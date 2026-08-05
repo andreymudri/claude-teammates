@@ -1,0 +1,17 @@
+{
+  "maxParallel": 6,
+  "phases": {
+    "default": {
+      "checks": [
+        { "name": "test", "kind": "command", "run": "npm test" },
+        {
+          "name": "review",
+          "kind": "agent",
+          "agent": "tm-reviewer",
+          "lens": ["correctness", "security", "tests"],
+          "blockOn": ["high"]
+        }
+      ]
+    }
+  }
+}
