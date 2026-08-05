@@ -14,8 +14,21 @@ const recorder = (result = { code: 0, stdout: '', stderr: '' }) => {
 test('changedFiles diffs the merge base with three dots, NUL-delimited and unquoted', async () => {
   const { calls, exec } = recorder({ code: 0, stdout: 'a.mjs\0b.mjs\0', stderr: '' })
   const files = await createGit({ cwd: '/x', exec }).changedFiles({ base: 'main', branch: 'tm/1' })
-  assert.deepEqual(calls[0], ['-c', 'core.quotePath=false', 'diff', '--name-only', '-z', 'main...tm/1'])
+  assert.deepEqual(calls[0], [
+    '-c', 'core.quotePath=false', 'diff', '--name-only', '-z', '--end-of-options', 'main...tm/1', '--',
+  ])
   assert.deepEqual(files, ['a.mjs', 'b.mjs'])
+})
+
+test('changedFiles does not let a leading-dash base reach option position', async () => {
+  const { calls, exec } = recorder({ code: 128, stdout: '', stderr: 'bad revision' })
+  await assert.rejects(
+    () => createGit({ exec }).changedFiles({ base: '--output=stolen', branch: 'T1' }),
+    GitError,
+  )
+  assert.deepEqual(calls[0], [
+    '-c', 'core.quotePath=false', 'diff', '--name-only', '-z', '--end-of-options', '--output=stolen...T1', '--',
+  ])
 })
 
 test('changedFiles drops empty NUL-delimited entries', async () => {
@@ -97,6 +110,32 @@ test('against a real repository, changedFiles reports the branch-only change', a
     assert.equal(await git.branchExists('teammates/r1/T1'), true)
     assert.equal(await git.branchExists('teammates/r1/T9'), false)
     assert.equal(await git.isDirty(), false)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('changedFiles fails closed instead of resolving the rev string as a pathspec', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-'))
+  const git = createGit({ cwd: root })
+  const sh = (args) => defaultGitExec(args, root)
+  try {
+    await sh(['init', '--initial-branch=main'])
+    await sh(['config', 'user.email', 'test@example.com'])
+    await sh(['config', 'user.name', 'test'])
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+
+    // No branch named "ghost" exists, but a file whose name equals the rev string does.
+    // Without --end-of-options/--, git resolves "main...ghost" as a pathspec instead of a
+    // revision range, exiting 0 with empty output — a silent, false "no changes".
+    await writeFile(path.join(root, 'main...ghost'), 'planted\n', 'utf8')
+
+    await assert.rejects(
+      () => git.changedFiles({ base: 'main', branch: 'ghost' }),
+      GitError,
+    )
   } finally {
     await rm(root, { recursive: true, force: true })
   }

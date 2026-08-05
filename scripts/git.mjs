@@ -32,7 +32,14 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
       // core.quotePath=false plus -z: paths come back NUL-delimited and unquoted, so a
       // non-ASCII path round-trips intact and a leading/trailing space in a filename is
       // never mistaken for line-trimming whitespace.
-      const out = await run(['-c', 'core.quotePath=false', 'diff', '--name-only', '-z', `${base}...${branch}`])
+      // --end-of-options stops a base/branch beginning with "-" from reaching option
+      // position; the trailing -- stops git from reinterpreting the rev range as a
+      // pathspec when no such rev exists but a same-named file does. Without both, an
+      // untracked file named exactly like the rev string makes the diff resolve to a
+      // pathspec and report a silent, empty "no changes" instead of failing.
+      const out = await run([
+        '-c', 'core.quotePath=false', 'diff', '--name-only', '-z', '--end-of-options', `${base}...${branch}`, '--',
+      ])
       return out.split('\0').filter(Boolean)
     },
     async headSha() {
