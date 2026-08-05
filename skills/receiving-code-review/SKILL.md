@@ -77,6 +77,27 @@ If it reproduces, the finding stands; fix it. If it doesn't, say so with what wa
 "Ran `<command>`, got `<actual result>` — the claimed failure doesn't reproduce," not
 a bare "that's wrong."
 
+## Gracefully Correcting Your Own Pushback
+
+This is the mirror case: you pushed back on a finding, and evidence now shows the
+reviewer was right. Having publicly committed to a position, the pull is to double down —
+defend it, hunt for a reading that keeps you right — or to quietly implement the fix
+without acknowledging you reversed. Both erode trust in your next pushback: the reviewer
+can no longer tell whether your disagreement means anything.
+
+State plainly that you were wrong and what changed your mind, then implement the finding:
+
+```
+✅ "You were right — I checked [X] and it does [Y]. Implementing now."
+✅ "Verified this and you're correct. My initial read was wrong because [reason]. Fixing."
+
+❌ Long apology
+❌ Defending why you pushed back in the first place
+❌ Implementing the fix silently, without saying the pushback was wrong
+```
+
+State the correction factually and move on — no extended apology, no re-litigating.
+
 ## Source-Specific Handling
 
 ### From a human reviewer
