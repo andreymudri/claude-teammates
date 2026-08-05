@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { createGit, GitError, defaultGitExec } from '../scripts/git.mjs'
+import { createGit, GitError, defaultGitExec, teammateRef } from '../scripts/git.mjs'
 
 const recorder = (result = { code: 0, stdout: '', stderr: '' }) => {
   const calls = []
@@ -211,4 +211,219 @@ test('defaultGitExec rejects with GitError, not a plain Error, when the process 
     () => defaultGitExec(['status'], missingCwd),
     GitError,
   )
+})
+
+// --- mergeBase --------------------------------------------------------------------------
+
+test('mergeBase builds the argv exactly, with no trailing -- (merge-base rejects one)', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: 'abc123\n', stderr: '' })
+  const sha = await createGit({ exec }).mergeBase('a', 'b')
+  assert.deepEqual(calls[0], ['merge-base', '--end-of-options', 'a', 'b'])
+  assert.equal(sha, 'abc123')
+})
+
+test('mergeBase rejects an empty or non-string ref with GitError', async () => {
+  const { calls, exec } = recorder()
+  await assert.rejects(() => createGit({ exec }).mergeBase('', 'b'), GitError)
+  await assert.rejects(() => createGit({ exec }).mergeBase('a', ''), GitError)
+  await assert.rejects(() => createGit({ exec }).mergeBase('a', []), GitError)
+  assert.deepEqual(calls, [])
+})
+
+// --- isAncestor --------------------------------------------------------------------------
+
+test('isAncestor builds the argv exactly, with no trailing --, and returns true on exit 0', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: '', stderr: '' })
+  assert.equal(await createGit({ exec }).isAncestor('a', 'b'), true)
+  assert.deepEqual(calls[0], ['merge-base', '--is-ancestor', '--end-of-options', 'a', 'b'])
+})
+
+test('isAncestor returns false on exit 1', async () => {
+  const { exec } = recorder({ code: 1, stdout: '', stderr: '' })
+  assert.equal(await createGit({ exec }).isAncestor('a', 'b'), false)
+})
+
+test('isAncestor throws GitError on exit 128 rather than reporting false', async () => {
+  const { exec } = recorder({ code: 128, stdout: '', stderr: 'bad revision' })
+  await assert.rejects(() => createGit({ exec }).isAncestor('a', 'b'), GitError)
+})
+
+test('isAncestor rejects an empty or non-string ref with GitError', async () => {
+  const { calls, exec } = recorder()
+  await assert.rejects(() => createGit({ exec }).isAncestor('', 'b'), GitError)
+  await assert.rejects(() => createGit({ exec }).isAncestor('a', ''), GitError)
+  assert.deepEqual(calls, [])
+})
+
+// --- commitsBetween ------------------------------------------------------------------------
+
+test('commitsBetween builds the argv with a trailing --, and drops blank lines', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: 'sha1\nsha2\n\n', stderr: '' })
+  const shas = await createGit({ exec }).commitsBetween({ from: 'a', to: 'b' })
+  assert.deepEqual(calls[0], ['rev-list', '--end-of-options', 'a..b', '--'])
+  assert.deepEqual(shas, ['sha1', 'sha2'])
+})
+
+test('commitsBetween rejects an empty or non-string from/to with GitError', async () => {
+  const { calls, exec } = recorder()
+  await assert.rejects(() => createGit({ exec }).commitsBetween({ from: '', to: 'b' }), GitError)
+  await assert.rejects(() => createGit({ exec }).commitsBetween({ from: 'a', to: '' }), GitError)
+  assert.deepEqual(calls, [])
+})
+
+// --- commitParents ------------------------------------------------------------------------
+
+test('commitParents builds the argv with a trailing --, and slices the sha off the front', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: 'child parent1 parent2\n', stderr: '' })
+  const parents = await createGit({ exec }).commitParents('child')
+  assert.deepEqual(calls[0], ['rev-list', '--parents', '-n', '1', '--end-of-options', 'child', '--'])
+  assert.deepEqual(parents, ['parent1', 'parent2'])
+})
+
+test('commitParents rejects an empty or non-string sha with GitError', async () => {
+  const { calls, exec } = recorder()
+  await assert.rejects(() => createGit({ exec }).commitParents(''), GitError)
+  await assert.rejects(() => createGit({ exec }).commitParents([]), GitError)
+  assert.deepEqual(calls, [])
+})
+
+// --- branchSha -----------------------------------------------------------------------------
+
+test('branchSha prefixes refs/heads/ and adds a trailing --', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: 'abc123\n', stderr: '' })
+  const sha = await createGit({ exec }).branchSha('teammates/r1/T1')
+  assert.deepEqual(calls[0], ['rev-parse', '--verify', '--end-of-options', 'refs/heads/teammates/r1/T1', '--'])
+  assert.equal(sha, 'abc123')
+})
+
+test('branchSha rejects an empty or non-string name with GitError', async () => {
+  const { calls, exec } = recorder()
+  await assert.rejects(() => createGit({ exec }).branchSha(''), GitError)
+  await assert.rejects(() => createGit({ exec }).branchSha(null), GitError)
+  assert.deepEqual(calls, [])
+})
+
+// --- fileAtCommit ----------------------------------------------------------------------------
+
+test('fileAtCommit builds the argv with a trailing --', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: 'file contents\n', stderr: '' })
+  const contents = await createGit({ exec }).fileAtCommit('sha1', 'docs/plan.md')
+  assert.deepEqual(calls[0], ['show', '--end-of-options', 'sha1:docs/plan.md', '--'])
+  assert.equal(contents, 'file contents\n')
+})
+
+test('fileAtCommit rejects an empty or non-string sha/path with GitError', async () => {
+  const { calls, exec } = recorder()
+  await assert.rejects(() => createGit({ exec }).fileAtCommit('', 'a.md'), GitError)
+  await assert.rejects(() => createGit({ exec }).fileAtCommit('sha1', ''), GitError)
+  assert.deepEqual(calls, [])
+})
+
+// --- resolveRef ------------------------------------------------------------------------------
+
+test('resolveRef builds the argv exactly and returns the trimmed sha', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: 'abc123\n', stderr: '' })
+  const sha = await createGit({ exec }).resolveRef('refs/heads/teammates/r1/T1')
+  assert.deepEqual(calls[0], ['rev-parse', '--verify', '--end-of-options', 'refs/heads/teammates/r1/T1', '--'])
+  assert.equal(sha, 'abc123')
+})
+
+test('resolveRef rejects a ref that is not fully qualified', async () => {
+  const { calls, exec } = recorder()
+  await assert.rejects(() => createGit({ exec }).resolveRef('teammates/r1/T1'), GitError)
+  await assert.rejects(() => createGit({ exec }).resolveRef(''), GitError)
+  await assert.rejects(() => createGit({ exec }).resolveRef(null), GitError)
+  assert.deepEqual(calls, [])
+})
+
+// --- fetchRefspec ----------------------------------------------------------------------------
+
+test('fetchRefspec builds the argv with --no-tags and returns the resolved dst sha', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: 'abc123\n', stderr: '' })
+  const sha = await createGit({ exec }).fetchRefspec({
+    from: '/path/to/clone',
+    src: 'refs/heads/teammates/r1/T1',
+    dst: 'refs/teammates/r1/T1',
+  })
+  assert.deepEqual(calls[0], [
+    'fetch', '--no-tags', '--end-of-options', '/path/to/clone',
+    '+refs/heads/teammates/r1/T1:refs/teammates/r1/T1',
+  ])
+  assert.deepEqual(calls[1], ['rev-parse', '--verify', '--end-of-options', 'refs/teammates/r1/T1', '--'])
+  assert.equal(sha, 'abc123')
+})
+
+test('fetchRefspec rejects an unqualified src or dst', async () => {
+  const { calls, exec } = recorder()
+  await assert.rejects(
+    () => createGit({ exec }).fetchRefspec({ from: '/x', src: 'teammates/r1/T1', dst: 'refs/teammates/r1/T1' }),
+    GitError,
+  )
+  await assert.rejects(
+    () => createGit({ exec }).fetchRefspec({ from: '/x', src: 'refs/heads/teammates/r1/T1', dst: 'teammates/r1/T1' }),
+    GitError,
+  )
+  assert.deepEqual(calls, [])
+})
+
+test('fetchRefspec rejects an empty from/src/dst', async () => {
+  const { calls, exec } = recorder()
+  await assert.rejects(
+    () => createGit({ exec }).fetchRefspec({ from: '', src: 'refs/heads/a', dst: 'refs/teammates/a' }),
+    GitError,
+  )
+  assert.deepEqual(calls, [])
+})
+
+// --- teammateRef -------------------------------------------------------------------------
+
+test('teammateRef names the orchestrator-only namespace', () => {
+  assert.equal(teammateRef('r1', 'T1'), 'refs/teammates/r1/T1')
+})
+
+// --- real-git regression: tag shadowing ---------------------------------------------------
+
+test('resolveRef reads the branch tip even when a tag of the same name shadows it', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-shadow-'))
+  const git = createGit({ cwd: root })
+  const sh = (args) => defaultGitExec(args, root)
+  try {
+    await sh(['init', '--initial-branch=main'])
+    await sh(['config', 'user.email', 'test@example.com'])
+    await sh(['config', 'user.name', 'test'])
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    const baseSha = (await git.headSha())
+
+    // The branch under test carries a real, honest change.
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'task.txt'), 'task\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'task'])
+    const branchSha = (await git.headSha())
+
+    // A teammate plants a tag with the SAME NAME as its branch, pointing at the earlier,
+    // unchanged commit. A bare-name lookup ("teammates/r1/T1") resolves through refs/tags/
+    // BEFORE refs/heads/, so `git diff <anchor>...teammates/r1/T1` would report NO changes
+    // — the pass signal — while the branch itself still carries the honest task.txt change.
+    await sh(['tag', 'teammates/r1/T1', baseSha])
+
+    // A bare-name diff is fooled by the tag: it reports no changes at all.
+    const shadowedDiff = await defaultGitExec(
+      ['diff', '--name-only', 'main...teammates/r1/T1'], root,
+    )
+    assert.equal(shadowedDiff.stdout.trim(), '', 'expected the bare-name diff to be shadowed by the tag')
+
+    // resolveRef, given the fully-qualified branch ref, is immune: it must resolve to the
+    // branch's real tip, not the tag's, and a diff by that resolved sha must see task.txt.
+    const resolved = await git.resolveRef('refs/heads/teammates/r1/T1')
+    assert.equal(resolved, branchSha, 'resolveRef must report the honest branch tip, not the shadowing tag')
+    assert.notEqual(resolved, baseSha)
+
+    const changed = await git.changedFiles({ base: 'main', branch: resolved })
+    assert.deepEqual(changed, ['task.txt'], 'diffing by the resolved sha must see the branch change the tag hid')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })
