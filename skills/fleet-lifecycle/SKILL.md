@@ -35,6 +35,12 @@ Both paths support adding teammates at any moment:
   claim tasks the workflow did not take), or edit the generated script and relaunch with
   `resumeFromRunId`.
 
-Respect `maxParallel` from the gate manifest. A single workflow caps concurrency at
-`min(16, cores-2)`; extra items queue rather than fail. Say so when reporting — never imply
-everything is running when tasks are waiting.
+Two separate limits apply — do not conflate them:
+
+- **`maxParallel`** from the gate manifest (default `min(8, cores-2)`) is this plugin's own
+  fleet size. You choose it and may change it between phases.
+- **`min(16, cores-2)`** is the Workflow tool's built-in per-workflow concurrency cap. It is
+  not ours to set. Excess items queue rather than fail.
+
+Whichever binds first is the real limit. Say so when reporting — never imply everything is
+running when tasks are waiting.

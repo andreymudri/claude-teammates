@@ -22,6 +22,11 @@ Phases with **three or more** tasks go through the Workflow tool:
 Write that source to a file and invoke `Workflow` with it. The Workflow tool needs the user's
 opt-in — ask once per run, then remember it for that run.
 
+**If the user declines, or the Workflow tool is unavailable, do not stop.** Fall back to the
+direct-agent path below for the whole phase: dispatch each task as its own background `Agent`
+with `isolation: 'worktree'`, respecting `maxParallel`. The result contract is identical, so
+nothing downstream changes. Say which path you took.
+
 Phases with fewer than three tasks are dispatched as direct background `Agent` calls with
 `isolation: 'worktree'` and the `tm-implementer` persona. Same result contract either way.
 

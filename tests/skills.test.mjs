@@ -67,3 +67,9 @@ test('phase-gate never reports done without a recorded PASS', async () => {
   assert.match(body, /never report .*done.* without/i)
   assert.match(body, /skipped/)
 })
+
+test('parallel-execution falls back to the direct-agent path when Workflow is declined or unavailable', async () => {
+  const { body } = await skill('parallel-execution')
+  assert.match(body, /do not stop/i)
+  assert.match(body, /Fall back to the\s+direct-agent path/)
+})
