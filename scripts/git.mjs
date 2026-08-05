@@ -29,8 +29,11 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
     async changedFiles({ base, branch }) {
       // Three dots: diff against the merge base, so commits that landed on the run
       // branch while the teammate worked are not attributed to the teammate.
-      const out = await run(['diff', '--name-only', `${base}...${branch}`])
-      return out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+      // core.quotePath=false plus -z: paths come back NUL-delimited and unquoted, so a
+      // non-ASCII path round-trips intact and a leading/trailing space in a filename is
+      // never mistaken for line-trimming whitespace.
+      const out = await run(['-c', 'core.quotePath=false', 'diff', '--name-only', '-z', `${base}...${branch}`])
+      return out.split('\0').filter(Boolean)
     },
     async headSha() {
       return (await run(['rev-parse', 'HEAD'])).trim()
@@ -42,8 +45,13 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
       return (await run(['status', '--porcelain'])).trim() !== ''
     },
     async branchExists(name) {
-      const { code } = await runRaw(['rev-parse', '--verify', '--quiet', `refs/heads/${name}`])
-      return code === 0
+      const args = ['rev-parse', '--verify', '--quiet', `refs/heads/${name}`]
+      const { code, stderr } = await runRaw(args)
+      if (code === 0) return true
+      // Exit 1 is git's answer for "no such ref" — a real absence, not a failure.
+      // Any other non-zero (e.g. 128 outside a repository) is a failure carrying stderr.
+      if (code === 1) return false
+      throw new GitError(`git ${args.join(' ')} failed: ${stderr.trim() || `exit ${code}`}`)
     },
   }
 }

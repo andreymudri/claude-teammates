@@ -11,16 +11,26 @@ const recorder = (result = { code: 0, stdout: '', stderr: '' }) => {
   return { calls, exec }
 }
 
-test('changedFiles diffs the merge base with three dots', async () => {
-  const { calls, exec } = recorder({ code: 0, stdout: 'a.mjs\nb.mjs\n', stderr: '' })
+test('changedFiles diffs the merge base with three dots, NUL-delimited and unquoted', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: 'a.mjs\0b.mjs\0', stderr: '' })
   const files = await createGit({ cwd: '/x', exec }).changedFiles({ base: 'main', branch: 'tm/1' })
-  assert.deepEqual(calls[0], ['diff', '--name-only', 'main...tm/1'])
+  assert.deepEqual(calls[0], ['-c', 'core.quotePath=false', 'diff', '--name-only', '-z', 'main...tm/1'])
   assert.deepEqual(files, ['a.mjs', 'b.mjs'])
 })
 
-test('changedFiles drops blank lines', async () => {
-  const { exec } = recorder({ code: 0, stdout: 'a.mjs\n\n\n', stderr: '' })
+test('changedFiles drops empty NUL-delimited entries', async () => {
+  const { exec } = recorder({ code: 0, stdout: 'a.mjs\0\0', stderr: '' })
   assert.deepEqual(await createGit({ exec }).changedFiles({ base: 'm', branch: 'b' }), ['a.mjs'])
+})
+
+test('changedFiles does not mangle a non-ASCII path', async () => {
+  const { exec } = recorder({ code: 0, stdout: 'café.mjs\0', stderr: '' })
+  assert.deepEqual(await createGit({ exec }).changedFiles({ base: 'm', branch: 'b' }), ['café.mjs'])
+})
+
+test('changedFiles does not trim a leading-space filename into a different name', async () => {
+  const { exec } = recorder({ code: 0, stdout: ' a.mjs\0', stderr: '' })
+  assert.deepEqual(await createGit({ exec }).changedFiles({ base: 'm', branch: 'b' }), [' a.mjs'])
 })
 
 test('a non-zero exit throws GitError carrying stderr', async () => {
@@ -31,10 +41,24 @@ test('a non-zero exit throws GitError carrying stderr', async () => {
   )
 })
 
-test('branchExists answers false on non-zero exit instead of throwing', async () => {
+test('headSha returns the trimmed sha on success', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: 'abc123\n', stderr: '' })
+  assert.equal(await createGit({ exec }).headSha(), 'abc123')
+  assert.deepEqual(calls[0], ['rev-parse', 'HEAD'])
+})
+
+test('branchExists answers false on exit 1 instead of throwing', async () => {
   const { calls, exec } = recorder({ code: 1, stdout: '', stderr: '' })
   assert.equal(await createGit({ exec }).branchExists('teammates/r1/T1'), false)
   assert.deepEqual(calls[0], ['rev-parse', '--verify', '--quiet', 'refs/heads/teammates/r1/T1'])
+})
+
+test('branchExists throws GitError on exit 128 rather than reporting the branch absent', async () => {
+  const { exec } = recorder({ code: 128, stdout: '', stderr: 'not a git repository' })
+  await assert.rejects(
+    () => createGit({ exec }).branchExists('teammates/r1/T1'),
+    (err) => err instanceof GitError && /not a git repository/.test(err.message),
+  )
 })
 
 test('isDirty is true when porcelain output is non-empty', async () => {
