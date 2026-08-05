@@ -54,6 +54,14 @@ test('claim reports claimed once then taken', async () => {
   })
 })
 
+test('unclaim releases a task so it can be claimed again', async () => {
+  await withRepo(async ({ root, io }) => {
+    assert.equal(await runCli(['claim', '--run', 'r1', '--task', 'T1', '--by', 'a', '--root', root], io), 0)
+    assert.equal(await runCli(['unclaim', '--run', 'r1', '--task', 'T1', '--root', root], io), 0)
+    assert.equal(await runCli(['claim', '--run', 'r1', '--task', 'T1', '--by', 'b', '--root', root], io), 0)
+  })
+})
+
 test('workflow prints generated source for a phase', async () => {
   await withRepo(async ({ root, planPath, io, lines }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
@@ -61,6 +69,35 @@ test('workflow prints generated source for a phase', async () => {
     const code = await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root], io)
     assert.equal(code, 0)
     assert.match(lines.join('\n'), /export const meta = \{/)
+  })
+})
+
+test('init-run uses maxParallel from the gate manifest when present', async () => {
+  await withRepo(async ({ root, planPath, io }) => {
+    await writeFile(
+      path.join(root, 'teammates.gate.json'),
+      JSON.stringify({ maxParallel: 2, phases: { default: { checks: [] } } }),
+      'utf8',
+    )
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const status = JSON.parse(
+      await (await import('node:fs/promises')).readFile(path.join(root, '.teammates', 'r1', 'status.json'), 'utf8'),
+    )
+    assert.equal(status.maxParallel, 2)
+  })
+})
+
+test('workflow uses maxParallel from the gate manifest when present', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await writeFile(
+      path.join(root, 'teammates.gate.json'),
+      JSON.stringify({ maxParallel: 2, phases: { default: { checks: [] } } }),
+      'utf8',
+    )
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.match(lines.join('\n'), /max 2 parallel/)
   })
 })
 
@@ -75,13 +112,58 @@ test('gate with no manifest prints the inferred config for confirmation', async 
 })
 
 test('gate reports a JSON verdict when a manifest exists', async () => {
-  await withRepo(async ({ root, io, lines }) => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
     const config = { maxParallel: 2, phases: { default: { checks: [{ name: 'noop', kind: 'command', run: 'node -e ""' }] } } }
     await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(config), 'utf8')
     const code = await runCli(['gate', '--run', 'r1', '--root', root], io)
     const parsed = JSON.parse(lines.join('\n'))
     assert.equal(parsed.verdict, 'PASS')
     assert.equal(code, 0)
+  })
+})
+
+test('gate records a PASS verdict into status.json for the run', async () => {
+  await withRepo(async ({ root, planPath, io }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const config = { maxParallel: 2, phases: { default: { checks: [{ name: 'noop', kind: 'command', run: 'node -e ""' }] } } }
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(config), 'utf8')
+    const code = await runCli(['gate', '--run', 'r1', '--root', root], io)
+    assert.equal(code, 0)
+    const status = JSON.parse(
+      await (await import('node:fs/promises')).readFile(path.join(root, '.teammates', 'r1', 'status.json'), 'utf8'),
+    )
+    assert.equal(status.gates.default.verdict, 'PASS')
+    assert.ok(typeof status.gates.default.recordedAt === 'number')
+  })
+})
+
+test('gate records a FAIL verdict into status.json for the run', async () => {
+  await withRepo(async ({ root, planPath, io }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const config = { maxParallel: 2, phases: { default: { checks: [{ name: 'boom', kind: 'command', run: 'node -e "process.exit(1)"' }] } } }
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(config), 'utf8')
+    const code = await runCli(['gate', '--run', 'r1', '--root', root], io)
+    assert.equal(code, 1)
+    const status = JSON.parse(
+      await (await import('node:fs/promises')).readFile(path.join(root, '.teammates', 'r1', 'status.json'), 'utf8'),
+    )
+    assert.equal(status.gates.default.verdict, 'FAIL')
+    assert.deepEqual(status.gates.default.failed, ['boom'])
+  })
+})
+
+test('gate with no status file for the run does not create one, warns, and still returns the right exit code', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const config = { maxParallel: 2, phases: { default: { checks: [{ name: 'noop', kind: 'command', run: 'node -e ""' }] } } }
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(config), 'utf8')
+    const code = await runCli(['gate', '--run', 'nope', '--root', root], io)
+    assert.equal(code, 0)
+    assert.match(lines.join('\n'), /verdict was not recorded.*run nope has no status/i)
+    await assert.rejects(
+      (await import('node:fs/promises')).readFile(path.join(root, '.teammates', 'nope', 'status.json'), 'utf8'),
+    )
   })
 })
 

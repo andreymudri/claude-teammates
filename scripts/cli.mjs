@@ -1,19 +1,21 @@
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { parsePlan } from './plan-parser.mjs'
 import { assignPhases } from './phases.mjs'
-import { readState, writeState, claimTask } from './state.mjs'
+import { readState, writeState, claimTask, releaseClaim } from './state.mjs'
 import { loadGateConfig, inferGateConfig, checksForPhase, defaultMaxParallel } from './gate-config.mjs'
 import { runChecks, aggregateVerdict } from './gate-runner.mjs'
 import { renderDigest } from './digest.mjs'
 import { generatePhaseWorkflow } from './workflow-gen.mjs'
 
-const USAGE = `usage: cli.mjs <init-run|gate|digest|claim|workflow> [options]
+const USAGE = `usage: cli.mjs <init-run|gate|digest|claim|unclaim|workflow> [options]
 
   init-run <planPath> --run <id> [--root <path>]
   gate     --run <id> [--root <path>] [--phase <name>]
   digest   --run <id> [--root <path>]
   claim    --run <id> --task <id> --by <teammate> [--root <path>]
+  unclaim  --run <id> --task <id> [--root <path>]
   workflow --run <id> --phase <n> [--root <path>]`
 
 function parseFlags(argv) {
@@ -44,6 +46,7 @@ const REQUIRED = {
   gate: ['run'],
   digest: ['run'],
   claim: ['run', 'task', 'by'],
+  unclaim: ['run', 'task'],
   workflow: ['run', 'phase'],
 }
 
@@ -75,12 +78,13 @@ export async function runCli(argv, io = { out: console.log }) {
   if (command === 'init-run') {
     const tasks = assignPhases(parsePlan(await readFile(positional[0], 'utf8')))
     const totalPhases = tasks.reduce((max, t) => Math.max(max, t.phase), 0)
+    const config = await loadGateConfig(root)
     await writeState(root, runId, 'plan', { runId, totalPhases, tasks })
     await writeState(root, runId, 'status', {
       runId,
       phase: 1,
       totalPhases,
-      maxParallel: defaultMaxParallel(),
+      maxParallel: config?.maxParallel ?? defaultMaxParallel(),
       tasks: tasks.map((t) => ({ id: t.id, title: t.title, state: 'pending' })),
     })
     for (let p = 1; p <= totalPhases; p += 1) {
@@ -103,15 +107,22 @@ export async function runCli(argv, io = { out: console.log }) {
     return won ? 0 : 1
   }
 
+  if (command === 'unclaim') {
+    await releaseClaim(root, runId, flags.task)
+    io.out('released')
+    return 0
+  }
+
   if (command === 'workflow') {
     const plan = await readState(root, runId, 'plan')
     if (!plan) { io.out(`no plan for run ${runId}`); return 1 }
     const phase = Number(flags.phase)
+    const config = await loadGateConfig(root)
     const src = await generatePhaseWorkflow({
       runId,
       phase,
       tasks: plan.tasks.filter((t) => t.phase === phase),
-      maxParallel: defaultMaxParallel(),
+      maxParallel: config?.maxParallel ?? defaultMaxParallel(),
     })
     io.out(src)
     return 0
@@ -125,9 +136,26 @@ export async function runCli(argv, io = { out: console.log }) {
       io.out(JSON.stringify(config, null, 2))
       return 3
     }
-    const results = await runChecks(checksForPhase(config, flags.phase ?? 'default'), { cwd: root })
+    const phaseName = flags.phase ?? 'default'
+    const results = await runChecks(checksForPhase(config, phaseName), { cwd: root })
     const verdict = aggregateVerdict(results)
     io.out(JSON.stringify({ ...verdict, results }, null, 2))
+
+    const status = await readState(root, runId, 'status')
+    if (status) {
+      status.gates = status.gates ?? {}
+      status.gates[phaseName] = {
+        verdict: verdict.verdict,
+        failed: verdict.failed,
+        skipped: verdict.skipped,
+        pending: verdict.pending,
+        recordedAt: Date.now(),
+      }
+      await writeState(root, runId, 'status', status)
+    } else {
+      io.out(`verdict was not recorded because run ${runId} has no status`)
+    }
+
     return verdict.verdict === 'PASS' ? 0 : 1
   }
 
@@ -135,6 +163,15 @@ export async function runCli(argv, io = { out: console.log }) {
   return 2
 }
 
-if (import.meta.main) {
+// import.meta.main only exists from Node 24.2. On an older runtime it is undefined, and
+// treating that as falsy would make the CLI print nothing and exit 0 — which a caller like
+// phase-gate reads as PASS. Fall back to comparing argv[1] against this module's own path
+// so the guard never silently skips running a subcommand.
+export function isEntryPoint(main, argv1, moduleUrlPath) {
+  if (main !== undefined) return main
+  return argv1 === moduleUrlPath
+}
+
+if (isEntryPoint(import.meta.main, process.argv[1], fileURLToPath(import.meta.url))) {
   process.exitCode = await runCli(process.argv.slice(2))
 }
