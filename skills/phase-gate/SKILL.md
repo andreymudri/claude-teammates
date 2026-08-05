@@ -42,3 +42,12 @@ retry the failing task with the findings fed back, override and proceed, or abor
 
 **Never report a phase done without a recorded PASS in `status.json`.** A check that was
 skipped is reported as skipped, every time. No "should work".
+
+**Evidence before claims, always.** Never claim a task, phase, or fix is complete, fixed,
+or passing without having run the verification yourself in this pass and seen its output —
+a prior run, an agent's self-report, or "should pass now" is not evidence. "Tests pass"
+requires the test command's fresh output showing the count and zero failures, not
+recollection of an earlier green run. "Bug fixed" requires re-running the original failing
+case and watching it pass now, not the diff alone. If a `tm-implementer` reports DONE,
+that report is not the evidence — the gate's own check run against its diff is. Skipping
+this because a check "obviously" passes is the same defect as skipping the check.

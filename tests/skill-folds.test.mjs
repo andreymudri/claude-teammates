@@ -1,0 +1,31 @@
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
+
+const read = async (name) => readFile(new URL(`../skills/${name}/SKILL.md`, import.meta.url), 'utf8')
+
+test('parallel-execution absorbs subagent-driven development: fresh agent per task, review between tasks', async () => {
+  const b = await read('parallel-execution')
+  assert.match(b, /fresh/i)
+  assert.match(b, /between tasks|per task/i)
+})
+
+test('parallel-execution absorbs worktree guidance: creation and cleanup', async () => {
+  const b = await read('parallel-execution')
+  assert.match(b, /git worktree/i)
+})
+
+test('fleet-lifecycle absorbs parallel dispatch guidance: independence is required', async () => {
+  const b = await read('fleet-lifecycle')
+  assert.match(b, /independent/i)
+})
+
+test('phase-gate absorbs verification-before-completion: evidence before claims', async () => {
+  const b = await read('phase-gate')
+  assert.match(b, /evidence/i)
+})
+
+test('phase-gate absorbs requesting-code-review: how reviewers are dispatched', async () => {
+  const b = await read('phase-gate')
+  assert.match(b, /tm-reviewer/)
+})

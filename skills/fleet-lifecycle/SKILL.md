@@ -50,3 +50,19 @@ Two separate limits apply — do not conflate them:
 
 Whichever binds first is the real limit. Say so when reporting — never imply everything is
 running when tasks are waiting.
+
+## When parallel dispatch is safe
+
+Dispatch teammates in parallel only when their tasks are genuinely **independent**: no
+shared state, and no sequential dependency between them (one does not need another's
+output or edits to proceed). `init-run`'s phase breakdown already enforces this for
+declared deps and file sets — but the same rule applies to anything you dispatch outside
+the plan, like ad-hoc investigation agents: group work by independent problem domain, one
+agent per domain, and issue all the dispatches in a single response so they actually run
+concurrently.
+
+A wrongly-parallelised pair does not just run slower — it produces **conflicting edits**,
+because both teammates touch state the other assumed was theirs alone. That failure mode
+is caught late, at merge, and costs more to unwind than the sequential run it was meant to
+speed up. When in doubt about whether two tasks are independent, dispatch them
+sequentially.
