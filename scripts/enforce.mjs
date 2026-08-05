@@ -9,18 +9,12 @@ export function taskBranchName(runId, taskId) {
   return `teammates/${runId}/${taskId}`
 }
 
-// A recorded branch wins; the convention is the fallback. A task that resolves to
-// neither is the caller's failure to handle, never a silent pass.
-//
-// A branch that was explicitly declared but is empty or whitespace-only is a plan
-// defect, not "no branch was declared" — it deliberately resolves to null rather
-// than falling back to the convention, so a defective declaration surfaces as a
-// gate failure instead of being silently papered over. (Falling through to the
-// convention here would also hide the defect from whoever wrote the plan.)
+// Convention only, deliberately. An earlier version preferred a branch recorded in
+// status.json, but that file is written by the agents being enforced — letting it choose
+// which branch is inspected hands the subject of the check control over the check. A
+// teammate that commits somewhere other than the convention now fails the gate, which is
+// the intended outcome rather than a limitation.
 export function resolveTaskBranch(task, runId) {
-  if (task && 'branch' in task && task.branch != null) {
-    return typeof task.branch === 'string' && task.branch.trim() === '' ? null : task.branch
-  }
   return task?.id ? taskBranchName(runId, task.id) : null
 }
 
@@ -61,10 +55,34 @@ function normalizeBranchRef(name) {
   return ref.toLowerCase()
 }
 
-export function ownershipViolations({ runBranch, baseSha, headSha, dirty, taskBranches = [] }) {
+// "Lowest un-integrated phase" is wrong when a later phase is integrated and an earlier one
+// is not: the check would run against the earlier phase, and once that integrates it would
+// return null (nothing to check) — so the later phase's declared file set is never enforced
+// at all. That state is not a legitimate run; it is reported, not resolved.
+export function derivePhase({ tasks = [], integratedPhases = [] } = {}) {
+  const list = tasks ?? []
+  const phases = [...new Set(list.map((t) => t?.phase))]
+  if (phases.some((p) => !Number.isInteger(p))) {
+    return { error: 'the plan contains a task with a non-integer phase' }
+  }
+  phases.sort((a, b) => a - b)
+  const integrated = new Set(integratedPhases ?? [])
+  const known = phases.filter((p) => integrated.has(p))
+  const firstOpen = phases.find((p) => !integrated.has(p))
+  if (firstOpen !== undefined && known.some((p) => p > firstOpen)) {
+    return { error: `phase ${firstOpen} is not integrated but a later phase is — refusing to guess which phase to enforce` }
+  }
+  return { phase: firstOpen ?? null }
+}
+
+// Ownership no longer asks "did HEAD move since a stored baseline" — that baseline lived in
+// status.json and any teammate could reset it, which turned a direct write to the run
+// branch into an accepted one. It now asks the question git can answer: is every commit on
+// the run branch since the anchor accounted for by this run's task branches?
+export function ownershipViolations({ runBranch, taskBranches = [], unexplainedCommits = [], dirty = false } = {}) {
   const violations = []
-  if (!runBranch || !baseSha) {
-    violations.push('run has no recorded runBranch/baseSha — re-run init-run inside a git repository')
+  if (!runBranch) {
+    violations.push('no run branch was supplied — the gate cannot establish what it is protecting')
     return violations
   }
   for (const branch of taskBranches) {
@@ -72,8 +90,8 @@ export function ownershipViolations({ runBranch, baseSha, headSha, dirty, taskBr
       violations.push(`task branch ${branch} is the run branch; only tm-integrator writes there`)
     }
   }
-  if (headSha !== baseSha) {
-    violations.push(`main worktree HEAD moved from ${baseSha} to ${headSha} without a recorded integration — run: cli.mjs integrated`)
+  for (const sha of unexplainedCommits) {
+    violations.push(`commit ${sha} on ${runBranch} is reachable from no task branch of this run — either it is a direct write, or the integrator merged without --no-ff and destroyed the ancestry this check reads`)
   }
   if (dirty) {
     violations.push('main worktree has uncommitted changes; teammates work only in their own worktrees')
@@ -81,9 +99,32 @@ export function ownershipViolations({ runBranch, baseSha, headSha, dirty, taskBr
   return violations
 }
 
-export function completionBlock(status, phaseName) {
-  const gate = status?.gates?.[phaseName]
-  if (!gate) return `no gate recorded for phase ${phaseName} — run the gate before completing`
-  if (gate.verdict !== 'PASS') return `gate for phase ${phaseName} is ${gate.verdict}, not PASS`
+// A recorded PASS is no longer consulted to decide completion — the gate is recomputed
+// instead. This predicate exists for the narrower job of deciding whether an already-known
+// verdict still describes the current tree: a teammate that amends its branch after a
+// passing gate leaves the verdict describing a tree that no longer exists.
+export function verdictCoversTree(verdict, current) {
+  if (!verdict || verdict.verdict !== 'PASS') return 'no passing verdict'
+  if (!verdict.anchorSha || verdict.anchorSha !== current?.anchorSha) return 'anchor moved since the verdict was recorded'
+  if (verdict.planHash !== current?.planHash) return 'the plan changed since the verdict was recorded'
+  const recorded = verdict.branchShas ?? {}
+  const now = current?.branchShas ?? {}
+  const names = new Set([...Object.keys(recorded), ...Object.keys(now)])
+  for (const name of names) {
+    if (recorded[name] !== now[name]) return `branch ${name} moved since the verdict was recorded`
+  }
   return null
+}
+
+// FNV-1a over the plan markdown. Not a security hash and not required to be: it detects a
+// plan that changed between a verdict and its use, in a module that must stay import-free.
+// Tamper-evidence here rests on git, not on this digest.
+export function planHash(markdown) {
+  let hash = 0x811c9dc5
+  const text = String(markdown ?? '')
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash.toString(16).padStart(8, '0')
 }
