@@ -26,3 +26,13 @@ test('covers cleaning up teammate worktrees', async () => {
 test('is original and carries no upstream attribution', async () => {
   assert.doesNotMatch(await body(), /Adapted from the MIT-licensed superpowers plugin/)
 })
+
+test('handles an inline run with no recorded gates by running the test suite fresh', async () => {
+  const b = await body()
+  assert.match(b, /gates.*(?:absent|empty)|(?:absent|empty).*gates/i)
+  assert.match(b, /full test suite/i)
+})
+
+test('handles the case where no run directory exists at all', async () => {
+  assert.match(await body(), /no run directory/i)
+})

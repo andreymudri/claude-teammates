@@ -9,8 +9,14 @@ Work is not finished because the code looks done. It is finished when the record
 
 ## The completion gate
 
-Read `.teammates/<run-id>/status.json` and check `status.gates`. Each phase that ran must
-have an entry there, and that entry's `verdict` must be `PASS`:
+Work is not finished because the code looks done, and never because "the tests looked green"
+or "the teammate said it was done" earlier in the conversation. Which check applies depends on
+what state the run is in — check in this order.
+
+### 1. Fleet run: `status.gates` is recorded
+
+If `.teammates/<run-id>/status.json` exists and has a non-empty `status.gates`, this is a fleet
+run. Each phase that ran must have an entry there, and that entry's `verdict` must be `PASS`:
 
     {
       "gates": {
@@ -25,9 +31,24 @@ have an entry there, and that entry's `verdict` must be `PASS`:
     }
 
 Walk every phase the run actually executed. If a phase is missing from `status.gates`, or its
-`verdict` is not `PASS`, the work is not finished — name the phase and stop. Do not present the
-branch as ready on the strength of "the tests looked green" or "the teammate said it was done".
-Only a recorded PASS counts.
+`verdict` is not `PASS`, the work is not finished — name the phase and stop. Only a recorded
+PASS counts.
+
+### 2. Inline run: a run directory exists but gates are absent or empty
+
+`executing-plans` runs plans inline, task by task, and never writes a gate manifest or a
+verdict — that's by design, not an omission. If `status.json` exists but `status.gates` is
+absent or empty, the run is inline, and the absent gates are expected, not a fault to fix here.
+
+Instead, run the project's full test suite now and confirm it passes from fresh output. A
+remembered result, or a run from earlier in this session, is not evidence — only a suite run
+you just executed counts. Once it's green, proceed.
+
+### 3. No run directory at all
+
+Someone may have finished work on a branch without ever calling `init-run` — there's no
+`.teammates/<run-id>/` to read. Run the project's full test suite now, confirm it is green from
+fresh output, and proceed the same way as case 2.
 
 ## Branch taxonomy
 
