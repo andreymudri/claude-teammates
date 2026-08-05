@@ -1,0 +1,10 @@
+{
+  "name": "claude-teammates",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Superpowers-style development process running on Claude Code teammates",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "name": "claude-teammates",
+  "version": "0.1.0",
+  "description": "Fleet orchestration, worktree-isolated parallel execution, automated phase gates, and supervision for Claude Code teammates."
+}

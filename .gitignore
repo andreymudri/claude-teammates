@@ -1,0 +1,4 @@
+node_modules/
+.teammates/
+*.log
+.env
