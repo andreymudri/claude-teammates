@@ -15,9 +15,27 @@ Zero runtime and dev dependencies. Tests use the built-in `node:test` runner.
 
 ## Install
 
+    /plugin marketplace add C:\projetos\claude-teammates
     /plugin install claude-teammates
 
-Or point Claude Code at this repo as a local plugin.
+Installing from a local path means skill edits take effect on the next session
+without a push.
+
+## Skills
+
+- `using-teammates` — entrypoint; routes to the right process or fleet skill before anything else happens
+- `brainstorming` — explores intent and design before implementation
+- `writing-plans` — turns a spec into a plan this plugin can parse, phase, and dispatch to a fleet
+- `executing-plans` — executes a written plan inline in this session, with checkpoints
+- `parallel-execution` — splits a plan into phases and dispatches worktree-isolated implementers
+- `fleet-lifecycle` — spawns, lists, messages, scales, stops, or resumes background teammates
+- `fleet-supervision` — renders the fleet digest and surfaces blocked or failed teammates
+- `phase-gate` — runs command, agent, and MCP checks and decides PASS or FAIL for a finished phase
+- `test-driven-development` — write the failing test first and watch it fail for the right reason
+- `systematic-debugging` — reproduce and isolate before changing anything
+- `receiving-code-review` — verify feedback technically rather than agreeing performatively
+- `finishing-a-development-branch` — verifies recorded gate verdicts, then decides how the run branch lands
+- `writing-skills` — creating, editing, and verifying skills before deployment
 
 ## Layout
 

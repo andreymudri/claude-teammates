@@ -1,0 +1,13 @@
+{
+  "name": "claude-teammates",
+  "owner": {
+    "name": "andreymudri"
+  },
+  "plugins": [
+    {
+      "name": "claude-teammates",
+      "source": "./",
+      "description": "Superpowers-style development process running on Claude Code teammates: brainstorming, planning, TDD, debugging, worktree-isolated parallel execution, automated phase gates, and supervision."
+    }
+  ]
+}
