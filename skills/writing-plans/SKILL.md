@@ -11,6 +11,26 @@ description: Use when you have a spec or requirements for a multi-step task, bef
 
 Save the plan to `docs/plans/YYYY-MM-DD-<feature-name>.md`.
 
+## Global Constraints
+
+Every plan needs a **Global Constraints** section in its header, before the first task — the
+project-wide requirements every task inherits: version floors, dependency limits, naming
+conventions, commit-message style, anything a task shouldn't have to restate. One line per
+constraint, with the exact value, not a vague pointer:
+
+```markdown
+## Global Constraints
+
+- Node >= 20
+- Zero new runtime dependencies
+- Commit messages: single-line, commitlint style, English
+```
+
+A task's own requirements are on top of this, not instead of it — every task implicitly
+carries the Global Constraints too. That's why `parallel-execution` dispatch hands each
+implementer the global constraints alongside its task brief: they're plan-wide, not
+per-task, so nothing downstream has to look them up separately.
+
 ## Machine-readable task format
 
 This plugin parses its own plans. `scripts/plan-parser.mjs` reads a `**Files:**` block under

@@ -33,6 +33,11 @@ test('requires an init-run self-check before handing a plan to a fleet', async (
   assert.match(body, /init-run/)
 })
 
+test('requires a Global Constraints section in the plan header', async () => {
+  const body = await readFile(skillPath, 'utf8')
+  assert.match(body, /Global Constraints/)
+})
+
 test('the example plan fragment in the skill actually parses into phased tasks', async () => {
   const body = await readFile(skillPath, 'utf8')
   const fence = /<!-- example-plan -->\n```markdown\n([\s\S]*?)```/.exec(body)
