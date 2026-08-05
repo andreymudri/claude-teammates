@@ -62,3 +62,19 @@ test('throws on duplicate task ids', () => {
 test('returns an empty array for a plan with no tasks', () => {
   assert.deepEqual(parsePlan('# Nothing here\n'), [])
 })
+
+test('exits Files block at checked checkbox', () => {
+  const planWithCheckedStep = `### Task 1: Work
+
+**Files:**
+- Create: \`a.mjs\`
+
+- [x] **Step 1: done**
+
+Later, some prose about modifications:
+- Modify: \`stray.mjs\`
+`
+  const tasks = parsePlan(planWithCheckedStep)
+  assert.deepEqual(tasks[0].files, ['a.mjs'])
+  assert.ok(!tasks[0].files.includes('stray.mjs'), 'stray.mjs should not be collected from prose after checked step')
+})

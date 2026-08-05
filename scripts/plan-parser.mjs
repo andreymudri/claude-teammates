@@ -2,7 +2,7 @@ const TASK_HEADING = /^###\s+Task\s+(\d+)\s*:\s*(.+?)\s*$/
 const FILES_HEADING = /^\*\*Files:\*\*\s*$/
 const FILE_LINE = /^-\s+(?:Create|Modify|Test)\s*:\s*`([^`]+)`\s*$/
 const DEPENDS_LINE = /^\*\*Depends:\*\*\s*(.+?)\s*$/
-const SECTION_BREAK = /^(\*\*|###|- \[ \])/
+const SECTION_BREAK = /^(\*\*|###|- \[[ x]\])/
 
 export function parsePlan(markdown) {
   const lines = markdown.split(/\r?\n/)
