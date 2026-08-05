@@ -43,8 +43,16 @@ export function describePendingCheck(check) {
   }
 }
 
+// `optional: true` is meaningful on a `command` check — "this lint is advisory". On an
+// enforcement check (`fileset`, `ownership`) it would mean "detect the violation and ship
+// anyway", which is never coherent to want. Both are forced non-optional here, at the point
+// the result is built, so an uncommitted manifest cannot disable enforcement while appearing
+// to record it.
+const ALWAYS_ENFORCED_KINDS = new Set(['fileset', 'ownership'])
+
 function checkResult(check, status, output) {
-  return { name: check.name, kind: check.kind, status, output, optional: check.optional === true }
+  const optional = ALWAYS_ENFORCED_KINDS.has(check.kind) ? false : check.optional === true
+  return { name: check.name, kind: check.kind, status, output, optional }
 }
 
 // Takes no `status` argument by design. Three earlier versions of this system were defeated
@@ -93,6 +101,23 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
       states.push(ownChanges.length > 0 && await git.isAncestor(sha, runSha))
     }
     if (states.length > 0 && states.every(Boolean)) integratedPhases.push(phase)
+  }
+
+  // An empty task list is not a run with nothing to check — it means the plan path or the
+  // plan itself is wrong (a directory anchor renders a tree listing that parses to zero
+  // tasks; `derivePhase` would otherwise return `{phase: null}` with no error, which
+  // `runFilesetCheck` reads as "every phase is integrated" and passes vacuously). Surfaced
+  // as a phaseError, which both fileset and ownership already honour, naming what was read
+  // and from where so the operator can see the mistake.
+  if (tasks.length === 0) {
+    return {
+      git, runId, runBranch, baseBranch, anchorSha, runSha,
+      planHash: planHash(planMarkdown),
+      tasks,
+      currentPhase: null,
+      phaseError: `plan at ${planPath} (anchor ${anchorSha}) parsed to zero tasks`,
+      integratedPhases,
+    }
   }
 
   const derived = derivePhase({ tasks, integratedPhases })

@@ -237,6 +237,21 @@ test('deriveContext does not treat a branch with only empty commits as integrate
   assert.deepEqual(ctx.integratedPhases, [])
 })
 
+// M1: a plan that parses to zero tasks must not read as "every phase is integrated". A
+// directory anchor (`git show <sha>:docs` renders a tree listing) parses to zero tasks the
+// same way an empty file would; derivePhase then returns `{phase: null}` with no error, and
+// runFilesetCheck's "nothing left to check" fast path passes vacuously while a task branch
+// can carry an undeclared file. An empty task list is a derive failure, not a clean run.
+test('deriveContext fails when the plan parses to zero tasks, naming the plan path and anchor', async () => {
+  const git = fakeGit({ fileAtCommit: async () => '' })
+  const ctx = await deriveContext({ git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, planPath: 'docs' })
+  assert.equal(ctx.currentPhase, null)
+  assert.ok(ctx.phaseError, 'expected a phaseError for a zero-task plan')
+  assert.match(ctx.phaseError, /docs/)
+  assert.match(ctx.phaseError, /anchorSha1/)
+  assert.deepEqual(ctx.tasks, [])
+})
+
 // --- runFilesetCheck ------------------------------------------------------------------------
 
 const T1_TASK = { id: 'T1', phase: 1, files: ['a.mjs'] }
@@ -331,6 +346,24 @@ test('runFilesetCheck lets a non-GitError propagate', async () => {
   const check = { name: 'fileset', kind: 'fileset' }
   const ctx = { git, runId: RUN_ID, anchorSha: 'anchorSha1', tasks: [T1_TASK], currentPhase: 1, phaseError: null }
   await assert.rejects(() => runFilesetCheck(check, ctx), /not a git error/)
+})
+
+// M2: `optional: true` is meaningful on a `command` check ("advisory") but on `fileset` or
+// `ownership` it means "detect the violation and ship anyway", which is never coherent. An
+// uncommitted manifest marking either check optional must not be able to disable enforcement
+// while appearing to record it — the result must always come back non-optional so
+// aggregateVerdict counts it.
+test('runFilesetCheck ignores optional:true and still fails the gate on a violation', async () => {
+  const git = fakeGit({
+    branchExists: async () => true,
+    changedFiles: async () => ['a.mjs', 'secret.mjs'],
+  })
+  const check = { name: 'fileset', kind: 'fileset', optional: true }
+  const ctx = { git, runId: RUN_ID, anchorSha: 'anchorSha1', tasks: [T1_TASK], currentPhase: 1, phaseError: null }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.equal(res.optional, false)
+  assert.equal(aggregateVerdict([res]).verdict, 'FAIL')
 })
 
 // --- runOwnershipCheck ------------------------------------------------------------------------
@@ -478,6 +511,16 @@ test('a commit whose sole parent sits on a task branch is still unexplained', as
   const res = await runOwnershipCheck(check, ctx)
   assert.equal(res.status, 'fail')
   assert.match(res.output, /c1/)
+})
+
+test('runOwnershipCheck ignores optional:true and still fails the gate on a violation', async () => {
+  const git = fakeGit({ isDirty: async () => true })
+  const check = { name: 'ownership', kind: 'ownership', optional: true }
+  const ctx = { git, runId: RUN_ID, runBranch: RUN_BRANCH, anchorSha: 'anchorSha1', runSha: 'runSha1', tasks: [] }
+  const res = await runOwnershipCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.equal(res.optional, false)
+  assert.equal(aggregateVerdict([res]).verdict, 'FAIL')
 })
 
 // --- runChecks dispatch -----------------------------------------------------------------------
