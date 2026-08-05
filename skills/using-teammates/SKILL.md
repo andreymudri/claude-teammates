@@ -33,7 +33,7 @@ repo. They are never the same directory. Every CLI call in every skill uses both
 
     node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" <subcommand> --root <project root> ...
 
-Invoking `node scripts/cli.mjs` by its relative path fails as soon as the working directory
+Invoking the CLI by a relative path fails as soon as the working directory
 isn't the plugin's own — which, installed via `/plugin`, it never is.
 
 ## Non-negotiables

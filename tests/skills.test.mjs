@@ -3,7 +3,14 @@ import assert from 'node:assert/strict'
 import { readFile, readdir } from 'node:fs/promises'
 
 const dir = new URL('../skills/', import.meta.url)
-const EXPECTED = ['fleet-lifecycle', 'fleet-supervision', 'parallel-execution', 'phase-gate', 'using-teammates']
+const REQUIRED = ['fleet-lifecycle', 'fleet-supervision', 'parallel-execution', 'phase-gate', 'using-teammates']
+
+async function allSkills() {
+  return (await readdir(dir, { withFileTypes: true }))
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name)
+    .sort()
+}
 
 async function skill(name) {
   const text = await readFile(new URL(`${name}/SKILL.md`, dir), 'utf8')
@@ -15,12 +22,13 @@ async function skill(name) {
   return { fields, body: text.slice(match[0].length) }
 }
 
-test('all five skills exist', async () => {
-  assert.deepEqual((await readdir(dir)).sort(), EXPECTED)
+test('every required fleet skill is present', async () => {
+  const names = await allSkills()
+  for (const required of REQUIRED) assert.ok(names.includes(required), `missing skill ${required}`)
 })
 
 test('each skill has a name matching its folder and a description starting with "Use when"', async () => {
-  for (const name of EXPECTED) {
+  for (const name of await allSkills()) {
     const { fields } = await skill(name)
     assert.equal(fields.name, name)
     assert.match(fields.description, /^Use when/, `${name} description must start with "Use when"`)
@@ -30,7 +38,7 @@ test('each skill has a name matching its folder and a description starting with 
 test('every cli subcommand referenced by a skill actually exists', async () => {
   const cli = await readFile(new URL('../scripts/cli.mjs', import.meta.url), 'utf8')
   const known = ['init-run', 'gate', 'digest', 'claim', 'unclaim', 'workflow']
-  for (const name of EXPECTED) {
+  for (const name of await allSkills()) {
     const { body } = await skill(name)
     for (const m of body.matchAll(/cli\.mjs["']?\s+([a-z-]+)/g)) {
       assert.ok(known.includes(m[1]), `${name} calls unknown subcommand ${m[1]}`)
@@ -41,7 +49,7 @@ test('every cli subcommand referenced by a skill actually exists', async () => {
 
 test('every agent referenced by a skill exists', async () => {
   const agents = (await readdir(new URL('../agents/', import.meta.url))).map((f) => f.replace('.md', ''))
-  for (const name of EXPECTED) {
+  for (const name of await allSkills()) {
     const { body } = await skill(name)
     for (const m of body.matchAll(/\btm-[a-z]+\b/g)) {
       assert.ok(agents.includes(m[0]), `${name} references missing agent ${m[0]}`)
@@ -51,7 +59,7 @@ test('every agent referenced by a skill exists', async () => {
 
 test('the entrypoint routes to all four working skills', async () => {
   const { body } = await skill('using-teammates')
-  for (const name of EXPECTED.filter((n) => n !== 'using-teammates')) {
+  for (const name of REQUIRED.filter((n) => n !== 'using-teammates')) {
     assert.ok(body.includes(name), `entrypoint does not route to ${name}`)
   }
 })
