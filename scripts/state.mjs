@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, rename } from 'node:fs/promises'
+import { mkdir, readFile, writeFile, rename, unlink } from 'node:fs/promises'
 import path from 'node:path'
 
 const NAMES = new Set(['plan', 'status', 'findings'])
@@ -42,4 +42,16 @@ export async function claimTask(root, runId, taskId, teammate) {
     if (err.code === 'EEXIST') return false
     throw err
   }
+}
+
+// Returns the task to the pool. Idempotent: releasing an unclaimed or already-released
+// task is not an error, so callers never need to check before releasing.
+export async function releaseClaim(root, runId, taskId) {
+  const target = path.join(runDir(root, runId), 'claims', `${taskId}.json`)
+  try {
+    await unlink(target)
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err
+  }
+  return true
 }

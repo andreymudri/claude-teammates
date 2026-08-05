@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { runDir, readState, writeState, claimTask } from '../scripts/state.mjs'
+import { runDir, readState, writeState, claimTask, releaseClaim } from '../scripts/state.mjs'
 
 async function withTempRoot(fn) {
   const root = await mkdtemp(path.join(tmpdir(), 'tm-'))
@@ -46,6 +46,22 @@ test('claimTask allows different tasks to be claimed independently', async () =>
   await withTempRoot(async (root) => {
     assert.equal(await claimTask(root, 'r1', 'T1', 'impl-a'), true)
     assert.equal(await claimTask(root, 'r1', 'T2', 'impl-b'), true)
+  })
+})
+
+test('releasing a claim then re-claiming the task succeeds', async () => {
+  await withTempRoot(async (root) => {
+    assert.equal(await claimTask(root, 'r1', 'T1', 'impl-a'), true)
+    assert.equal(await claimTask(root, 'r1', 'T1', 'impl-b'), false)
+    await releaseClaim(root, 'r1', 'T1')
+    assert.equal(await claimTask(root, 'r1', 'T1', 'impl-b'), true)
+  })
+})
+
+test('releasing a nonexistent claim is not an error', async () => {
+  await withTempRoot(async (root) => {
+    await assert.doesNotReject(releaseClaim(root, 'r1', 'never-claimed'))
+    assert.equal(await releaseClaim(root, 'r1', 'never-claimed'), true)
   })
 })
 
