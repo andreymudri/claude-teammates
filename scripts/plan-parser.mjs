@@ -10,8 +10,34 @@ export function parsePlan(markdown) {
   const seen = new Set()
   let current = null
   let inFiles = false
+  let inFence = false
+  let fenceChar = null
+  let fenceLength = 0
 
   for (const line of lines) {
+    // Check for fence open/close
+    const trimmed = line.trimStart()
+    const fenceMatch = trimmed.match(/^(`{3,}|~{3,})/)
+    if (fenceMatch) {
+      const char = fenceMatch[1][0]
+      const length = fenceMatch[1].length
+      if (inFence && char === fenceChar && length >= fenceLength) {
+        // Closing fence
+        inFence = false
+        fenceChar = null
+        fenceLength = 0
+      } else if (!inFence) {
+        // Opening fence
+        inFence = true
+        fenceChar = char
+        fenceLength = length
+      }
+      continue
+    }
+
+    // Skip all processing if inside a fence
+    if (inFence) continue
+
     const heading = TASK_HEADING.exec(line)
     if (heading) {
       const id = `T${heading[1]}`
