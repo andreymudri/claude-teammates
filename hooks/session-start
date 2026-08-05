@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# SessionStart hook for the claude-teammates plugin.
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+ENTRYPOINT="${PLUGIN_ROOT}/skills/using-teammates/SKILL.md"
+
+escape_for_json() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    printf '%s' "$s"
+}
+
+# Fail loudly, never fatally. A silent miss is indistinguishable from a healthy
+# session, and the process would stop self-activating with no signal at all.
+# A hard non-zero exit is rejected: it risks disrupting or spamming every
+# session start, which is a worse cure than the disease.
+if [ -r "${ENTRYPOINT}" ]; then
+    content=$(cat "${ENTRYPOINT}")
+    session_context="<EXTREMELY_IMPORTANT>\nYou have claude-teammates.\n\n**Below is the full content of your 'claude-teammates:using-teammates' skill - your introduction to using skills. For all other skills, use the 'Skill' tool:**\n\n$(escape_for_json "$content")\n</EXTREMELY_IMPORTANT>"
+else
+    warning="WARNING: the claude-teammates plugin is installed but NOT active. Its entrypoint could not be read at ${ENTRYPOINT} (skills/using-teammates/SKILL.md). Process skills will not self-activate this session. Check the plugin installation."
+    session_context=$(escape_for_json "$warning")
+fi
+
+# Output context injection as JSON.
+# Cursor hooks expect additional_context (snake_case).
+# Claude Code hooks expect hookSpecificOutput.additionalContext (nested).
+# Copilot CLI (v1.0.11+) and others expect additionalContext (top-level, SDK standard).
+# Claude Code reads BOTH additional_context and hookSpecificOutput without
+# deduplication, so we must emit only the field the current platform consumes.
+if [ -n "${CURSOR_PLUGIN_ROOT:-}" ]; then
+  printf '{\n  "additional_context": "%s"\n}\n' "$session_context"
+elif [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -z "${COPILOT_CLI:-}" ]; then
+  printf '{\n  "hookSpecificOutput": {\n    "hookEventName": "SessionStart",\n    "additionalContext": "%s"\n  }\n}\n' "$session_context"
+else
+  printf '{\n  "additionalContext": "%s"\n}\n' "$session_context"
+fi
+
+exit 0
