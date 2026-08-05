@@ -1,13 +1,46 @@
 ---
 name: using-teammates
-description: Use when work could be split across background teammates - decides fleet vs solo and routes to the right teammates skill.
+description: Use when starting any conversation or task - establishes how to find and use skills, and routes to the right process or fleet skill before anything else happens.
 ---
 
 # Using Teammates
 
-Decide whether this work wants a fleet, then route.
+This is the entrypoint. Read it before doing anything else this session — including
+answering a question, exploring the codebase, or checking a file.
 
-## Fleet or solo
+## The Rule
+
+**Invoke relevant skills BEFORE any response or action** — including clarifying
+questions, exploring the codebase, or checking files.
+
+Then announce "Using [skill] to [purpose]" and follow the skill exactly.
+
+## Skill Priority
+
+Process skills set the approach; implementation skills carry it out. When both
+apply, the process skill goes first.
+
+- "Let's build X" → `brainstorming` first, then implementation skills.
+- "Fix this bug" → `systematic-debugging` first, then domain skills.
+
+## Routing
+
+| Situation | Skill |
+|---|---|
+| Exploring an idea, unclear requirements, before any design or plan | `brainstorming` |
+| Requirements are settled and a multi-step change needs a written plan | `writing-plans` |
+| A written plan exists and there's a git repo with 3+ disjoint tasks — run a fleet | `parallel-execution` |
+| A written plan exists but the work doesn't warrant a fleet — work it inline | `executing-plans` |
+| A bug, test failure, or unexpected behavior, before proposing a fix | `systematic-debugging` |
+| Implementing any feature or bugfix, before writing implementation code | `test-driven-development` |
+| Feedback came back on your work, before acting on it | `receiving-code-review` |
+| Implementation is complete and all tests pass — decide how to integrate | `finishing-a-development-branch` |
+| Creating or editing a skill, or verifying one works before deployment | `writing-skills` |
+| Spawn, list, message, scale, stop, or resume teammates in a running fleet | `fleet-lifecycle` |
+| A fleet phase finished and needs a verdict before the next phase starts | `phase-gate` |
+| Want to know what a running fleet is doing right now | `fleet-supervision` |
+
+## Fleet or Solo
 
 Run a fleet when **all** of these hold:
 
@@ -15,16 +48,20 @@ Run a fleet when **all** of these hold:
 - The plan has three or more tasks that touch disjoint files.
 - The repo is a git repo — worktree isolation depends on it.
 
-Otherwise work solo. A two-task change costs more to orchestrate than to do.
+Otherwise take the inline path: `executing-plans`. A two-task change costs more to
+orchestrate as a fleet than to just do.
 
-## Routing
+## Red Flags
 
-| Situation | Skill |
+These thoughts mean STOP — you're rationalizing your way out of a skill check:
+
+| Thought | Reality |
 |---|---|
-| Starting a run from a written plan | `parallel-execution` |
-| Spawn, list, message, scale, stop, or resume teammates | `fleet-lifecycle` |
-| A phase finished and needs a verdict | `phase-gate` |
-| Want to know what the fleet is doing right now | `fleet-supervision` |
+| "This is just a simple question" | Questions are tasks. Check for skills. |
+| "I need more context first" | Skill check comes BEFORE clarifying questions. |
+| "Let me explore the codebase first" | Skills tell you HOW to explore. Check first. |
+| "The skill is overkill" | Simple things become complex. Use it. |
+| "I'll just do this one thing first" | Check BEFORE doing anything. |
 
 ## Invoking the CLI
 
