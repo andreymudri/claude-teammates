@@ -7,7 +7,7 @@ description: Use when checking what a running fleet is doing - renders the diges
 
 ## Digest
 
-    node scripts/cli.mjs digest --run <runId>
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" digest --run <runId> --root <project root>
 
 Show that block as-is. It is deliberately compact; do not expand it into prose.
 

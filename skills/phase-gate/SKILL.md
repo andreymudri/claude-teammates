@@ -9,7 +9,7 @@ Phases run autonomously end to end. The boundary is where verification happens.
 
 ## Run it
 
-    node scripts/cli.mjs gate --run <runId> [--phase <name>]
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" gate --run <runId> --root <project root> [--phase <name>]
 
 Exit codes: `0` PASS, `1` FAIL, `3` no manifest (an inferred one was printed).
 

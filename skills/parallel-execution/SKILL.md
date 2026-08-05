@@ -7,7 +7,7 @@ description: Use when executing a written plan across background teammates - spl
 
 ## 1. Initialize the run
 
-    node scripts/cli.mjs init-run <planPath> --run <runId>
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" init-run <planPath> --run <runId> --root <project root>
 
 This writes `.teammates/<runId>/plan.json` and `status.json` and prints the phase breakdown.
 Tasks land in the same phase only when their deps are satisfied and their file sets are
@@ -17,7 +17,7 @@ disjoint.
 
 Phases with **three or more** tasks go through the Workflow tool:
 
-    node scripts/cli.mjs workflow --run <runId> --phase <n>
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" workflow --run <runId> --phase <n> --root <project root>
 
 Write that source to a file and invoke `Workflow` with it. The Workflow tool needs the user's
 opt-in — ask once per run, then remember it for that run.

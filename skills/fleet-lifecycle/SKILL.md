@@ -10,7 +10,7 @@ description: Use when spawning, listing, messaging, scaling, stopping, or resumi
 **add `<role>` [n]** — spawn `n` background agents of that role (`tm-implementer` by
 default). Each new teammate claims work itself:
 
-    node scripts/cli.mjs claim --run <id> --task <taskId> --by <teammateName>
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" claim --run <id> --task <taskId> --by <teammateName> --root <project root>
 
 Exit 0 means the claim was won; exit 1 means another teammate already owns it — move to the
 next unclaimed task. This is what makes mid-run additions safe.
@@ -21,7 +21,13 @@ next unclaimed task. This is what makes mid-run additions safe.
 **message `<name>`** — `SendMessage` to a running teammate to redirect it. Only works for
 teammates spawned as direct agents; agents inside a running Workflow cannot receive messages.
 
-**stop `<name>`** — stop one teammate. Its task returns to `pending`, never `done`.
+**stop `<name>`** — stop one teammate. Its task returns to `pending`, never `done`. Release the
+claim so the task is claimable again:
+
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" unclaim --run <id> --task <taskId> --root <project root>
+
+Without this the task stays permanently claimed by the stopped teammate and no respawned
+teammate can ever pick it up.
 
 **resume `<run-id>`** — read `.teammates/<run-id>/` and reconstruct state. For the Workflow
 path, relaunch with `resumeFromRunId` so completed agents return cached results.

@@ -26,6 +26,16 @@ Otherwise work solo. A two-task change costs more to orchestrate than to do.
 | A phase finished and needs a verdict | `phase-gate` |
 | Want to know what the fleet is doing right now | `fleet-supervision` |
 
+## Invoking the CLI
+
+`CLAUDE_PLUGIN_ROOT` is where this plugin is installed; `--root` is always the user's project
+repo. They are never the same directory. Every CLI call in every skill uses both:
+
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" <subcommand> --root <project root> ...
+
+Invoking `node scripts/cli.mjs` by its relative path fails as soon as the working directory
+isn't the plugin's own — which, installed via `/plugin`, it never is.
+
 ## Non-negotiables
 
 - No teammate ever touches the main worktree. Only `tm-integrator` writes to the run branch.
