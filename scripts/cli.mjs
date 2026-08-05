@@ -39,11 +39,38 @@ async function readPackage(root) {
   }
 }
 
+const REQUIRED = {
+  'init-run': ['run'],
+  gate: ['run'],
+  digest: ['run'],
+  claim: ['run', 'task', 'by'],
+  workflow: ['run', 'phase'],
+}
+
+// A skill branches on this CLI's exit code. A missing argument must produce the usage
+// message and exit 2, never an unhandled TypeError and a stack trace.
+function missingArgs(command, flags, positional) {
+  const missing = (REQUIRED[command] ?? []).filter((f) => !flags[f]).map((f) => `--${f}`)
+  if (command === 'init-run' && !positional[0]) missing.unshift('<planPath>')
+  if (command === 'workflow' && flags.phase && !Number.isInteger(Number(flags.phase))) {
+    missing.push('--phase <integer>')
+  }
+  return missing
+}
+
 export async function runCli(argv, io = { out: console.log }) {
   const [command, ...rest] = argv
   const { flags, positional } = parseFlags(rest)
   const root = flags.root ?? process.cwd()
   const runId = flags.run
+
+  if (REQUIRED[command]) {
+    const missing = missingArgs(command, flags, positional)
+    if (missing.length > 0) {
+      io.out(`missing required argument: ${missing.join(', ')}\n\n${USAGE}`)
+      return 2
+    }
+  }
 
   if (command === 'init-run') {
     const tasks = assignPhases(parsePlan(await readFile(positional[0], 'utf8')))

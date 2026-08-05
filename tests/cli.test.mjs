@@ -91,3 +91,41 @@ test('an unknown subcommand prints usage and exits 2', async () => {
     assert.match(lines.join('\n'), /usage: cli\.mjs/)
   })
 })
+
+test('digest with no --run reports a missing argument instead of crashing', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const code = await runCli(['digest', '--root', root], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /missing required argument/)
+    assert.match(lines.join('\n'), /--run/)
+  })
+})
+
+test('claim with --run but no --task or --by names both missing flags', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const code = await runCli(['claim', '--run', 'r1', '--root', root], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /missing required argument/)
+    assert.match(lines.join('\n'), /--task/)
+    assert.match(lines.join('\n'), /--by/)
+  })
+})
+
+test('init-run with --run but no plan path names <planPath>', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const code = await runCli(['init-run', '--run', 'r1', '--root', root], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /missing required argument/)
+    assert.match(lines.join('\n'), /<planPath>/)
+  })
+})
+
+test('workflow with a non-integer --phase returns 2 rather than generating anything', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const code = await runCli(['workflow', '--run', 'r1', '--phase', 'abc', '--root', root], io)
+    assert.equal(code, 2)
+    assert.doesNotMatch(lines.join('\n'), /export const meta/)
+  })
+})
