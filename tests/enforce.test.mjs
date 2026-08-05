@@ -5,8 +5,10 @@ import {
   taskBranchName,
   resolveTaskBranch,
   filesetViolations,
+  derivePhase,
   ownershipViolations,
-  completionBlock,
+  verdictCoversTree,
+  planHash,
 } from '../scripts/enforce.mjs'
 
 test('backslashes, leading ./ and leading / all normalize to a bare posix path', () => {
@@ -47,69 +49,104 @@ test('the branch convention is teammates/<runId>/<taskId>', () => {
   assert.equal(taskBranchName('r1', 'T1'), 'teammates/r1/T1')
 })
 
-test('a recorded branch beats the convention', () => {
-  assert.equal(resolveTaskBranch({ id: 'T1', branch: 'custom' }, 'r1'), 'custom')
+test('a branch field on the task is ignored in favour of the convention', () => {
+  assert.equal(resolveTaskBranch({ id: 'T1', branch: 'custom' }, 'r1'), 'teammates/r1/T1')
 })
 
 test('with no recorded branch the convention is used', () => {
   assert.equal(resolveTaskBranch({ id: 'T1' }, 'r1'), 'teammates/r1/T1')
 })
 
-test('a task with neither id nor branch resolves to null', () => {
+test('a task with no id resolves to null', () => {
   assert.equal(resolveTaskBranch({}, 'r1'), null)
 })
 
-test('an empty-string branch resolves to null instead of failing open', () => {
-  assert.equal(resolveTaskBranch({ id: 'T1', branch: '' }, 'r1'), null)
+// --- derivePhase -----------------------------------------------------------------------
+
+test('derivePhase returns phase 1 when nothing is integrated', () => {
+  assert.deepEqual(
+    derivePhase({ tasks: [{ phase: 1 }, { phase: 2 }], integratedPhases: [] }),
+    { phase: 1 },
+  )
 })
 
-test('a whitespace-only branch resolves to null instead of failing open', () => {
-  assert.equal(resolveTaskBranch({ id: 'T1', branch: '   ' }, 'r1'), null)
+test('derivePhase returns phase 2 when phase 1 is integrated', () => {
+  assert.deepEqual(
+    derivePhase({ tasks: [{ phase: 1 }, { phase: 2 }], integratedPhases: [1] }),
+    { phase: 2 },
+  )
 })
 
-test('an unmoved, clean main worktree with distinct task branches has no violations', () => {
+test('derivePhase returns phase null when every phase is integrated', () => {
+  assert.deepEqual(
+    derivePhase({ tasks: [{ phase: 1 }, { phase: 2 }], integratedPhases: [1, 2] }),
+    { phase: null },
+  )
+})
+
+test('derivePhase errors when a later phase is integrated but an earlier one is not', () => {
+  const result = derivePhase({ tasks: [{ phase: 1 }, { phase: 2 }], integratedPhases: [2] })
+  assert.ok(result.error)
+  assert.match(result.error, /phase 1/)
+})
+
+test('derivePhase errors on a non-integer phase', () => {
+  const result = derivePhase({ tasks: [{ phase: 1.5 }], integratedPhases: [] })
+  assert.ok(result.error)
+  assert.match(result.error, /non-integer phase/)
+})
+
+test('derivePhase handles non-contiguous phases', () => {
+  assert.deepEqual(
+    derivePhase({ tasks: [{ phase: 1 }, { phase: 3 }, { phase: 4 }], integratedPhases: [] }),
+    { phase: 1 },
+  )
+})
+
+test('derivePhase sorts its input rather than trusting task order', () => {
+  // Tasks listed in descending phase order must still yield the lowest un-integrated phase.
+  assert.deepEqual(
+    derivePhase({ tasks: [{ phase: 3 }, { phase: 2 }, { phase: 1 }], integratedPhases: [] }),
+    { phase: 1 },
+  )
+})
+
+// --- ownershipViolations -----------------------------------------------------------------
+
+test('no unexplained commits and no alias collisions is clean', () => {
   const v = ownershipViolations({
-    runBranch: 'main', baseSha: 'abc', headSha: 'abc', dirty: false, taskBranches: ['teammates/r1/T1'],
+    runBranch: 'main', taskBranches: ['teammates/r1/T1'], unexplainedCommits: [], dirty: false,
   })
   assert.deepEqual(v, [])
 })
 
 test('a task branch equal to the run branch is a violation', () => {
-  const v = ownershipViolations({
-    runBranch: 'main', baseSha: 'abc', headSha: 'abc', dirty: false, taskBranches: ['main'],
-  })
+  const v = ownershipViolations({ runBranch: 'main', taskBranches: ['main'], unexplainedCommits: [], dirty: false })
   assert.equal(v.length, 1)
   assert.match(v[0], /only tm-integrator writes there/)
 })
 
 test('a case-only alias of the run branch is a violation', () => {
-  const v = ownershipViolations({
-    runBranch: 'main', baseSha: 'abc', headSha: 'abc', dirty: false, taskBranches: ['Main'],
-  })
+  const v = ownershipViolations({ runBranch: 'main', taskBranches: ['Main'], unexplainedCommits: [], dirty: false })
   assert.equal(v.length, 1)
   assert.match(v[0], /only tm-integrator writes there/)
 })
 
 test('a refs/heads/ prefixed alias of the run branch is a violation', () => {
-  const v = ownershipViolations({
-    runBranch: 'main', baseSha: 'abc', headSha: 'abc', dirty: false, taskBranches: ['refs/heads/main'],
-  })
+  const v = ownershipViolations({ runBranch: 'main', taskBranches: ['refs/heads/main'], unexplainedCommits: [], dirty: false })
   assert.equal(v.length, 1)
   assert.match(v[0], /only tm-integrator writes there/)
 })
 
 test('a heads/ prefixed alias of the run branch is a violation', () => {
-  const v = ownershipViolations({
-    runBranch: 'main', baseSha: 'abc', headSha: 'abc', dirty: false, taskBranches: ['heads/main'],
-  })
+  const v = ownershipViolations({ runBranch: 'main', taskBranches: ['heads/main'], unexplainedCommits: [], dirty: false })
   assert.equal(v.length, 1)
   assert.match(v[0], /only tm-integrator writes there/)
 })
 
 test('a doubly-prefixed refs/heads/refs/heads/ alias is a violation', () => {
   const v = ownershipViolations({
-    runBranch: 'refs/heads/main', baseSha: 'abc', headSha: 'abc', dirty: false,
-    taskBranches: ['refs/heads/refs/heads/main'],
+    runBranch: 'refs/heads/main', taskBranches: ['refs/heads/refs/heads/main'], unexplainedCommits: [], dirty: false,
   })
   assert.equal(v.length, 1)
   assert.match(v[0], /only tm-integrator writes there/)
@@ -117,43 +154,102 @@ test('a doubly-prefixed refs/heads/refs/heads/ alias is a violation', () => {
 
 test('a doubly-prefixed heads/heads/ alias is a violation', () => {
   const v = ownershipViolations({
-    runBranch: 'heads/main', baseSha: 'abc', headSha: 'abc', dirty: false,
-    taskBranches: ['heads/heads/main'],
+    runBranch: 'heads/main', taskBranches: ['heads/heads/main'], unexplainedCommits: [], dirty: false,
   })
   assert.equal(v.length, 1)
   assert.match(v[0], /only tm-integrator writes there/)
 })
 
-test('a moved main HEAD is a violation naming the integrated command', () => {
-  const v = ownershipViolations({ runBranch: 'main', baseSha: 'abc', headSha: 'def', dirty: false })
-  assert.equal(v.length, 1)
-  assert.match(v[0], /cli\.mjs integrated/)
+test('each unexplained commit is flagged and names --no-ff', () => {
+  const v = ownershipViolations({
+    runBranch: 'main', taskBranches: ['teammates/r1/T1'], unexplainedCommits: ['abc123', 'def456'], dirty: false,
+  })
+  assert.equal(v.length, 2)
+  assert.match(v[0], /abc123/)
+  assert.match(v[0], /--no-ff/)
+  assert.match(v[1], /def456/)
 })
 
-test('a dirty main worktree is a violation', () => {
-  const v = ownershipViolations({ runBranch: 'main', baseSha: 'abc', headSha: 'abc', dirty: true })
+test('a dirty worktree is a violation', () => {
+  const v = ownershipViolations({ runBranch: 'main', taskBranches: [], unexplainedCommits: [], dirty: true })
   assert.equal(v.length, 1)
   assert.match(v[0], /uncommitted changes/)
 })
 
-test('a missing runBranch or baseSha is itself a violation and short-circuits', () => {
-  const v = ownershipViolations({ runBranch: null, baseSha: null, headSha: 'abc', dirty: true })
+test('a missing runBranch short-circuits', () => {
+  const v = ownershipViolations({ runBranch: null, taskBranches: ['x'], unexplainedCommits: ['y'], dirty: true })
   assert.equal(v.length, 1)
-  assert.match(v[0], /init-run/)
+  assert.match(v[0], /cannot establish what it is protecting/)
 })
 
-test('completion is blocked when no gate is recorded', () => {
-  assert.match(completionBlock({ gates: {} }, 'default'), /no gate recorded/)
+// --- verdictCoversTree --------------------------------------------------------------------
+
+const baseVerdict = {
+  verdict: 'PASS',
+  anchorSha: 'anchor1',
+  planHash: 'ph1',
+  branchShas: { 'teammates/r1/T1': 'sha1' },
+}
+const baseCurrent = {
+  anchorSha: 'anchor1',
+  planHash: 'ph1',
+  branchShas: { 'teammates/r1/T1': 'sha1' },
+}
+
+test('verdictCoversTree is null for a matching PASS', () => {
+  assert.equal(verdictCoversTree(baseVerdict, baseCurrent), null)
 })
 
-test('completion is blocked when the recorded gate is FAIL', () => {
-  assert.match(completionBlock({ gates: { default: { verdict: 'FAIL' } } }, 'default'), /not PASS/)
+test('verdictCoversTree gives a reason for a non-PASS verdict', () => {
+  assert.match(verdictCoversTree({ ...baseVerdict, verdict: 'FAIL' }, baseCurrent), /no passing verdict/)
 })
 
-test('completion is allowed on a recorded PASS', () => {
-  assert.equal(completionBlock({ gates: { default: { verdict: 'PASS' } } }, 'default'), null)
+test('verdictCoversTree gives a reason for a missing verdict', () => {
+  assert.match(verdictCoversTree(null, baseCurrent), /no passing verdict/)
 })
 
-test('completion is blocked when status is missing entirely', () => {
-  assert.match(completionBlock(null, 'default'), /no gate recorded/)
+test('verdictCoversTree gives a reason for a moved anchor', () => {
+  assert.match(verdictCoversTree(baseVerdict, { ...baseCurrent, anchorSha: 'anchor2' }), /anchor moved/)
+})
+
+test('verdictCoversTree gives a reason for a changed plan hash', () => {
+  assert.match(verdictCoversTree(baseVerdict, { ...baseCurrent, planHash: 'ph2' }), /plan changed/)
+})
+
+test('verdictCoversTree gives a reason for a moved branch', () => {
+  assert.match(
+    verdictCoversTree(baseVerdict, { ...baseCurrent, branchShas: { 'teammates/r1/T1': 'sha2' } }),
+    /branch teammates\/r1\/T1 moved/,
+  )
+})
+
+test('verdictCoversTree flags a branch present in current but not in the recorded verdict', () => {
+  const current = { ...baseCurrent, branchShas: { ...baseCurrent.branchShas, 'teammates/r1/T2': 'sha3' } }
+  assert.match(verdictCoversTree(baseVerdict, current), /branch teammates\/r1\/T2 moved/)
+})
+
+test('verdictCoversTree flags a branch present in the recorded verdict but not in current', () => {
+  const verdict = { ...baseVerdict, branchShas: { ...baseVerdict.branchShas, 'teammates/r1/T2': 'sha3' } }
+  assert.match(verdictCoversTree(verdict, baseCurrent), /branch teammates\/r1\/T2 moved/)
+})
+
+// --- planHash -------------------------------------------------------------------------------
+
+test('planHash is stable for equal input', () => {
+  assert.equal(planHash('# plan\n\nsome text'), planHash('# plan\n\nsome text'))
+})
+
+test('planHash differs for a one-character change', () => {
+  assert.notEqual(planHash('# plan A'), planHash('# plan B'))
+})
+
+test('planHash handles empty and nullish input', () => {
+  assert.equal(planHash(''), planHash(undefined))
+  assert.equal(planHash(null), planHash(''))
+})
+
+test('planHash output matches the 8-hex-character format', () => {
+  assert.match(planHash('anything'), /^[0-9a-f]{8}$/)
+  assert.match(planHash(''), /^[0-9a-f]{8}$/)
+  assert.match(planHash('a very long piece of plan markdown text right here'), /^[0-9a-f]{8}$/)
 })
