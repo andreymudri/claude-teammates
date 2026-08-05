@@ -81,14 +81,16 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
       // the anchor: a branch created at the anchor, or created by pointing at the run tip
       // itself, is an ancestor by reflexivity or by definition, with no work required.
       // Confirmed: a teammate can create every task branch at the run tip, commit nothing
-      // anywhere, and every phase reads integrated. Requiring at least one commit strictly
-      // between the anchor and the branch means "integrated" implies "did work", not just
-      // "points at something already on the run branch". This does not close self-integration
-      // in general — a phantom branch pointed at a run tip that already carries someone
-      // else's real commits still passes this check — that remains the documented, accepted
-      // limitation (see the spec's "Not defended against" list).
-      const ownCommits = await git.commitsBetween({ from: anchorSha, to: sha })
-      states.push(ownCommits.length > 0 && await git.isAncestor(sha, runSha))
+      // anywhere, and every phase reads integrated. Counting commits is not enough either —
+      // confirmed separately: a single `git commit --allow-empty` satisfies "has a commit"
+      // while changing no file at all. Requiring at least one *file* changed between the
+      // anchor and the branch means "integrated" implies "did work", not just "points at
+      // something already on the run branch" or "has a commit". This does not close
+      // self-integration in general — a phantom branch pointed at a run tip that already
+      // carries someone else's real commits still passes this check — that remains the
+      // documented, accepted limitation (see the spec's "Not defended against" list).
+      const ownChanges = await git.changedFiles({ base: anchorSha, branch: sha })
+      states.push(ownChanges.length > 0 && await git.isAncestor(sha, runSha))
     }
     if (states.length > 0 && states.every(Boolean)) integratedPhases.push(phase)
   }
@@ -179,6 +181,12 @@ async function contentAt(git, sha, filePath) {
   }
 }
 
+// The rule, stated once so it is predictable regardless of merge order or which side
+// conflicts: a file is accepted when the first parent's own content at the point of
+// divergence is unchanged (a clean, verifiable single-side contribution) OR when more than
+// one parent's history touched it there (an unverifiable but honest multi-way conflict);
+// it is rejected only when the merge's content for that file has no such source at all.
+//
 // True when every byte that differs between the merge commit and its first parent is
 // attributable to one of the merge's *other* parents (the caller has already confirmed
 // every one of those is itself an ancestor of one of this run's task branches). For each
@@ -203,8 +211,20 @@ async function contentAt(git, sha, filePath) {
 // Every secondary parent is checked for every file — nothing here stops at the first parent
 // that explains part of the commit, which is what let content hide in the gap between two
 // parents' contributions in an octopus merge.
+//
+// The candidate file list is the *union* of what changed between the first parent and the
+// merge commit, and what each secondary parent itself changed relative to the first parent —
+// not just the former. A file a secondary parent added and the merge commit then deleted
+// (`git rm` after `--no-ff --no-commit`, before completing the commit) shows zero diff
+// between the first parent and the merge commit — added, then removed, nets to invisible —
+// so it would never reach the check at all if only that one diff were consulted. Deletion is
+// a content change with no legitimate source, exactly like a fabricated addition; the merge
+// commit must still explain why a file its own second parent introduced is now gone.
 async function mergeContentExplainedByParents(git, firstParent, secondaryParents, mergeSha) {
-  const mergedFiles = await git.changedFiles({ base: firstParent, branch: mergeSha })
+  const mergedFiles = new Set(await git.changedFiles({ base: firstParent, branch: mergeSha }))
+  for (const parent of secondaryParents) {
+    for (const file of await git.changedFiles({ base: firstParent, branch: parent })) mergedFiles.add(file)
+  }
   for (const file of mergedFiles) {
     const mergeContent = await contentAt(git, mergeSha, file)
     let genuineConflict = false

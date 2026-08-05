@@ -174,7 +174,7 @@ test('deriveContext derives phase 2 once phase 1 branches are ancestors', async 
   const git = fakeGit({
     branchExists: async (name) => name === T1_BRANCH,
     isAncestor: async (sha, runSha) => sha === `refs/heads/${T1_BRANCH}-sha` && runSha === 'runSha1',
-    commitsBetween: async ({ to }) => (to === `refs/heads/${T1_BRANCH}-sha` ? ['t1-commit'] : []),
+    changedFiles: async ({ branch }) => (branch === `refs/heads/${T1_BRANCH}-sha` ? ['a.mjs'] : []),
   })
   const ctx = await deriveContext({ git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, planPath: 'plan.md' })
   assert.equal(ctx.currentPhase, 2)
@@ -186,7 +186,7 @@ test('deriveContext derives currentPhase: null when every phase is integrated', 
   const git = fakeGit({
     branchExists: async () => true,
     isAncestor: async () => true,
-    commitsBetween: async () => ['some-commit'],
+    changedFiles: async () => ['some-file'],
   })
   const ctx = await deriveContext({ git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, planPath: 'plan.md' })
   assert.equal(ctx.currentPhase, null)
@@ -197,7 +197,7 @@ test('deriveContext surfaces phaseError for out-of-order integration', async () 
   const git = fakeGit({
     branchExists: async (name) => name === T2_BRANCH,
     isAncestor: async (sha, runSha) => sha === `refs/heads/${T2_BRANCH}-sha` && runSha === 'runSha1',
-    commitsBetween: async ({ to }) => (to === `refs/heads/${T2_BRANCH}-sha` ? ['t2-commit'] : []),
+    changedFiles: async ({ branch }) => (branch === `refs/heads/${T2_BRANCH}-sha` ? ['b.mjs'] : []),
   })
   const ctx = await deriveContext({ git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, planPath: 'plan.md' })
   assert.equal(ctx.currentPhase, null)
@@ -205,16 +205,32 @@ test('deriveContext surfaces phaseError for out-of-order integration', async () 
   assert.deepEqual(ctx.integratedPhases, [2])
 })
 
-// A branch created with zero commits past the anchor must never read as "integrated" —
+// A branch created with zero file changes past the anchor must never read as "integrated" —
 // isAncestor(X, X) is trivially true, so a phantom branch pointed at the anchor (or at the
 // run tip) would otherwise pass with no work done. See the real-repo regression test below
 // ("an empty task branch at the run tip does not read as integrated").
-test('deriveContext does not treat a branch with zero commits past the anchor as integrated', async () => {
+test('deriveContext does not treat a branch with zero file changes past the anchor as integrated', async () => {
   const git = fakeGit({
     branchExists: async (name) => name === T1_BRANCH,
-    // isAncestor alone would say yes — the branch sha equals the anchor sha (zero commits).
+    // isAncestor alone would say yes — the branch sha equals the anchor sha (zero changes).
     isAncestor: async () => true,
-    commitsBetween: async () => [],
+    changedFiles: async () => [],
+  })
+  const ctx = await deriveContext({ git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, planPath: 'plan.md' })
+  assert.equal(ctx.currentPhase, 1)
+  assert.deepEqual(ctx.integratedPhases, [])
+})
+
+// H3-empty: counting commits is not the same as counting file changes. `git commit
+// --allow-empty` produces a real commit with zero file changes; a branch consisting only of
+// such commits must not read as integrated either.
+test('deriveContext does not treat a branch with only empty commits as integrated', async () => {
+  const git = fakeGit({
+    branchExists: async (name) => name === T1_BRANCH,
+    isAncestor: async () => true,
+    // The branch has a real commit (so a commit-counting check would wrongly pass); it just
+    // never touched a file.
+    changedFiles: async () => [],
   })
   const ctx = await deriveContext({ git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, planPath: 'plan.md' })
   assert.equal(ctx.currentPhase, 1)
@@ -721,5 +737,108 @@ test('an empty task branch at the run tip does not read as integrated (real repo
 
     const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
     assert.notEqual(res.output, 'every phase in the plan is integrated')
+  })
+})
+
+// H3-empty: a single `git commit --allow-empty`, honestly merged, is a real commit — a
+// commit-counting guard would call the phase integrated even though the branch touched no
+// file. The guard must count file changes, not commits.
+test('a branch consisting only of an empty commit does not read as integrated (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'plan.md'), singleTaskPlan(), 'utf8')
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await sh(['commit', '--allow-empty', '-m', 'empty T1 commit'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+
+    assert.deepEqual(ctx.integratedPhases, [])
+    assert.equal(ctx.currentPhase, 1)
+  })
+})
+
+// V3: a merge that brings in a file and deletes it before committing is invisible to a diff
+// taken only between the merge commit and its first parent — added, then removed, nets to
+// no difference at all. Deletion is a content change with no legitimate source, exactly like
+// a fabricated addition, and must be caught the same way.
+test('a merge that deletes the task branch\'s entire contribution is unexplained (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'plan.md'), singleTaskPlan(), 'utf8')
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'content\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '--no-commit', 'teammates/r1/T1'])
+    await sh(['rm', '-f', 'a.mjs'])
+    await sh(['commit', '-m', 'Merge T1 (dropped)'])
+
+    const mergeSha = (await sh(['rev-parse', 'run'])).stdout.trim()
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+    const res = await runOwnershipCheck({ name: 'ownership', kind: 'ownership' }, ctx)
+
+    assert.equal(res.status, 'fail')
+    assert.match(res.output, new RegExp(mergeSha))
+  })
+})
+
+// V5: pinned exactly to the coordinator's literal reported repro (both tasks declaring the
+// same file, T1 merging clean first, T2 conflicting second) to settle a reported
+// contradiction. Extensive re-testing (this shape, the reverse order, and a variant where
+// the seed commit lives only on the run branch) could not reproduce a FAIL — this
+// implementation returns PASS for all of them, consistent with the one-sentence rule stated
+// above mergeContentExplainedByParents. Pinned here so any future regression is caught, and
+// so the exact tested shape is on record.
+test('a hand-resolved conflict over the coordinator\'s exact V5 scenario is explained, not flagged (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'plan.md'), [
+      '### Task 1: first task',
+      '',
+      '**Files:**',
+      '- Create: `a.mjs`',
+      '',
+      '**Depends:** none',
+      '',
+      '### Task 2: second task',
+      '',
+      '**Files:**',
+      '- Create: `a.mjs`',
+      '',
+      '**Depends:** none',
+      '',
+    ].join('\n'), 'utf8')
+    await writeFile(path.join(root, 'a.mjs'), 'line1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'line1 edited by T1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', '-b', 'teammates/r1/T2', 'main'])
+    await writeFile(path.join(root, 'a.mjs'), 'line1 edited by T2\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T2 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+    const conflict = await sh(['merge', '--no-ff', '--no-commit', 'teammates/r1/T2'])
+    assert.match(conflict.stdout + conflict.stderr, /[Cc]onflict/, 'expected a real git conflict to set up this test')
+    await writeFile(path.join(root, 'a.mjs'), 'line1 edited by T1 and T2\n', 'utf8')
+    await sh(['add', 'a.mjs'])
+    await sh(['commit', '-m', 'Merge T2'])
+
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+    const res = await runOwnershipCheck({ name: 'ownership', kind: 'ownership' }, ctx)
+
+    assert.equal(res.status, 'pass', res.output)
   })
 })
