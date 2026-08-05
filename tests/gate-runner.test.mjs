@@ -61,6 +61,20 @@ test('a skipped optional check does not fail but is reported', () => {
   assert.deepEqual(v.skipped, ['contract'])
 })
 
+test('an optional failing check does not fail the gate but is reported in optionalFailed', () => {
+  const v = aggregateVerdict([{ name: 'a', status: 'pass' }, { name: 'contract', status: 'fail', optional: true }])
+  assert.equal(v.verdict, 'PASS')
+  assert.deepEqual(v.failed, [])
+  assert.deepEqual(v.optionalFailed, ['contract'])
+})
+
+test('a non-optional failing check still fails the gate', () => {
+  const v = aggregateVerdict([{ name: 'a', status: 'pass' }, { name: 'b', status: 'fail', optional: false }])
+  assert.equal(v.verdict, 'FAIL')
+  assert.deepEqual(v.failed, ['b'])
+  assert.deepEqual(v.optionalFailed, [])
+})
+
 test('a non-optional pending check fails the gate', () => {
   const v = aggregateVerdict([{ name: 'review', status: 'pending' }])
   assert.equal(v.verdict, 'FAIL')

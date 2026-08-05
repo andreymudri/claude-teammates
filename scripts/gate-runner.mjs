@@ -56,13 +56,16 @@ const RECOGNIZED = new Set(['pass', 'fail', 'skip', 'pending'])
 export function aggregateVerdict(results) {
   // An unrecognized or missing status is a failure, never a pass. This function is the
   // single source of truth for whether a phase proceeds; it must never fail open.
+  // The verdict is the AND of all non-optional checks — an optional check that fails
+  // is still surfaced, in optionalFailed, but never blocks the gate on its own.
   const unrecognized = results.filter((r) => !RECOGNIZED.has(r.status)).map((r) => r.name)
   const failed = [
-    ...results.filter((r) => r.status === 'fail').map((r) => r.name),
+    ...results.filter((r) => r.status === 'fail' && !r.optional).map((r) => r.name),
     ...unrecognized,
   ]
+  const optionalFailed = results.filter((r) => r.status === 'fail' && r.optional).map((r) => r.name)
   const skipped = results.filter((r) => r.status === 'skip').map((r) => r.name)
   const pending = results.filter((r) => r.status === 'pending' && !r.optional).map((r) => r.name)
   const passed = results.length > 0 && failed.length === 0 && pending.length === 0
-  return { verdict: passed ? 'PASS' : 'FAIL', failed, skipped, pending }
+  return { verdict: passed ? 'PASS' : 'FAIL', failed, optionalFailed, skipped, pending }
 }
