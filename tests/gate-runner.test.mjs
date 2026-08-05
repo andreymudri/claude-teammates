@@ -602,7 +602,7 @@ test('every ref-shaped argument reaching git is a sha or a fully-qualified ref',
   await deriveContext({ git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, planPath: 'plan.md' })
   await runFilesetCheck(
     { name: 'fileset', kind: 'fileset' },
-    { git, runId: RUN_ID, anchorSha: shaFor('anchor'), tasks: [T1_TASK], currentPhase: 1, phaseError: null },
+    { git, runId: RUN_ID, anchorSha: shaFor('anchor'), runSha: shaFor('run'), tasks: [T1_TASK], currentPhase: 1, phaseError: null },
   )
   await runOwnershipCheck(
     { name: 'ownership', kind: 'ownership' },
@@ -831,6 +831,58 @@ test('a merge that deletes the task branch\'s entire contribution is unexplained
 
     assert.equal(res.status, 'fail')
     assert.match(res.output, new RegExp(mergeSha))
+  })
+})
+
+// H1: `fileset` must diff a task branch against its actual fork point off the run branch, not
+// against the run anchor fixed at the start of the whole run. A phase-2 branch legitimately
+// forks from the run branch *after* phase 1 was merged into it, so phase 1's files land in a
+// phase-2 branch's diff against the (stale) anchor even though the phase-2 teammate never
+// touched them. `anchor...branch` does not save this either: once the anchor is an ancestor of
+// the branch, `merge-base(anchor, branch) == anchor`, so the three-dot diff degenerates to the
+// same two-dot diff. The fix diffs against `merge-base(runSha, branchSha)` instead — the task
+// branch's real fork point off the run branch as it stood when the teammate branched.
+test('runFilesetCheck does not blame a phase-2 branch for phase-1 files merged onto run before it forked (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'plan.md'), planMarkdown(), 'utf8')
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+
+    // Phase 1: T1 commits a.mjs, merged --no-ff onto run.
+    await sh(['checkout', '-b', T1_BRANCH])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', T1_BRANCH])
+
+    // Phase 2: T2 branches off run *after* phase 1 landed, and commits only b.mjs.
+    await sh(['checkout', '-b', T2_BRANCH])
+    await writeFile(path.join(root, 'b.mjs'), 'export const b = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T2 work'])
+    await sh(['checkout', 'run'])
+
+    const ctx = await deriveContext({ git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, planPath: 'plan.md' })
+    assert.equal(ctx.currentPhase, 2)
+    const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
+    assert.equal(res.status, 'pass', res.output)
+
+    // Extend: T2 also commits a stray file. The fail must name only the stray file, not
+    // a.mjs, which T2 never touched.
+    await sh(['checkout', T2_BRANCH])
+    await writeFile(path.join(root, 'stray.mjs'), 'export const stray = true\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T2 stray commit'])
+    await sh(['checkout', 'run'])
+
+    const ctx2 = await deriveContext({ git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, planPath: 'plan.md' })
+    const res2 = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx2)
+    assert.equal(res2.status, 'fail')
+    assert.match(res2.output, /stray\.mjs/)
+    assert.doesNotMatch(res2.output, /a\.mjs/)
   })
 })
 

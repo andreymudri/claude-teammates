@@ -132,7 +132,7 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
 }
 
 export async function runFilesetCheck(check, ctx = {}) {
-  const { git, runId, anchorSha, tasks, currentPhase, phaseError } = ctx
+  const { git, runId, runSha, tasks, currentPhase, phaseError } = ctx
   if (!git) return checkResult(check, 'fail', 'fileset check has no git access')
   if (phaseError) return checkResult(check, 'fail', phaseError)
   if (currentPhase == null) {
@@ -179,7 +179,15 @@ export async function runFilesetCheck(check, ctx = {}) {
       }
       const sha = await git.resolveRef(`refs/heads/${branch}`)
       branchShas[branch] = sha
-      const changed = await git.changedFiles({ base: anchorSha, branch: sha })
+      // Diffed against the branch's actual fork point off the run branch, not the run
+      // anchor fixed at the start of the whole run. A phase-2 branch legitimately forks
+      // from the run branch after phase 1 has already been merged into it, so a diff
+      // against the anchor would blame phase 2 for phase 1's files. Three-dot notation
+      // against the anchor does not help either — once the anchor is an ancestor of the
+      // branch (true for every phase after the first), merge-base(anchor, branch) is just
+      // the anchor again, so it degenerates to the same wrong diff.
+      const forkPoint = await git.mergeBase(runSha, sha)
+      const changed = await git.changedFiles({ base: forkPoint, branch: sha })
       const violations = filesetViolations(changed, task.files)
       if (violations.length > 0) problems.push(`${task.id}: outside declared set — ${violations.join(', ')}`)
     } catch (err) {
