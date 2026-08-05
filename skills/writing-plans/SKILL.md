@@ -31,6 +31,10 @@ A task that builds on another must carry `**Depends:** T1, T3`. Without it, the 
 work is scheduled concurrently with the task it depends on, and a fleet will run them in
 parallel worktrees regardless of what the prose says.
 
+When a task has no dependencies, omit the **Depends:** line entirely — that is the intended
+way to say "nothing." A sentinel like `**Depends:** none` is tolerated by the parser, but
+omission is the documented form; don't rely on the sentinel.
+
 ## Declared files are the enforced write set
 
 An implementer may only create or modify the files its task declares. This is the permitted

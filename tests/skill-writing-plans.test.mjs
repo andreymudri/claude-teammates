@@ -18,6 +18,11 @@ test('requires an explicit Depends line for dependent tasks', async () => {
   assert.match(body, /\*\*Depends:\*\*/)
 })
 
+test('tells authors to omit the Depends line for tasks with no dependencies', async () => {
+  const body = await readFile(skillPath, 'utf8')
+  assert.match(body, /omit(ting)? the \*\*Depends:\*\*/i)
+})
+
 test('states that declared files are the enforced write set', async () => {
   const body = await readFile(skillPath, 'utf8')
   assert.match(body, /write set|permitted.*files|only the files/i)
