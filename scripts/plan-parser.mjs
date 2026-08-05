@@ -3,6 +3,7 @@ const FILES_HEADING = /^\*\*Files:\*\*\s*$/
 const FILE_LINE = /^-\s+(?:Create|Modify|Test)\s*:\s*`([^`]+)`\s*$/
 const DEPENDS_LINE = /^\*\*Depends:\*\*\s*(.+?)\s*$/
 const SECTION_BREAK = /^(\*\*|###|- \[[ x]\])/
+const NO_DEPS_SENTINELS = new Set(['none', 'n/a', 'na', '-', ''])
 
 export function parsePlan(markdown) {
   const lines = markdown.split(/\r?\n/)
@@ -54,7 +55,10 @@ export function parsePlan(markdown) {
 
     const depends = DEPENDS_LINE.exec(line)
     if (depends) {
-      current.deps = depends[1].split(',').map((d) => d.trim()).filter(Boolean)
+      current.deps = depends[1]
+        .split(',')
+        .map((d) => d.trim())
+        .filter((d) => !NO_DEPS_SENTINELS.has(d.toLowerCase()))
       inFiles = false
       continue
     }

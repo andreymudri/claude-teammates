@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { parsePlan } from '../scripts/plan-parser.mjs'
+import { assignPhases } from '../scripts/phases.mjs'
 
 const PLAN = `
 # Some Plan
@@ -128,4 +129,35 @@ test('respects nested fences with different fence lengths', () => {
   assert.equal(tasks.length, 1)
   assert.equal(tasks[0].id, 'T1')
   assert.ok(!tasks.some((t) => t.id === 'T8'), 'T8 should not be parsed from inside nested fence')
+})
+
+test('treats "Depends: none" as no dependencies', () => {
+  const plan = '### Task 1: X\n\n**Files:**\n- Create: `a.mjs`\n\n**Depends:** none\n'
+  const tasks = parsePlan(plan)
+  assert.deepEqual(tasks[0].deps, [])
+})
+
+test('treats "Depends: N/A" as no dependencies, case-insensitively', () => {
+  const plan = '### Task 1: X\n\n**Files:**\n- Create: `a.mjs`\n\n**Depends:** N/A\n'
+  const tasks = parsePlan(plan)
+  assert.deepEqual(tasks[0].deps, [])
+})
+
+test('treats "Depends: -" as no dependencies', () => {
+  const plan = '### Task 1: X\n\n**Files:**\n- Create: `a.mjs`\n\n**Depends:** -\n'
+  const tasks = parsePlan(plan)
+  assert.deepEqual(tasks[0].deps, [])
+})
+
+test('drops only the sentinel when mixed with a real dependency id', () => {
+  const plan = '### Task 1: X\n\n**Files:**\n- Create: `a.mjs`\n\n**Depends:** T1, none\n'
+  const tasks = parsePlan(plan)
+  assert.deepEqual(tasks[0].deps, ['T1'])
+})
+
+test('an unknown dependency id still throws from assignPhases', () => {
+  const plan = '### Task 1: X\n\n**Files:**\n- Create: `a.mjs`\n\n**Depends:** T99\n'
+  const tasks = parsePlan(plan)
+  assert.deepEqual(tasks[0].deps, ['T99'])
+  assert.throws(() => assignPhases(tasks), /unsatisfiable dependencies: T1/)
 })
