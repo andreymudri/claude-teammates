@@ -4,6 +4,8 @@
     "default": {
       "checks": [
         { "name": "test", "kind": "command", "run": "npm test" },
+        { "name": "fileset", "kind": "fileset" },
+        { "name": "ownership", "kind": "ownership" },
         {
           "name": "review",
           "kind": "agent",
