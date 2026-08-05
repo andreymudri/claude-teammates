@@ -166,19 +166,65 @@ export async function runFilesetCheck(check, ctx = {}) {
   return { ...result, branchShas }
 }
 
-// A merge is "clean" with respect to the branch it claims to bring in when every file the
-// merge commit changed relative to its first parent is a file that branch itself changed
-// relative to that same first parent (the three-dot diff lands on the actual divergence
-// point regardless of how many other phases have since landed on the run branch). Anything
-// the merge changed beyond that set is content the merge commit introduced on its own —
-// exactly the shape of the confirmed backdoor-via-merge attack. Uses only changedFiles,
-// since scripts/git.mjs is outside this task's write set.
-async function mergeCarriesOnlyBranchContent(git, firstParent, secondParent, mergeSha) {
-  const merged = new Set(await git.changedFiles({ base: firstParent, branch: mergeSha }))
-  if (merged.size === 0) return true
-  const contributed = new Set(await git.changedFiles({ base: firstParent, branch: secondParent }))
-  for (const file of merged) {
-    if (!contributed.has(file)) return false
+// git show <sha>:<path> fails when the path does not exist at that commit — a real absence,
+// not a git failure. `null` is a sentinel distinct from any real file content; every caller
+// compares it against another call of this same function, so the sentinel only ever meets
+// itself or real content.
+async function contentAt(git, sha, filePath) {
+  try {
+    return await git.fileAtCommit(sha, filePath)
+  } catch (err) {
+    if (!(err instanceof GitError)) throw err
+    return null
+  }
+}
+
+// True when every byte that differs between the merge commit and its first parent is
+// attributable to one of the merge's *other* parents (the caller has already confirmed
+// every one of those is itself an ancestor of one of this run's task branches). For each
+// file the merge changed relative to its first parent:
+//
+//   - A secondary parent "touched" the file when its content differs from the pairwise
+//     merge-base with the first parent — the file's actual point of divergence, regardless
+//     of how many other phases have since landed on the run branch.
+//   - Exactly one clean toucher (the first parent's own content at that same base is
+//     unchanged): a clean merge takes that side verbatim, so the merge's content must equal
+//     it byte for byte. Matching filename with different bytes — the confirmed attack this
+//     closes — fails right here.
+//   - The first parent's content at that base *also* differs (a genuine two-way conflict),
+//     or more than one secondary parent independently disagrees: git itself would have
+//     required a hand resolution here, which cannot be verified byte-for-byte without
+//     re-implementing the merge algorithm. Accepted — the ancestry check already confirmed
+//     every contributor is an honest task branch, so this is a conflict between legitimate
+//     contributions, not smuggled content.
+//   - No parent touched the file at all: content with no legitimate source. Fails, even
+//     under a name that matches nothing suspicious.
+//
+// Every secondary parent is checked for every file — nothing here stops at the first parent
+// that explains part of the commit, which is what let content hide in the gap between two
+// parents' contributions in an octopus merge.
+async function mergeContentExplainedByParents(git, firstParent, secondaryParents, mergeSha) {
+  const mergedFiles = await git.changedFiles({ base: firstParent, branch: mergeSha })
+  for (const file of mergedFiles) {
+    const mergeContent = await contentAt(git, mergeSha, file)
+    let genuineConflict = false
+    const cleanContributions = new Set()
+    for (const parent of secondaryParents) {
+      const base = await git.mergeBase(firstParent, parent)
+      const baseContent = await contentAt(git, base, file)
+      const parentContent = await contentAt(git, parent, file)
+      if (parentContent === baseContent) continue // this parent never touched the file
+      const firstContentAtBase = await contentAt(git, firstParent, file)
+      if (firstContentAtBase !== baseContent) { genuineConflict = true; break }
+      cleanContributions.add(parentContent)
+    }
+    if (genuineConflict) continue
+    if (cleanContributions.size === 0) return false
+    if (cleanContributions.size === 1 && mergeContent !== [...cleanContributions][0]) return false
+    // size > 1: independent secondary parents disagree without the first parent being
+    // involved — git itself would have flagged this as a conflict too. Accepted, for the
+    // same reason a genuine conflict is: not verifiable byte-for-byte, but every contributor
+    // is already a confirmed task branch.
   }
   return true
 }
@@ -208,30 +254,31 @@ export async function runOwnershipCheck(check, ctx = {}) {
       if (!explained) {
         const parents = await git.commitParents(sha)
         const firstParent = parents[0]
-        // Only a *non-first* parent can explain a commit this way. The first parent is the
+        // Only *non-first* parents can explain a commit this way. The first parent is the
         // run branch's own prior history; letting it vouch for a commit would let any commit
         // reachable through a fast-forward onto a task branch (first parent == that branch's
         // tip) trivially explain itself via isAncestor(X, X) — exactly how a direct write
         // riding a fast-forward would be waved through. Confirmed via mutation testing:
         // scanning `parents` instead of `parents.slice(1)` leaves the suite green while
         // silently accepting that write.
-        for (const parent of parents.slice(1)) {
-          for (const branchSha of shas) {
-            if (await git.isAncestor(parent, branchSha)) {
-              // Ancestry alone does not prove the merge commit's tree carries nothing beyond
-              // what that branch contributed — a merge can carry arbitrary extra content
-              // while still being --no-ff. Confirmed: `git merge --no-ff --no-commit <branch>`,
-              // then adding files before committing. A clean merge's diff against its first
-              // parent is exactly the diff the second parent contributed against that same
-              // first parent; anything else in the merge's diff is content the merge commit
-              // introduced on its own.
-              if (firstParent && await mergeCarriesOnlyBranchContent(git, firstParent, parent, sha)) {
-                explained = true
-              }
-              break
+        const secondaryParents = parents.slice(1)
+        if (firstParent && secondaryParents.length > 0) {
+          // Every secondary parent must itself be an ancestor of one of this run's task
+          // branches — an octopus merge with one legitimate parent and one rogue parent
+          // must not be waved through because the legitimate one matched. Confirmed gap in
+          // an earlier version: the scan broke on the first matching parent, so content
+          // riding in behind a second, unowned parent was never inspected.
+          let allParentsOwned = true
+          for (const parent of secondaryParents) {
+            let owned = false
+            for (const branchSha of shas) {
+              if (await git.isAncestor(parent, branchSha)) { owned = true; break }
             }
+            if (!owned) { allParentsOwned = false; break }
           }
-          if (explained) break
+          if (allParentsOwned) {
+            explained = await mergeContentExplainedByParents(git, firstParent, secondaryParents, sha)
+          }
         }
       }
       if (!explained) unexplained.push(sha)

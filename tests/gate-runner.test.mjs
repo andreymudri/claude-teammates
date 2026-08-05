@@ -359,21 +359,42 @@ test('runOwnershipCheck accepts a merge commit whose second parent is a task bra
   assert.equal(res.status, 'pass')
 })
 
-test('runOwnershipCheck fails a merge commit that carries extra content beyond its second parent', async () => {
+test('runOwnershipCheck fails a merge commit whose content for a file has no source in any parent', async () => {
   const branchSha = `refs/heads/${T1_BRANCH}-sha`
   const git = fakeGit({
     branchExists: async () => true,
     commitsBetween: async () => ['m1'],
     isAncestor: async (a, b) => a === 'p1' && b === branchSha,
     commitParents: async () => ['p0', 'p1'],
-    // The merge commit differs from its first parent by a.mjs (the branch's real work) and
-    // BACKDOOR.mjs (content the merge introduced on its own); the branch itself only ever
-    // touched a.mjs against that same first parent.
-    changedFiles: async ({ base, branch }) => {
-      if (base === 'p0' && branch === 'm1') return ['a.mjs', 'BACKDOOR.mjs']
-      if (base === 'p0' && branch === 'p1') return ['a.mjs']
-      return []
+    mergeBase: async (a, b) => (a === 'p0' && b === 'p1' ? 'base01' : 'anchorSha1'),
+    // BACKDOOR.mjs differs between the merge commit and its first parent, but neither the
+    // first parent nor the second parent (nor their common base) ever had it — content with
+    // no legitimate source.
+    changedFiles: async ({ base, branch }) => (base === 'p0' && branch === 'm1' ? ['BACKDOOR.mjs'] : []),
+    fileAtCommit: async (sha, filePath) => {
+      if (filePath === 'BACKDOOR.mjs' && sha === 'm1') return 'export const backdoor = true\n'
+      throw new GitError(`no such path ${filePath} at ${sha}`)
     },
+  })
+  const check = { name: 'ownership', kind: 'ownership' }
+  const ctx = { git, runId: RUN_ID, runBranch: RUN_BRANCH, anchorSha: 'anchorSha1', runSha: 'runSha1', tasks: [T1_TASK] }
+  const res = await runOwnershipCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.match(res.output, /m1/)
+})
+
+// The confirmed gap: a two-parent-owned merge short-circuited on the first matching
+// secondary parent, so an octopus merge with a legitimate parent AND a rogue (unowned)
+// parent was waved through — content riding in behind the rogue parent was never inspected.
+// Every secondary parent must be independently confirmed as an ancestor of a task branch.
+test('runOwnershipCheck requires every parent of an octopus merge to be owned by a task branch', async () => {
+  const t1Sha = `refs/heads/${T1_BRANCH}-sha`
+  const git = fakeGit({
+    branchExists: async (name) => name === T1_BRANCH,
+    commitsBetween: async () => ['m1'],
+    // Only the T1 branch tip is an ancestor of a task branch; 'rogue' is not.
+    isAncestor: async (a, b) => a === t1Sha && b === t1Sha,
+    commitParents: async () => ['p0', t1Sha, 'rogue'],
   })
   const check = { name: 'ownership', kind: 'ownership' }
   const ctx = { git, runId: RUN_ID, runBranch: RUN_BRANCH, anchorSha: 'anchorSha1', runSha: 'runSha1', tasks: [T1_TASK] }
@@ -602,6 +623,81 @@ test('an evil --no-ff merge that carries extra content is unexplained (real repo
 
     assert.equal(res.status, 'fail')
     assert.match(res.output, new RegExp(mergeSha))
+  })
+})
+
+// The more useful attack: keep the filename the task legitimately owns, but replace its
+// reviewed content during the merge. A name-set comparison (the previous version of this
+// check) cannot see this — both the name set and the ancestry look honest. Only a
+// byte-for-byte content comparison against the branch's actual contribution catches it.
+test('a merge that tampers with content under an unchanged filename is unexplained (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'plan.md'), singleTaskPlan(), 'utf8')
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'from-branch\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '--no-commit', 'teammates/r1/T1'])
+    // Same filename the merge legitimately brings in, different bytes.
+    await writeFile(path.join(root, 'a.mjs'), 'TAMPERED-IN-MERGE\n', 'utf8')
+    await sh(['add', '-A'])
+    await sh(['commit', '-m', 'Merge T1'])
+
+    const mergeSha = (await sh(['rev-parse', 'run'])).stdout.trim()
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+    const res = await runOwnershipCheck({ name: 'ownership', kind: 'ownership' }, ctx)
+
+    assert.equal(res.status, 'fail')
+    assert.match(res.output, new RegExp(mergeSha))
+  })
+})
+
+// The other side of the same coin: an integrator resolving a genuine conflict legitimately
+// writes content into the merge commit that matches neither parent verbatim. If the content
+// check cannot tell this apart from tampering, it breaks ordinary integration, which is
+// worse than the hole it closes. Two branches modify the same line differently from a common
+// ancestor; the run branch already carries one of them (phase 1, cleanly merged); merging
+// the second produces a real git conflict, hand-resolved and committed.
+test('a genuine hand-resolved merge conflict is explained, not flagged as tampering (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'plan.md'), planMarkdown(), 'utf8')
+    await writeFile(path.join(root, 'shared.txt'), 'line1\nline2\nline3\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+
+    // Phase 1: T2 changes shared.txt, merges cleanly onto run.
+    await sh(['checkout', '-b', 'teammates/r1/T2'])
+    await writeFile(path.join(root, 'shared.txt'), 'line1\nline2-T2\nline3\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T2 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T2', 'teammates/r1/T2'])
+
+    // Phase 2: T1, branched from the original anchor (unaware of T2's change), changes the
+    // same line differently — a genuine conflict when merged onto run.
+    await sh(['checkout', 'main'])
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'shared.txt'), 'line1\nline2-T1\nline3\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', 'run'])
+    const merge = await sh(['merge', '--no-ff', '--no-commit', 'teammates/r1/T1'])
+    assert.match(merge.stdout + merge.stderr, /[Cc]onflict/, 'expected a real git conflict to set up this test')
+    // Hand-resolve, combining both intents — content matching neither parent verbatim.
+    await writeFile(path.join(root, 'shared.txt'), 'line1\nline2-merged\nline3\n', 'utf8')
+    await sh(['add', 'shared.txt'])
+    await sh(['commit', '-m', 'Merge T1 (resolved conflict)'])
+
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+    const res = await runOwnershipCheck({ name: 'ownership', kind: 'ownership' }, ctx)
+
+    assert.equal(res.status, 'pass', res.output)
   })
 })
 
