@@ -60,6 +60,15 @@ exception to keep it alive ("X is the cause, except in this case where it's also
 hypothesis that needs a growing list of exceptions to survive contact with evidence isn't
 converging on the root cause; it's accumulating epicycles around the wrong one.
 
+## When the loop itself is failing
+
+Roughly three fixes in, if each one clears the reported symptom but surfaces new breakage in a
+different place, the problem isn't a wrong hypothesis — it's coupling the design didn't
+anticipate, and the loop is the wrong tool for it. A fourth local fix will very likely repeat
+the pattern: fix here, break there. When you see this shape, stop fixing, name the
+architectural problem in one sentence, and raise it rather than running another iteration of
+the loop.
+
 ## Red flags — stop and go back to reproduce
 
 - "Quick fix for now, investigate later"
