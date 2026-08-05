@@ -1,5 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import {
   runCommandCheck,
   describePendingCheck,
@@ -9,7 +12,7 @@ import {
   runFilesetCheck,
   runOwnershipCheck,
 } from '../scripts/gate-runner.mjs'
-import { GitError } from '../scripts/git.mjs'
+import { GitError, createGit, defaultGitExec } from '../scripts/git.mjs'
 
 const fakeExec = (table) => async (cmd) => table[cmd] ?? { code: 127, output: `not stubbed: ${cmd}` }
 
@@ -171,6 +174,7 @@ test('deriveContext derives phase 2 once phase 1 branches are ancestors', async 
   const git = fakeGit({
     branchExists: async (name) => name === T1_BRANCH,
     isAncestor: async (sha, runSha) => sha === `refs/heads/${T1_BRANCH}-sha` && runSha === 'runSha1',
+    commitsBetween: async ({ to }) => (to === `refs/heads/${T1_BRANCH}-sha` ? ['t1-commit'] : []),
   })
   const ctx = await deriveContext({ git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, planPath: 'plan.md' })
   assert.equal(ctx.currentPhase, 2)
@@ -182,6 +186,7 @@ test('deriveContext derives currentPhase: null when every phase is integrated', 
   const git = fakeGit({
     branchExists: async () => true,
     isAncestor: async () => true,
+    commitsBetween: async () => ['some-commit'],
   })
   const ctx = await deriveContext({ git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, planPath: 'plan.md' })
   assert.equal(ctx.currentPhase, null)
@@ -192,11 +197,28 @@ test('deriveContext surfaces phaseError for out-of-order integration', async () 
   const git = fakeGit({
     branchExists: async (name) => name === T2_BRANCH,
     isAncestor: async (sha, runSha) => sha === `refs/heads/${T2_BRANCH}-sha` && runSha === 'runSha1',
+    commitsBetween: async ({ to }) => (to === `refs/heads/${T2_BRANCH}-sha` ? ['t2-commit'] : []),
   })
   const ctx = await deriveContext({ git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, planPath: 'plan.md' })
   assert.equal(ctx.currentPhase, null)
   assert.match(ctx.phaseError, /phase 1/)
   assert.deepEqual(ctx.integratedPhases, [2])
+})
+
+// A branch created with zero commits past the anchor must never read as "integrated" —
+// isAncestor(X, X) is trivially true, so a phantom branch pointed at the anchor (or at the
+// run tip) would otherwise pass with no work done. See the real-repo regression test below
+// ("an empty task branch at the run tip does not read as integrated").
+test('deriveContext does not treat a branch with zero commits past the anchor as integrated', async () => {
+  const git = fakeGit({
+    branchExists: async (name) => name === T1_BRANCH,
+    // isAncestor alone would say yes — the branch sha equals the anchor sha (zero commits).
+    isAncestor: async () => true,
+    commitsBetween: async () => [],
+  })
+  const ctx = await deriveContext({ git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, planPath: 'plan.md' })
+  assert.equal(ctx.currentPhase, 1)
+  assert.deepEqual(ctx.integratedPhases, [])
 })
 
 // --- runFilesetCheck ------------------------------------------------------------------------
@@ -254,12 +276,16 @@ test('runFilesetCheck fails on phaseError', async () => {
   assert.match(res.output, /phase 1 is not integrated/)
 })
 
-test('runFilesetCheck passes when every phase is integrated (currentPhase null)', async () => {
-  const git = fakeGit()
+test('runFilesetCheck passes when every phase is integrated (currentPhase null) and records branchShas', async () => {
+  const git = fakeGit({ branchExists: async () => true })
   const check = { name: 'fileset', kind: 'fileset' }
   const ctx = { git, runId: RUN_ID, anchorSha: 'anchorSha1', tasks: [T1_TASK], currentPhase: null, phaseError: null }
   const res = await runFilesetCheck(check, ctx)
   assert.equal(res.status, 'pass')
+  // A PASS with no branchShas reads to verdictCoversTree as still covering the tree no
+  // matter how branches move afterwards — the resolved shas must be attached even on the
+  // all-integrated short-circuit.
+  assert.deepEqual(res.branchShas, { [T1_BRANCH]: `refs/heads/${T1_BRANCH}-sha` })
 })
 
 test('runFilesetCheck fails without git access', async () => {
@@ -333,6 +359,29 @@ test('runOwnershipCheck accepts a merge commit whose second parent is a task bra
   assert.equal(res.status, 'pass')
 })
 
+test('runOwnershipCheck fails a merge commit that carries extra content beyond its second parent', async () => {
+  const branchSha = `refs/heads/${T1_BRANCH}-sha`
+  const git = fakeGit({
+    branchExists: async () => true,
+    commitsBetween: async () => ['m1'],
+    isAncestor: async (a, b) => a === 'p1' && b === branchSha,
+    commitParents: async () => ['p0', 'p1'],
+    // The merge commit differs from its first parent by a.mjs (the branch's real work) and
+    // BACKDOOR.mjs (content the merge introduced on its own); the branch itself only ever
+    // touched a.mjs against that same first parent.
+    changedFiles: async ({ base, branch }) => {
+      if (base === 'p0' && branch === 'm1') return ['a.mjs', 'BACKDOOR.mjs']
+      if (base === 'p0' && branch === 'p1') return ['a.mjs']
+      return []
+    },
+  })
+  const check = { name: 'ownership', kind: 'ownership' }
+  const ctx = { git, runId: RUN_ID, runBranch: RUN_BRANCH, anchorSha: 'anchorSha1', runSha: 'runSha1', tasks: [T1_TASK] }
+  const res = await runOwnershipCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.match(res.output, /m1/)
+})
+
 test('runOwnershipCheck fails on a dirty worktree', async () => {
   const git = fakeGit({ isDirty: async () => true })
   const check = { name: 'ownership', kind: 'ownership' }
@@ -356,6 +405,42 @@ test('runOwnershipCheck converts GitError to a fail', async () => {
   const res = await runOwnershipCheck(check, ctx)
   assert.equal(res.status, 'fail')
   assert.match(res.output, /commitsBetween boom/)
+})
+
+// Mirrors the fileset check's equivalent test — without this, the two checks are silently
+// asymmetric: fileset lets a non-GitError propagate (tested above), and until this test
+// existed, ownership's identical `if (!(err instanceof GitError)) throw err` had no coverage.
+test('runOwnershipCheck lets a non-GitError propagate', async () => {
+  const git = fakeGit({ commitsBetween: async () => { throw new Error('not a git error') } })
+  const check = { name: 'ownership', kind: 'ownership' }
+  const ctx = { git, runId: RUN_ID, runBranch: RUN_BRANCH, anchorSha: 'anchorSha1', runSha: 'runSha1', tasks: [] }
+  await assert.rejects(() => runOwnershipCheck(check, ctx), /not a git error/)
+})
+
+// Mutation-testing gap: mutating `parents.slice(1)` to `parents` at the ownership scan site
+// left the suite green, because every prior test only ever exercised a *second* parent
+// explaining a merge. Reproduced concretely: the run branch fast-forwards onto a task
+// branch's tip, then takes a direct commit — that commit's sole (first) parent is the task
+// branch tip. isAncestor(firstParent, firstParent) is trivially true, so if the scan ever
+// includes the first parent, the direct write explains itself. `parents.slice(1)` must
+// exclude it.
+test('a commit whose sole parent sits on a task branch is still unexplained', async () => {
+  const branchSha = `refs/heads/${T1_BRANCH}-sha`
+  const git = fakeGit({
+    branchExists: async () => true,
+    commitsBetween: async () => ['c1'],
+    // Reflexive only: true exactly when the two arguments are literally the same value.
+    // The direct commit 'c1' is not itself the branch tip, so the initial "is the commit
+    // itself an ancestor of a task branch" check is false — only the parent-scan path can
+    // wrongly explain it, and only if that scan is allowed to see the first parent.
+    isAncestor: async (a, b) => a === b,
+    commitParents: async () => [branchSha],
+  })
+  const check = { name: 'ownership', kind: 'ownership' }
+  const ctx = { git, runId: RUN_ID, runBranch: RUN_BRANCH, anchorSha: 'anchorSha1', runSha: 'runSha1', tasks: [T1_TASK] }
+  const res = await runOwnershipCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.match(res.output, /c1/)
 })
 
 // --- runChecks dispatch -----------------------------------------------------------------------
@@ -392,29 +477,153 @@ test('runChecks records a fail when a runner throws', async () => {
   assert.match(results[0].output, /unexpected boom/)
 })
 
-// --- tag-shadowing regression: every resolveRef argument must be fully qualified ------------
+// --- tag-shadowing regression: every ref-shaped argument reaching git must be a sha or a
+// fully-qualified ref ------------------------------------------------------------------------
+//
+// A narrower version of this test once asserted only that every `resolveRef` argument was
+// fully qualified. That version could not see H1: `deriveContext` called `git.mergeBase`
+// with the bare `baseBranch`/`runBranch` strings directly, never routing them through
+// `resolveRef` at all, so the earlier test passed while the bypass was live. This version
+// records every ref-shaped argument reaching *every* method a bare name could reach —
+// mergeBase, isAncestor, commitsBetween, changedFiles, commitParents, fileAtCommit, and
+// resolveRef — and requires each to already be a sha or a fully-qualified `refs/...` ref.
 
-test('every resolveRef argument reaching git starts with refs/heads/', async () => {
-  const git = fakeGit({
-    branchExists: async (name) => name === T1_BRANCH,
-    isAncestor: async (sha, runSha) => sha === `refs/heads/${T1_BRANCH}-sha` && runSha === 'runSha1',
-  })
-  await deriveContext({ git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, planPath: 'plan.md' })
-
-  const fileset = await runFilesetCheck(
-    { name: 'fileset', kind: 'fileset' },
-    { git, runId: RUN_ID, anchorSha: 'anchorSha1', tasks: [T1_TASK], currentPhase: 1, phaseError: null },
-  )
-  void fileset
-
-  const ownership = await runOwnershipCheck(
-    { name: 'ownership', kind: 'ownership' },
-    { git, runId: RUN_ID, runBranch: RUN_BRANCH, anchorSha: 'anchorSha1', runSha: 'runSha1', tasks: [T1_TASK] },
-  )
-  void ownership
-
-  assert.ok(git.resolveRefCalls.length > 0)
-  for (const ref of git.resolveRefCalls) {
-    assert.match(ref, /^refs\/heads\//, `resolveRef received a non-fully-qualified ref: ${ref}`)
+function shaFor(ref) {
+  // A stable, sha-shaped (40 lowercase hex chars) fake, so downstream calls receive
+  // something a real caller could not mistake for a bare branch name.
+  let hash = 0x811c9dc5
+  const text = String(ref)
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193) >>> 0
   }
+  return hash.toString(16).padStart(8, '0').repeat(5).slice(0, 40)
+}
+
+function refShapedFakeGit() {
+  const calls = { resolveRef: [], mergeBase: [], isAncestor: [], commitsBetween: [], changedFiles: [], commitParents: [], fileAtCommit: [] }
+  const git = {
+    async mergeBase(a, b) { calls.mergeBase.push([a, b]); return shaFor(`merge-base:${a}:${b}`) },
+    async fileAtCommit(sha, filePath) { calls.fileAtCommit.push(sha); void filePath; return planMarkdown() },
+    async resolveRef(ref) { calls.resolveRef.push(ref); return shaFor(ref) },
+    async branchExists(name) { return name === T1_BRANCH || name === T2_BRANCH },
+    async isAncestor(ancestor, descendant) { calls.isAncestor.push([ancestor, descendant]); return true },
+    async changedFiles({ base, branch }) { calls.changedFiles.push({ base, branch }); return [] },
+    async commitsBetween({ from, to }) { calls.commitsBetween.push({ from, to }); return [shaFor('commit1')] },
+    async commitParents(sha) { calls.commitParents.push(sha); return [shaFor('parent0'), shaFor('parent1')] },
+    async isDirty() { return false },
+  }
+  return { git, calls }
+}
+
+test('every ref-shaped argument reaching git is a sha or a fully-qualified ref', async () => {
+  const { git, calls } = refShapedFakeGit()
+
+  await deriveContext({ git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, planPath: 'plan.md' })
+  await runFilesetCheck(
+    { name: 'fileset', kind: 'fileset' },
+    { git, runId: RUN_ID, anchorSha: shaFor('anchor'), tasks: [T1_TASK], currentPhase: 1, phaseError: null },
+  )
+  await runOwnershipCheck(
+    { name: 'ownership', kind: 'ownership' },
+    { git, runId: RUN_ID, runBranch: RUN_BRANCH, anchorSha: shaFor('anchor'), runSha: shaFor('run'), tasks: [T1_TASK] },
+  )
+
+  const shaped = (v) => /^[0-9a-f]{40}$/.test(v) || /^refs\//.test(v)
+  const assertAllShaped = (label, values) => {
+    for (const v of values) assert.ok(shaped(v), `${label} received a bare, non-shaped ref: ${JSON.stringify(v)}`)
+  }
+  assertAllShaped('resolveRef', calls.resolveRef)
+  assertAllShaped('fileAtCommit', calls.fileAtCommit)
+  assertAllShaped('mergeBase', calls.mergeBase.flat())
+  assertAllShaped('isAncestor', calls.isAncestor.flat())
+  assertAllShaped('commitsBetween', calls.commitsBetween.flatMap(({ from, to }) => [from, to]))
+  assertAllShaped('changedFiles', calls.changedFiles.flatMap(({ base, branch }) => [base, branch]))
+  assertAllShaped('commitParents', calls.commitParents)
+
+  assert.ok(calls.mergeBase.length > 0, 'mergeBase was never called')
+  assert.ok(calls.isAncestor.length > 0, 'isAncestor was never called')
+  assert.ok(calls.commitsBetween.length > 0, 'commitsBetween was never called')
+  assert.ok(calls.changedFiles.length > 0, 'changedFiles was never called')
+  assert.ok(calls.commitParents.length >= 0)
+  assert.ok(calls.fileAtCommit.length > 0, 'fileAtCommit was never called')
+})
+
+// --- real-repo regressions: H2 (evil merge) and H3 (empty task branch) ----------------------
+
+async function withRepo(fn) {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-gate-runner-'))
+  const sh = (args) => defaultGitExec(args, root)
+  try {
+    await sh(['init', '--initial-branch=main'])
+    await sh(['config', 'user.email', 'test@example.com'])
+    await sh(['config', 'user.name', 'test'])
+    await fn({ root, sh, git: createGit({ cwd: root }) })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}
+
+function singleTaskPlan() {
+  return [
+    '### Task 1: first task',
+    '',
+    '**Files:**',
+    '- Create: `a.mjs`',
+    '',
+    '**Depends:** none',
+    '',
+  ].join('\n')
+}
+
+// H2: a merge commit's --no-ff shape is not proof its tree carries only what its second
+// parent contributed. Reproduced with `git merge --no-ff --no-commit`, then adding an
+// out-of-band file before completing the commit.
+test('an evil --no-ff merge that carries extra content is unexplained (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'plan.md'), singleTaskPlan(), 'utf8')
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '--no-commit', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'BACKDOOR.mjs'), 'export const backdoor = true\n', 'utf8')
+    await sh(['add', '-A'])
+    await sh(['commit', '-m', 'Merge T1'])
+
+    const mergeSha = (await sh(['rev-parse', 'run'])).stdout.trim()
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+    const res = await runOwnershipCheck({ name: 'ownership', kind: 'ownership' }, ctx)
+
+    assert.equal(res.status, 'fail')
+    assert.match(res.output, new RegExp(mergeSha))
+  })
+})
+
+// H3: isAncestor(X, X) is trivially true, so a task branch created at the run tip with zero
+// commits of its own must not read as "integrated" — otherwise a run in which no task did
+// any work returns a clean gate PASS.
+test('an empty task branch at the run tip does not read as integrated (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'plan.md'), singleTaskPlan(), 'utf8')
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+    // Created at the run tip; no commits of its own.
+    await sh(['branch', 'teammates/r1/T1'])
+
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+
+    assert.deepEqual(ctx.integratedPhases, [])
+    assert.equal(ctx.currentPhase, 1)
+
+    const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
+    assert.notEqual(res.output, 'every phase in the plan is integrated')
+  })
 })

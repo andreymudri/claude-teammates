@@ -50,7 +50,14 @@ function checkResult(check, status, output) {
 // Takes no `status` argument by design. Three earlier versions of this system were defeated
 // by trusting a file the enforced agents can write.
 export async function deriveContext({ git, runId, runBranch, baseBranch, planPath }) {
-  const anchorSha = await git.mergeBase(baseBranch, runBranch)
+  // Both refs are resolved to shas before mergeBase ever sees them. A bare name resolves
+  // through refs/tags/ before refs/heads/ — confirmed bypass: a teammate plants tags named
+  // like the base and run branches, mergeBase silently resolves against the tagged (attacker)
+  // commits, and the anchor, the plan read at that anchor, and the ownership commit range are
+  // all computed against the wrong tree.
+  const baseSha = await git.resolveRef(`refs/heads/${baseBranch}`)
+  const runSha = await git.resolveRef(`refs/heads/${runBranch}`)
+  const anchorSha = await git.mergeBase(baseSha, runSha)
   const planMarkdown = await git.fileAtCommit(anchorSha, planPath)
   const { parsePlan } = await import('./plan-parser.mjs')
   const { assignPhases } = await import('./phases.mjs')
@@ -63,7 +70,6 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
     if (!byPhase.has(task.phase)) byPhase.set(task.phase, [])
     byPhase.get(task.phase).push(task)
   }
-  const runSha = await git.resolveRef(`refs/heads/${runBranch}`)
   const integratedPhases = []
   for (const [phase, phaseTasks] of byPhase) {
     const states = []
@@ -71,7 +77,18 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
       const branch = resolveTaskBranch(t, runId)
       if (!branch || !(await git.branchExists(branch))) { states.push(false); continue }
       const sha = await git.resolveRef(`refs/heads/${branch}`)
-      states.push(await git.isAncestor(sha, runSha))
+      // isAncestor(sha, runSha) alone is trivially true for a branch with zero commits past
+      // the anchor: a branch created at the anchor, or created by pointing at the run tip
+      // itself, is an ancestor by reflexivity or by definition, with no work required.
+      // Confirmed: a teammate can create every task branch at the run tip, commit nothing
+      // anywhere, and every phase reads integrated. Requiring at least one commit strictly
+      // between the anchor and the branch means "integrated" implies "did work", not just
+      // "points at something already on the run branch". This does not close self-integration
+      // in general — a phantom branch pointed at a run tip that already carries someone
+      // else's real commits still passes this check — that remains the documented, accepted
+      // limitation (see the spec's "Not defended against" list).
+      const ownCommits = await git.commitsBetween({ from: anchorSha, to: sha })
+      states.push(ownCommits.length > 0 && await git.isAncestor(sha, runSha))
     }
     if (states.length > 0 && states.every(Boolean)) integratedPhases.push(phase)
   }
@@ -91,7 +108,30 @@ export async function runFilesetCheck(check, ctx = {}) {
   const { git, runId, anchorSha, tasks, currentPhase, phaseError } = ctx
   if (!git) return checkResult(check, 'fail', 'fileset check has no git access')
   if (phaseError) return checkResult(check, 'fail', phaseError)
-  if (currentPhase == null) return checkResult(check, 'pass', 'every phase in the plan is integrated')
+  if (currentPhase == null) {
+    // Every phase is integrated: there is no in-progress phase whose declared file set is
+    // still being written to, so there is nothing left to diff. Re-diffing every historical
+    // branch on every gate invocation would repeat work this check already did while each
+    // phase was in progress, without adding signal beyond what runOwnershipCheck re-verifies
+    // on every invocation regardless of phase (every commit on the run branch since the
+    // anchor is reachable from a task branch, and a merge commit contributes nothing beyond
+    // what its parents already established). Branch shas are still recorded here, though,
+    // so a branch that moves after this verdict is issued is caught by verdictCoversTree
+    // even though this path performs no diff of its own.
+    const branchShas = {}
+    try {
+      for (const task of tasks ?? []) {
+        const branch = resolveTaskBranch(task, runId)
+        if (branch && await git.branchExists(branch)) {
+          branchShas[branch] = await git.resolveRef(`refs/heads/${branch}`)
+        }
+      }
+    } catch (err) {
+      if (!(err instanceof GitError)) throw err
+      return checkResult(check, 'fail', err.message)
+    }
+    return { ...checkResult(check, 'pass', 'every phase in the plan is integrated'), branchShas }
+  }
 
   const phaseTasks = (tasks ?? []).filter((t) => t.phase === currentPhase)
   // Zero tasks is not "nothing to check" — the run and the plan disagree, and an earlier
@@ -126,6 +166,23 @@ export async function runFilesetCheck(check, ctx = {}) {
   return { ...result, branchShas }
 }
 
+// A merge is "clean" with respect to the branch it claims to bring in when every file the
+// merge commit changed relative to its first parent is a file that branch itself changed
+// relative to that same first parent (the three-dot diff lands on the actual divergence
+// point regardless of how many other phases have since landed on the run branch). Anything
+// the merge changed beyond that set is content the merge commit introduced on its own —
+// exactly the shape of the confirmed backdoor-via-merge attack. Uses only changedFiles,
+// since scripts/git.mjs is outside this task's write set.
+async function mergeCarriesOnlyBranchContent(git, firstParent, secondParent, mergeSha) {
+  const merged = new Set(await git.changedFiles({ base: firstParent, branch: mergeSha }))
+  if (merged.size === 0) return true
+  const contributed = new Set(await git.changedFiles({ base: firstParent, branch: secondParent }))
+  for (const file of merged) {
+    if (!contributed.has(file)) return false
+  }
+  return true
+}
+
 export async function runOwnershipCheck(check, ctx = {}) {
   const { git, runId, runBranch, anchorSha, runSha, tasks } = ctx
   if (!git) return checkResult(check, 'fail', 'ownership check has no git access')
@@ -150,9 +207,29 @@ export async function runOwnershipCheck(check, ctx = {}) {
       }
       if (!explained) {
         const parents = await git.commitParents(sha)
+        const firstParent = parents[0]
+        // Only a *non-first* parent can explain a commit this way. The first parent is the
+        // run branch's own prior history; letting it vouch for a commit would let any commit
+        // reachable through a fast-forward onto a task branch (first parent == that branch's
+        // tip) trivially explain itself via isAncestor(X, X) — exactly how a direct write
+        // riding a fast-forward would be waved through. Confirmed via mutation testing:
+        // scanning `parents` instead of `parents.slice(1)` leaves the suite green while
+        // silently accepting that write.
         for (const parent of parents.slice(1)) {
           for (const branchSha of shas) {
-            if (await git.isAncestor(parent, branchSha)) { explained = true; break }
+            if (await git.isAncestor(parent, branchSha)) {
+              // Ancestry alone does not prove the merge commit's tree carries nothing beyond
+              // what that branch contributed — a merge can carry arbitrary extra content
+              // while still being --no-ff. Confirmed: `git merge --no-ff --no-commit <branch>`,
+              // then adding files before committing. A clean merge's diff against its first
+              // parent is exactly the diff the second parent contributed against that same
+              // first parent; anything else in the merge's diff is content the merge commit
+              // introduced on its own.
+              if (firstParent && await mergeCarriesOnlyBranchContent(git, firstParent, parent, sha)) {
+                explained = true
+              }
+              break
+            }
           }
           if (explained) break
         }
