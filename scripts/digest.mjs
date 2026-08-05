@@ -6,8 +6,13 @@ const SECTIONS = [
   { state: 'pending', label: 'pending' },
 ]
 
+const KNOWN = new Set(SECTIONS.map((s) => s.state))
+
 function describe(task, now) {
   if (task.state === 'running') {
+    // A running task with no startedAt is a bookkeeping bug, not a zero-minute task.
+    // Say so rather than rendering NaNm.
+    if (typeof task.startedAt !== 'number') return `${task.title}(?)`
     const mins = Math.floor((now - task.startedAt) / 60_000)
     return `${task.title}(${mins}m)`
   }
@@ -20,8 +25,15 @@ export function renderDigest(status, now) {
   const { runId, phase, totalPhases, maxParallel, tasks } = status
   const lines = [`run ${runId} · phase ${phase}/${totalPhases} · ${tasks.length} tasks`]
 
-  for (const { state, label } of SECTIONS) {
-    const group = tasks.filter((t) => t.state === state)
+  const groups = SECTIONS.map(({ state, label }) => ({
+    label,
+    group: tasks.filter((t) => t.state === state),
+  }))
+  // Never drop a task: an unrecognized state is surfaced under `unknown` rather than
+  // silently omitted. A task missing from the digest is a task nobody chases.
+  groups.push({ label: 'unknown', group: tasks.filter((t) => !KNOWN.has(t.state)) })
+
+  for (const { label, group } of groups) {
     if (group.length === 0) continue
     const body = group.map((t) => describe(t, now)).join(' ')
     lines.push(`${label.padEnd(9)} ${String(group.length).padStart(1)}  ${body}`)

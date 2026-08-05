@@ -58,3 +58,16 @@ test('a section with no tasks is omitted', () => {
   const out = renderDigest(clean, NOW)
   assert.ok(!out.includes('blocked'))
 })
+
+test('an unrecognized state appears under unknown section', () => {
+  const withUnknown = { ...status, tasks: [...status.tasks, { id: 'T5', title: 'ghost', state: 'weird' }] }
+  const out = renderDigest(withUnknown, NOW)
+  assert.match(out, /unknown\s+1\s+ghost/)
+})
+
+test('a running task with no startedAt renders (?) not NaNm', () => {
+  const noStart = { ...status, tasks: [{ id: 'T1', title: 'broken', state: 'running' }] }
+  const out = renderDigest(noStart, NOW)
+  assert.match(out, /broken\(\?\)/)
+  assert.ok(!out.includes('NaN'))
+})
