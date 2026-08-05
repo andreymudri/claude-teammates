@@ -51,8 +51,16 @@ export async function runChecks(checks, ctx = {}) {
   return results
 }
 
+const RECOGNIZED = new Set(['pass', 'fail', 'skip', 'pending'])
+
 export function aggregateVerdict(results) {
-  const failed = results.filter((r) => r.status === 'fail').map((r) => r.name)
+  // An unrecognized or missing status is a failure, never a pass. This function is the
+  // single source of truth for whether a phase proceeds; it must never fail open.
+  const unrecognized = results.filter((r) => !RECOGNIZED.has(r.status)).map((r) => r.name)
+  const failed = [
+    ...results.filter((r) => r.status === 'fail').map((r) => r.name),
+    ...unrecognized,
+  ]
   const skipped = results.filter((r) => r.status === 'skip').map((r) => r.name)
   const pending = results.filter((r) => r.status === 'pending' && !r.optional).map((r) => r.name)
   const passed = results.length > 0 && failed.length === 0 && pending.length === 0

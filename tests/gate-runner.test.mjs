@@ -70,3 +70,15 @@ test('a non-optional pending check fails the gate', () => {
 test('an empty result set fails rather than silently passing', () => {
   assert.equal(aggregateVerdict([]).verdict, 'FAIL')
 })
+
+test('a result with no status field aggregates to FAIL', () => {
+  const v = aggregateVerdict([{ name: 'x' }])
+  assert.equal(v.verdict, 'FAIL')
+  assert.deepEqual(v.failed, ['x'])
+})
+
+test('a result with an unrecognised status aggregates to FAIL', () => {
+  const v = aggregateVerdict([{ name: 'y', status: 'passed' }])
+  assert.equal(v.verdict, 'FAIL')
+  assert.deepEqual(v.failed, ['y'])
+})
