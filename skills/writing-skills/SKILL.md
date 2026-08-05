@@ -76,6 +76,39 @@ sounds like it would match.
 confidence that a process is covered, while every real invocation silently falls through to
 default behavior. No skill at all is at least honestly absent.
 
+## Match the form to the failure
+
+A rule's shape has to match the shape of the failure it prevents.
+
+- **Failure is doing a forbidden thing** (claiming done without running tests, committing
+  without the failing test first) — a prohibition works, because obeying it tells the reader
+  exactly what not to do and there's nothing else to get right.
+- **Failure is producing the wrong shape of output** (a plan with inconsistent task sizing, a
+  digest missing a required field) — a prohibition backfires, because forbidding the wrong
+  shape doesn't tell the reader what the right shape is. Use a positive form instead: a
+  template, a worked example, a required structure to fill in.
+
+To tell which you're facing, ask: if a reader obeyed this rule perfectly, would they then know
+what to produce? If yes, a prohibition is fine. If no — obeying it only tells them what to
+avoid — the rule is the wrong form; replace it with a template or example.
+
+## Pressure-test discipline skills with a subagent
+
+A skill that reads as compelling in calm review can still collapse under the pressure it
+exists to withstand — time pressure, a plausible-sounding shortcut, an authority claim that
+"this case is different." Reading your own skill and agreeing with it proves nothing; you
+already agreed with it before you wrote it.
+
+For a **discipline skill** — one whose job is to hold under pressure, like TDD, systematic
+debugging, or verification-before-completion — dispatch a subagent with the skill plus a
+scenario engineered to make skipping it look attractive. Then judge by what the subagent
+*did*, not by what it said it would do. If it rationalized its way out of the rule, the
+skill's wording is the defect, not the subagent — go fix the wording and retest.
+
+This step is overkill for purely informational skills (reference docs, how-to guides) — there
+is no pressure to resist, only information to find. It applies specifically to skills that
+exist to hold a line under pressure.
+
 ## Red flags
 
 | Thought | Reality |
@@ -83,6 +116,7 @@ default behavior. No skill at all is at least honestly absent.
 | "The description is close enough, no need to test triggering" | Close enough to you is not close enough to the matcher. An untested description is an unverified claim that the skill will ever run. |
 | "This is a small edit, I don't need to re-verify" | An edit that changes the description or the triggering conditions can silently break discovery. Re-verify triggering after any change to those sections. |
 | "I'll skip the template, my frontmatter is fine" | The template's frontmatter shape is exactly what the suite checks. Freehand frontmatter is how a missing field or a name/folder mismatch slips through. |
+| "It reads fine, that's enough for a discipline skill" | Reading fine under no pressure proves nothing about holding under pressure. Pressure-test it with a subagent before trusting it. |
 
 ## Applying this
 
