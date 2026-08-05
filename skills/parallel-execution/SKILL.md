@@ -43,6 +43,14 @@ Run `phase-gate`. Only on PASS, dispatch `tm-integrator` to merge the teammate b
 dependency order. The integrator is the sole writer to the run branch, and it runs alone —
 never in parallel with anything.
 
+## Choosing a model per dispatch
+
+Set the model explicitly on every dispatch — an omitted model inherits the session's, which is
+usually the most expensive tier, and that cost multiplies across every teammate in a phase. Use
+the cheapest tier that fits the task: mechanical tasks whose brief already contains the code to
+write take the cheapest model; integration work and tasks that require judgment calls take a
+mid tier; architecture-level work and the final review take the most capable model available.
+
 ## Invariants
 
 - A teammate **never touches the main worktree**; it works only in its own.
@@ -72,6 +80,14 @@ context. Only fall back to a fresh implementer on that task if resuming stalls; 
 Each teammate works in its own git worktree — `isolation: 'worktree'` creates one per
 teammate automatically; a teammate never shares a worktree with another.
 
+- **Bootstrap before task work starts:** a fresh worktree has no installed dependencies and no
+  untracked config the project needs (for example `.env`). Before writing the first test,
+  install dependencies as the project requires, copy over any untracked config files the
+  project needs, and run the existing test suite once to confirm a clean, green baseline. Do
+  this every time, not just when something looks off: a failure caused by a missing dependency
+  looks exactly like a RED test from `test-driven-development`, and the gate cannot tell the
+  two apart. If the baseline can't be made green, report `blocked` rather than starting task
+  work on top of it.
 - **Inspect:** `git worktree list` shows every worktree in the repo, including ones from
   other runs. Use it to confirm a teammate actually got an isolated workspace, and to spot
   stale ones before starting a new run.

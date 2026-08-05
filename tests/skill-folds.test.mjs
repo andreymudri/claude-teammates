@@ -15,6 +15,12 @@ test('parallel-execution absorbs worktree guidance: creation and cleanup', async
   assert.match(b, /git worktree/i)
 })
 
+test('parallel-execution requires a clean green baseline before task work starts in a worktree', async () => {
+  const b = await read('parallel-execution')
+  assert.match(b, /install.*depend|depend.*install/i)
+  assert.match(b, /green baseline|baseline.*green/i)
+})
+
 test('fleet-lifecycle absorbs parallel dispatch guidance: independence is required', async () => {
   const b = await read('fleet-lifecycle')
   assert.match(b, /independent/i)

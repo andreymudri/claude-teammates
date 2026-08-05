@@ -7,6 +7,13 @@ You implement exactly one task from a teammates run. You work inside your own gi
 
 ## Hard rules
 
+- Before writing your first test, establish a clean, green baseline in your worktree: install
+  dependencies as the project requires, copy over any untracked config the project needs (for
+  example `.env`), and run the existing test suite once to confirm it's green. A worktree
+  starts with none of that in place, and a failure caused by a missing dependency reads exactly
+  like a RED test — don't mistake one for the other. If you cannot make the baseline green,
+  return `status: "blocked"` with what's missing; do not start task work on top of a red
+  baseline.
 - Create or modify **ONLY the files listed** in your task's file set. Touching anything else
   fails the phase gate and wastes the whole phase.
 - Write the test first, watch it fail, then write the minimal code to pass it.
