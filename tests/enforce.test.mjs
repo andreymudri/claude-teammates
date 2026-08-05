@@ -59,6 +59,14 @@ test('a task with neither id nor branch resolves to null', () => {
   assert.equal(resolveTaskBranch({}, 'r1'), null)
 })
 
+test('an empty-string branch resolves to null instead of failing open', () => {
+  assert.equal(resolveTaskBranch({ id: 'T1', branch: '' }, 'r1'), null)
+})
+
+test('a whitespace-only branch resolves to null instead of failing open', () => {
+  assert.equal(resolveTaskBranch({ id: 'T1', branch: '   ' }, 'r1'), null)
+})
+
 test('an unmoved, clean main worktree with distinct task branches has no violations', () => {
   const v = ownershipViolations({
     runBranch: 'main', baseSha: 'abc', headSha: 'abc', dirty: false, taskBranches: ['teammates/r1/T1'],
@@ -69,6 +77,30 @@ test('an unmoved, clean main worktree with distinct task branches has no violati
 test('a task branch equal to the run branch is a violation', () => {
   const v = ownershipViolations({
     runBranch: 'main', baseSha: 'abc', headSha: 'abc', dirty: false, taskBranches: ['main'],
+  })
+  assert.equal(v.length, 1)
+  assert.match(v[0], /only tm-integrator writes there/)
+})
+
+test('a case-only alias of the run branch is a violation', () => {
+  const v = ownershipViolations({
+    runBranch: 'main', baseSha: 'abc', headSha: 'abc', dirty: false, taskBranches: ['Main'],
+  })
+  assert.equal(v.length, 1)
+  assert.match(v[0], /only tm-integrator writes there/)
+})
+
+test('a refs/heads/ prefixed alias of the run branch is a violation', () => {
+  const v = ownershipViolations({
+    runBranch: 'main', baseSha: 'abc', headSha: 'abc', dirty: false, taskBranches: ['refs/heads/main'],
+  })
+  assert.equal(v.length, 1)
+  assert.match(v[0], /only tm-integrator writes there/)
+})
+
+test('a heads/ prefixed alias of the run branch is a violation', () => {
+  const v = ownershipViolations({
+    runBranch: 'main', baseSha: 'abc', headSha: 'abc', dirty: false, taskBranches: ['heads/main'],
   })
   assert.equal(v.length, 1)
   assert.match(v[0], /only tm-integrator writes there/)
