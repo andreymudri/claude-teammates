@@ -28,6 +28,11 @@ test('agents are spawned in parallel with worktree isolation', async () => {
   assert.match(src, /isolation: 'worktree'/)
 })
 
+test('the .then handler propagates null instead of spreading it, so a dead agent stays falsy', async () => {
+  const src = await generatePhaseWorkflow({ runId: '3f2a', phase: 1, tasks, maxParallel: 4 })
+  assert.match(src, /\.then\(\(r\) => \(r === null \? null : \{ taskId: t\.id, \.\.\.r \}\)\)/)
+})
+
 test('the generated body is syntactically valid javascript', async () => {
   const src = await generatePhaseWorkflow({ runId: '3f2a', phase: 1, tasks, maxParallel: 4 })
   const body = src.replace(/^export const meta = /m, 'const meta = ')

@@ -28,7 +28,7 @@ const results = await parallel(TASKS.map((t) => () =>
       'Commit your work on your worktree branch and return the structured result.',
     ].join('\n'),
     { label: t.id, phase: 'Implement', schema: RESULT_SCHEMA, isolation: 'worktree' },
-  ).then((r) => ({ taskId: t.id, ...r }))
+  ).then((r) => (r === null ? null : { taskId: t.id, ...r }))
 ))
 
 return { results: results.filter(Boolean), orphaned: TASKS.filter((t, i) => !results[i]).map((t) => t.id) }
