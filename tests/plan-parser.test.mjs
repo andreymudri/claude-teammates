@@ -78,3 +78,54 @@ Later, some prose about modifications:
   assert.deepEqual(tasks[0].files, ['a.mjs'])
   assert.ok(!tasks[0].files.includes('stray.mjs'), 'stray.mjs should not be collected from prose after checked step')
 })
+
+test('skips fake task headings inside fenced code blocks', () => {
+  const planWithFencedFake = `### Task 1: Real
+
+**Files:**
+- Create: \`real.mjs\`
+
+## Example
+
+\`\`\`
+### Task 9: Fake
+\`\`\`
+`
+  const tasks = parsePlan(planWithFencedFake)
+  assert.equal(tasks.length, 1)
+  assert.equal(tasks[0].id, 'T1')
+  assert.ok(!tasks.some((t) => t.id === 'T9'), 'T9 should not be parsed from inside fence')
+})
+
+test('skips file entries inside fenced code blocks', () => {
+  const planWithFencedFile = `### Task 1: Real
+
+**Files:**
+- Create: \`real.mjs\`
+
+\`\`\`markdown
+- Create: \`ghost.mjs\`
+\`\`\`
+`
+  const tasks = parsePlan(planWithFencedFile)
+  assert.deepEqual(tasks[0].files, ['real.mjs'])
+  assert.ok(!tasks[0].files.includes('ghost.mjs'), 'ghost.mjs should not be parsed from inside fence')
+})
+
+test('respects nested fences with different fence lengths', () => {
+  const planWithNestedFences = `### Task 1: Real
+
+**Files:**
+- Create: \`real.mjs\`
+
+\`\`\`\`
+\`\`\`
+### Task 8: AlsoFake
+\`\`\`
+\`\`\`\`
+`
+  const tasks = parsePlan(planWithNestedFences)
+  assert.equal(tasks.length, 1)
+  assert.equal(tasks[0].id, 'T1')
+  assert.ok(!tasks.some((t) => t.id === 'T8'), 'T8 should not be parsed from inside nested fence')
+})
