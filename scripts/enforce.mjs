@@ -30,18 +30,35 @@ export function filesetViolations(changed, declared) {
 }
 
 // Different spellings can name the same ref to git: `refs/heads/main`, `heads/main`
-// and `main` are one ref, and on this (case-insensitive) filesystem `Main` and `main`
-// are the same branch too. Strip a leading refs/heads/ or heads/ and compare
-// case-insensitively so those aliases can't slip past the run-branch guard.
+// and `main` are one ref. Strip a leading refs/heads/ or heads/ repeatedly (not just
+// once), so a branch whose actual name itself starts with refs/heads/ — whose full ref
+// is refs/heads/refs/heads/<name> — still normalizes to the same string as its short
+// spelling.
+//
+// The comparison then folds case. Whether that fold is *necessary* depends on the
+// filesystem the check runs on: on a case-insensitive filesystem (Windows, macOS) git
+// itself treats `Main` and `main` as one branch, so folding is required there to catch
+// a real alias. On a case-sensitive filesystem (Linux, most CI) `main` and `Main` are
+// genuinely different branches to git, so the fold can over-trigger — reporting `Main`
+// as a violation of the `main` run branch even though git would allow both to exist.
+// That over-triggering is deliberate: this is an enforcement check, and only reachable
+// by a branch deliberately named against the `teammates/<runId>/<taskId>` convention,
+// so failing closed toward "flag it" is the right default in both directions.
 //
 // This is still a string comparison, not a git query: this module stays pure and has
 // no git access, so it cannot resolve either side to a sha. A branch that is the same
-// commit as the run branch under a name this normalization does not recognize (or that
-// only collides by sha on a case-sensitive filesystem) will not be caught here — a
-// sha-based comparison would be strictly correct but needs the git wrapper, which lives
-// in the caller, not this predicate.
+// commit as the run branch under a name this normalization does not recognize will not
+// be caught here — a sha-based comparison would be strictly correct but needs the git
+// wrapper, which lives in the caller, not this predicate.
 function normalizeBranchRef(name) {
-  return String(name).replace(/^refs\/heads\//, '').replace(/^heads\//, '').toLowerCase()
+  let ref = String(name)
+  let stripped = true
+  while (stripped) {
+    stripped = false
+    if (ref.startsWith('refs/heads/')) { ref = ref.slice('refs/heads/'.length); stripped = true }
+    else if (ref.startsWith('heads/')) { ref = ref.slice('heads/'.length); stripped = true }
+  }
+  return ref.toLowerCase()
 }
 
 export function ownershipViolations({ runBranch, baseSha, headSha, dirty, taskBranches = [] }) {

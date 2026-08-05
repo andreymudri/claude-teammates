@@ -106,6 +106,24 @@ test('a heads/ prefixed alias of the run branch is a violation', () => {
   assert.match(v[0], /only tm-integrator writes there/)
 })
 
+test('a doubly-prefixed refs/heads/refs/heads/ alias is a violation', () => {
+  const v = ownershipViolations({
+    runBranch: 'refs/heads/main', baseSha: 'abc', headSha: 'abc', dirty: false,
+    taskBranches: ['refs/heads/refs/heads/main'],
+  })
+  assert.equal(v.length, 1)
+  assert.match(v[0], /only tm-integrator writes there/)
+})
+
+test('a doubly-prefixed heads/heads/ alias is a violation', () => {
+  const v = ownershipViolations({
+    runBranch: 'heads/main', baseSha: 'abc', headSha: 'abc', dirty: false,
+    taskBranches: ['heads/heads/main'],
+  })
+  assert.equal(v.length, 1)
+  assert.match(v[0], /only tm-integrator writes there/)
+})
+
 test('a moved main HEAD is a violation naming the integrated command', () => {
   const v = ownershipViolations({ runBranch: 'main', baseSha: 'abc', headSha: 'def', dirty: false })
   assert.equal(v.length, 1)
