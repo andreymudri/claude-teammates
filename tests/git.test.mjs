@@ -15,7 +15,8 @@ test('changedFiles diffs the merge base with three dots, NUL-delimited and unquo
   const { calls, exec } = recorder({ code: 0, stdout: 'a.mjs\0b.mjs\0', stderr: '' })
   const files = await createGit({ cwd: '/x', exec }).changedFiles({ base: 'main', branch: 'tm/1' })
   assert.deepEqual(calls[0], [
-    '-c', 'core.quotePath=false', 'diff', '--name-only', '-z', '--end-of-options', 'main...tm/1', '--',
+    '-c', 'core.quotePath=false', 'diff', '--name-only', '--no-renames', '-z',
+    '--end-of-options', 'main...tm/1', '--',
   ])
   assert.deepEqual(files, ['a.mjs', 'b.mjs'])
 })
@@ -27,8 +28,45 @@ test('changedFiles does not let a leading-dash base reach option position', asyn
     GitError,
   )
   assert.deepEqual(calls[0], [
-    '-c', 'core.quotePath=false', 'diff', '--name-only', '-z', '--end-of-options', '--output=stolen...T1', '--',
+    '-c', 'core.quotePath=false', 'diff', '--name-only', '--no-renames', '-z',
+    '--end-of-options', '--output=stolen...T1', '--',
   ])
+})
+
+test('changedFiles rejects an empty base string instead of silently diffing against HEAD', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: '', stderr: '' })
+  await assert.rejects(
+    () => createGit({ exec }).changedFiles({ base: '', branch: 'task' }),
+    GitError,
+  )
+  assert.deepEqual(calls, [])
+})
+
+test('changedFiles rejects an empty branch string instead of silently diffing against HEAD', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: '', stderr: '' })
+  await assert.rejects(
+    () => createGit({ exec }).changedFiles({ base: 'main', branch: '' }),
+    GitError,
+  )
+  assert.deepEqual(calls, [])
+})
+
+test('changedFiles rejects a non-string branch rather than stringifying it', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: '', stderr: '' })
+  await assert.rejects(
+    () => createGit({ exec }).changedFiles({ base: 'main', branch: [] }),
+    GitError,
+  )
+  assert.deepEqual(calls, [])
+})
+
+test('changedFiles rejects a whitespace-only base', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: '', stderr: '' })
+  await assert.rejects(
+    () => createGit({ exec }).changedFiles({ base: '   ', branch: 'task' }),
+    GitError,
+  )
+  assert.deepEqual(calls, [])
 })
 
 test('changedFiles drops empty NUL-delimited entries', async () => {
@@ -139,4 +177,38 @@ test('changedFiles fails closed instead of resolving the rev string as a pathspe
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test('changedFiles reports the pre-image path of a rename, not just the post-image', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-'))
+  const git = createGit({ cwd: root })
+  const sh = (args) => defaultGitExec(args, root)
+  try {
+    await sh(['init', '--initial-branch=main'])
+    await sh(['config', 'user.email', 'test@example.com'])
+    await sh(['config', 'user.name', 'test'])
+    // shared.txt belongs to a different task; only mine.txt is in this task's declared set.
+    await writeFile(path.join(root, 'shared.txt'), 'shared\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await sh(['mv', 'shared.txt', 'mine.txt'])
+    await sh(['commit', '-m', 'rename shared.txt away'])
+
+    const changed = await git.changedFiles({ base: 'main', branch: 'teammates/r1/T1' })
+    // With rename detection on, git reports only mine.txt (the post-image) and the
+    // deletion of shared.txt — a file this task never declared — goes unseen.
+    assert.ok(changed.includes('shared.txt'), `pre-image shared.txt missing from ${JSON.stringify(changed)}`)
+    assert.ok(changed.includes('mine.txt'), `post-image mine.txt missing from ${JSON.stringify(changed)}`)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('defaultGitExec rejects with GitError, not a plain Error, when the process cannot be spawned', async () => {
+  const missingCwd = path.join(tmpdir(), `tm-git-missing-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+  await assert.rejects(
+    () => defaultGitExec(['status'], missingCwd),
+    GitError,
+  )
 })
