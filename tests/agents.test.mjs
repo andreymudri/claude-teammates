@@ -6,10 +6,10 @@ const dir = new URL('../agents/', import.meta.url)
 
 async function frontmatter(file) {
   const text = await readFile(new URL(file, dir), 'utf8')
-  const match = /^---\n([\s\S]*?)\n---/.exec(text)
+  const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)
   assert.ok(match, `${file} has no frontmatter`)
   const fields = Object.fromEntries(
-    match[1].split('\n').map((l) => [l.slice(0, l.indexOf(':')).trim(), l.slice(l.indexOf(':') + 1).trim()]),
+    match[1].split(/\r?\n/).map((l) => [l.slice(0, l.indexOf(':')).trim(), l.slice(l.indexOf(':') + 1).trim()]),
   )
   return { fields, body: text.slice(match[0].length) }
 }
