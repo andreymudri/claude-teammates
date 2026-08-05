@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Superpowers-style development process running on Claude Code teammates",
+  "engines": {
+    "node": ">=24.2.0"
+  },
   "scripts": {
     "test": "node --test tests/*.test.mjs"
   }
