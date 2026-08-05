@@ -17,14 +17,23 @@ The following skills are adapted from superpowers skills of the same name:
 | `test-driven-development` | superpowers `test-driven-development` |
 | `writing-skills` | superpowers `writing-skills` |
 
+## Same-named upstream skills, substantially rewritten
+
+`writing-plans` and `finishing-a-development-branch` share their names with superpowers
+skills, but the content here was substantially rewritten for this plugin's fleet/gate model —
+different save locations, a different machine-readable task format, and a different
+completion gate built around `status.json`. `writing-plans` does reuse the shape of upstream's
+Self-Review structure (the same Spec coverage / Placeholder scan / Type consistency ordering)
+and `finishing-a-development-branch` reuses upstream's three-option integration menu shape.
+Both are listed here rather than under "Original skills" because that lineage exists, even
+though neither is a line-for-line adaptation.
+
 ## Original skills
 
 The following skills are original to `claude-teammates` and are not adaptations
-of any superpowers skill:
+of, nor share a name with, any superpowers skill:
 
 - `using-teammates`
-- `writing-plans`
-- `finishing-a-development-branch`
 - `fleet-lifecycle`
 - `parallel-execution`
 - `phase-gate`
