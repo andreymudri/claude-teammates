@@ -76,4 +76,5 @@ Any of these mid-task means: stop, go back to reproduce, and continue from there
 Use this loop for any bug, failing test, or unexpected behavior before proposing a fix — a
 `tm-implementer` working a task, or inline work in the main session. Once the loop reaches
 step 6, hand off to the `test-driven-development` skill for the RED/GREEN discipline on the
-regression test itself.
+regression test itself. Before claiming the bug is fixed, the `phase-gate` skill is where that
+claim is checked against a recorded PASS rather than taken on your word.
