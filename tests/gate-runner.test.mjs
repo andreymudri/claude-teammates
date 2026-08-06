@@ -537,6 +537,65 @@ test('runOwnershipCheck leaves a commit unexplained when the base branch does no
   )
 })
 
+// Accepting base ancestry costs a signal: before it, an accidental commit landing on the base
+// branch mid-run rode into the run branch as an ownership FAILURE — wrong, but the only place
+// a moved baseline was ever visible. Nothing pins the base ref, so the movement itself cannot
+// be detected after the fact; what can be preserved is a record of what was admitted because
+// of it. A pass that admitted nothing must stay quiet, or the note becomes noise nobody reads.
+test('runOwnershipCheck records every base-explained commit in its own passing output', async () => {
+  const baseSha = `refs/heads/${BASE_BRANCH}-sha`
+  const git = fakeGit({
+    branchExists: async () => true,
+    commitsBetween: async () => ['m1'],
+    isAncestor: async (a, b) => a === 'baseAdvance' && b === baseSha,
+    commitParents: async () => ['p0', 'baseAdvance'],
+  })
+  const check = { name: 'ownership', kind: 'ownership' }
+  const ctx = {
+    git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH,
+    anchorSha: 'anchorSha1', runSha: 'runSha1', tasks: [T1_TASK],
+  }
+  const res = await runOwnershipCheck(check, ctx)
+  assert.equal(res.status, 'pass')
+  assert.match(res.output, /m1/)
+})
+
+test('the base-explained note names the base branch it accepted the commit from', async () => {
+  const baseSha = `refs/heads/${BASE_BRANCH}-sha`
+  const git = fakeGit({
+    branchExists: async () => true,
+    commitsBetween: async () => ['m1'],
+    isAncestor: async (a, b) => a === 'baseAdvance' && b === baseSha,
+    commitParents: async () => ['p0', 'baseAdvance'],
+  })
+  const check = { name: 'ownership', kind: 'ownership' }
+  const ctx = {
+    git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH,
+    anchorSha: 'anchorSha1', runSha: 'runSha1', tasks: [T1_TASK],
+  }
+  const res = await runOwnershipCheck(check, ctx)
+  assert.equal(res.status, 'pass')
+  assert.match(res.output, new RegExp(BASE_BRANCH))
+})
+
+test('a pass with no base-explained commits carries no note and an empty output', async () => {
+  const git = fakeGit({
+    branchExists: async () => true,
+    commitsBetween: async () => ['m1'],
+    // Explained the ordinary way: the secondary parent is an ancestor of a task branch.
+    isAncestor: async (a, b) => a === 'p1' && b === `refs/heads/${T1_BRANCH}-sha`,
+    commitParents: async () => ['p0', 'p1'],
+  })
+  const check = { name: 'ownership', kind: 'ownership' }
+  const ctx = {
+    git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH,
+    anchorSha: 'anchorSha1', runSha: 'runSha1', tasks: [T1_TASK],
+  }
+  const res = await runOwnershipCheck(check, ctx)
+  assert.equal(res.status, 'pass')
+  assert.equal(res.output, '')
+})
+
 test('runOwnershipCheck fails on a dirty worktree', async () => {
   const git = fakeGit({ isDirty: async () => true })
   const check = { name: 'ownership', kind: 'ownership' }

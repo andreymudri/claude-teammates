@@ -7,6 +7,7 @@ import {
   filesetViolations,
   derivePhase,
   ownershipViolations,
+  baseExplainedNote,
   verdictCoversTree,
   planHash,
 } from '../scripts/enforce.mjs'
@@ -180,6 +181,25 @@ test('an unexplained commit names the base branch as a ruled-out explanation', (
   })
   assert.equal(v.length, 1)
   assert.match(v[0], /base branch/)
+})
+
+// --- baseExplainedNote --------------------------------------------------------------------
+//
+// Accepting base ancestry silently would delete the only signal the old (wrong) failure
+// carried: that the baseline moved mid-run. The note is what keeps a passing gate honest
+// about what it admitted.
+
+test('the base-explained note names every admitted commit and the base branch', () => {
+  const note = baseExplainedNote({ baseBranch: 'main', commits: ['abc123', 'def456'] })
+  assert.match(note, /abc123/)
+  assert.match(note, /def456/)
+  assert.match(note, /main/)
+})
+
+test('the base-explained note is empty when nothing was admitted by base ancestry', () => {
+  assert.equal(baseExplainedNote({ baseBranch: 'main', commits: [] }), '')
+  assert.equal(baseExplainedNote({ baseBranch: 'main' }), '')
+  assert.equal(baseExplainedNote(), '')
 })
 
 test('a dirty worktree is a violation', () => {

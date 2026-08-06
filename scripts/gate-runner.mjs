@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { filesetViolations, ownershipViolations, resolveTaskBranch, derivePhase, planHash } from './enforce.mjs'
+import { filesetViolations, ownershipViolations, baseExplainedNote, resolveTaskBranch, derivePhase, planHash } from './enforce.mjs'
 import { GitError } from './git.mjs'
 import { withMergePreview, conflictPairs } from './merge-preview.mjs'
 
@@ -335,6 +335,9 @@ export async function runOwnershipCheck(check, ctx = {}) {
 
     const commits = await git.commitsBetween({ from: anchorSha, to: runSha })
     const unexplained = []
+    // Every commit this check admitted only because of base ancestry. Reported on the pass —
+    // see `baseExplainedNote`, which also records why no base sha from run start is consulted.
+    const baseExplained = []
     for (const sha of commits) {
       let explained = false
       for (const branchSha of shas) {
@@ -358,6 +361,7 @@ export async function runOwnershipCheck(check, ctx = {}) {
           // an earlier version: the scan broke on the first matching parent, so content
           // riding in behind a second, unowned parent was never inspected.
           let allParentsOwned = true
+          let usedBase = false
           for (const parent of secondaryParents) {
             let owned = false
             for (const branchSha of shas) {
@@ -369,11 +373,12 @@ export async function runOwnershipCheck(check, ctx = {}) {
             // content is already trusted: the anchor is computed from it and `changedFiles`
             // diffs against it, so accepting base ancestry adds no new trust. It is still
             // per-parent — a rogue parent riding alongside a base parent fails the loop.
-            if (!owned && baseSha && await git.isAncestor(parent, baseSha)) owned = true
+            if (!owned && baseSha && await git.isAncestor(parent, baseSha)) { owned = true; usedBase = true }
             if (!owned) { allParentsOwned = false; break }
           }
           if (allParentsOwned) {
             explained = await mergeContentExplainedByParents(git, firstParent, secondaryParents, sha)
+            if (explained && usedBase) baseExplained.push(sha)
           }
         }
       }
@@ -387,7 +392,7 @@ export async function runOwnershipCheck(check, ctx = {}) {
       dirty: await git.isDirty(),
     })
     return violations.length === 0
-      ? checkResult(check, 'pass', '')
+      ? checkResult(check, 'pass', baseExplainedNote({ baseBranch, commits: baseExplained }))
       : checkResult(check, 'fail', violations.join('\n'))
   } catch (err) {
     if (!(err instanceof GitError)) throw err
