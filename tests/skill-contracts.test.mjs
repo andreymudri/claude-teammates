@@ -186,17 +186,16 @@ test('phase-gate states that conflicts are escalated rather than retried', async
 test('phase-gate documents preview.link and states links are shared, not copied', async () => {
   const { body } = await skill('phase-gate')
   assert.match(body, /preview\.link/, 'phase-gate must mention preview.link')
-  // Bind the polarity within one sentence: require "shared", "not", and "copies" to appear before the
-  // next period, so the assertion fails if the text says "copied, not shared" or inverts the claim.
-  const normalized = body.replace(/\s+/g, ' ')
-  assert.match(normalized, /shared[^.]*not[^.]*copies?/i, 'phase-gate must state links are shared, not copies, in one sentence')
+  // Polarity requires a literal phrase, not scattered tokens. Assert the exact claim and its negation.
+  assert.match(body, /shared, not copies?/i, 'phase-gate must state "shared, not copies"')
+  assert.doesNotMatch(body, /links are copie/i, 'phase-gate must not claim links are copied')
 })
 
 test('phase-gate states that a failed link fails the merge check', async () => {
   const { body } = await skill('phase-gate')
-  const normalized = body.replace(/\s+/g, ' ')
-  // Bind the polarity within one sentence: require "link", "is reported", "merge", and "fail" to appear
-  // before the next period, so the assertion fails if the text says "is NOT reported" or changes which
-  // check fails. Do not match loose subsequences across the entire document.
-  assert.match(normalized, /link[^.]*is reported[^.]*merge[^.]*fail/i, 'phase-gate must state, in one sentence, that a link is reported as a merge failure')
+  // Polarity requires a literal phrase, not scattered tokens. Assert the exact claim and its negation.
+  // The sentence must state the link IS reported as a merge failure.
+  assert.match(body, /is reported as a merge failure/i, 'phase-gate must state "is reported as a merge failure"')
+  // The sentence must NOT state the link is reported as a command-check failure.
+  assert.doesNotMatch(body, /link[^.]*is reported as a command-check failure/i, 'phase-gate must not state a link is reported as a command-check failure')
 })
