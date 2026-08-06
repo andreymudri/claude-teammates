@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { filesetViolations, ownershipViolations, resolveTaskBranch, derivePhase, planHash } from './enforce.mjs'
 import { GitError } from './git.mjs'
+import { withMergePreview, conflictPairs } from './merge-preview.mjs'
 
 const TAIL_LINES = 40
 
@@ -33,22 +34,26 @@ export async function runCommandCheck(check, { cwd = process.cwd(), exec = defau
   }
 }
 
+// `optional: true` is meaningful on a `command` check — "this lint is advisory". On an
+// enforcement check (`fileset`, `ownership`, `merge`) it would mean "detect the violation and
+// ship anyway", which is never coherent to want. All three are forced non-optional here, at
+// the point the result is built, so an uncommitted manifest cannot disable enforcement while
+// appearing to record it.
+const ALWAYS_ENFORCED_KINDS = new Set(['fileset', 'ownership', 'merge'])
+
 export function describePendingCheck(check) {
   return {
     name: check.name,
     kind: check.kind,
     status: 'pending',
-    optional: check.optional === true,
+    // An always-enforced kind cannot buy its way out here either. `pending` blocks only while
+    // it is non-optional, so a manifest entry of an enforced kind that found no runner —
+    // `{ "kind": "merge", "optional": true }`, the computed check a manifest must not be able
+    // to supply or suppress — would otherwise land as a pending that waves the phase through.
+    optional: ALWAYS_ENFORCED_KINDS.has(check.kind) ? false : check.optional === true,
     check,
   }
 }
-
-// `optional: true` is meaningful on a `command` check — "this lint is advisory". On an
-// enforcement check (`fileset`, `ownership`) it would mean "detect the violation and ship
-// anyway", which is never coherent to want. Both are forced non-optional here, at the point
-// the result is built, so an uncommitted manifest cannot disable enforcement while appearing
-// to record it.
-const ALWAYS_ENFORCED_KINDS = new Set(['fileset', 'ownership'])
 
 function checkResult(check, status, output) {
   const optional = ALWAYS_ENFORCED_KINDS.has(check.kind) ? false : check.optional === true
@@ -352,21 +357,38 @@ export async function runOwnershipCheck(check, ctx = {}) {
   }
 }
 
+// `merge` is deliberately absent: the gate builds the merge preview itself, once, around the
+// whole check list. A manifest entry claiming that kind finds no runner and lands as pending,
+// which blocks — an editable manifest must not be able to supply or suppress a computed check.
 const RUNNERS = Object.assign(Object.create(null), {
   command: runCommandCheck,
   fileset: runFilesetCheck,
   ownership: runOwnershipCheck,
 })
 
-export async function runChecks(checks, ctx = {}) {
+const MERGE_CHECK = { name: 'merge', kind: 'merge' }
+
+const CONFLICT_SKIP = 'the phase does not merge cleanly; no merged tree exists to test'
+
+async function runCheckList(checks, ctx, commandCwd, mergeConflicted) {
   const results = []
   for (const check of checks) {
+    // A `command` check exists to answer "does the integrated tree work". Without a merged
+    // tree there is no honest answer, and running it against the run branch's own tree would
+    // answer a different question while looking like the one that was asked. Skipped, with
+    // the reason — the block comes from the `merge` check, which fails.
+    if (check.kind === 'command' && mergeConflicted) {
+      results.push(checkResult(check, 'skip', CONFLICT_SKIP))
+      continue
+    }
     // Bare property access would resolve a kind of "toString" to Object.prototype.toString
     // and call it as a runner. Confirmed reachable from a hand-written manifest.
     const runner = Object.hasOwn(RUNNERS, check.kind) ? RUNNERS[check.kind] : null
     if (!runner) { results.push(describePendingCheck(check)); continue }
     try {
-      results.push(await runner(check, ctx))
+      // Only `command` checks are relocated. `fileset` and `ownership` read git, not a
+      // working tree, and must keep reading the real repository.
+      results.push(await runner(check, check.kind === 'command' ? { ...ctx, cwd: commandCwd } : ctx))
     } catch (err) {
       // A throwing check previously propagated out of the CLI, so no verdict was recorded
       // and the previous phase's PASS stood.
@@ -374,6 +396,71 @@ export async function runChecks(checks, ctx = {}) {
     }
   }
   return results
+}
+
+// A preview that could not be built at all — a merge that failed without leaving unmerged
+// paths (unset user.email, a branch deleted mid-run, unrelated histories), or a worktree that
+// could not be created — is neither a clean tree nor a reportable conflict. It is reported as
+// a failing `merge` check carrying git's own reason, with the `command` checks skipped: they
+// must never run against the unmerged tree, and `aggregateVerdict` blocks on the fail.
+async function previewFailure(checks, ctx, reason) {
+  return [checkResult(MERGE_CHECK, 'fail', reason), ...await runCheckList(checks, ctx, ctx.cwd, true)]
+}
+
+export async function runChecks(checks, ctx = {}) {
+  // A solo (--no-fleet) run has no run branch, no task branches and no git in context: there
+  // is nothing to preview, so the checks run where the caller stands.
+  if (!ctx.git || ctx.solo) return runCheckList(checks, ctx, ctx.cwd, false)
+
+  // The same notion of "this phase's branches" the fileset check uses — same
+  // resolveTaskBranch call, same branchExists guard, same phase filter. Two different ones in
+  // one file would drift.
+  const phaseTasks = (ctx.tasks ?? []).filter((t) => t.phase === ctx.currentPhase)
+  const branches = []
+  try {
+    for (const task of phaseTasks) {
+      const branch = resolveTaskBranch(task, ctx.runId)
+      if (branch && await ctx.git.branchExists(branch)) branches.push(branch)
+    }
+  } catch (err) {
+    return previewFailure(checks, ctx, `merge preview could not resolve the phase's branches: ${err.message}`)
+  }
+
+  // Set as soon as the callback runs, so the catch below can tell "the preview was never
+  // built" (re-run the list against no merged tree) from the theoretical case of the callback
+  // itself throwing after some checks already ran — which must never re-run them.
+  let previewed = false
+  try {
+    return await withMergePreview({
+      git: ctx.git,
+      base: ctx.runBranch,
+      branches,
+      // Every check runs inside this callback, so the worktree is alive for all of them and
+      // removed exactly once, after the last one. The merge check cannot be the thing holding
+      // the worktree open — by the time a later check ran, the directory would be gone.
+      run: async ({ path, conflict }) => {
+        previewed = true
+        if (conflict) {
+          const pairs = conflictPairs(branches, conflict)
+          const merged = { ...checkResult(MERGE_CHECK, 'fail', JSON.stringify(pairs, null, 2)), pairs }
+          return [merged, ...await runCheckList(checks, ctx, ctx.cwd, true)]
+        }
+        const merged = checkResult(MERGE_CHECK, 'pass', '')
+        // `path` is null only when the phase has no branches to merge: nothing to preview, so
+        // the run branch's own tree is the tree integration would produce.
+        return [merged, ...await runCheckList(checks, ctx, path ?? ctx.cwd, false)]
+      },
+    })
+  } catch (err) {
+    const reason = `merge preview failed: ${err.message}`
+    if (previewed) {
+      // Unreachable in practice — runCheckList catches every per-check throw. Kept so a
+      // future edit inside the callback can never produce a second, duplicate run of the
+      // checks, nor a verdict-less crash out of the CLI.
+      return [checkResult(MERGE_CHECK, 'fail', reason), ...checks.map((c) => checkResult(c, 'fail', reason))]
+    }
+    return previewFailure(checks, ctx, reason)
+  }
 }
 
 const RECOGNIZED = new Set(['pass', 'fail', 'skip', 'pending'])
