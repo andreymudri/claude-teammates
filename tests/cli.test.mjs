@@ -1941,6 +1941,33 @@ async function captureAgentPrompts(src) {
   return captured
 }
 
+// The values cli.mjs decides and hands the generator, read by running the generated module
+// rather than by matching its text. Asserting on the rendered declaration would couple these
+// tests to the template's spacing and to jsString's choice of quote character — both owned by
+// tests/workflow-gen.test.mjs — so a pure reformat of templates/phase-workflow.js would fail
+// a test about cli.mjs. Evaluating the module reads the argument that actually arrived.
+async function captureWorkflowConstants(src) {
+  const body = src.replace(/^export const meta = /m, 'const meta = ')
+  // The module ends in a top-level `return`, so anything appended after it is unreachable.
+  // Discarding that one value is what lets the constants be read; it couples this helper to
+  // the workflow contract that a phase module returns its results, not to how any
+  // declaration inside it is spelled.
+  const at = body.lastIndexOf('\nreturn ')
+  assert.ok(at !== -1, 'a generated phase module must end in a top-level return')
+  const readable = `${body.slice(0, at)}\nvoid ${body.slice(at + '\nreturn '.length)}`
+  const phaseFn = () => {}
+  const parallel = (fns) => Promise.all(fns.map((f) => f()))
+  const agent = () =>
+    Promise.resolve({ status: 'done', branch: 'b', filesChanged: [], summary: 's', blockers: [] })
+  const run = new Function(
+    'phase',
+    'parallel',
+    'agent',
+    `return (async () => { ${readable}\n;return { PLAN_PATH, BASE_BRANCH } })`,
+  )(phaseFn, parallel, agent)
+  return run()
+}
+
 test('workflow --plan and --base put the base branch in a checkout line and name the plan', async () => {
   await withRepo(async ({ root, planPath, io, lines }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
@@ -2018,10 +2045,10 @@ test('workflow with a valueless --base renders the no-base brief rather than the
     const code = await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root, '--base'], io)
     assert.equal(code, 0, lines.join('\n'))
     const src = lines.join('\n')
-    // Structural, not prose: the emitted BASE_BRANCH literal is what cli.mjs decides here.
-    // Matching a word out of the template's warning paragraph would turn a reword of that
-    // paragraph into a failure of this test, which is about cli.mjs and nothing else.
-    assert.match(src, /const BASE_BRANCH = ''/, 'a valueless --base must reach the generator as the empty string')
+    // The value, not its rendering: what cli.mjs decides here is the empty string, and that
+    // is what the generated module must hold however the template spells the declaration.
+    const { BASE_BRANCH } = await captureWorkflowConstants(src)
+    assert.equal(BASE_BRANCH, '', 'a valueless --base must reach the generator as the empty string')
     const [prompt] = await captureAgentPrompts(src)
     assert.ok(!prompt.includes('git checkout -B teammates/r1/T1 true'), 'a valueless --base must not become a branch')
   })
@@ -2040,7 +2067,8 @@ test('workflow with a valueless --plan renders the no-plan brief rather than fai
     )
     assert.equal(code, 0, lines.join('\n'))
     const src = lines.join('\n')
-    assert.match(src, /const PLAN_PATH = ''/, 'a valueless --plan must reach the generator as the empty string')
+    const { PLAN_PATH } = await captureWorkflowConstants(src)
+    assert.equal(PLAN_PATH, '', 'a valueless --plan must reach the generator as the empty string')
     const [prompt] = await captureAgentPrompts(src)
     assert.ok(!prompt.includes('PLAN. Read true'), 'a valueless --plan must not become a plan path')
   })
@@ -2121,6 +2149,46 @@ test('parseConstraints flattens a nested bullet into a standalone constraint', a
   assert.deepEqual(
     parseConstraints('## Global Constraints\n\n- a\n  - nested\n- b\n'),
     ['a', 'nested', 'b'],
+  )
+})
+
+// One continuation line is the case a wrap-at-the-margin author hits first, but it is not
+// the case that pins the loop: closing the item after absorbing a single line still passes
+// a one-line-wrap test while dropping everything from the second continuation line on. A
+// three-line bullet is the shortest input that distinguishes "join the wrap" from "join one
+// line of the wrap", which is the same silent truncation the join exists to prevent.
+test('parseConstraints joins every continuation line of a bullet wrapped over three lines', async () => {
+  assert.deepEqual(
+    parseConstraints('## Global Constraints\n\n- a\n  b\n  c\n- d\n'),
+    ['a b c', 'd'],
+  )
+})
+
+// The join must not turn a line it cannot read into a corruption of the line above it. An
+// indented line that opens like a bullet but that the bullet pattern rejects — a bullet with
+// no text, or one whose text is broken up by a Unicode line separator, which `.` does not
+// match — is a rule in its own right, however malformed. Appending it to the previous item
+// would silently fuse two unrelated rules into one constraint that every teammate then reads
+// as a single sentence. It is dropped instead: losing a malformed rule is recoverable, a
+// constraint that says something neither author wrote is not.
+test('parseConstraints drops an indented bullet the bullet pattern rejects rather than gluing it to the constraint above', async () => {
+  assert.deepEqual(
+    parseConstraints('## Global Constraints\n\n- x\n  - y z\n'),
+    ['x'],
+  )
+  assert.deepEqual(
+    parseConstraints('## Global Constraints\n\n- x\n  -  \n- y\n'),
+    ['x', 'y'],
+  )
+})
+
+// The join removes the wrap and nothing else: it is not a reformatter. A run of spaces the
+// author put inside a continuation line is part of the constraint text and survives, exactly
+// as a run of spaces inside the bullet's own first line already does.
+test('parseConstraints preserves internal whitespace when joining a wrapped bullet', async () => {
+  assert.deepEqual(
+    parseConstraints('## Global Constraints\n\n- a\n  b   c\n'),
+    ['a b   c'],
   )
 })
 

@@ -133,13 +133,20 @@ export function parseConstraints(markdown) {
   // sentence. An indented, non-blank line directly under an item is joined onto it; a
   // blank line closes the item, so a following indented paragraph is not swallowed. A
   // nested bullet matches the bullet pattern first and so stays a standalone constraint.
+  //
+  // The continuation test excludes any indented line opening with `-`, so a line that looks
+  // like a bullet but that the bullet pattern rejects — an empty `-`, or one whose text is
+  // split by a Unicode line separator, which `.` does not match — is dropped rather than
+  // appended. Joining it would fuse two unrelated rules into a single constraint that reads
+  // as one sentence and says what neither author wrote; a dropped malformed rule is the
+  // lesser failure, and the only one that cannot silently misinform a teammate.
   let open = false
   for (const line of (next ? rest.slice(0, next.index) : rest).split('\n')) {
     const bullet = /^\s*-\s+(.*\S)\s*$/.exec(line)
     if (bullet) {
       items.push(bullet[1])
       open = true
-    } else if (open && /^\s+\S/.test(line)) {
+    } else if (open && /^\s+[^-\s]/.test(line)) {
       items[items.length - 1] += ` ${line.trim()}`
     } else {
       open = false
