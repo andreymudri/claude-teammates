@@ -262,8 +262,13 @@ export async function runCli(argv, io = { out: console.log }) {
   // catches `undefined`, so `--root ""` survives to become `repoRoot: ''` downstream, which
   // defeats the realpath-based containment checks in the merge preview (realpath('') rejects,
   // so both guarded escape checks in linkInto get skipped instead of enforced). Fail loudly
-  // here instead of silently using the wrong root.
-  if (typeof flags.root === 'string' && flags.root.trim() === '') {
+  // here instead of silently using the wrong root. A bare `--root` with no value at all (e.g.
+  // last on the argv, or immediately followed by another flag) is the same orchestrator
+  // mistake in a different guise: an unset `$PROJECT_ROOT` templated *unquoted* makes the
+  // argument vanish entirely rather than become empty, so parseFlags maps it to `true`
+  // instead of a string. That `true` would otherwise reach path.join() downstream and throw
+  // a raw TypeError with no verdict, which must never happen.
+  if (typeof flags.root !== 'undefined' && (typeof flags.root !== 'string' || flags.root.trim() === '')) {
     io.out(`--root must not be empty\n\n${USAGE}`)
     return 2
   }
