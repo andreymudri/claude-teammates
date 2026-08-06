@@ -105,3 +105,35 @@ test('fixRoundsForPhase returns 2 when no fixRounds is set anywhere, and for nul
   assert.equal(fixRoundsForPhase(config, 'unknown'), 2)
   assert.equal(fixRoundsForPhase(null, 'default'), 2)
 })
+
+test('fixRoundsForPhase falls back key-by-key when a named phase omits fixRounds', () => {
+  const config = {
+    phases: {
+      default: { fixRounds: 5, checks: [{ name: 'test', kind: 'command', run: 'npm test' }] },
+      integration: { checks: [{ name: 'test', kind: 'command', run: 'npm test' }] },
+    },
+  }
+  assert.equal(fixRoundsForPhase(config, 'integration'), 5)
+})
+
+test('fixRoundsForPhase rejects a non-integer fixRounds and falls back to the default phase', () => {
+  const withDefault = (value) => ({
+    phases: { default: { fixRounds: 3, checks: [] }, integration: { fixRounds: value, checks: [] } },
+  })
+  assert.equal(fixRoundsForPhase(withDefault('many'), 'integration'), 3)
+  assert.equal(fixRoundsForPhase(withDefault(-1), 'integration'), 3)
+  assert.equal(fixRoundsForPhase(withDefault(1.5), 'integration'), 3)
+})
+
+test('fixRoundsForPhase rejects a non-integer default fixRounds and falls back to 2', () => {
+  const only = (value) => ({ phases: { default: { fixRounds: value, checks: [] } } })
+  assert.equal(fixRoundsForPhase(only('many'), 'default'), 2)
+  assert.equal(fixRoundsForPhase(only(-1), 'default'), 2)
+  assert.equal(fixRoundsForPhase(only(1.5), 'default'), 2)
+  assert.equal(fixRoundsForPhase(only(null), 'default'), 2)
+})
+
+test('fixRoundsForPhase accepts zero as an explicit no-retry budget', () => {
+  const config = { phases: { default: { fixRounds: 0, checks: [] } } }
+  assert.equal(fixRoundsForPhase(config, 'default'), 0)
+})
