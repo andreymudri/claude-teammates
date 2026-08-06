@@ -130,3 +130,55 @@ test('tm-implementer forbids weakening a test to satisfy a fix-round finding', a
   const body = await readFile(new URL('../agents/tm-implementer.md', import.meta.url), 'utf8')
   assert.match(body, /do not weaken or delete a test/i)
 })
+
+test('phase-gate documents --results flag and rejects computed checks', async () => {
+  const { body } = await skill('phase-gate')
+  assert.match(body, /--results/, 'phase-gate must document the --results flag')
+  // A single bound phrase, not three independent substring matches: three loose regexes
+  // (`--results`, `command.*fileset.*ownership`, `entry is rejected`) all still match text
+  // that inverts the rule ("only an agent or mcp entry is rejected"), because nothing ties
+  // their sense together. This phrase carries its own polarity.
+  const normalized = body.replace(/\s+/g, ' ')
+  assert.match(
+    normalized,
+    /only `?agent`? and `?mcp`? checks may be supplied/i,
+    'phase-gate must state, in one phrase, that only agent and mcp checks may be supplied',
+  )
+  assert.match(body, /entry is\s+rejected/, 'phase-gate must state that entries are rejected')
+})
+
+// Naming a subcommand the CLI dispatches is not enough: a flag can be renamed (e.g.
+// `flags.results` -> `flags.supplied`) without touching the subcommand list, and the skill's
+// invocation would then be silently wrong — the CLI would parse the renamed flag as a boolean
+// and swallow the next token as a positional. Bind the flags the skill documents for `gate` to
+// the flags scripts/cli.mjs actually declares for `gate` in its own USAGE string.
+function gateUsageFlags(cli) {
+  const usage = /const USAGE = `([\s\S]*?)`/.exec(cli)
+  assert.ok(usage, 'cli.mjs must define a USAGE string')
+  const gateLine = usage[1].split(/\r?\n/).find((l) => l.trim().startsWith('gate '))
+  assert.ok(gateLine, 'cli.mjs USAGE must document the gate subcommand')
+  return new Set([...gateLine.matchAll(/--[a-z-]+/g)].map((m) => m[0]))
+}
+
+test('phase-gate names no cli.mjs flag for gate that scripts/cli.mjs does not declare', async () => {
+  const { body } = await skill('phase-gate')
+  const cli = await readFile(new URL('../scripts/cli.mjs', import.meta.url), 'utf8')
+  const acceptedFlags = gateUsageFlags(cli)
+
+  let checked = 0
+  for (const line of body.split(/\r?\n/)) {
+    if (!/cli\.mjs["']?\s+gate\b/.test(line)) continue
+    for (const [flag] of line.matchAll(/--[a-z-]+/g)) {
+      checked++
+      assert.ok(acceptedFlags.has(flag), `phase-gate documents ${flag} for gate, which scripts/cli.mjs USAGE does not declare`)
+    }
+  }
+  assert.ok(checked > 0, 'precondition: phase-gate must document at least one cli.mjs gate flag')
+})
+
+test('phase-gate states that conflicts are escalated rather than retried', async () => {
+  const { body } = await skill('phase-gate')
+  assert.match(body, /merge.*check/i, 'phase-gate must document the merge check')
+  const normalized = body.replace(/\s+/g, ' ')
+  assert.match(normalized, /conflict.*escalate.*do not retry/i, 'phase-gate must state that conflicts are escalated and not retried')
+})
