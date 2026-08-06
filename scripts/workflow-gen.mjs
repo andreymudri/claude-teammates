@@ -30,7 +30,10 @@ function jsLiteral(value, indent = '') {
   return `{\n${entries}\n${indent}}`
 }
 
-export async function generatePhaseWorkflow({ runId, phase, tasks, maxParallel, tierModels }) {
+export async function generatePhaseWorkflow({
+  runId, phase, tasks, maxParallel, tierModels,
+  planPath = '', baseBranch = '', constraints = [],
+}) {
   if (!tasks || tasks.length === 0) throw new Error(`no tasks for phase ${phase}`)
 
   const meta = {
@@ -39,9 +42,12 @@ export async function generatePhaseWorkflow({ runId, phase, tasks, maxParallel, 
     phases: [{ title: 'Implement', detail: `${tasks.length} worktree-isolated implementers` }],
   }
 
+  // The branch name is computed once here rather than derived again inside the template,
+  // so the brief's `checkout -B` and the dispatch cannot disagree about the string.
   const slim = tasks.map(({ id, title, files, tier }) => {
     const model = tierModels?.[tier]
-    return model ? { id, title, files, model } : { id, title, files }
+    const base = { id, title, files, branch: `teammates/${runId}/${id}` }
+    return model ? { ...base, model } : base
   })
   const template = await readFile(TEMPLATE, 'utf8')
 
@@ -52,4 +58,7 @@ export async function generatePhaseWorkflow({ runId, phase, tasks, maxParallel, 
   return template
     .replace('__META__', () => `export const meta = ${jsLiteral(meta)}`)
     .replace('__TASKS__', () => JSON.stringify(slim, null, 2))
+    .replace('__PLAN_PATH__', () => jsLiteral(planPath))
+    .replace('__BASE_BRANCH__', () => jsLiteral(baseBranch))
+    .replace('__CONSTRAINTS__', () => jsLiteral(constraints))
 }
