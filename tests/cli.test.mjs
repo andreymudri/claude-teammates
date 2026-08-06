@@ -1349,6 +1349,122 @@ test('mergeSuppliedResults leaves a check that already ran untouched', async () 
   assert.equal(merged[2].output, 'supplied')
 })
 
+// `optional` is a manifest declaration ("this check does not block"), not a result field. It
+// must come from the computed check and never from the supplied file — otherwise a results
+// file reporting its own failure can also declare that failure advisory. Pinned on the merge
+// function directly because that is the single line where the two sources meet: flipping it
+// to `s.optional ?? r.optional` must fail here.
+test('mergeSuppliedResults takes optional from the computed check, never from the supplied entry', () => {
+  const raw = [{ name: 'review', kind: 'agent', status: 'pending', optional: false }]
+  const merged = mergeSuppliedResults(raw, [
+    { name: 'review', kind: 'agent', status: 'fail', optional: true, findings: [{ file: 'a.mjs' }] },
+  ])
+  assert.equal(merged[0].status, 'fail')
+  assert.equal(merged[0].optional, false)
+})
+
+// The end-to-end consequence of the line above: a required `agent` check reported as failing
+// stays a blocking failure. If `optional` were laundered through the file, this would print
+// PASS with the failure demoted into `optionalFailed` and exit 0.
+test('--results cannot launder a failing required check into an optional one', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeAgentManifest(root)
+    const resultsPath = await writeResults(root, {
+      results: [{ name: 'review', kind: 'agent', status: 'fail', optional: true, findings: [{ file: 'a.mjs' }] }],
+    })
+    lines.length = 0
+    const code = await runCli(
+      ['gate', '--run', 'r1', '--plan', 'plan.md', '--no-fleet', '--root', root, '--results', resultsPath],
+      io,
+    )
+    assert.equal(code, 1)
+    const parsed = JSON.parse(lines[lines.length - 1])
+    assert.equal(parsed.verdict, 'FAIL')
+    assert.deepEqual(parsed.failed, ['review'])
+    assert.deepEqual(parsed.optionalFailed, [])
+    assert.equal(parsed.results.find((r) => r.name === 'review').optional, false)
+  })
+})
+
+// `checksForPhase` does not enforce unique check names. Validation resolves a supplied name
+// to exactly one check (last wins) while the merge writes to every result with that name, so
+// a collision would let an `agent` result land on a same-named `command` check — and whether
+// the file was accepted at all would depend on manifest declaration order. Both orders must
+// be rejected identically.
+test('--results naming a check declared twice in the manifest exits 2, whichever order they are declared in', async () => {
+  const collidingChecks = [
+    { name: 'test', kind: 'command', run: 'node -e "process.exit(1)"' },
+    { name: 'test', kind: 'agent' },
+  ]
+  for (const checks of [collidingChecks, [...collidingChecks].reverse()]) {
+    await withRepo(async ({ root, planPath, io, lines }) => {
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      await writeFile(
+        path.join(root, 'teammates.gate.json'),
+        JSON.stringify({ phases: { default: { checks } } }),
+        'utf8',
+      )
+      const resultsPath = await writeResults(root, {
+        results: [{ name: 'test', kind: 'agent', status: 'pass' }],
+      })
+      lines.length = 0
+      const code = await runCli(
+        ['gate', '--run', 'r1', '--plan', 'plan.md', '--no-fleet', '--root', root, '--results', resultsPath],
+        io,
+      )
+      assert.equal(code, 2)
+      assert.match(lines.join('\n'), /declared more than once in this phase's manifest/)
+      const status = await readStatus(root, 'r1')
+      assert.equal(status.gates, undefined)
+    })
+  }
+})
+
+// The writing half of the same invariant: even if a duplicate name ever reached the merge, one
+// supplied entry fills at most one pending result. The second collides and stays pending, so
+// the gate blocks rather than passing a check nobody reported.
+test('mergeSuppliedResults fills at most one pending result per supplied entry', () => {
+  const raw = [
+    { name: 'test', kind: 'command', status: 'pending', optional: false },
+    { name: 'test', kind: 'agent', status: 'pending', optional: false },
+  ]
+  const merged = mergeSuppliedResults(raw, [{ name: 'test', kind: 'agent', status: 'pass' }])
+  assert.equal(merged[0].status, 'pass')
+  assert.equal(merged[1].status, 'pending')
+  assert.deepEqual(merged[1], raw[1])
+})
+
+test('a valueless --results is reported as a missing argument rather than silently dropped', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeAgentManifest(root)
+    lines.length = 0
+    const code = await runCli(
+      ['gate', '--run', 'r1', '--plan', 'plan.md', '--no-fleet', '--root', root, '--results'],
+      io,
+    )
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /missing required argument: --results <path>/)
+  })
+})
+
+// Also in the middle of argv, where parseFlags reads the following flag name as the value
+// unless the boolean-switch rule fires.
+test('a valueless --results before another flag is still reported as missing', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeAgentManifest(root)
+    lines.length = 0
+    const code = await runCli(
+      ['gate', '--run', 'r1', '--plan', 'plan.md', '--results', '--root', root, '--no-fleet'],
+      io,
+    )
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /missing required argument: --results <path>/)
+  })
+})
+
 test('gate exits 1 with a message when status.json is unreadable rather than throwing', async () => {
   await withRepo(async ({ root, planPath, io, lines }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
@@ -1361,5 +1477,33 @@ test('gate exits 1 with a message when status.json is unreadable rather than thr
     const code = await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--no-fleet', '--root', root], io)
     assert.equal(code, 1)
     assert.match(lines.join('\n'), /could not read run state/)
+  })
+})
+
+// An unreadable status.json is a gate failure, and the verdict that gets printed has to say
+// so. Every check here passes, so a verdict computed and printed before the state read would
+// put `"verdict": "PASS"` on stdout ahead of a bare error line — contradicting the exit code
+// and leaving stdout unparseable for a caller that reads it as JSON.
+test('a corrupt status.json produces parseable JSON whose verdict is FAIL, not PASS', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const config = { phases: { default: { checks: [{ name: 'noop', kind: 'command', run: 'node -e ""' }] } } }
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(config), 'utf8')
+    await writeFile(path.join(root, '.teammates', 'r1', 'status.json'), '{ not json', 'utf8')
+    lines.length = 0
+    // A derived run, so nothing else is on stdout: `--no-fleet` prints its own notice line,
+    // which would mask whether the verdict document itself is the whole output.
+    const code = await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--root', root], io)
+    assert.equal(code, 1)
+
+    const out = lines.join('\n')
+    assert.doesNotMatch(out, /"verdict": "PASS"/)
+    // The whole of stdout parses as JSON: no error line trailing the verdict document.
+    const parsed = JSON.parse(out)
+    assert.equal(parsed.verdict, 'FAIL')
+    assert.ok(parsed.failed.includes('run-state'))
+    assert.match(parsed.error, /could not read run state/)
+    // The computed check results are still carried, so the failure is attributable.
+    assert.ok(parsed.results.some((r) => r.name === 'noop' && r.status === 'pass'))
   })
 })
