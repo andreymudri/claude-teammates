@@ -33,6 +33,14 @@ test('a task with five declared files infers capable', () => {
   assert.equal(inferTier(task, [task]), 'capable')
 })
 
+// Pins the file-count threshold from below: four files is the largest task that is still not
+// capable on file count alone. Without this, `> 4` mutated to `>= 4` routes every four-file
+// task to the most expensive tier and the rest of the suite stays green.
+test('a task with four declared files, no fenced brief and no dependents infers mid', () => {
+  const task = makeTask({ files: ['a', 'b', 'c', 'd'], brief: '' })
+  assert.equal(inferTier(task, [task]), 'mid')
+})
+
 test('a task whose brief contains a fenced block and declares two files infers cheap', () => {
   const task = makeTask({ files: ['a', 'b'], brief: 'do this:\n```js\nconst x = 1\n```' })
   assert.equal(inferTier(task, [task]), 'cheap')
@@ -41,6 +49,14 @@ test('a task whose brief contains a fenced block and declares two files infers c
 test('the same fenced brief with three declared files infers mid', () => {
   const task = makeTask({ files: ['a', 'b', 'c'], brief: 'do this:\n```js\nconst x = 1\n```' })
   assert.equal(inferTier(task, [task]), 'mid')
+})
+
+// Pins the fence rule as an upper bound rather than an equality: one file is under the limit
+// and must still be cheap. Without this, `<= 2` mutated to `=== 2` demotes every single-file
+// fenced task to mid and the rest of the suite stays green.
+test('a fenced brief with a single declared file infers cheap', () => {
+  const task = makeTask({ files: ['a'], brief: 'do this:\n```js\nconst x = 1\n```' })
+  assert.equal(inferTier(task, [task]), 'cheap')
 })
 
 test('a task with no brief and two files infers mid', () => {
