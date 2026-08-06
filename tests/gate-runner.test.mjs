@@ -237,6 +237,21 @@ test('deriveContext does not treat a branch with only empty commits as integrate
   assert.deepEqual(ctx.integratedPhases, [])
 })
 
+// M1: a plan that parses to zero tasks must not read as "every phase is integrated". A
+// directory anchor (`git show <sha>:docs` renders a tree listing) parses to zero tasks the
+// same way an empty file would; derivePhase then returns `{phase: null}` with no error, and
+// runFilesetCheck's "nothing left to check" fast path passes vacuously while a task branch
+// can carry an undeclared file. An empty task list is a derive failure, not a clean run.
+test('deriveContext fails when the plan parses to zero tasks, naming the plan path and anchor', async () => {
+  const git = fakeGit({ fileAtCommit: async () => '' })
+  const ctx = await deriveContext({ git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, planPath: 'docs' })
+  assert.equal(ctx.currentPhase, null)
+  assert.ok(ctx.phaseError, 'expected a phaseError for a zero-task plan')
+  assert.match(ctx.phaseError, /docs/)
+  assert.match(ctx.phaseError, /anchorSha1/)
+  assert.deepEqual(ctx.tasks, [])
+})
+
 // --- runFilesetCheck ------------------------------------------------------------------------
 
 const T1_TASK = { id: 'T1', phase: 1, files: ['a.mjs'] }
@@ -331,6 +346,24 @@ test('runFilesetCheck lets a non-GitError propagate', async () => {
   const check = { name: 'fileset', kind: 'fileset' }
   const ctx = { git, runId: RUN_ID, anchorSha: 'anchorSha1', tasks: [T1_TASK], currentPhase: 1, phaseError: null }
   await assert.rejects(() => runFilesetCheck(check, ctx), /not a git error/)
+})
+
+// M2: `optional: true` is meaningful on a `command` check ("advisory") but on `fileset` or
+// `ownership` it means "detect the violation and ship anyway", which is never coherent. An
+// uncommitted manifest marking either check optional must not be able to disable enforcement
+// while appearing to record it — the result must always come back non-optional so
+// aggregateVerdict counts it.
+test('runFilesetCheck ignores optional:true and still fails the gate on a violation', async () => {
+  const git = fakeGit({
+    branchExists: async () => true,
+    changedFiles: async () => ['a.mjs', 'secret.mjs'],
+  })
+  const check = { name: 'fileset', kind: 'fileset', optional: true }
+  const ctx = { git, runId: RUN_ID, anchorSha: 'anchorSha1', tasks: [T1_TASK], currentPhase: 1, phaseError: null }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.equal(res.optional, false)
+  assert.equal(aggregateVerdict([res]).verdict, 'FAIL')
 })
 
 // --- runOwnershipCheck ------------------------------------------------------------------------
@@ -480,6 +513,16 @@ test('a commit whose sole parent sits on a task branch is still unexplained', as
   assert.match(res.output, /c1/)
 })
 
+test('runOwnershipCheck ignores optional:true and still fails the gate on a violation', async () => {
+  const git = fakeGit({ isDirty: async () => true })
+  const check = { name: 'ownership', kind: 'ownership', optional: true }
+  const ctx = { git, runId: RUN_ID, runBranch: RUN_BRANCH, anchorSha: 'anchorSha1', runSha: 'runSha1', tasks: [] }
+  const res = await runOwnershipCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.equal(res.optional, false)
+  assert.equal(aggregateVerdict([res]).verdict, 'FAIL')
+})
+
 // --- runChecks dispatch -----------------------------------------------------------------------
 
 test('runChecks dispatches command, fileset and ownership checks', async () => {
@@ -559,7 +602,7 @@ test('every ref-shaped argument reaching git is a sha or a fully-qualified ref',
   await deriveContext({ git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, planPath: 'plan.md' })
   await runFilesetCheck(
     { name: 'fileset', kind: 'fileset' },
-    { git, runId: RUN_ID, anchorSha: shaFor('anchor'), tasks: [T1_TASK], currentPhase: 1, phaseError: null },
+    { git, runId: RUN_ID, anchorSha: shaFor('anchor'), runSha: shaFor('run'), tasks: [T1_TASK], currentPhase: 1, phaseError: null },
   )
   await runOwnershipCheck(
     { name: 'ownership', kind: 'ownership' },
@@ -788,6 +831,58 @@ test('a merge that deletes the task branch\'s entire contribution is unexplained
 
     assert.equal(res.status, 'fail')
     assert.match(res.output, new RegExp(mergeSha))
+  })
+})
+
+// H1: `fileset` must diff a task branch against its actual fork point off the run branch, not
+// against the run anchor fixed at the start of the whole run. A phase-2 branch legitimately
+// forks from the run branch *after* phase 1 was merged into it, so phase 1's files land in a
+// phase-2 branch's diff against the (stale) anchor even though the phase-2 teammate never
+// touched them. `anchor...branch` does not save this either: once the anchor is an ancestor of
+// the branch, `merge-base(anchor, branch) == anchor`, so the three-dot diff degenerates to the
+// same two-dot diff. The fix diffs against `merge-base(runSha, branchSha)` instead — the task
+// branch's real fork point off the run branch as it stood when the teammate branched.
+test('runFilesetCheck does not blame a phase-2 branch for phase-1 files merged onto run before it forked (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'plan.md'), planMarkdown(), 'utf8')
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+
+    // Phase 1: T1 commits a.mjs, merged --no-ff onto run.
+    await sh(['checkout', '-b', T1_BRANCH])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', T1_BRANCH])
+
+    // Phase 2: T2 branches off run *after* phase 1 landed, and commits only b.mjs.
+    await sh(['checkout', '-b', T2_BRANCH])
+    await writeFile(path.join(root, 'b.mjs'), 'export const b = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T2 work'])
+    await sh(['checkout', 'run'])
+
+    const ctx = await deriveContext({ git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, planPath: 'plan.md' })
+    assert.equal(ctx.currentPhase, 2)
+    const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
+    assert.equal(res.status, 'pass', res.output)
+
+    // Extend: T2 also commits a stray file. The fail must name only the stray file, not
+    // a.mjs, which T2 never touched.
+    await sh(['checkout', T2_BRANCH])
+    await writeFile(path.join(root, 'stray.mjs'), 'export const stray = true\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T2 stray commit'])
+    await sh(['checkout', 'run'])
+
+    const ctx2 = await deriveContext({ git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, planPath: 'plan.md' })
+    const res2 = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx2)
+    assert.equal(res2.status, 'fail')
+    assert.match(res2.output, /stray\.mjs/)
+    assert.doesNotMatch(res2.output, /a\.mjs/)
   })
 })
 
