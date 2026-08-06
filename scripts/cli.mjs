@@ -3,7 +3,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parsePlan } from './plan-parser.mjs'
 import { assignPhases } from './phases.mjs'
-import { readState, writeState, claimTask, releaseClaim, readFixRounds } from './state.mjs'
+import { readState, writeState, claimTask, releaseClaim, readFixRounds, recordFixRound } from './state.mjs'
 import { loadGateConfig, inferGateConfig, checksForPhase, defaultMaxParallel, fixRoundsForPhase } from './gate-config.mjs'
 import { TIERS, inferTier } from './routing.mjs'
 import { decideFix } from './fix-loop.mjs'
@@ -13,7 +13,7 @@ import { generatePhaseWorkflow } from './workflow-gen.mjs'
 import { createGit, GitError } from './git.mjs'
 import { deriveContext } from './gate-runner.mjs'
 
-const USAGE = `usage: cli.mjs <init-run|gate|digest|claim|unclaim|workflow|complete|fix> [options]
+const USAGE = `usage: cli.mjs <init-run|gate|digest|claim|unclaim|workflow|complete|fix|record-fix-round> [options]
 
   init-run <planPath> --run <id> [--root <path>]
   gate     --run <id> --plan <path> [--base <branch>] [--root <path>] [--phase <name>] [--no-fleet]
@@ -22,7 +22,8 @@ const USAGE = `usage: cli.mjs <init-run|gate|digest|claim|unclaim|workflow|compl
   unclaim  --run <id> --task <id> [--root <path>]
   workflow --run <id> --phase <n> [--root <path>] [--models <json>]
   complete --run <id> --task <id> --plan <path> [--base <branch>] [--root <path>]
-  fix      --run <id> --phase <n> --verdict <path> [--root <path>]`
+  fix      --run <id> --phase <n> --verdict <path> [--root <path>]
+  record-fix-round --run <id> --phase <n> --task <id> [--root <path>]`
 
 // A flag followed by nothing, or by another flag, is a boolean switch (e.g. --no-fleet)
 // and takes no value. Without this, a boolean flag anywhere but the very last argv
@@ -66,7 +67,13 @@ const REQUIRED = {
   workflow: ['run', 'phase'],
   complete: ['run', 'task', 'plan'],
   fix: ['run', 'phase', 'verdict'],
+  'record-fix-round': ['run', 'phase', 'task'],
 }
+
+// Commands whose `--phase` names a numeric plan phase, not a manifest phase key. `gate` is
+// deliberately absent: its `--phase` is a NAME (`default`, `integration`) that selects a
+// block of checks from teammates.gate.json.
+const NUMERIC_PHASE_COMMANDS = new Set(['workflow', 'fix', 'record-fix-round'])
 
 // A skill branches on this CLI's exit code. A missing argument must produce the usage
 // message and exit 2, never an unhandled TypeError and a stack trace.
@@ -86,7 +93,12 @@ function missingArgs(command, flags, positional) {
     .filter((f) => !flags[f] || flags[f] === true)
     .map((f) => `--${f}`)
   if (command === 'init-run' && !positional[0]) missing.unshift('<planPath>')
-  if (command === 'workflow' && flags.phase && flags.phase !== true && !Number.isInteger(Number(flags.phase))) {
+  // Unvalidated, a non-numeric `--phase` reaches `fix`'s task filter, selects nothing, and
+  // comes back `escalate`/`unattributable` — "halt and ask the user" for what is only a
+  // mistyped flag, with a genuine retry lost. `default` is the likeliest mistype of all: it
+  // is the exact token `gate --phase` takes when omitted, and an operator carries it across.
+  if (NUMERIC_PHASE_COMMANDS.has(command)
+    && flags.phase && flags.phase !== true && !Number.isInteger(Number(flags.phase))) {
     missing.push('--phase <integer>')
   }
   return missing
@@ -260,7 +272,15 @@ export async function runCli(argv, io = { out: console.log }) {
     // in the dispatching skill, which passes its own tier map through here. Absent, the
     // generated agent() calls carry no model and inherit the session's, as before.
     let tierModels
-    if (flags.models !== undefined && flags.models !== true) {
+    // `--models` written as a bare switch parses as `true` (parseFlags's boolean-switch
+    // reading). Skipping it silently would exit 0 with a model-free workflow — the caller
+    // asked for routing and got none, with nothing on stdout to say so. Treated as the
+    // missing argument it is, exactly as missingArgs treats `=== true` for required flags.
+    if (flags.models === true) {
+      io.out('--models needs a value: a JSON object mapping tiers to model names')
+      return 2
+    }
+    if (flags.models !== undefined) {
       try {
         tierModels = JSON.parse(flags.models)
       } catch {
@@ -272,6 +292,16 @@ export async function runCli(argv, io = { out: console.log }) {
       if (tierModels === null || typeof tierModels !== 'object' || Array.isArray(tierModels)) {
         io.out('--models must be a JSON object mapping tiers to model names')
         return 2
+      }
+      // The container being an object is not enough: every value is emitted verbatim into
+      // the generated task list AND spread into the agent() options, so a nested object, a
+      // number or an empty string becomes a `model` field no dispatcher can act on and no
+      // reader can spot. A model name is a non-empty string or it is a mistake.
+      for (const [tier, model] of Object.entries(tierModels)) {
+        if (typeof model !== 'string' || model.trim() === '') {
+          io.out(`--models value for '${tier}' must be a non-empty string model name`)
+          return 2
+        }
       }
     }
 
@@ -316,7 +346,18 @@ export async function runCli(argv, io = { out: console.log }) {
     const results = await runChecks(checks, ctx)
     const verdict = aggregateVerdict(results)
     const branchShas = Object.assign({}, ...results.map((r) => r.branchShas ?? {}))
-    const bound = { ...verdict, anchorSha: ctx.anchorSha, planHash: ctx.planHash, branchShas, phase: ctx.currentPhase }
+    // `phase` is the numeric plan phase derived from git; `phaseName` is the manifest key
+    // this gate selected its checks under. They are two different key spaces and the
+    // verdict carries both, so `fix` can filter tasks by the number while looking the
+    // fix-round budget up under the very key that produced these checks.
+    const bound = {
+      ...verdict,
+      anchorSha: ctx.anchorSha,
+      planHash: ctx.planHash,
+      branchShas,
+      phase: ctx.currentPhase,
+      phaseName,
+    }
     io.out(JSON.stringify({ ...bound, results }, null, 2))
 
     // Recorded for digests and supervision. Nothing reads this to decide anything.
@@ -421,20 +462,66 @@ export async function runCli(argv, io = { out: console.log }) {
       return 1
     }
 
+    // Validated as an integer by missingArgs, then normalised: `--phase 01` and `--phase 1`
+    // must select the same tasks and read the same round counter, not two disjoint string
+    // keys. Every phase comparison below this line is numeric.
+    const phase = Number(flags.phase)
+
+    // The verdict names the phase it was computed for. A `--phase` that disagrees with it
+    // is an argument error, not a decision: adjudicating phase 3 against phase 1's verdict
+    // silently selects the wrong task set and reports `unattributable` for findings that
+    // are perfectly attributable to the phase that actually failed.
+    if (Number.isInteger(verdict?.phase) && verdict.phase !== phase) {
+      io.out(`--phase ${flags.phase} does not match the verdict's phase ${verdict.phase} at ${flags.verdict}\n\n${USAGE}`)
+      return 2
+    }
+
     const config = (await loadGateConfig(root)) ?? {}
     // decideFix attributes findings to the tasks that declared the cited files, so it must
     // see only the failing phase's tasks — a file declared by a later phase's task is not
     // this phase's to retry.
-    const phaseTasks = (plan.tasks ?? []).filter((t) => String(t.phase) === String(flags.phase))
+    const phaseTasks = (plan.tasks ?? []).filter((t) => Number(t.phase) === phase)
+    // Two key spaces meet here. Task selection and the round counter are keyed by the
+    // NUMERIC phase; teammates.gate.json is keyed by phase NAME (`default`, `integration`),
+    // which is what `gate --phase` selects checks under. The manifest key space wins for
+    // the budget, and the gate's own verdict carries the name it used forward as
+    // `phaseName` — so the budget comes from the same manifest block that produced these
+    // checks instead of missing and silently falling back to the default.
+    const budgetKey = typeof verdict?.phaseName === 'string' ? verdict.phaseName : String(phase)
     const decision = decideFix(
       verdict,
-      flags.phase,
+      phase,
       phaseTasks,
       // Already the per-phase `{ taskId: count }` map; decideFix does not index it again.
-      readFixRounds(status, flags.phase),
-      { fixRounds: fixRoundsForPhase(config, flags.phase) },
+      readFixRounds(status, phase),
+      { fixRounds: fixRoundsForPhase(config, budgetKey) },
     )
     io.out(JSON.stringify(decision, null, 2))
+    return 0
+  }
+
+  // The writer for the counter `fix` reads. Deliberately a separate subcommand rather than a
+  // side effect of `fix`: `fix` is a pure read that a caller may re-run freely (to re-inspect
+  // a decision, or after an unrelated crash), and a read that writes would double-count every
+  // one of those re-runs and burn the budget without a retry ever happening. The caller
+  // records a round when it ACTUALLY DISPATCHES a retry — that is the moment a round happens
+  // — and keeping the write separate from the decision is what makes it exactly-once.
+  if (command === 'record-fix-round') {
+    const phase = Number(flags.phase)
+    const plan = await readState(root, runId, 'plan')
+    if (!plan) { io.out(`no plan for run ${runId}`); return 1 }
+    const status = await readState(root, runId, 'status')
+    if (!status) { io.out(`no status for run ${runId}`); return 1 }
+
+    // A round is spent against a budget that belongs to one task in one phase, so the pair
+    // must exist in the plan. This also keeps an arbitrary caller-supplied string — say
+    // `__proto__` — from ever reaching the round map as a key.
+    const known = (plan.tasks ?? []).some((t) => t.id === flags.task && Number(t.phase) === phase)
+    if (!known) { io.out(`no task ${flags.task} in phase ${phase} of run ${runId}`); return 1 }
+
+    const next = recordFixRound(status, phase, flags.task)
+    await writeState(root, runId, 'status', next)
+    io.out(`${flags.task} phase ${phase} round ${readFixRounds(next, phase)[flags.task]}`)
     return 0
   }
 
