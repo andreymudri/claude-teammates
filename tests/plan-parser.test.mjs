@@ -201,6 +201,103 @@ const x = 1
   assert.ok(!tasks[0].brief.includes('b.mjs'))
 })
 
+test('the brief of the last task stops at a trailing document section', () => {
+  const plan = `### Task 9: Wire it up
+
+**Files:**
+- Modify: \`scripts/routing.mjs\`
+
+Pure prose describing the change, with no code at all.
+
+## Self-check
+
+Run the parser over the plan:
+
+\`\`\`bash
+node scripts/plan-parser.mjs docs/plans/x.md
+\`\`\`
+`
+  const tasks = parsePlan(plan)
+  assert.equal(tasks.length, 1)
+  assert.ok(tasks[0].brief.includes('Pure prose describing the change'))
+  assert.ok(!tasks[0].brief.includes('Self-check'), 'trailing ## section must not land in the brief')
+  assert.ok(!tasks[0].brief.includes('```'), 'a fence in a trailing section must not land in the brief')
+  assert.ok(!tasks[0].brief.includes('node scripts/plan-parser.mjs'))
+})
+
+test('the brief stops at a horizontal rule that closes the task list', () => {
+  const plan = `### Task 1: X
+
+**Files:**
+- Create: \`a.mjs\`
+
+Brief body.
+
+---
+
+Closing prose with a fence:
+
+\`\`\`
+### Task 7: Fake
+\`\`\`
+`
+  const tasks = parsePlan(plan)
+  assert.equal(tasks.length, 1)
+  assert.ok(tasks[0].brief.includes('Brief body.'))
+  assert.ok(!tasks[0].brief.includes('Closing prose'), 'prose after --- must not land in the brief')
+  assert.ok(!tasks[0].brief.includes('```'), 'a fence after --- must not land in the brief')
+})
+
+test('a ## heading inside a fenced block does not end the task brief', () => {
+  const plan = `### Task 1: X
+
+**Files:**
+- Create: \`a.mjs\`
+
+Brief body.
+
+\`\`\`markdown
+## Not a real section
+
+---
+\`\`\`
+
+Still the same task brief.
+`
+  const tasks = parsePlan(plan)
+  assert.equal(tasks.length, 1)
+  assert.ok(tasks[0].brief.includes('```markdown'), 'fences inside a task body stay in the brief')
+  assert.ok(tasks[0].brief.includes('## Not a real section'))
+  assert.ok(tasks[0].brief.includes('Still the same task brief.'))
+})
+
+test('a document section between two tasks does not leak into either brief', () => {
+  const plan = `### Task 1: X
+
+**Files:**
+- Create: \`a.mjs\`
+
+First brief.
+
+## Interlude
+
+Interlude prose.
+
+### Task 2: Y
+
+**Files:**
+- Create: \`b.mjs\`
+
+Second brief.
+`
+  const tasks = parsePlan(plan)
+  assert.equal(tasks.length, 2)
+  assert.ok(tasks[0].brief.includes('First brief.'))
+  assert.ok(!tasks[0].brief.includes('Interlude'))
+  assert.ok(tasks[1].brief.includes('Second brief.'))
+  assert.ok(!tasks[1].brief.includes('Interlude'))
+})
+
 test('parses an unrecognised Model value without throwing', () => {
   const plan = '### Task 1: X\n\n**Files:**\n- Create: `a.mjs`\n\n**Model:** enormous\n'
   const tasks = parsePlan(plan)

@@ -6,6 +6,10 @@ const DEPENDS_LINE = /^\*\*Depends:\*\*\s*(.+?)\s*$/
 // A second check here would let the two drift apart silently.
 const MODEL_LINE = /^\*\*Model:\*\*\s*(.+?)\s*$/
 const SECTION_BREAK = /^(\*\*|###|- \[[ x]\])/
+// Ends a task body: a document-level `## ` heading or a `---` rule. `### ` does not match,
+// so task headings stay the business of TASK_HEADING. Only consulted outside a fence, so a
+// `## ` or `---` written inside a task's fenced code block stays part of that task's brief.
+const DOC_BREAK = /^(##\s|-{3,}\s*$)/
 const NO_DEPS_SENTINELS = new Set(['none', 'n/a', 'na', '-', ''])
 
 export function parsePlan(markdown) {
@@ -19,7 +23,12 @@ export function parsePlan(markdown) {
   let fenceLength = 0
 
   for (const line of lines) {
-    if (current && !TASK_HEADING.test(line)) current.brief.push(line)
+    // `inFence` still holds the state from before this line, so a closing fence and every
+    // line within the block read as "inside a fence" here.
+    if (current) {
+      if (!inFence && DOC_BREAK.test(line)) current = null
+      else if (!TASK_HEADING.test(line)) current.brief.push(line)
+    }
     // Check for fence open/close
     const trimmed = line.trimStart()
     const fenceMatch = trimmed.match(/^(`{3,}|~{3,})/)
