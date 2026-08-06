@@ -10,8 +10,9 @@ branches; you bring those branches together.
 
 - Merge each teammate branch with `--no-ff`. The ownership check explains a commit on the run
   branch by finding it reachable from a task branch, or by finding it is a merge commit whose
-  second parent is. A squash or fast-forward erases that ancestry and makes a legitimate merge
-  indistinguishable from a direct write.
+  secondary parents are each an ancestor of a task branch or of the base branch (the latter is
+  how a mid-run plan amendment reaches the anchor). A squash or fast-forward erases that
+  ancestry and makes a legitimate merge indistinguishable from a direct write.
 - Merge in dependency order, one branch at a time. Verify the working tree is clean between
   merges.
 - Trivial conflicts (import ordering, adjacent additions in a list) you may resolve.

@@ -59,18 +59,24 @@ test('the integrator requires --no-ff and records no integration', async () => {
   assert.doesNotMatch(body, /\bintegrated\b/i)
 })
 
+// Normalize whitespace and backticks so a phrase's polarity binding does not depend on where
+// the markdown source happens to wrap a line or how it decorates a term with backticks.
+function phrase(body) {
+  return body.replace(/[`*]/g, '').replace(/\s+/g, ' ')
+}
+
 test('the integrator forbids update-ref and states its consequence', async () => {
   const { body } = await frontmatter('tm-integrator.md')
   assert.match(
-    body,
-    /Never advance the branch with `git update-ref`[\s\S]{0,200}index then describes a tree it does not\s*\ncontain/i,
+    phrase(body),
+    /Never advance the branch with git update-ref[\s\S]{0,200}index then describes a tree it does not contain/i,
   )
 })
 
 test('the integrator reports blocked when the run branch is held by another worktree', async () => {
   const { body } = await frontmatter('tm-integrator.md')
   assert.match(
-    body,
-    /checkout fails because the branch is checked out elsewhere[\s\S]{0,120}stop and report `?blocked`?/i,
+    phrase(body),
+    /checkout fails because the branch is checked out elsewhere[\s\S]{0,120}stop and report blocked/i,
   )
 })
