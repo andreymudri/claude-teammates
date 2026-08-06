@@ -1622,3 +1622,100 @@ test('a corrupt status.json produces parseable JSON whose verdict is FAIL, not P
     assert.ok(parsed.results.some((r) => r.name === 'noop' && r.status === 'pass'))
   })
 })
+
+// --- Task 4: a manifest's preview.link must actually reach runChecks -----------------------
+//
+// gate-config.mjs's previewLinks(config) existed since T2 but nothing called it: `gate`
+// built ctx as `{ cwd: root, ...(await derive(...)) }`, so ctx.previewLink was always
+// undefined and no link was ever created end to end. These pin that the `gate` path wires
+// the saved manifest's preview.link through to the merge preview, and that a manifest
+// without one still yields the pre-existing, link-free behaviour.
+
+const ONE_TASK_PLAN = `### Task 1: A
+
+**Files:**
+- Create: \`a.mjs\`
+`
+
+test('gate wires a manifest\'s preview.link through to the merge preview', async () => {
+  await withRepo(async ({ root, io, lines, git: gitCmd }) => {
+    const planPath = path.join(root, 'plan.md')
+    gitCmd(['checkout', '--quiet', 'main'])
+    await writeFile(planPath, ONE_TASK_PLAN, 'utf8')
+    // Ignored so the real, untracked `deps` directory created below never reads as a dirty
+    // worktree to the ownership check — the same reason `.teammates/` is ignored.
+    const gitignore = await readFile(path.join(root, '.gitignore'), 'utf8')
+    await writeFile(path.join(root, '.gitignore'), `${gitignore}deps/\n`, 'utf8')
+    await writeFile(
+      path.join(root, 'teammates.gate.json'),
+      JSON.stringify({
+        preview: { link: ['deps'] },
+        phases: {
+          default: {
+            checks: [{
+              name: 'reads-linked-file',
+              kind: 'command',
+              run: 'node -e "process.exit(require(\'fs\').existsSync(\'deps/marker.txt\') ? 0 : 1)"',
+            }],
+          },
+        },
+      }),
+      'utf8',
+    )
+    gitCmd(['add', 'plan.md', 'teammates.gate.json', '.gitignore'])
+    gitCmd(['commit', '--quiet', '-m', 'plan, gate manifest with preview.link, and gitignore'])
+    gitCmd(['checkout', '--quiet', 'run-branch'])
+    gitCmd(['merge', '--quiet', '--ff-only', 'main'])
+
+    // The linked directory is real content sitting in the actual repository working tree —
+    // preview.link resolves against ctx.cwd (the repo root), not against anything committed.
+    await mkdir(path.join(root, 'deps'), { recursive: true })
+    await writeFile(path.join(root, 'deps', 'marker.txt'), 'linked build input\n', 'utf8')
+
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+
+    gitCmd(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    gitCmd(['add', 'a.mjs'])
+    gitCmd(['commit', '--quiet', '-m', 'T1 work'])
+    gitCmd(['checkout', '--quiet', 'run-branch'])
+
+    lines.length = 0
+    const code = await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--root', root], io)
+    assert.equal(code, 0, lines.join('\n'))
+    const parsed = JSON.parse(lines.join('\n'))
+    assert.equal(parsed.verdict, 'PASS')
+    assert.ok(
+      parsed.results.some((r) => r.name === 'reads-linked-file' && r.status === 'pass'),
+      'the command check must have found the linked file inside the preview',
+    )
+  })
+})
+
+test('gate passes no links when the manifest declares no preview.link', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: gitCmd }) => {
+    gitCmd(['checkout', '--quiet', 'main'])
+    await writeEnforcementManifest(root)
+    gitCmd(['add', 'teammates.gate.json'])
+    gitCmd(['commit', '--quiet', '-m', 'gate manifest'])
+    gitCmd(['checkout', '--quiet', 'run-branch'])
+    gitCmd(['merge', '--quiet', '--ff-only', 'main'])
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+
+    gitCmd(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    gitCmd(['add', 'a.mjs'])
+    gitCmd(['commit', '--quiet', '-m', 'T1 work'])
+    gitCmd(['checkout', '--quiet', 'run-branch'])
+
+    lines.length = 0
+    const code = await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--root', root], io)
+    assert.equal(code, 0, lines.join('\n'))
+    const parsed = JSON.parse(lines.join('\n'))
+    // PASS with no link-related error is exactly today's pre-existing, link-free behaviour
+    // for a manifest without a preview field: ctx.previewLink resolves to [], and the merge
+    // preview needs no repoRoot to satisfy zero link entries.
+    assert.equal(parsed.verdict, 'PASS')
+    assert.ok(!parsed.error, 'a manifest without preview.link must never fail while resolving a link')
+  })
+})

@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { parsePlan } from './plan-parser.mjs'
 import { assignPhases } from './phases.mjs'
 import { readState, writeState, claimTask, releaseClaim, readFixRounds, recordFixRound } from './state.mjs'
-import { loadGateConfig, inferGateConfig, checksForPhase, defaultMaxParallel, fixRoundsForPhase } from './gate-config.mjs'
+import { loadGateConfig, inferGateConfig, checksForPhase, defaultMaxParallel, fixRoundsForPhase, previewLinks } from './gate-config.mjs'
 import { TIERS, inferTier } from './routing.mjs'
 import { decideFix } from './fix-loop.mjs'
 import { runChecks, aggregateVerdict } from './gate-runner.mjs'
@@ -437,7 +437,7 @@ export async function runCli(argv, io = { out: console.log }) {
     let ctx = { cwd: root }
     if (!solo) {
       try {
-        ctx = { cwd: root, ...(await derive(root, runId, flags)) }
+        ctx = { cwd: root, previewLink: previewLinks(config), ...(await derive(root, runId, flags)) }
       } catch (err) {
         io.out(JSON.stringify({ verdict: 'FAIL', failed: ['derive'], error: err.message }, null, 2))
         return 1
