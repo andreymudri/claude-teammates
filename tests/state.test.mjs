@@ -3,7 +3,15 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { runDir, readState, writeState, claimTask, releaseClaim } from '../scripts/state.mjs'
+import {
+  runDir,
+  readState,
+  writeState,
+  claimTask,
+  releaseClaim,
+  readFixRounds,
+  recordFixRound,
+} from '../scripts/state.mjs'
 
 async function withTempRoot(fn) {
   const root = await mkdtemp(path.join(tmpdir(), 'tm-'))
@@ -72,4 +80,30 @@ test('concurrent claims on one task produce exactly one winner', async () => {
     )
     assert.equal(results.filter(Boolean).length, 1)
   })
+})
+
+test('readFixRounds returns {} for a status with no fixRounds, and for null', () => {
+  assert.deepEqual(readFixRounds({}, 'Implement'), {})
+  assert.deepEqual(readFixRounds(null, 'Implement'), {})
+})
+
+test('readFixRounds accepts a numeric phase and a string phase interchangeably', () => {
+  const status = { fixRounds: { '2': { T1: 1 } } }
+  assert.deepEqual(readFixRounds(status, 2), { T1: 1 })
+  assert.deepEqual(readFixRounds(status, '2'), { T1: 1 })
+})
+
+test('recordFixRound increments from absent to 1, then 1 to 2', () => {
+  let status = recordFixRound({}, 'Implement', 'T1')
+  assert.equal(status.fixRounds.Implement.T1, 1)
+  status = recordFixRound(status, 'Implement', 'T1')
+  assert.equal(status.fixRounds.Implement.T1, 2)
+})
+
+test('recordFixRound does not mutate the status object it was given, and leaves another phase untouched', () => {
+  const before = { fixRounds: { Verify: { T2: 3 } } }
+  const after = recordFixRound(before, 'Implement', 'T1')
+  assert.deepEqual(before, { fixRounds: { Verify: { T2: 3 } } })
+  assert.deepEqual(after.fixRounds.Verify, { T2: 3 })
+  assert.equal(after.fixRounds.Implement.T1, 1)
 })
