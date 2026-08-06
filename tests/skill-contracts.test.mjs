@@ -182,3 +182,20 @@ test('phase-gate states that conflicts are escalated rather than retried', async
   const normalized = body.replace(/\s+/g, ' ')
   assert.match(normalized, /conflict.*escalate.*do not retry/i, 'phase-gate must state that conflicts are escalated and not retried')
 })
+
+test('phase-gate documents preview.link and states links are shared, not copied', async () => {
+  const { body } = await skill('phase-gate')
+  assert.match(body, /preview\.link/, 'phase-gate must mention preview.link')
+  // Polarity requires a literal phrase, not scattered tokens. Assert the exact claim and its negation.
+  assert.match(body, /shared, not copies?/i, 'phase-gate must state "shared, not copies"')
+  assert.doesNotMatch(body, /links are copie/i, 'phase-gate must not claim links are copied')
+})
+
+test('phase-gate states that a failed link fails the merge check', async () => {
+  const { body } = await skill('phase-gate')
+  // Polarity requires a literal phrase, not scattered tokens. Assert the exact claim and its negation.
+  // The sentence must state the link IS reported as a merge failure.
+  assert.match(body, /is reported as a merge failure/i, 'phase-gate must state "is reported as a merge failure"')
+  // The sentence must NOT state the link is reported as a command-check failure.
+  assert.doesNotMatch(body, /link[^.]*is reported as a command-check failure/i, 'phase-gate must not state a link is reported as a command-check failure')
+})
