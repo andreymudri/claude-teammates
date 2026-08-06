@@ -3,23 +3,26 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parsePlan } from './plan-parser.mjs'
 import { assignPhases } from './phases.mjs'
-import { readState, writeState, claimTask, releaseClaim } from './state.mjs'
-import { loadGateConfig, inferGateConfig, checksForPhase, defaultMaxParallel } from './gate-config.mjs'
+import { readState, writeState, claimTask, releaseClaim, readFixRounds } from './state.mjs'
+import { loadGateConfig, inferGateConfig, checksForPhase, defaultMaxParallel, fixRoundsForPhase } from './gate-config.mjs'
+import { TIERS, inferTier } from './routing.mjs'
+import { decideFix } from './fix-loop.mjs'
 import { runChecks, aggregateVerdict } from './gate-runner.mjs'
 import { renderDigest } from './digest.mjs'
 import { generatePhaseWorkflow } from './workflow-gen.mjs'
 import { createGit, GitError } from './git.mjs'
 import { deriveContext } from './gate-runner.mjs'
 
-const USAGE = `usage: cli.mjs <init-run|gate|digest|claim|unclaim|workflow|complete> [options]
+const USAGE = `usage: cli.mjs <init-run|gate|digest|claim|unclaim|workflow|complete|fix> [options]
 
   init-run <planPath> --run <id> [--root <path>]
   gate     --run <id> --plan <path> [--base <branch>] [--root <path>] [--phase <name>] [--no-fleet]
   digest   --run <id> [--root <path>]
   claim    --run <id> --task <id> --by <teammate> [--root <path>]
   unclaim  --run <id> --task <id> [--root <path>]
-  workflow --run <id> --phase <n> [--root <path>]
-  complete --run <id> --task <id> --plan <path> [--base <branch>] [--root <path>]`
+  workflow --run <id> --phase <n> [--root <path>] [--models <json>]
+  complete --run <id> --task <id> --plan <path> [--base <branch>] [--root <path>]
+  fix      --run <id> --phase <n> --verdict <path> [--root <path>]`
 
 // A flag followed by nothing, or by another flag, is a boolean switch (e.g. --no-fleet)
 // and takes no value. Without this, a boolean flag anywhere but the very last argv
@@ -62,6 +65,7 @@ const REQUIRED = {
   unclaim: ['run', 'task'],
   workflow: ['run', 'phase'],
   complete: ['run', 'task', 'plan'],
+  fix: ['run', 'phase', 'verdict'],
 }
 
 // A skill branches on this CLI's exit code. A missing argument must produce the usage
@@ -185,6 +189,23 @@ export async function runCli(argv, io = { out: console.log }) {
 
   if (command === 'init-run') {
     const tasks = assignPhases(parsePlan(await readFile(positional[0], 'utf8')))
+
+    // Every task carries a tier from here on, so no consumer has to re-derive one.
+    // `plan-parser.mjs` records a declared tier verbatim and validates nothing; the
+    // vocabulary lives in routing.mjs, so this is the single place that checks it. A typo
+    // must fail the run at init, not silently route a task to a tier no dispatcher knows.
+    for (const task of tasks) {
+      if (task.tierSource === 'declared') {
+        if (!TIERS.includes(task.tier)) {
+          io.out(`${task.id}: unknown model tier '${task.tier}' (expected ${TIERS.join(', ')})`)
+          return 2
+        }
+        continue
+      }
+      task.tier = inferTier(task, tasks)
+      task.tierSource = 'inferred'
+    }
+
     const totalPhases = tasks.reduce((max, t) => Math.max(max, t.phase), 0)
     const config = await loadGateConfig(root)
     await writeState(root, runId, 'plan', { runId, totalPhases, tasks })
@@ -198,7 +219,13 @@ export async function runCli(argv, io = { out: console.log }) {
       tasks: tasks.map((t) => ({ id: t.id, title: t.title, state: 'pending' })),
     })
     for (let p = 1; p <= totalPhases; p += 1) {
-      const ids = tasks.filter((t) => t.phase === p).map((t) => t.id).join(', ')
+      // Tier and its source are printed, not just the ids: routing decides what every
+      // dispatch in the phase costs, and an operator should see an inference they disagree
+      // with before the run starts, while a Model line is still cheap to add.
+      const ids = tasks
+        .filter((t) => t.phase === p)
+        .map((t) => `${t.id} (${t.tier}, ${t.tierSource})`)
+        .join(', ')
       io.out(`phase ${p}: ${ids}`)
     }
     return 0
@@ -228,11 +255,32 @@ export async function runCli(argv, io = { out: console.log }) {
     if (!plan) { io.out(`no plan for run ${runId}`); return 1 }
     const phase = Number(flags.phase)
     const config = await loadGateConfig(root)
+
+    // Concrete model names never enter this repository or teammates.gate.json — they live
+    // in the dispatching skill, which passes its own tier map through here. Absent, the
+    // generated agent() calls carry no model and inherit the session's, as before.
+    let tierModels
+    if (flags.models !== undefined && flags.models !== true) {
+      try {
+        tierModels = JSON.parse(flags.models)
+      } catch {
+        // A caller branches on this exit code. A malformed map must produce a message and
+        // 2, never a raw SyntaxError stack from deep inside JSON.parse.
+        io.out('--models must be a JSON object mapping tiers to model names')
+        return 2
+      }
+      if (tierModels === null || typeof tierModels !== 'object' || Array.isArray(tierModels)) {
+        io.out('--models must be a JSON object mapping tiers to model names')
+        return 2
+      }
+    }
+
     const src = await generatePhaseWorkflow({
       runId,
       phase,
       tasks: plan.tasks.filter((t) => t.phase === phase),
       maxParallel: config?.maxParallel ?? defaultMaxParallel(),
+      tierModels,
     })
     io.out(src)
     return 0
@@ -349,6 +397,44 @@ export async function runCli(argv, io = { out: console.log }) {
     task.state = 'done'
     await writeState(root, runId, 'status', status)
     io.out(`${flags.task} done`)
+    return 0
+  }
+
+  // Every computed decision — `none`, `retry`, and `escalate` alike — exits 0. The caller
+  // reads the `decision` field, not the exit code: a retry also has to carry the task list
+  // and the tier each task retries at, and an exit code cannot carry that. A non-zero exit
+  // here means this command could not compute a decision at all (missing run state, an
+  // unreadable verdict), which is a different condition from "the phase must escalate".
+  //
+  // This command decides nothing about the gate itself. The verdict it reads was computed
+  // from git by `gate`; nothing here can turn a FAIL into a PASS.
+  if (command === 'fix') {
+    const plan = await readState(root, runId, 'plan')
+    if (!plan) { io.out(`no plan for run ${runId}`); return 1 }
+    const status = await readState(root, runId, 'status')
+
+    let verdict
+    try {
+      verdict = JSON.parse(await readFile(flags.verdict, 'utf8'))
+    } catch (err) {
+      io.out(`cannot read verdict at ${flags.verdict}: ${err.message}`)
+      return 1
+    }
+
+    const config = (await loadGateConfig(root)) ?? {}
+    // decideFix attributes findings to the tasks that declared the cited files, so it must
+    // see only the failing phase's tasks — a file declared by a later phase's task is not
+    // this phase's to retry.
+    const phaseTasks = (plan.tasks ?? []).filter((t) => String(t.phase) === String(flags.phase))
+    const decision = decideFix(
+      verdict,
+      flags.phase,
+      phaseTasks,
+      // Already the per-phase `{ taskId: count }` map; decideFix does not index it again.
+      readFixRounds(status, flags.phase),
+      { fixRounds: fixRoundsForPhase(config, flags.phase) },
+    )
+    io.out(JSON.stringify(decision, null, 2))
     return 0
   }
 
