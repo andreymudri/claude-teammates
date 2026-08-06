@@ -24,6 +24,9 @@ export function inferGateConfig(pkg) {
     .filter((name) => typeof scripts[name] === 'string')
     .map((name) => ({ name, kind: 'command', run: `npm run ${name}` }))
 
+  checks.push({ name: 'fileset', kind: 'fileset' })
+  checks.push({ name: 'ownership', kind: 'ownership' })
+
   checks.push({
     name: 'review',
     kind: 'agent',

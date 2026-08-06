@@ -27,7 +27,19 @@ test('loadGateConfig reads the manifest', async () => {
 test('inferGateConfig includes only scripts that exist', () => {
   const config = inferGateConfig({ scripts: { test: 'vitest run', build: 'next build' } })
   const names = config.phases.default.checks.map((c) => c.name)
-  assert.deepEqual(names, ['test', 'build', 'review'])
+  assert.deepEqual(names, ['test', 'build', 'fileset', 'ownership', 'review'])
+})
+
+test('inferGateConfig always appends fileset and ownership checks before review', () => {
+  const config = inferGateConfig({ scripts: { test: 'node --test' } })
+  const names = config.phases.default.checks.map((c) => c.name)
+  assert.deepEqual(names, ['test', 'fileset', 'ownership', 'review'])
+  const fileset = config.phases.default.checks.find((c) => c.name === 'fileset')
+  const ownership = config.phases.default.checks.find((c) => c.name === 'ownership')
+  assert.equal(fileset.kind, 'fileset')
+  assert.notEqual(fileset.optional, true)
+  assert.equal(ownership.kind, 'ownership')
+  assert.notEqual(ownership.optional, true)
 })
 
 test('inferGateConfig orders typecheck, lint, test, build', () => {
