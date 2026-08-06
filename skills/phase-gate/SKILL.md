@@ -34,9 +34,32 @@ any non-optional check is still pending.
 
 ## On FAIL
 
-Halt before integration. Report, in this order: which check failed, the exact command output
-or finding list, the offending diff hunks, and the owning teammate. Then offer three choices —
-retry the failing task with the findings fed back, override and proceed, or abort the phase.
+Ask the CLI what to do before asking the user:
+
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" fix --run <runId> --phase <n> --root <root> \
+      --verdict <path to the verdict JSON>
+
+It prints a decision. On `retry`, redispatch each listed task at the listed `tier`, resuming
+the same teammate so it keeps its task context, and hand it the failing check names and the
+surviving findings. Then run the gate again from scratch — never reuse the previous verdict,
+and never re-run only the failing check.
+
+A retried teammate that returns `blocked` ends the loop immediately. `blocked` means missing
+input, and further rounds cannot supply it.
+
+On `escalate`, halt before integration and report, in this order: the escalation reason, which
+check failed, the exact command output or finding list, the offending diff hunks, the owning
+teammate, and the round history — which tier ran each round and what failed each time. Then
+offer three choices: retry the failing task with the findings fed back, override and proceed,
+or abort the phase.
+
+A PASS reached after N fix rounds is reported as such, never as a clean first-pass PASS.
+
+**The round budget is a cost bound, not a security bound.** `fixRounds` lives in `status.json`,
+which is written by the agents the gate enforces. A teammate that rewrites its own count buys
+itself more retries — wasted tokens, not a false PASS, because the verdict is recomputed from
+git every round. Do not describe the loop as tamper-evident; only `fileset` and `ownership`
+carry that property.
 
 ## What the enforcement checks do and do not cover
 

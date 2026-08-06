@@ -49,3 +49,22 @@ test('adapted skills credit the upstream project', async () => {
     assert.match(body, /Adapted from the MIT-licensed superpowers plugin/, `${name}: missing attribution line`)
   }
 })
+
+test('parallel-execution documents all three model tiers and the --models flag', async () => {
+  const { body } = await skill('parallel-execution')
+  assert.match(body, /\bcheap\b/)
+  assert.match(body, /\bmid\b/)
+  assert.match(body, /\bcapable\b/)
+  assert.match(body, /--models/)
+})
+
+test('phase-gate documents the fix subcommand and the cost-bound framing', async () => {
+  const { body } = await skill('phase-gate')
+  assert.match(body, /cli\.mjs["']?\s+fix\b/)
+  assert.match(body, /cost bound, not a security bound/)
+})
+
+test('tm-implementer forbids weakening a test to satisfy a fix-round finding', async () => {
+  const body = await readFile(new URL('../agents/tm-implementer.md', import.meta.url), 'utf8')
+  assert.match(body, /do not weaken or delete a test/i)
+})

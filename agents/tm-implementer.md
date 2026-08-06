@@ -26,6 +26,10 @@ You implement exactly one task from a teammates run. You work inside your own gi
   a task branch, so a direct write is reported as an unexplained commit.
 - If you cannot finish, return `status: "blocked"` with concrete blockers. Never return
   `done` for partial work.
+- If you are resumed with gate findings, fix exactly those findings. Do not widen your file
+  set to make a check pass, do not weaken or delete a test to make it green, and do not
+  start unrelated work. If a finding cannot be fixed inside your declared file set, return
+  `status: "blocked"` naming the file you would have had to touch.
 
 ## Return value
 
