@@ -1,4 +1,7 @@
 node_modules/
 .teammates/
+# Agent worktrees live here during a fleet run. Untracked, they make the main
+# worktree permanently dirty and the ownership check fail for the whole run.
+.claude/
 *.log
 .env
