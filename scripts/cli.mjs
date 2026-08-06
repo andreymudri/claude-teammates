@@ -16,7 +16,7 @@ import { deriveContext } from './gate-runner.mjs'
 const USAGE = `usage: cli.mjs <init-run|gate|digest|claim|unclaim|workflow|complete|fix|record-fix-round> [options]
 
   init-run <planPath> --run <id> [--root <path>]
-  gate     --run <id> --plan <path> [--base <branch>] [--root <path>] [--phase <name>] [--no-fleet]
+  gate     --run <id> --plan <path> [--base <branch>] [--root <path>] [--phase <name>] [--no-fleet] [--results <path>]
   digest   --run <id> [--root <path>]
   claim    --run <id> --task <id> --by <teammate> [--root <path>]
   unclaim  --run <id> --task <id> [--root <path>]
@@ -101,6 +101,12 @@ function missingArgs(command, flags, positional) {
     && flags.phase && flags.phase !== true && !Number.isInteger(Number(flags.phase))) {
     missing.push('--phase <integer>')
   }
+  // `--results` is optional, so it is not in REQUIRED — but once given it takes a value, and
+  // a bare `--results` parses as `true` (parseFlags's boolean-switch reading). Left alone,
+  // the gate's own `flags.results !== true` guard skips the whole supplied-results block and
+  // the run exits 1 on the still-pending checks with nothing on stdout about the dropped
+  // flag. Same treatment every value-taking flag gets from the `=== true` rule above.
+  if (command === 'gate' && flags.results === true) missing.push('--results <path>')
   return missing
 }
 
@@ -132,6 +138,83 @@ async function resolveBaseBranch(git, flag) {
   }
   if (present.length === 1) return present[0]
   throw new Error('could not determine the base branch — pass --base')
+}
+
+// Only the checks the CLI cannot run itself may be supplied. `command`, `fileset` and
+// `ownership` are computed, so they are never in this set.
+const SUPPLIABLE_KINDS = new Set(['agent', 'mcp'])
+// The same vocabulary aggregateVerdict recognises, minus `pending` — supplying "still
+// pending" says nothing, and anything outside the set is an error rather than a pass.
+const SUPPLIED_STATUSES = new Set(['pass', 'fail', 'skip'])
+
+// `--results` is caller input for one run, never persisted authority. A result for a computed
+// check would be a way to hand the gate a passing `fileset`, so those are rejected outright.
+//
+// Module-private on purpose: this is a trust boundary, every branch below is covered
+// end-to-end through `runCli`, and nothing outside this module has any business calling it.
+function validateSuppliedResults(supplied, checks) {
+  const byName = new Map()
+  const duplicated = new Set()
+  for (const c of checks) {
+    if (byName.has(c.name)) duplicated.add(c.name)
+    byName.set(c.name, c)
+  }
+  for (const r of supplied) {
+    // `checksForPhase` does not enforce unique check names, and a name that resolves to more
+    // than one check cannot be validated: `byName` would resolve it to exactly one (last
+    // wins) while the merge below fills EVERY pending result carrying that name — so a
+    // manifest declaring `{name:'test',kind:'command'}` and `{name:'test',kind:'agent'}`
+    // would let an `agent` result land on the `command` check. Whether the file was accepted
+    // would then depend on declaration order rather than on what gets written. Reject the
+    // collision instead of resolving it.
+    if (duplicated.has(r?.name)) {
+      return `--results names a check declared more than once in this phase's manifest: ${JSON.stringify(r?.name)}`
+    }
+    const check = byName.get(r?.name)
+    if (!check) return `--results names a check not in this phase's manifest: ${JSON.stringify(r?.name)}`
+    if (!SUPPLIABLE_KINDS.has(check.kind)) return `--results may not supply a ${check.kind} check: ${check.name}`
+    if (!SUPPLIED_STATUSES.has(r.status)) return `--results carries an unrecognized status for ${check.name}: ${JSON.stringify(r.status)}`
+  }
+  return null
+}
+
+// Fills in the pending results only. A check the gate actually ran keeps its computed result,
+// so a supplied entry can never overwrite what the CLI itself determined. The merged list is
+// then handed to aggregateVerdict, which stays the only producer of a verdict — that is what
+// makes a recorded PASS CLI-computed rather than hand-written.
+//
+// `status`, `output` and `findings` come from the supplied entry — that is what the caller is
+// reporting. `optional` is taken from the COMPUTED result and never from the file: `optional`
+// is a manifest declaration that a check does not block, so letting a result declare itself
+// optional would turn a failing required review advisory by way of the very file reporting
+// its failure (PASS, exit 0, the failure demoted into `optionalFailed`).
+//
+// Each supplied entry is consumed once, so a name appearing twice in the raw results fills
+// only the first pending one and any collision is left pending rather than silently passed.
+// validateSuppliedResults already rejects duplicate names outright; this keeps the invariant
+// local to the function that does the writing.
+//
+// The `status !== 'pending'` guard is dormant future-proofing rather than dead code: no
+// suppliable kind has a runner today, so the gate always leaves `agent`/`mcp` pending. The
+// moment one of them does run, a supplied result must not overwrite the computed one.
+export function mergeSuppliedResults(rawResults, supplied) {
+  const unused = new Map()
+  for (const r of supplied) {
+    if (!unused.has(r.name)) unused.set(r.name, r)
+  }
+  return rawResults.map((r) => {
+    const s = unused.get(r.name)
+    if (!s || r.status !== 'pending') return r
+    unused.delete(r.name)
+    return {
+      name: r.name,
+      kind: r.kind,
+      status: s.status,
+      output: s.output ?? '',
+      optional: r.optional,
+      findings: s.findings ?? [],
+    }
+  })
 }
 
 async function derive(root, runId, flags) {
@@ -333,6 +416,24 @@ export async function runCli(argv, io = { out: console.log }) {
     const checks = solo ? all.filter((c) => c.kind !== 'fileset' && c.kind !== 'ownership') : all
     if (solo) io.out('--no-fleet: enforcement checks are not running')
 
+    // Read once, at the moment of the run. The file is never persisted and never read back
+    // from `.teammates/`; it fills in this run's pending checks and nothing else.
+    let supplied = []
+    // A valueless `--results` never reaches here: missingArgs rejects it as the missing
+    // argument it is, rather than letting this guard silently drop the flag.
+    if (flags.results) {
+      try {
+        const parsed = JSON.parse(await readFile(flags.results, 'utf8'))
+        supplied = Array.isArray(parsed?.results) ? parsed.results : null
+      } catch {
+        supplied = null
+      }
+      if (supplied === null) {
+        io.out('--results must be a readable JSON file shaped { "results": [...] }\n')
+        return 2
+      }
+    }
+
     let ctx = { cwd: root }
     if (!solo) {
       try {
@@ -343,14 +444,17 @@ export async function runCli(argv, io = { out: console.log }) {
       }
     }
 
-    const results = await runChecks(checks, ctx)
+    const rawResults = await runChecks(checks, ctx)
+    const invalid = validateSuppliedResults(supplied, checks)
+    if (invalid) { io.out(`${invalid}\n`); return 2 }
+    const results = mergeSuppliedResults(rawResults, supplied)
     const verdict = aggregateVerdict(results)
     const branchShas = Object.assign({}, ...results.map((r) => r.branchShas ?? {}))
     // `phase` is the numeric plan phase derived from git; `phaseName` is the manifest key
     // this gate selected its checks under. They are two different key spaces and the
     // verdict carries both, so `fix` can filter tasks by the number while looking the
     // fix-round budget up under the very key that produced these checks.
-    const bound = {
+    let bound = {
       ...verdict,
       anchorSha: ctx.anchorSha,
       planHash: ctx.planHash,
@@ -358,7 +462,6 @@ export async function runCli(argv, io = { out: console.log }) {
       phase: ctx.currentPhase,
       phaseName,
     }
-    io.out(JSON.stringify({ ...bound, results }, null, 2))
 
     // Recorded for digests and supervision. Nothing reads this to decide anything.
     //
@@ -370,7 +473,32 @@ export async function runCli(argv, io = { out: console.log }) {
     const gateKey = solo ? `solo:${phaseName}` : String(ctx.currentPhase ?? phaseName)
     // --run is optional in solo mode (see missingArgs): without it there is no run to
     // record anything against, so skip straight to the exit code.
-    const status = typeof runId === 'string' ? await readState(root, runId, 'status') : null
+    //
+    // Read BEFORE the verdict is printed. status.json is agent-writable, and a corrupt one
+    // is a gate failure, not a footnote: printing a computed `"verdict": "PASS"` and then
+    // appending `could not read run state: ...` both contradicts the exit code and leaves
+    // stdout unparseable as JSON for the caller that has to read it.
+    let status = null
+    let stateError = null
+    if (typeof runId === 'string') {
+      try {
+        status = await readState(root, runId, 'status')
+      } catch (err) {
+        stateError = err.message
+      }
+    }
+    if (stateError) {
+      bound = {
+        ...bound,
+        verdict: 'FAIL',
+        failed: [...verdict.failed, 'run-state'],
+        error: `could not read run state: ${stateError}`,
+      }
+      io.out(JSON.stringify({ ...bound, results }, null, 2))
+      return 1
+    }
+    io.out(JSON.stringify({ ...bound, results }, null, 2))
+
     if (status) {
       status.gates = status.gates ?? {}
       // Object.defineProperty bypasses any inherited setter — notably the legacy

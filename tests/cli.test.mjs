@@ -1,10 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { runCli } from '../scripts/cli.mjs'
+import { runCli, mergeSuppliedResults } from '../scripts/cli.mjs'
 
 const PLAN = `### Task 1: A
 
@@ -1121,5 +1121,389 @@ test('fix does not retry a later phase task whose file a finding cites', async (
     assert.equal(decision.decision, 'escalate')
     assert.equal(decision.reason, 'unattributable')
     assert.deepEqual(decision.tasks, [])
+  })
+})
+
+// --- `gate --results`: caller-supplied results for the checks the CLI cannot run itself.
+//
+// These pin the trust boundary. `--results` is caller input for one run: it may only fill in
+// `agent`/`mcp` checks the manifest already declares, and only where the gate left them
+// `pending`. Everything else is an error, because a supplied `fileset`/`ownership`/`command`
+// entry would be a way to hand the gate a passing enforcement check.
+
+// Manifest with one runnable command check and one `agent` check the gate cannot run, so the
+// gate always leaves `review` pending until a caller supplies it.
+async function writeAgentManifest(root) {
+  await writeFile(
+    path.join(root, 'teammates.gate.json'),
+    JSON.stringify({
+      phases: {
+        default: {
+          checks: [
+            { name: 'noop', kind: 'command', run: 'node -e ""' },
+            { name: 'review', kind: 'agent' },
+          ],
+        },
+      },
+    }),
+    'utf8',
+  )
+}
+
+// Written under .teammates/, which withRepo gitignores: a results file dropped in the work
+// tree would make the ownership check see an untracked path and report a dirty worktree.
+async function writeResults(root, body) {
+  const target = path.join(root, '.teammates', 'results.json')
+  await mkdir(path.dirname(target), { recursive: true })
+  await writeFile(target, typeof body === 'string' ? body : JSON.stringify(body), 'utf8')
+  return target
+}
+
+test('gate with a pending agent check exits 1, and --results supplying it as pass exits 0 with PASS', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeAgentManifest(root)
+
+    lines.length = 0
+    const pendingCode = await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--no-fleet', '--root', root], io)
+    assert.equal(pendingCode, 1)
+    const pendingOut = JSON.parse(lines[lines.length - 1])
+    assert.equal(pendingOut.verdict, 'FAIL')
+    assert.deepEqual(pendingOut.pending, ['review'])
+
+    const resultsPath = await writeResults(root, {
+      results: [{ name: 'review', kind: 'agent', status: 'pass', findings: [] }],
+    })
+    lines.length = 0
+    const code = await runCli(
+      ['gate', '--run', 'r1', '--plan', 'plan.md', '--no-fleet', '--root', root, '--results', resultsPath],
+      io,
+    )
+    assert.equal(code, 0)
+    assert.match(lines.join('\n'), /"verdict": "PASS"/)
+    const parsed = JSON.parse(lines[lines.length - 1])
+    assert.deepEqual(parsed.pending, [])
+    assert.ok(parsed.results.some((r) => r.name === 'review' && r.status === 'pass'))
+  })
+})
+
+test('the verdict recorded into status.json after a --results run is PASS', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeAgentManifest(root)
+    const resultsPath = await writeResults(root, {
+      results: [{ name: 'review', kind: 'agent', status: 'pass', findings: [] }],
+    })
+    lines.length = 0
+    // A derived (non-solo) run, so the record lands under the numeric phase key rather
+    // than the `solo:` one — that is the key a digest and the fix loop read.
+    const code = await runCli(
+      ['gate', '--run', 'r1', '--plan', 'plan.md', '--root', root, '--results', resultsPath],
+      io,
+    )
+    assert.equal(code, 0)
+    const status = await readStatus(root, 'r1')
+    assert.equal(status.gates['1'].verdict, 'PASS')
+  })
+})
+
+test('--results naming a check absent from the manifest exits 2 and records nothing', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeAgentManifest(root)
+    const resultsPath = await writeResults(root, {
+      results: [{ name: 'invented', kind: 'agent', status: 'pass' }],
+    })
+    lines.length = 0
+    const code = await runCli(
+      ['gate', '--run', 'r1', '--plan', 'plan.md', '--no-fleet', '--root', root, '--results', resultsPath],
+      io,
+    )
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /names a check not in this phase's manifest/)
+    const status = await readStatus(root, 'r1')
+    assert.equal(status.gates, undefined)
+  })
+})
+
+test('--results supplying a command check exits 2', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeAgentManifest(root)
+    const resultsPath = await writeResults(root, {
+      results: [{ name: 'noop', kind: 'command', status: 'pass' }],
+    })
+    lines.length = 0
+    const code = await runCli(
+      ['gate', '--run', 'r1', '--plan', 'plan.md', '--no-fleet', '--root', root, '--results', resultsPath],
+      io,
+    )
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /may not supply a command check: noop/)
+    const status = await readStatus(root, 'r1')
+    assert.equal(status.gates, undefined)
+  })
+})
+
+test('--results supplying a fileset check exits 2', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeEnforcementManifest(root)
+    const resultsPath = await writeResults(root, {
+      results: [{ name: 'fileset', kind: 'fileset', status: 'pass' }],
+    })
+    lines.length = 0
+    // A derived run, so the manifest's fileset check is really in the check list — the
+    // rejection is the kind rule, not "no such check".
+    const code = await runCli(
+      ['gate', '--run', 'r1', '--plan', 'plan.md', '--root', root, '--results', resultsPath],
+      io,
+    )
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /may not supply a fileset check: fileset/)
+    const status = await readStatus(root, 'r1')
+    assert.equal(status.gates, undefined)
+  })
+})
+
+test('--results carrying an unrecognized status casing exits 2 rather than passing', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeAgentManifest(root)
+    const resultsPath = await writeResults(root, {
+      results: [{ name: 'review', kind: 'agent', status: 'PASS' }],
+    })
+    lines.length = 0
+    const code = await runCli(
+      ['gate', '--run', 'r1', '--plan', 'plan.md', '--no-fleet', '--root', root, '--results', resultsPath],
+      io,
+    )
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /unrecognized status for review/)
+    const status = await readStatus(root, 'r1')
+    assert.equal(status.gates, undefined)
+  })
+})
+
+test('--results pointing at a missing file exits 2 with a message and no stack trace', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeAgentManifest(root)
+    lines.length = 0
+    const code = await runCli(
+      ['gate', '--run', 'r1', '--plan', 'plan.md', '--no-fleet', '--root', root,
+        '--results', path.join(root, '.teammates', 'nope.json')],
+      io,
+    )
+    assert.equal(code, 2)
+    const out = lines.join('\n')
+    assert.match(out, /--results must be a readable JSON file/)
+    assert.doesNotMatch(out, /at .*cli\.mjs/)
+  })
+})
+
+test('--results pointing at malformed JSON, or at JSON without a results array, exits 2', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeAgentManifest(root)
+
+    const malformed = await writeResults(root, '{ not json')
+    lines.length = 0
+    const malformedCode = await runCli(
+      ['gate', '--run', 'r1', '--plan', 'plan.md', '--no-fleet', '--root', root, '--results', malformed],
+      io,
+    )
+    assert.equal(malformedCode, 2)
+    assert.match(lines.join('\n'), /--results must be a readable JSON file/)
+    assert.doesNotMatch(lines.join('\n'), /at .*cli\.mjs/)
+
+    const notAnArray = await writeResults(root, { results: 'review' })
+    lines.length = 0
+    const shapeCode = await runCli(
+      ['gate', '--run', 'r1', '--plan', 'plan.md', '--no-fleet', '--root', root, '--results', notAnArray],
+      io,
+    )
+    assert.equal(shapeCode, 2)
+    assert.match(lines.join('\n'), /--results must be a readable JSON file/)
+  })
+})
+
+// Only `pending` results are replaced. Pinned on the merge function directly because no
+// suppliable kind can currently produce a non-pending result through `runChecks` — `agent`
+// and `mcp` have no runner, so the gate always leaves them pending. The guard exists for the
+// moment one of them does run: a supplied result must never overwrite a computed one.
+test('mergeSuppliedResults leaves a check that already ran untouched', async () => {
+  const raw = [
+    { name: 'review', kind: 'agent', status: 'pass', output: 'computed', optional: false },
+    { name: 'audit', kind: 'agent', status: 'fail', output: 'computed', optional: false },
+    { name: 'scan', kind: 'mcp', status: 'pending', optional: false, check: { name: 'scan', kind: 'mcp' } },
+  ]
+  const merged = mergeSuppliedResults(raw, [
+    { name: 'review', kind: 'agent', status: 'fail' },
+    { name: 'audit', kind: 'agent', status: 'pass' },
+    { name: 'scan', kind: 'mcp', status: 'pass', output: 'supplied', findings: [] },
+  ])
+  assert.deepEqual(merged[0], raw[0])
+  assert.deepEqual(merged[1], raw[1])
+  assert.equal(merged[2].status, 'pass')
+  assert.equal(merged[2].output, 'supplied')
+})
+
+// `optional` is a manifest declaration ("this check does not block"), not a result field. It
+// must come from the computed check and never from the supplied file — otherwise a results
+// file reporting its own failure can also declare that failure advisory. Pinned on the merge
+// function directly because that is the single line where the two sources meet: flipping it
+// to `s.optional ?? r.optional` must fail here.
+test('mergeSuppliedResults takes optional from the computed check, never from the supplied entry', () => {
+  const raw = [{ name: 'review', kind: 'agent', status: 'pending', optional: false }]
+  const merged = mergeSuppliedResults(raw, [
+    { name: 'review', kind: 'agent', status: 'fail', optional: true, findings: [{ file: 'a.mjs' }] },
+  ])
+  assert.equal(merged[0].status, 'fail')
+  assert.equal(merged[0].optional, false)
+})
+
+// The end-to-end consequence of the line above: a required `agent` check reported as failing
+// stays a blocking failure. If `optional` were laundered through the file, this would print
+// PASS with the failure demoted into `optionalFailed` and exit 0.
+test('--results cannot launder a failing required check into an optional one', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeAgentManifest(root)
+    const resultsPath = await writeResults(root, {
+      results: [{ name: 'review', kind: 'agent', status: 'fail', optional: true, findings: [{ file: 'a.mjs' }] }],
+    })
+    lines.length = 0
+    const code = await runCli(
+      ['gate', '--run', 'r1', '--plan', 'plan.md', '--no-fleet', '--root', root, '--results', resultsPath],
+      io,
+    )
+    assert.equal(code, 1)
+    const parsed = JSON.parse(lines[lines.length - 1])
+    assert.equal(parsed.verdict, 'FAIL')
+    assert.deepEqual(parsed.failed, ['review'])
+    assert.deepEqual(parsed.optionalFailed, [])
+    assert.equal(parsed.results.find((r) => r.name === 'review').optional, false)
+  })
+})
+
+// `checksForPhase` does not enforce unique check names. Validation resolves a supplied name
+// to exactly one check (last wins) while the merge writes to every result with that name, so
+// a collision would let an `agent` result land on a same-named `command` check — and whether
+// the file was accepted at all would depend on manifest declaration order. Both orders must
+// be rejected identically.
+test('--results naming a check declared twice in the manifest exits 2, whichever order they are declared in', async () => {
+  const collidingChecks = [
+    { name: 'test', kind: 'command', run: 'node -e "process.exit(1)"' },
+    { name: 'test', kind: 'agent' },
+  ]
+  for (const checks of [collidingChecks, [...collidingChecks].reverse()]) {
+    await withRepo(async ({ root, planPath, io, lines }) => {
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      await writeFile(
+        path.join(root, 'teammates.gate.json'),
+        JSON.stringify({ phases: { default: { checks } } }),
+        'utf8',
+      )
+      const resultsPath = await writeResults(root, {
+        results: [{ name: 'test', kind: 'agent', status: 'pass' }],
+      })
+      lines.length = 0
+      const code = await runCli(
+        ['gate', '--run', 'r1', '--plan', 'plan.md', '--no-fleet', '--root', root, '--results', resultsPath],
+        io,
+      )
+      assert.equal(code, 2)
+      assert.match(lines.join('\n'), /declared more than once in this phase's manifest/)
+      const status = await readStatus(root, 'r1')
+      assert.equal(status.gates, undefined)
+    })
+  }
+})
+
+// The writing half of the same invariant: even if a duplicate name ever reached the merge, one
+// supplied entry fills at most one pending result. The second collides and stays pending, so
+// the gate blocks rather than passing a check nobody reported.
+test('mergeSuppliedResults fills at most one pending result per supplied entry', () => {
+  const raw = [
+    { name: 'test', kind: 'command', status: 'pending', optional: false },
+    { name: 'test', kind: 'agent', status: 'pending', optional: false },
+  ]
+  const merged = mergeSuppliedResults(raw, [{ name: 'test', kind: 'agent', status: 'pass' }])
+  assert.equal(merged[0].status, 'pass')
+  assert.equal(merged[1].status, 'pending')
+  assert.deepEqual(merged[1], raw[1])
+})
+
+test('a valueless --results is reported as a missing argument rather than silently dropped', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeAgentManifest(root)
+    lines.length = 0
+    const code = await runCli(
+      ['gate', '--run', 'r1', '--plan', 'plan.md', '--no-fleet', '--root', root, '--results'],
+      io,
+    )
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /missing required argument: --results <path>/)
+  })
+})
+
+// Also in the middle of argv, where parseFlags reads the following flag name as the value
+// unless the boolean-switch rule fires.
+test('a valueless --results before another flag is still reported as missing', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeAgentManifest(root)
+    lines.length = 0
+    const code = await runCli(
+      ['gate', '--run', 'r1', '--plan', 'plan.md', '--results', '--root', root, '--no-fleet'],
+      io,
+    )
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /missing required argument: --results <path>/)
+  })
+})
+
+test('gate exits 1 with a message when status.json is unreadable rather than throwing', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const config = { phases: { default: { checks: [{ name: 'noop', kind: 'command', run: 'node -e ""' }] } } }
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(config), 'utf8')
+    // status.json is agent-writable. A corrupt one must not turn a computed verdict into a
+    // stack trace for a caller that branches on exit codes.
+    await writeFile(path.join(root, '.teammates', 'r1', 'status.json'), '{ not json', 'utf8')
+    lines.length = 0
+    const code = await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--no-fleet', '--root', root], io)
+    assert.equal(code, 1)
+    assert.match(lines.join('\n'), /could not read run state/)
+  })
+})
+
+// An unreadable status.json is a gate failure, and the verdict that gets printed has to say
+// so. Every check here passes, so a verdict computed and printed before the state read would
+// put `"verdict": "PASS"` on stdout ahead of a bare error line — contradicting the exit code
+// and leaving stdout unparseable for a caller that reads it as JSON.
+test('a corrupt status.json produces parseable JSON whose verdict is FAIL, not PASS', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const config = { phases: { default: { checks: [{ name: 'noop', kind: 'command', run: 'node -e ""' }] } } }
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(config), 'utf8')
+    await writeFile(path.join(root, '.teammates', 'r1', 'status.json'), '{ not json', 'utf8')
+    lines.length = 0
+    // A derived run, so nothing else is on stdout: `--no-fleet` prints its own notice line,
+    // which would mask whether the verdict document itself is the whole output.
+    const code = await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--root', root], io)
+    assert.equal(code, 1)
+
+    const out = lines.join('\n')
+    assert.doesNotMatch(out, /"verdict": "PASS"/)
+    // The whole of stdout parses as JSON: no error line trailing the verdict document.
+    const parsed = JSON.parse(out)
+    assert.equal(parsed.verdict, 'FAIL')
+    assert.ok(parsed.failed.includes('run-state'))
+    assert.match(parsed.error, /could not read run state/)
+    // The computed check results are still carried, so the failure is attributable.
+    assert.ok(parsed.results.some((r) => r.name === 'noop' && r.status === 'pass'))
   })
 })
