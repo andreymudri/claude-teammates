@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { filesetViolations, ownershipViolations, resolveTaskBranch, derivePhase, planHash } from './enforce.mjs'
 import { GitError } from './git.mjs'
+import { withMergePreview, conflictPairs } from './merge-preview.mjs'
 
 const TAIL_LINES = 40
 
@@ -33,22 +34,26 @@ export async function runCommandCheck(check, { cwd = process.cwd(), exec = defau
   }
 }
 
+// `optional: true` is meaningful on a `command` check — "this lint is advisory". On an
+// enforcement check (`fileset`, `ownership`, `merge`) it would mean "detect the violation and
+// ship anyway", which is never coherent to want. All three are forced non-optional here, at
+// the point the result is built, so an uncommitted manifest cannot disable enforcement while
+// appearing to record it.
+const ALWAYS_ENFORCED_KINDS = new Set(['fileset', 'ownership', 'merge'])
+
 export function describePendingCheck(check) {
   return {
     name: check.name,
     kind: check.kind,
     status: 'pending',
-    optional: check.optional === true,
+    // An always-enforced kind cannot buy its way out here either. `pending` blocks only while
+    // it is non-optional, so a manifest entry of an enforced kind that found no runner —
+    // `{ "kind": "merge", "optional": true }`, the computed check a manifest must not be able
+    // to supply or suppress — would otherwise land as a pending that waves the phase through.
+    optional: ALWAYS_ENFORCED_KINDS.has(check.kind) ? false : check.optional === true,
     check,
   }
 }
-
-// `optional: true` is meaningful on a `command` check — "this lint is advisory". On an
-// enforcement check (`fileset`, `ownership`) it would mean "detect the violation and ship
-// anyway", which is never coherent to want. Both are forced non-optional here, at the point
-// the result is built, so an uncommitted manifest cannot disable enforcement while appearing
-// to record it.
-const ALWAYS_ENFORCED_KINDS = new Set(['fileset', 'ownership'])
 
 function checkResult(check, status, output) {
   const optional = ALWAYS_ENFORCED_KINDS.has(check.kind) ? false : check.optional === true
@@ -131,8 +136,29 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
   }
 }
 
+// `complete` verifies the calling task, not the whole phase, and marks that with
+// `ctx.taskScope: <task id>`. `gate` never sets it, so `taskScope == null` is the phase-wide
+// path every gate invocation has always taken, byte for byte.
+//
+// The narrowing travels as a marker rather than as a pre-filtered `ctx.tasks` on purpose:
+// `runOwnershipCheck` must stay run-wide. It explains every commit on the run branch, not just
+// this task's, so handing it a filtered task list would let a direct write ride in behind
+// whichever task happens to finish first. A marker narrows exactly the two consumers that
+// should narrow and leaves ownership reading the full list.
+function scopedTasks(ctx) {
+  const tasks = ctx.tasks ?? []
+  return ctx.taskScope == null ? tasks : tasks.filter((t) => t.id === ctx.taskScope)
+}
+
+// The phase's tasks, then the scope. A `taskScope` naming a task outside the current phase
+// therefore narrows to zero, which the callers' existing "selected no tasks" guard fails —
+// fail-closed, never a vacuous pass.
+function scopedPhaseTasks(ctx) {
+  return scopedTasks(ctx).filter((t) => t.phase === ctx.currentPhase)
+}
+
 export async function runFilesetCheck(check, ctx = {}) {
-  const { git, runId, runSha, tasks, currentPhase, phaseError } = ctx
+  const { git, runId, runSha, currentPhase, phaseError } = ctx
   if (!git) return checkResult(check, 'fail', 'fileset check has no git access')
   if (phaseError) return checkResult(check, 'fail', phaseError)
   if (currentPhase == null) {
@@ -147,7 +173,9 @@ export async function runFilesetCheck(check, ctx = {}) {
     // even though this path performs no diff of its own.
     const branchShas = {}
     try {
-      for (const task of tasks ?? []) {
+      // Scoped too: a task-scoped verdict must not claim to cover a sibling's branch, or a
+      // sibling moving its branch would invalidate this task's verdict via verdictCoversTree.
+      for (const task of scopedTasks(ctx)) {
         const branch = resolveTaskBranch(task, runId)
         if (branch && await git.branchExists(branch)) {
           branchShas[branch] = await git.resolveRef(`refs/heads/${branch}`)
@@ -160,7 +188,7 @@ export async function runFilesetCheck(check, ctx = {}) {
     return { ...checkResult(check, 'pass', 'every phase in the plan is integrated'), branchShas }
   }
 
-  const phaseTasks = (tasks ?? []).filter((t) => t.phase === currentPhase)
+  const phaseTasks = scopedPhaseTasks(ctx)
   // Zero tasks is not "nothing to check" — the run and the plan disagree, and an earlier
   // version returned a clean pass for exactly this state.
   if (phaseTasks.length === 0) {
@@ -352,21 +380,38 @@ export async function runOwnershipCheck(check, ctx = {}) {
   }
 }
 
+// `merge` is deliberately absent: the gate builds the merge preview itself, once, around the
+// whole check list. A manifest entry claiming that kind finds no runner and lands as pending,
+// which blocks — an editable manifest must not be able to supply or suppress a computed check.
 const RUNNERS = Object.assign(Object.create(null), {
   command: runCommandCheck,
   fileset: runFilesetCheck,
   ownership: runOwnershipCheck,
 })
 
-export async function runChecks(checks, ctx = {}) {
+const MERGE_CHECK = { name: 'merge', kind: 'merge' }
+
+const CONFLICT_SKIP = 'the phase does not merge cleanly; no merged tree exists to test'
+
+async function runCheckList(checks, ctx, commandCwd, mergeConflicted) {
   const results = []
   for (const check of checks) {
+    // A `command` check exists to answer "does the integrated tree work". Without a merged
+    // tree there is no honest answer, and running it against the run branch's own tree would
+    // answer a different question while looking like the one that was asked. Skipped, with
+    // the reason — the block comes from the `merge` check, which fails.
+    if (check.kind === 'command' && mergeConflicted) {
+      results.push(checkResult(check, 'skip', CONFLICT_SKIP))
+      continue
+    }
     // Bare property access would resolve a kind of "toString" to Object.prototype.toString
     // and call it as a runner. Confirmed reachable from a hand-written manifest.
     const runner = Object.hasOwn(RUNNERS, check.kind) ? RUNNERS[check.kind] : null
     if (!runner) { results.push(describePendingCheck(check)); continue }
     try {
-      results.push(await runner(check, ctx))
+      // Only `command` checks are relocated. `fileset` and `ownership` read git, not a
+      // working tree, and must keep reading the real repository.
+      results.push(await runner(check, check.kind === 'command' ? { ...ctx, cwd: commandCwd } : ctx))
     } catch (err) {
       // A throwing check previously propagated out of the CLI, so no verdict was recorded
       // and the previous phase's PASS stood.
@@ -376,7 +421,83 @@ export async function runChecks(checks, ctx = {}) {
   return results
 }
 
+// A preview that could not be built at all — a merge that failed without leaving unmerged
+// paths (unset user.email, a branch deleted mid-run, unrelated histories), or a worktree that
+// could not be created — is neither a clean tree nor a reportable conflict. It is reported as
+// a failing `merge` check carrying git's own reason, with the `command` checks skipped: they
+// must never run against the unmerged tree, and `aggregateVerdict` blocks on the fail.
+async function previewFailure(checks, ctx, reason) {
+  return [checkResult(MERGE_CHECK, 'fail', reason), ...await runCheckList(checks, ctx, ctx.cwd, true)]
+}
+
+export async function runChecks(checks, ctx = {}) {
+  // A solo (--no-fleet) run has no run branch, no task branches and no git in context: there
+  // is nothing to preview, so the checks run where the caller stands.
+  if (!ctx.git || ctx.solo) return runCheckList(checks, ctx, ctx.cwd, false)
+
+  // The same notion of "this phase's branches" the fileset check uses — same
+  // resolveTaskBranch call, same branchExists guard, same phase filter, and the same
+  // `taskScope` narrowing. Two different ones in one file would drift.
+  //
+  // Scoping matters here for the same reason it matters for fileset: with the phase-wide set,
+  // the first teammate of a 3-task phase to run `complete` gets every sibling's branch merged
+  // into its preview, so a sibling's stray commit — or a sibling branch that does not exist
+  // yet — fails the preview and reads to that teammate as "my own work is broken".
+  const phaseTasks = scopedPhaseTasks(ctx)
+  const branches = []
+  try {
+    for (const task of phaseTasks) {
+      const branch = resolveTaskBranch(task, ctx.runId)
+      if (branch && await ctx.git.branchExists(branch)) branches.push(branch)
+    }
+  } catch (err) {
+    return previewFailure(checks, ctx, `merge preview could not resolve the phase's branches: ${err.message}`)
+  }
+
+  // Set as soon as the callback runs, so the catch below can tell "the preview was never
+  // built" (re-run the list against no merged tree) from the theoretical case of the callback
+  // itself throwing after some checks already ran — which must never re-run them.
+  let previewed = false
+  try {
+    return await withMergePreview({
+      git: ctx.git,
+      base: ctx.runBranch,
+      branches,
+      // Every check runs inside this callback, so the worktree is alive for all of them and
+      // removed exactly once, after the last one. The merge check cannot be the thing holding
+      // the worktree open — by the time a later check ran, the directory would be gone.
+      run: async ({ path, conflict }) => {
+        previewed = true
+        if (conflict) {
+          const pairs = conflictPairs(branches, conflict)
+          const merged = { ...checkResult(MERGE_CHECK, 'fail', JSON.stringify(pairs, null, 2)), pairs }
+          return [merged, ...await runCheckList(checks, ctx, ctx.cwd, true)]
+        }
+        const merged = checkResult(MERGE_CHECK, 'pass', '')
+        // `path` is null only when the phase has no branches to merge: nothing to preview, so
+        // the run branch's own tree is the tree integration would produce.
+        return [merged, ...await runCheckList(checks, ctx, path ?? ctx.cwd, false)]
+      },
+    })
+  } catch (err) {
+    const reason = `merge preview failed: ${err.message}`
+    if (previewed) {
+      // Unreachable in practice — runCheckList catches every per-check throw. Kept so a
+      // future edit inside the callback can never produce a second, duplicate run of the
+      // checks, nor a verdict-less crash out of the CLI.
+      return [checkResult(MERGE_CHECK, 'fail', reason), ...checks.map((c) => checkResult(c, 'fail', reason))]
+    }
+    return previewFailure(checks, ctx, reason)
+  }
+}
+
 const RECOGNIZED = new Set(['pass', 'fail', 'skip', 'pending'])
+
+// Kinds the gate computes for itself rather than reading from the manifest. They are real
+// results — they fail, they block, they are reported — but they are not evidence that anything
+// the manifest asked for was actually verified, so they do not satisfy the fail-closed
+// "some check ran" clause below.
+const GATE_COMPUTED_KINDS = new Set(['merge'])
 
 export function aggregateVerdict(results) {
   // An unrecognized or missing status is a failure, never a pass. This function is the
@@ -391,6 +512,15 @@ export function aggregateVerdict(results) {
   const optionalFailed = results.filter((r) => r.status === 'fail' && r.optional).map((r) => r.name)
   const skipped = results.filter((r) => r.status === 'skip').map((r) => r.name)
   const pending = results.filter((r) => r.status === 'pending' && !r.optional).map((r) => r.name)
-  const passed = results.length > 0 && failed.length === 0 && pending.length === 0
+  // "At least one check ran" is decided over the manifest-supplied results only. `runChecks`
+  // prepends the gate's own `merge` result to every fleet check list, so counting `results`
+  // wholesale would read a check list of one self-generated pass as a verified phase — which is
+  // exactly what an enforced agent buys by emptying the working-tree manifest, the same edit
+  // that stops `fileset` and `ownership` from running. Confirmed reachable: the working tree's
+  // manifest is loaded with plain `fs` and never compared against the committed copy. A
+  // manifest entry that merely *claims* a gate-computed kind is excluded here too; it lands as
+  // a non-optional pending and blocks on its own, so exclusion only ever fails closed.
+  const verified = results.filter((r) => !GATE_COMPUTED_KINDS.has(r.kind))
+  const passed = verified.length > 0 && failed.length === 0 && pending.length === 0
   return { verdict: passed ? 'PASS' : 'FAIL', failed, optionalFailed, skipped, pending }
 }

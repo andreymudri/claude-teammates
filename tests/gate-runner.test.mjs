@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
@@ -535,7 +535,10 @@ test('runChecks dispatches command, fileset and ownership checks', async () => {
     { name: 'ownership', kind: 'ownership' },
     { name: 'review', kind: 'agent', agent: 'tm-reviewer' },
   ], ctx)
-  assert.deepEqual(results.map((r) => r.status), ['pass', 'pass', 'pass', 'pending'])
+  // The gate's own computed merge check leads the list; this ctx has no in-progress phase and
+  // so no branches to preview, which is a clean merge by definition.
+  assert.deepEqual(results.map((r) => r.name), ['merge', 'test', 'fileset', 'ownership', 'review'])
+  assert.deepEqual(results.map((r) => r.status), ['pass', 'pass', 'pass', 'pass', 'pending'])
 })
 
 test('runChecks yields pending for prototype-shadowing kinds', async () => {
@@ -552,9 +555,14 @@ test('runChecks records a fail when a runner throws', async () => {
   const git = fakeGit({ branchExists: async () => { throw new Error('unexpected boom') } })
   const ctx = { git, runId: RUN_ID, anchorSha: 'anchorSha1', tasks: [T1_TASK], currentPhase: 1, phaseError: null }
   const results = await runChecks([{ name: 'fileset', kind: 'fileset' }], ctx)
+  // The same throw stops the merge preview from being assembled, so the merge check fails too;
+  // the fileset check still reports its own throw rather than vanishing behind it.
+  assert.equal(results[0].name, 'merge')
   assert.equal(results[0].status, 'fail')
-  assert.match(results[0].output, /check threw/)
-  assert.match(results[0].output, /unexpected boom/)
+  const fileset = results.find((r) => r.name === 'fileset')
+  assert.equal(fileset.status, 'fail')
+  assert.match(fileset.output, /check threw/)
+  assert.match(fileset.output, /unexpected boom/)
 })
 
 // --- tag-shadowing regression: every ref-shaped argument reaching git must be a sha or a
@@ -936,4 +944,453 @@ test('a hand-resolved conflict over the coordinator\'s exact V5 scenario is expl
 
     assert.equal(res.status, 'pass', res.output)
   })
+})
+
+// --- runChecks merge preview -----------------------------------------------------------------
+//
+// The gate's `command` checks are meaningless against any tree but the one integration will
+// actually produce, so runChecks builds the phase's merge preview itself and runs the whole
+// check list inside it. These tests pin the four outcomes that preview can have — clean,
+// conflicted, failed outright, and "no branches to merge" — plus the fact that a manifest can
+// neither supply nor suppress the computed `merge` check.
+
+const T2_PHASE1_TASK = { id: 'T2', phase: 1, files: ['b.mjs'] }
+
+// A git double carrying the worktree methods withMergePreview drives. The defaults describe a
+// phase whose branches all exist and merge cleanly.
+function previewGit(overrides = {}) {
+  return fakeGit({
+    branchExists: async () => true,
+    addWorktreeDetached: async (dir) => dir,
+    mergeInto: async () => null,
+    removeWorktree: async () => true,
+    ...overrides,
+  })
+}
+
+function previewCtx(overrides = {}) {
+  return {
+    cwd: '/project/root',
+    runId: RUN_ID,
+    runBranch: RUN_BRANCH,
+    baseBranch: BASE_BRANCH,
+    anchorSha: 'anchorSha1',
+    runSha: 'runSha1',
+    tasks: [T1_TASK],
+    currentPhase: 1,
+    phaseError: null,
+    ...overrides,
+  }
+}
+
+const recordingExec = (calls, result = { code: 0, output: '' }) => async (cmd, cwd) => {
+  calls.push({ cmd, cwd })
+  return result
+}
+
+test('a command check runs inside the merge preview worktree when the phase merges cleanly', async () => {
+  const calls = []
+  const ctx = previewCtx({ git: previewGit(), exec: recordingExec(calls) })
+  const results = await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], ctx)
+
+  assert.deepEqual(results.map((r) => [r.name, r.kind, r.status]), [
+    ['merge', 'merge', 'pass'],
+    ['test', 'command', 'pass'],
+  ])
+  assert.equal(calls.length, 1)
+  assert.notEqual(calls[0].cwd, '/project/root', 'the command must not run against the project root')
+  assert.match(calls[0].cwd, /tm-preview-/)
+})
+
+test('the computed merge check can never be marked optional by a manifest', async () => {
+  const ctx = previewCtx({ git: previewGit({ mergeInto: async () => ['a.mjs'] }) })
+  const results = await runChecks([], ctx)
+  assert.equal(results[0].name, 'merge')
+  assert.equal(results[0].optional, false)
+})
+
+test('a conflicting phase fails the merge check with the pair report and skips every command check', async () => {
+  const calls = []
+  const ctx = previewCtx({
+    git: previewGit({ mergeInto: async () => ['a.mjs', 'b.mjs'] }),
+    exec: recordingExec(calls),
+    tasks: [T1_TASK, T2_PHASE1_TASK],
+  })
+  const results = await runChecks([
+    { name: 'test', kind: 'command', run: 'npm test' },
+    { name: 'lint', kind: 'command', run: 'npm run lint' },
+  ], ctx)
+
+  const [merge, ...rest] = results
+  assert.equal(merge.name, 'merge')
+  assert.equal(merge.status, 'fail')
+  assert.deepEqual(merge.pairs, [{ branches: [T1_BRANCH, T2_BRANCH], paths: ['a.mjs', 'b.mjs'] }])
+  // The report names both branches and both paths, so the fix loop can escalate to a pair
+  // rather than blaming one owner.
+  assert.deepEqual(JSON.parse(merge.output), merge.pairs)
+
+  assert.deepEqual(rest.map((r) => r.status), ['skip', 'skip'])
+  for (const r of rest) assert.match(r.output, /does not merge cleanly/)
+  assert.equal(calls.length, 0, 'no command may run against the unmerged tree')
+})
+
+test('a conflicting phase yields FAIL, and the block comes from the merge check itself', async () => {
+  const ctx = previewCtx({
+    git: previewGit({ mergeInto: async () => ['a.mjs'] }),
+    exec: recordingExec([]),
+    tasks: [T1_TASK, T2_PHASE1_TASK],
+  })
+  const results = await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], ctx)
+  const verdict = aggregateVerdict(results)
+  assert.equal(verdict.verdict, 'FAIL')
+  // aggregateVerdict does not block on `skip`; the skipped command checks are reporting only.
+  assert.deepEqual(verdict.failed, ['merge'])
+  assert.deepEqual(verdict.skipped, ['test'])
+})
+
+// withMergePreview rejects when the preview could not be built at all — a merge that failed
+// without leaving unmerged paths (unset user.email, a deleted branch, unrelated histories),
+// or a worktree that could not be created. That is neither a clean tree nor a reportable
+// conflict, so the gate records the merge check as a fail carrying git's reason and skips the
+// command checks rather than running them against the unmerged tree.
+test('a merge preview that fails outright fails the merge check and skips the command checks', async () => {
+  const calls = []
+  const ctx = previewCtx({
+    // mergeInto reporting a conflict with no paths: withMergePreview throws rather than
+    // handing the callback a conflict naming nothing.
+    git: previewGit({ mergeInto: async () => [] }),
+    exec: recordingExec(calls),
+  })
+  const results = await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], ctx)
+
+  assert.equal(results[0].name, 'merge')
+  assert.equal(results[0].status, 'fail')
+  assert.match(results[0].output, /merge preview/)
+  assert.equal(results[1].status, 'skip')
+  assert.equal(calls.length, 0, 'no command may run when the preview could not be built')
+  assert.equal(aggregateVerdict(results).verdict, 'FAIL')
+})
+
+test('a solo run builds no merge preview and runs command checks against the project root', async () => {
+  const calls = []
+  // A solo (--no-fleet) ctx carries no git at all; ctx.solo is honoured too, so a caller that
+  // says so explicitly is never previewed either.
+  for (const ctx of [
+    { cwd: '/project/root', exec: recordingExec(calls) },
+    { cwd: '/project/root', exec: recordingExec(calls), solo: true, git: previewGit() },
+  ]) {
+    const results = await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], ctx)
+    assert.deepEqual(results.map((r) => r.name), ['test'])
+    assert.equal(results[0].status, 'pass')
+  }
+  assert.deepEqual(calls.map((c) => c.cwd), ['/project/root', '/project/root'])
+})
+
+test('a phase with no task branches passes the merge check and runs commands against the run tree', async () => {
+  const calls = []
+  const ctx = previewCtx({
+    git: previewGit({
+      branchExists: async () => false,
+      addWorktreeDetached: async () => { throw new Error('no worktree may be created with nothing to merge') },
+    }),
+    exec: recordingExec(calls),
+  })
+  const results = await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], ctx)
+  assert.deepEqual(results.map((r) => [r.name, r.status]), [['merge', 'pass'], ['test', 'pass']])
+  assert.deepEqual(calls.map((c) => c.cwd), ['/project/root'])
+})
+
+test('a manifest entry claiming kind "merge" finds no runner and lands as pending, blocking the phase', async () => {
+  const ctx = previewCtx({ git: previewGit(), exec: recordingExec([]) })
+  const results = await runChecks([{ name: 'merge', kind: 'merge' }], ctx)
+  // The first result is the gate's own computed merge check; the manifest's entry cannot
+  // supply or suppress it, and lands as pending.
+  assert.deepEqual(results.map((r) => r.status), ['pass', 'pending'])
+  const verdict = aggregateVerdict(results)
+  assert.equal(verdict.verdict, 'FAIL')
+  assert.deepEqual(verdict.pending, ['merge'])
+})
+
+test('a manifest entry claiming kind "merge" cannot mark itself optional to escape blocking', async () => {
+  const ctx = previewCtx({ git: previewGit(), exec: recordingExec([]) })
+  const results = await runChecks([{ name: 'merge', kind: 'merge', optional: true }], ctx)
+  assert.equal(results[1].status, 'pending')
+  assert.equal(results[1].optional, false)
+  assert.equal(aggregateVerdict(results).verdict, 'FAIL')
+})
+
+// The worktree has to outlive the whole check list, not just the merge: if withMergePreview's
+// callback returned as soon as the merge was known, the directory would already be gone by the
+// time the first command ran.
+test('the preview worktree is removed once, after the last check has run inside it', async () => {
+  const order = []
+  const git = previewGit({
+    addWorktreeDetached: async (dir) => {
+      await writeFile(path.join(dir, 'marker.txt'), 'inside the preview\n', 'utf8')
+      order.push('add')
+      return dir
+    },
+    removeWorktree: async (dir) => { order.push('remove'); assert.match(dir, /tm-preview-/); return true },
+  })
+  const read = []
+  const exec = async (cmd, cwd) => {
+    order.push(cmd)
+    read.push((await readFile(path.join(cwd, 'marker.txt'), 'utf8')).trim())
+    return { code: 0, output: '' }
+  }
+  const results = await runChecks([
+    { name: 'test', kind: 'command', run: 'npm test' },
+    { name: 'lint', kind: 'command', run: 'npm run lint' },
+  ], previewCtx({ git, exec }))
+
+  assert.deepEqual(results.map((r) => r.status), ['pass', 'pass', 'pass'])
+  assert.deepEqual(read, ['inside the preview', 'inside the preview'])
+  assert.deepEqual(order, ['add', 'npm test', 'npm run lint', 'remove'])
+  assert.equal(order.filter((o) => o === 'remove').length, 1)
+})
+
+// The fail-closed clause in aggregateVerdict ("no checks ran, so nothing was verified") has to
+// survive the gate prepending its own computed results to the list. An enforced agent that
+// empties the working-tree manifest — the very edit that stops `fileset` and `ownership` from
+// running — must not turn the phase green just because the gate's own `merge` check is sitting
+// in the results array. The regression test for this invariant that calls aggregateVerdict([])
+// directly cannot see it: the array is never empty by the time it is aggregated. These go
+// through runChecks.
+test('a manifest that contributed zero checks fails the phase even though the gate computed a merge result', async () => {
+  const ctx = previewCtx({ git: previewGit(), exec: recordingExec([]) })
+  const results = await runChecks([], ctx)
+  assert.deepEqual(results.map((r) => [r.name, r.status]), [['merge', 'pass']])
+  const verdict = aggregateVerdict(results)
+  assert.equal(verdict.verdict, 'FAIL', 'a passing self-generated merge is not a verified phase')
+})
+
+test('an empty manifest fails the phase on every preview outcome, and matches --no-fleet', async () => {
+  const outcomes = {
+    clean: previewGit(),
+    conflicted: previewGit({ mergeInto: async () => ['a.mjs'] }),
+    // mergeInto reporting a conflict with no paths: withMergePreview throws, so this is the
+    // preview-could-not-be-built path.
+    unbuildable: previewGit({ mergeInto: async () => [] }),
+  }
+  for (const [name, git] of Object.entries(outcomes)) {
+    const results = await runChecks([], previewCtx({ git, exec: recordingExec([]) }))
+    assert.equal(aggregateVerdict(results).verdict, 'FAIL', `empty manifest passed on the ${name} preview`)
+  }
+  // The solo path builds no preview at all and has always failed closed here. The two modes
+  // must agree: an empty check list is never a pass.
+  assert.equal(aggregateVerdict(await runChecks([], { cwd: '/project/root', solo: true })).verdict, 'FAIL')
+})
+
+// The counterpart: one real manifest check is enough to make the list non-empty, so the fix
+// above cannot be satisfied by failing every fleet phase.
+test('a single passing manifest check still yields PASS alongside the computed merge result', async () => {
+  const ctx = previewCtx({ git: previewGit(), exec: recordingExec([]) })
+  const results = await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], ctx)
+  assert.equal(aggregateVerdict(results).verdict, 'PASS')
+})
+
+// The preview must be built from the *run branch*, the tree integration actually merges into,
+// not from the base branch. In a two-phase run whose phase 1 is already merged into the run
+// branch, a preview built from the base would hand phase 2 a tree with none of phase 1's code
+// in it: command checks fail against a tree integration will never produce, and a
+// phase-1/phase-2 conflict is blamed on the wrong pair. Nothing else asserts the ref, so
+// swapping it stays green.
+test('the preview worktree is created from the run branch, not the base branch', async () => {
+  const bases = []
+  const ctx = previewCtx({
+    git: previewGit({ addWorktreeDetached: async (dir, base) => { bases.push(base); return dir } }),
+    exec: recordingExec([]),
+  })
+  await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], ctx)
+  assert.deepEqual(bases, [RUN_BRANCH])
+  assert.notEqual(bases[0], BASE_BRANCH)
+})
+
+// The previewed branch set is the current phase's, resolved exactly the way the fileset check
+// resolves it. Without this, a phase-2 teammate pushing a branch while phase 1 is being gated
+// gets merged into phase 1's preview, and a conflict or a broken command among branches outside
+// the phase fails phase 1 — sending the fix loop at tasks that are not even in it.
+test('only the current phase\'s branches are merged into the preview', async () => {
+  const merged = []
+  const ctx = previewCtx({
+    git: previewGit({ mergeInto: async (_dir, branches) => { merged.push(...branches); return null } }),
+    exec: recordingExec([]),
+    tasks: [T1_TASK, T2_PHASE1_TASK, { id: 'T3', phase: 2, files: ['c.mjs'] }],
+  })
+  await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], ctx)
+  assert.deepEqual(merged, [T1_BRANCH, T2_BRANCH])
+  assert.ok(!merged.includes('teammates/r1/T3'), 'a phase-2 branch must not reach a phase-1 preview')
+})
+
+// The `previewed` guard exists so a throw raised *after* the callback resolved can never re-run
+// checks that already ran. Unreachable with the real accessor — its removeWorktree is async, so
+// withMergePreview's `.catch()` swallows it — but reachable with one that throws synchronously,
+// which is exactly the shape a future edit could introduce.
+test('a throw raised after the checks already ran does not run them a second time', async () => {
+  const calls = []
+  let branchExistsCalls = 0
+  const git = previewGit({
+    branchExists: async () => { branchExistsCalls += 1; return true },
+    // Synchronous throw: `git.removeWorktree(dir).catch(...)` never gets a promise to catch, so
+    // the rejection escapes the `finally` after `run` has already resolved.
+    removeWorktree: () => { throw new Error('worktree teardown boom') },
+  })
+  const results = await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], previewCtx({ git, exec: recordingExec(calls) }))
+
+  assert.equal(branchExistsCalls, 1, 'the branch set must not be reassembled for a second run')
+  assert.equal(calls.length, 1, 'the command check must not execute twice')
+  assert.deepEqual(results.map((r) => [r.name, r.status]), [['merge', 'fail'], ['test', 'fail']])
+  assert.match(results[0].output, /worktree teardown boom/)
+  assert.equal(aggregateVerdict(results).verdict, 'FAIL')
+})
+
+test('a branch lookup that throws while assembling the preview fails the merge check, not the run', async () => {
+  const calls = []
+  const ctx = previewCtx({
+    git: previewGit({ branchExists: async () => { throw new Error('branch lookup boom') } }),
+    exec: recordingExec(calls),
+  })
+  const results = await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], ctx)
+  assert.equal(results[0].name, 'merge')
+  assert.equal(results[0].status, 'fail')
+  assert.match(results[0].output, /branch lookup boom/)
+  assert.equal(results[1].status, 'skip')
+  assert.equal(calls.length, 0)
+})
+
+// --- ctx.taskScope: narrowing a `complete` invocation to one task --------------------------
+//
+// `complete` verifies the calling task, not the whole phase, so `cli.mjs` marks its context
+// with `taskScope: <task id>`. `gate` never sets it. Two places in this file honour the marker
+// — the previewed branch set and the fileset check's phase-task list — while `runOwnershipCheck`
+// deliberately does not, which is the whole reason the narrowing travels as a marker rather
+// than as a pre-filtered `ctx.tasks`: ownership must keep explaining *every* commit on the run
+// branch, and a filtered task list would silently hide a direct write riding in behind
+// whichever task happens to finish first.
+//
+// These tests drive `runChecks` / `runFilesetCheck` / `runOwnershipCheck` directly, so they pin
+// this file's half of the contract whether or not the `cli.mjs` half has landed yet.
+
+const T3_PHASE2_TASK = { id: 'T3', phase: 2, files: ['c.mjs'] }
+const T3_BRANCH = 'teammates/r1/T3'
+
+// The finding this closes: with the phase-wide branch set, the first teammate of a 3-task phase
+// to run `complete` gets every sibling's branch merged into its preview. A sibling's stray
+// commit — or a sibling branch that does not exist yet — fails the preview, and the teammate
+// reads it as "my own work is broken".
+test('with taskScope set, only that task\'s branch is merged into the preview', async () => {
+  const merged = []
+  const ctx = previewCtx({
+    git: previewGit({ mergeInto: async (_dir, branches) => { merged.push(...branches); return null } }),
+    exec: recordingExec([]),
+    tasks: [T1_TASK, T2_PHASE1_TASK],
+    taskScope: 'T2',
+  })
+  await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], ctx)
+  assert.deepEqual(merged, [T2_BRANCH])
+  assert.ok(!merged.includes(T1_BRANCH), 'a sibling\'s branch must not reach a task-scoped preview')
+})
+
+// The paired half, and the property most worth pinning: absent the marker — every `gate`
+// invocation — the previewed set is byte-for-byte the phase-wide set it has always been.
+test('with taskScope absent, the previewed branch set is the whole phase, unchanged', async () => {
+  const merged = []
+  const ctx = previewCtx({
+    git: previewGit({ mergeInto: async (_dir, branches) => { merged.push(...branches); return null } }),
+    exec: recordingExec([]),
+    tasks: [T1_TASK, T2_PHASE1_TASK, T3_PHASE2_TASK],
+  })
+  assert.equal(ctx.taskScope, undefined)
+  await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], ctx)
+  assert.deepEqual(merged, [T1_BRANCH, T2_BRANCH])
+})
+
+// A taskScope that names nothing in the current phase narrows to zero tasks, which the existing
+// "selected no tasks" guard turns into a fail. Fail-closed, not a vacuous pass.
+test('a taskScope naming no task in the current phase previews nothing and does not pass vacuously', async () => {
+  const merged = []
+  const ctx = previewCtx({
+    git: previewGit({ mergeInto: async (_dir, branches) => { merged.push(...branches); return null } }),
+    exec: recordingExec([]),
+    tasks: [T1_TASK, T3_PHASE2_TASK],
+    taskScope: 'T3',
+  })
+  const results = await runChecks([{ name: 'fileset', kind: 'fileset' }], ctx)
+  assert.deepEqual(merged, [])
+  assert.equal(results.find((r) => r.name === 'fileset').status, 'fail')
+  assert.equal(aggregateVerdict(results).verdict, 'FAIL')
+})
+
+const scopedFilesetGit = () => fakeGit({
+  branchExists: async () => true,
+  // T2's branch carries a path outside its declared set; T1's is clean.
+  changedFiles: async ({ branch }) => (branch.includes('T2') ? ['b.mjs', 'stray.mjs'] : ['a.mjs']),
+})
+
+test('with taskScope set, runFilesetCheck considers only that task', async () => {
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = {
+    git: scopedFilesetGit(), runId: RUN_ID, anchorSha: 'anchorSha1', runSha: 'runSha1',
+    tasks: [T1_TASK, T2_PHASE1_TASK], currentPhase: 1, phaseError: null, taskScope: 'T1',
+  }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'pass', 'a sibling\'s violation must not fail the scoped task')
+  assert.deepEqual(res.branchShas, { [T1_BRANCH]: `refs/heads/${T1_BRANCH}-sha` })
+})
+
+// The same context without the marker: the sibling's violation is exactly as fatal as it is
+// today. Together with the test above this pins that the narrowing is the marker's doing and
+// nothing else.
+test('with taskScope absent, runFilesetCheck still walks every task in the phase', async () => {
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = {
+    git: scopedFilesetGit(), runId: RUN_ID, anchorSha: 'anchorSha1', runSha: 'runSha1',
+    tasks: [T1_TASK, T2_PHASE1_TASK], currentPhase: 1, phaseError: null,
+  }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.match(res.output, /T2: outside declared set/)
+  assert.deepEqual(res.branchShas, {
+    [T1_BRANCH]: `refs/heads/${T1_BRANCH}-sha`,
+    [T2_BRANCH]: `refs/heads/${T2_BRANCH}-sha`,
+  })
+})
+
+// The all-integrated short-circuit records branch shas for verdictCoversTree rather than
+// diffing. A task-scoped verdict must not claim to cover a sibling's branch either: recording
+// one would let a sibling moving its branch invalidate this task's verdict.
+test('with taskScope set, the all-integrated path records only that task\'s branch sha', async () => {
+  const git = fakeGit({ branchExists: async () => true })
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = {
+    git, runId: RUN_ID, anchorSha: 'anchorSha1', tasks: [T1_TASK, T2_PHASE1_TASK],
+    currentPhase: null, phaseError: null, taskScope: 'T2',
+  }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'pass')
+  assert.deepEqual(res.branchShas, { [T2_BRANCH]: `refs/heads/${T2_BRANCH}-sha` })
+})
+
+// Ownership is the one that must NOT narrow. A commit explained only by a *sibling's* branch
+// stays explained under taskScope; if the marker leaked into runOwnershipCheck, that commit
+// would read as unexplained and the scoped teammate would be blocked by work it does not own —
+// and the same leak is what would let a direct write hide behind whichever task ran first.
+test('with taskScope set, runOwnershipCheck still sees every task in the run', async () => {
+  const git = fakeGit({
+    branchExists: async () => true,
+    commitsBetween: async () => ['c1'],
+    isAncestor: async (a, b) => a === 'c1' && b === `refs/heads/${T2_BRANCH}-sha`,
+  })
+  const check = { name: 'ownership', kind: 'ownership' }
+  const ctx = {
+    git, runId: RUN_ID, runBranch: RUN_BRANCH, anchorSha: 'anchorSha1', runSha: 'runSha1',
+    tasks: [T1_TASK, T2_PHASE1_TASK, T3_PHASE2_TASK], taskScope: 'T1',
+  }
+  const res = await runOwnershipCheck(check, ctx)
+  assert.equal(res.status, 'pass')
+  // Every task branch in the run was resolved, not just the scoped one — including a task from
+  // another phase, since ownership is run-wide and not phase-wide either.
+  for (const branch of [T1_BRANCH, T2_BRANCH, T3_BRANCH]) {
+    assert.ok(git.resolveRefCalls.includes(`refs/heads/${branch}`), `${branch} must still be consulted`)
+  }
 })
