@@ -7,6 +7,16 @@ event-driven supervision.
 Design: `docs/specs/2026-08-05-claude-teammates-design.md`
 Plan: `docs/plans/2026-08-05-claude-teammates.md`
 
+### What the phase gate guarantees
+
+The gate checks that each teammate's **committed** changes stayed inside the files its task
+declared, and that every commit on the run branch came from a teammate branch. It computes
+this from git each time it runs and trusts nothing an agent wrote.
+
+It is tamper-evident, not tamper-proof: a teammate executes its own tests, so a determined one
+can do anything you can. The gate catches drift and mistakes reliably; it is not a security
+boundary. See `docs/specs/2026-08-05-tamper-evident-enforcement-design.md`.
+
 ## Development
 
     npm test
@@ -34,7 +44,7 @@ without a push.
 - `test-driven-development` — write the failing test first and watch it fail for the right reason
 - `systematic-debugging` — reproduce and isolate before changing anything
 - `receiving-code-review` — verify feedback technically rather than agreeing performatively
-- `finishing-a-development-branch` — verifies recorded gate verdicts, then decides how the run branch lands
+- `finishing-a-development-branch` — re-runs the gate to verify each phase, then decides how the run branch lands
 - `writing-skills` — creating, editing, and verifying skills before deployment
 
 ## Layout

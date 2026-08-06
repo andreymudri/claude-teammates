@@ -40,8 +40,8 @@ Append every result to `status.json`. A teammate that returned nothing is `orpha
 ## 4. Gate, then integrate
 
 Run `phase-gate`. Only on PASS, dispatch `tm-integrator` to merge the teammate branches in
-dependency order. The integrator is the sole writer to the run branch, and it runs alone —
-never in parallel with anything.
+dependency order with `--no-ff`. The integrator is the sole writer to the run branch and runs
+alone. No bookkeeping call follows the merge: the next phase is derived from what is merged.
 
 ## Choosing a model per dispatch
 
