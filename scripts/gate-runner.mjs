@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { filesetViolations, ownershipViolations, resolveTaskBranch, derivePhase, planHash } from './enforce.mjs'
+import { filesetViolations, ownershipViolations, baseExplainedNote, resolveTaskBranch, derivePhase, planHash } from './enforce.mjs'
 import { GitError } from './git.mjs'
 import { withMergePreview, conflictPairs } from './merge-preview.mjs'
 
@@ -311,7 +311,7 @@ async function mergeContentExplainedByParents(git, firstParent, secondaryParents
 }
 
 export async function runOwnershipCheck(check, ctx = {}) {
-  const { git, runId, runBranch, anchorSha, runSha, tasks } = ctx
+  const { git, runId, runBranch, baseBranch, anchorSha, runSha, tasks } = ctx
   if (!git) return checkResult(check, 'fail', 'ownership check has no git access')
 
   try {
@@ -325,8 +325,19 @@ export async function runOwnershipCheck(check, ctx = {}) {
       }
     }
 
+    // Tolerated when it cannot be resolved: a run configured without a base branch, or with
+    // one that no longer exists, keeps today's behaviour rather than failing this check for a
+    // brand-new reason it was never meant to report.
+    let baseSha = null
+    if (baseBranch && await git.branchExists(baseBranch)) {
+      baseSha = await git.resolveRef(`refs/heads/${baseBranch}`)
+    }
+
     const commits = await git.commitsBetween({ from: anchorSha, to: runSha })
     const unexplained = []
+    // Every commit this check admitted only because of base ancestry. Reported on the pass —
+    // see `baseExplainedNote`, which also records why no base sha from run start is consulted.
+    const baseExplained = []
     for (const sha of commits) {
       let explained = false
       for (const branchSha of shas) {
@@ -350,15 +361,24 @@ export async function runOwnershipCheck(check, ctx = {}) {
           // an earlier version: the scan broke on the first matching parent, so content
           // riding in behind a second, unowned parent was never inspected.
           let allParentsOwned = true
+          let usedBase = false
           for (const parent of secondaryParents) {
             let owned = false
             for (const branchSha of shas) {
               if (await git.isAncestor(parent, branchSha)) { owned = true; break }
             }
+            // A merge of the base into the run branch is how a mid-run plan amendment reaches
+            // the anchor. Its secondary parent is the base, never a task branch, so without
+            // this a legitimate base advance is indistinguishable from a direct write. Base
+            // content is already trusted: the anchor is computed from it and `changedFiles`
+            // diffs against it, so accepting base ancestry adds no new trust. It is still
+            // per-parent — a rogue parent riding alongside a base parent fails the loop.
+            if (!owned && baseSha && await git.isAncestor(parent, baseSha)) { owned = true; usedBase = true }
             if (!owned) { allParentsOwned = false; break }
           }
           if (allParentsOwned) {
             explained = await mergeContentExplainedByParents(git, firstParent, secondaryParents, sha)
+            if (explained && usedBase) baseExplained.push(sha)
           }
         }
       }
@@ -372,7 +392,7 @@ export async function runOwnershipCheck(check, ctx = {}) {
       dirty: await git.isDirty(),
     })
     return violations.length === 0
-      ? checkResult(check, 'pass', '')
+      ? checkResult(check, 'pass', baseExplainedNote({ baseBranch, commits: baseExplained }))
       : checkResult(check, 'fail', violations.join('\n'))
   } catch (err) {
     if (!(err instanceof GitError)) throw err

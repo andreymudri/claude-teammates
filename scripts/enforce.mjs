@@ -91,12 +91,29 @@ export function ownershipViolations({ runBranch, taskBranches = [], unexplainedC
     }
   }
   for (const sha of unexplainedCommits) {
-    violations.push(`commit ${sha} on ${runBranch} is reachable from no task branch of this run — either it is a direct write, or the integrator merged without --no-ff and destroyed the ancestry this check reads`)
+    violations.push(`commit ${sha} on ${runBranch} is reachable from no task branch of this run and from no ancestor of the base branch — either it is a direct write, or the integrator merged without --no-ff and destroyed the ancestry this check reads`)
   }
   if (dirty) {
     violations.push('main worktree has uncommitted changes; teammates work only in their own worktrees')
   }
   return violations
+}
+
+// The counterpart to the base-ancestry explanation in the ownership check: whatever that
+// clause admits, this states out loud. Accepting a base-explained commit silently would be a
+// net loss of signal — an accidental commit landing on the base mid-run used to surface as an
+// ownership failure (wrong, but visible), and would otherwise now ride in with a green gate
+// and no record anywhere.
+//
+// It deliberately does NOT compare against a base sha recorded at run start. That state would
+// have to live in `.teammates/`, which the ownership check must never read: those files are
+// written by the very agents this check enforces, so consulting them would let the enforced
+// party supply the evidence and destroy the property that makes ownership tamper-evident.
+// The check reports what it accepted; it does not claim the base did not move.
+export function baseExplainedNote({ baseBranch, commits = [] } = {}) {
+  if (!commits || commits.length === 0) return ''
+  const label = commits.length === 1 ? 'commit' : 'commits'
+  return `accepted ${commits.length} ${label} by ancestry of base branch ${baseBranch} rather than any task branch of this run: ${commits.join(', ')}`
 }
 
 // A recorded PASS is no longer consulted to decide completion — the gate is recomputed

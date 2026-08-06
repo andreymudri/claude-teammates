@@ -7,6 +7,7 @@ import {
   filesetViolations,
   derivePhase,
   ownershipViolations,
+  baseExplainedNote,
   verdictCoversTree,
   planHash,
 } from '../scripts/enforce.mjs'
@@ -166,8 +167,39 @@ test('each unexplained commit is flagged and names --no-ff', () => {
   })
   assert.equal(v.length, 2)
   assert.match(v[0], /abc123/)
+  assert.match(v[0], /reachable from no task branch/)
   assert.match(v[0], /--no-ff/)
   assert.match(v[1], /def456/)
+})
+
+// The ownership check now also accepts base-branch ancestry as an explanation. A reader who is
+// only told "no task branch" is sent hunting for a direct write when the real question is why
+// the commit is not on the base either — the message must name that possibility itself.
+test('an unexplained commit names the base branch as a ruled-out explanation', () => {
+  const v = ownershipViolations({
+    runBranch: 'main', taskBranches: ['teammates/r1/T1'], unexplainedCommits: ['abc123'], dirty: false,
+  })
+  assert.equal(v.length, 1)
+  assert.match(v[0], /base branch/)
+})
+
+// --- baseExplainedNote --------------------------------------------------------------------
+//
+// Accepting base ancestry silently would delete the only signal the old (wrong) failure
+// carried: that the baseline moved mid-run. The note is what keeps a passing gate honest
+// about what it admitted.
+
+test('the base-explained note names every admitted commit and the base branch', () => {
+  const note = baseExplainedNote({ baseBranch: 'main', commits: ['abc123', 'def456'] })
+  assert.match(note, /abc123/)
+  assert.match(note, /def456/)
+  assert.match(note, /main/)
+})
+
+test('the base-explained note is empty when nothing was admitted by base ancestry', () => {
+  assert.equal(baseExplainedNote({ baseBranch: 'main', commits: [] }), '')
+  assert.equal(baseExplainedNote({ baseBranch: 'main' }), '')
+  assert.equal(baseExplainedNote(), '')
 })
 
 test('a dirty worktree is a violation', () => {
