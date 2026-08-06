@@ -6,7 +6,7 @@
 //   docs/plans/2026-08-05-tamper-evident-enforcement.md (Task 4)
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, rm, writeFile, readFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, rm, writeFile, readFile, realpath, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -928,5 +928,206 @@ test('a compliant two-phase run passes phase 1, is merged --no-ff, then derives 
     const completeResult = await runCliOn(root, ['complete', '--run', 'r1', '--task', 'T2', '--plan', 'plan.md'])
     assert.equal(completeResult.code, 0)
     assert.match(completeResult.out, /T2 done/)
+  })
+})
+
+// ============================================================================================
+// Step 7 — the `preview.link` boundary, against real repositories and a real merge preview.
+//
+// What these pin: a manifest cannot use `preview.link` to reach outside the repository. The
+// manifest is read from the working tree, which an enforced teammate may write, so the entries
+// it declares are caller input in exactly the sense `--results` is: an entry that escapes the
+// repository textually, escapes it only after normalisation, or is absolute is refused before
+// any worktree exists, and an entry naming a directory that is not there fails the `merge`
+// check rather than being deferred into a `command` check that would then blame the teammate's
+// code for a missing build input. In every rejection the gate FAILs, nothing is created at the
+// escape target, and the `command` checks are recorded `skip` — never `pass`.
+//
+// What these do NOT pin: that a determined teammate cannot get arbitrary code to run. It still
+// can, and that limit is unchanged and documented — a `command` check is a shell command read
+// from the same editable manifest, so a teammate that can write the manifest can already run
+// anything without needing a link at all. These tests narrow nothing there. What they pin is
+// narrower and worth pinning on its own: the link mechanism does not hand that code a writable
+// junction into a directory OUTSIDE the repository, which is the one privilege linking adds.
+//
+// The last test is the counterweight to all of them. A gate that refused every entry would
+// satisfy every rejection above, so one test provisions a legitimate link end to end and
+// proves a `command` check read through it.
+// ============================================================================================
+
+// Like commitManifest, but also carries a top-level `preview` block and, optionally, extra
+// .gitignore entries — an untracked build directory left unignored is a dirty worktree and
+// `ownership` would fail the run on that instead of on what the test is about. Same amend-into-
+// the-initial-commit reasoning, so call it before taskBranch and before creating the ignored
+// directory (it runs `git add .`).
+async function commitPreviewManifest(root, { link, checks, ignore = [] }) {
+  const config = { preview: { link }, phases: { default: { checks } } }
+  await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(config), 'utf8')
+  await writeFile(path.join(root, '.gitignore'), ['.teammates/', ...ignore, ''].join('\n'), 'utf8')
+  git(root, ['add', '.'])
+  git(root, ['commit', '--quiet', '--amend', '--no-edit'])
+  git(root, ['branch', '--force', 'main', 'run-branch'])
+}
+
+async function exists(p) {
+  return await stat(p).then(() => true, () => false)
+}
+
+const PREVIEW_CHECKS = [
+  { name: 'fileset', kind: 'fileset' },
+  { name: 'ownership', kind: 'ownership' },
+  // Passes trivially if it is ever run, so a recorded `skip` below is evidence the gate
+  // withheld it and not evidence the command itself was broken.
+  { name: 'noop', kind: 'command', run: 'node -e ""' },
+]
+
+// Runs a one-task phase whose manifest declares `link`, and returns the parsed gate verdict.
+async function gateWithLink(root, link) {
+  await commitPreviewManifest(root, { link, checks: PREVIEW_CHECKS })
+  await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+  const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+  return { code, parsed: JSON.parse(out) }
+}
+
+// The three rejections share their shape entirely: FAIL, `merge` alone failing, the entry named
+// in the merge output, and the command check withheld. Only the message differs.
+function assertLinkRejected(code, parsed, entry, messagePattern) {
+  assert.equal(code, 1)
+  assert.equal(parsed.verdict, 'FAIL')
+  assert.deepEqual(parsed.failed, ['merge'])
+  const merge = parsed.results.find((r) => r.name === 'merge')
+  assert.equal(merge.status, 'fail')
+  // The entry is interpolated with JSON.stringify, so a Windows absolute path appears with its
+  // backslashes doubled. Compare against that same escaping rather than the raw string.
+  const asWritten = JSON.stringify(entry).slice(1, -1)
+  assert.ok(merge.output.includes(asWritten), `the merge output must name the entry: ${merge.output}`)
+  assert.match(merge.output, messagePattern)
+  // `skip`, not merely "not pass": aggregateVerdict counts `skip` as neither failed nor
+  // pending, so a check that quietly passed against the unprovisioned run branch would be
+  // indistinguishable from one honestly withheld if this only asserted the absence of `pass`.
+  assert.equal(parsed.results.find((r) => r.name === 'noop').status, 'skip')
+}
+
+test('a manifest declaring a preview.link that escapes the repository fails the gate and creates nothing at the escape target', async () => {
+  await withRepo(async (root) => {
+    const escapeTarget = path.resolve(root, '..', 'escape')
+    assert.equal(await exists(escapeTarget), false, 'fixture precondition: the escape target must not pre-exist')
+
+    const { code, parsed } = await gateWithLink(root, ['../escape'])
+    assertLinkRejected(code, parsed, '../escape', /escapes the repository/)
+
+    // The entry is refused by validateLinkPaths before withMergePreview creates any worktree,
+    // so there is no window in which a junction into the parent directory exists.
+    assert.equal(await exists(escapeTarget), false, 'nothing may be created at the escape target')
+  })
+})
+
+test('a manifest declaring an absolute preview.link fails the gate and creates nothing at the escape target', async () => {
+  await withRepo(async (root) => {
+    const escapeTarget = path.resolve(root, '..', 'abs-escape')
+    assert.equal(await exists(escapeTarget), false, 'fixture precondition: the escape target must not pre-exist')
+
+    const { code, parsed } = await gateWithLink(root, [escapeTarget])
+    assertLinkRejected(code, parsed, escapeTarget, /must be repo-relative/)
+
+    assert.equal(await exists(escapeTarget), false, 'nothing may be created at the escape target')
+  })
+})
+
+test('a manifest declaring a preview.link that escapes only after normalisation fails the gate and creates nothing at the escape target', async () => {
+  await withRepo(async (root) => {
+    // 'a/../../escape' contains no leading '..' and names a plausible in-repo subdirectory; it
+    // reaches the parent of the repository only once path.normalize collapses the segments.
+    const escapeTarget = path.resolve(root, '..', 'escape')
+    assert.equal(await exists(escapeTarget), false, 'fixture precondition: the escape target must not pre-exist')
+
+    const { code, parsed } = await gateWithLink(root, ['a/../../escape'])
+    assertLinkRejected(code, parsed, 'a/../../escape', /escapes the repository/)
+
+    assert.equal(await exists(escapeTarget), false, 'nothing may be created at the escape target')
+  })
+})
+
+test('a manifest declaring a preview.link that does not exist fails the merge check with ENOENT and skips the command checks', async () => {
+  await withRepo(async (root) => {
+    // Unlike the three above this entry is textually legitimate, so it survives
+    // validateLinkPaths, a worktree is created, the merge succeeds, and the failure comes from
+    // the explicit stat in linkInto — neither a POSIX symlink nor a Windows junction refuses a
+    // missing target on its own, and a dangling link would defer this to the command check.
+    const { code, parsed } = await gateWithLink(root, ['not-installed'])
+    assert.equal(code, 1)
+    assert.equal(parsed.verdict, 'FAIL')
+    assert.deepEqual(parsed.failed, ['merge'])
+    const merge = parsed.results.find((r) => r.name === 'merge')
+    assert.equal(merge.status, 'fail')
+    assert.match(merge.output, /preview link 'not-installed' failed: ENOENT/)
+    // The remedy sentence is part of what makes this a manifest error rather than a code
+    // defect, so it is pinned rather than left to the message's first clause.
+    assert.match(merge.output, /Run your install step, or remove it from preview\.link/)
+    // A preview missing its build inputs is exactly the state in which a command check
+    // produces failures that look like code defects. It must be withheld, not run, and not
+    // recorded `pass` against the unprovisioned run-branch tree.
+    assert.equal(parsed.results.find((r) => r.name === 'noop').status, 'skip')
+  })
+})
+
+test('a legitimate preview.link provisions the preview and a command check reads through it', async () => {
+  await withRepo(async (root) => {
+    // The probe reports where it ran and what the linked path resolves to, so the assertions
+    // below can tell "read through the link, from inside the preview" apart from "read from
+    // the repository working tree" — the two are indistinguishable by exit code alone, and a
+    // check that was skipped still yields PASS and exit 0.
+    const sentinel = path.join(root, '.teammates', 'link-probe.json')
+    const probe = `import { realpathSync, readFileSync, writeFileSync } from 'node:fs'
+// Throws — and so exits non-zero, failing the check — if the link was never created.
+const marker = 'build/deps/marker.txt'
+writeFileSync(${JSON.stringify(sentinel)}, JSON.stringify({
+  cwd: realpathSync(process.cwd()),
+  markerReal: realpathSync(marker),
+  content: readFileSync(marker, 'utf8'),
+}))
+`
+    await commitPreviewManifest(root, {
+      link: ['build/deps'],
+      ignore: ['build/'],
+      checks: [
+        { name: 'fileset', kind: 'fileset' },
+        { name: 'ownership', kind: 'ownership' },
+        // Nested one level below the repository root on purpose: `build/` is not tracked, so
+        // the merged tree contains no `build` at all and the probe is unreachable there by
+        // accident — running it requires linkInto to have created the parent and the link.
+        { name: 'reads-through-link', kind: 'command', run: 'node build/deps/probe.mjs' },
+      ],
+    })
+
+    // Real, untracked content in the actual repository working tree: preview.link resolves
+    // against the repo root, not against anything committed.
+    await mkdir(path.join(root, 'build', 'deps'), { recursive: true })
+    await writeFile(path.join(root, 'build', 'deps', 'marker.txt'), 'linked build input\n', 'utf8')
+    await writeFile(path.join(root, 'build', 'deps', 'probe.mjs'), probe, 'utf8')
+    await mkdir(path.dirname(sentinel), { recursive: true })
+
+    await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+    const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(code, 0, out)
+    const parsed = JSON.parse(out)
+    assert.equal(parsed.verdict, 'PASS')
+    assert.equal(parsed.results.find((r) => r.name === 'merge').status, 'pass')
+    assert.equal(parsed.results.find((r) => r.name === 'reads-through-link').status, 'pass')
+
+    // The sentinel exists only if the command genuinely executed; `pass` above cannot be
+    // reached by a withheld check, but neither can it distinguish WHERE the check ran.
+    const report = JSON.parse(await readFile(sentinel, 'utf8'))
+    const realRoot = await realpath(root)
+    // Ran inside the merge preview's scratch worktree, not in the repository working tree —
+    // where `build/deps/marker.txt` also exists and would have satisfied a naive probe with no
+    // link created at all.
+    assert.notEqual(report.cwd, realRoot)
+    assert.equal(path.relative(realRoot, report.cwd).startsWith('..'), true,
+      `the check must run outside the repository working tree, ran in ${report.cwd}`)
+    // ...and the path it read resolves back to the repository's real file, which is what makes
+    // it a link rather than a copy the preview happened to contain.
+    assert.equal(report.markerReal, path.join(realRoot, 'build', 'deps', 'marker.txt'))
+    assert.equal(report.content, 'linked build input\n')
   })
 })
