@@ -34,15 +34,22 @@ any non-optional check is still pending.
 
 ## On FAIL
 
-Ask the CLI what to do before asking the user:
+Ask the CLI for a fix decision before asking the user. Hand it the run, the failing phase, the
+run root, and the verdict JSON you just produced; it prints one of three decisions — `none`,
+`retry`, or `escalate` — and exits 0 for all three, so read the `decision` field rather than the
+exit status. (The invocation is documented with the subcommand that implements it.)
 
-    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" fix --run <runId> --phase <n> --root <root> \
-      --verdict <path to the verdict JSON>
+On `none`, the decision engine found no failing check in the verdict you handed it. **This does
+not mean "the failure needs no fix" and it is never permission to integrate.** You reached this
+section because the gate failed, so a `none` decision means the verdict you passed is not the
+one that failed — a stale file, the wrong phase, the wrong run root, or a verdict written before
+the last check completed. Re-derive the verdict by running the gate again from scratch and ask
+again. Integrate only on a freshly recomputed PASS, never on `none`.
 
-It prints a decision. On `retry`, redispatch each listed task at the listed `tier`, resuming
-the same teammate so it keeps its task context, and hand it the failing check names and the
-surviving findings. Then run the gate again from scratch — never reuse the previous verdict,
-and never re-run only the failing check.
+On `retry`, redispatch each listed task at the listed `tier`, resuming the same teammate so it
+keeps its task context, and hand it the failing check names and the surviving findings. Then run
+the gate again from scratch — never reuse the previous verdict, and never re-run only the
+failing check.
 
 A retried teammate that returns `blocked` ends the loop immediately. `blocked` means missing
 input, and further rounds cannot supply it.

@@ -58,10 +58,34 @@ test('parallel-execution documents all three model tiers and the --models flag',
   assert.match(body, /--models/)
 })
 
-test('phase-gate documents the fix subcommand and the cost-bound framing', async () => {
+test('phase-gate documents the fix decision and the cost-bound framing', async () => {
   const { body } = await skill('phase-gate')
-  assert.match(body, /cli\.mjs["']?\s+fix\b/)
+  assert.match(body, /fix decision/)
+  for (const decision of ['none', 'retry', 'escalate']) {
+    assert.match(body, new RegExp('`' + decision + '`'), `phase-gate must document the ${decision} decision`)
+  }
   assert.match(body, /cost bound, not a security bound/)
+})
+
+test('phase-gate says plainly what a none decision means and does not mean', async () => {
+  const { body } = await skill('phase-gate')
+  const start = body.indexOf('## On FAIL')
+  const end = body.indexOf('## What the enforcement checks')
+  assert.ok(start >= 0 && end > start, 'On FAIL section not found')
+  const onFail = body.slice(start, end)
+  const noneStart = onFail.indexOf('On `none`')
+  assert.ok(noneStart >= 0, 'On FAIL must have a `none` branch')
+  const none = onFail.slice(noneStart, onFail.indexOf('On `retry`'))
+  assert.match(none, /never permission to integrate/i, '`none` must not read as "no fix needed"')
+  assert.match(none.replace(/\s+/g, ' '), /gate again from scratch/i, '`none` must say to re-derive the verdict')
+})
+
+test('phase-gate names no cli subcommand that scripts/cli.mjs does not implement', async () => {
+  const { body } = await skill('phase-gate')
+  const cli = await readFile(new URL('../scripts/cli.mjs', import.meta.url), 'utf8')
+  for (const [, sub] of body.matchAll(/cli\.mjs["']?\s+([a-z-]+)/g)) {
+    assert.ok(cli.includes(`'${sub}'`), `phase-gate documents unimplemented subcommand ${sub}`)
+  }
 })
 
 test('tm-implementer forbids weakening a test to satisfy a fix-round finding', async () => {
