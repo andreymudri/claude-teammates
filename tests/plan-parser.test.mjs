@@ -161,3 +161,171 @@ test('an unknown dependency id still throws from assignPhases', () => {
   assert.deepEqual(tasks[0].deps, ['T99'])
   assert.throws(() => assignPhases(tasks), /unsatisfiable dependencies: T1/)
 })
+
+test('parses a declared Model line into tier and tierSource', () => {
+  const plan = '### Task 1: X\n\n**Files:**\n- Create: `a.mjs`\n\n**Model:** cheap\n'
+  const tasks = parsePlan(plan)
+  assert.equal(tasks[0].tier, 'cheap')
+  assert.equal(tasks[0].tierSource, 'declared')
+})
+
+test('leaves tier and tierSource undefined when there is no Model line', () => {
+  const plan = '### Task 1: X\n\n**Files:**\n- Create: `a.mjs`\n'
+  const tasks = parsePlan(plan)
+  assert.equal(tasks[0].tier, undefined)
+  assert.equal(tasks[0].tierSource, undefined)
+})
+
+test('captures the task brief including a fenced code block, stopping at the next heading', () => {
+  const plan = `### Task 1: X
+
+**Files:**
+- Create: \`a.mjs\`
+
+Some brief text.
+
+\`\`\`js
+const x = 1
+\`\`\`
+
+### Task 2: Y
+
+**Files:**
+- Create: \`b.mjs\`
+`
+  const tasks = parsePlan(plan)
+  assert.ok(tasks[0].brief.includes('Some brief text.'))
+  assert.ok(tasks[0].brief.includes('```js'))
+  assert.ok(tasks[0].brief.includes('const x = 1'))
+  assert.ok(!tasks[0].brief.includes('Task 2'))
+  assert.ok(!tasks[0].brief.includes('b.mjs'))
+})
+
+test('the brief of the last task stops at a trailing document section', () => {
+  const plan = `### Task 9: Wire it up
+
+**Files:**
+- Modify: \`scripts/routing.mjs\`
+
+Pure prose describing the change, with no code at all.
+
+## Self-check
+
+Run the parser over the plan:
+
+\`\`\`bash
+node scripts/plan-parser.mjs docs/plans/x.md
+\`\`\`
+`
+  const tasks = parsePlan(plan)
+  assert.equal(tasks.length, 1)
+  assert.ok(tasks[0].brief.includes('Pure prose describing the change'))
+  assert.ok(!tasks[0].brief.includes('Self-check'), 'trailing ## section must not land in the brief')
+  assert.ok(!tasks[0].brief.includes('```'), 'a fence in a trailing section must not land in the brief')
+  assert.ok(!tasks[0].brief.includes('node scripts/plan-parser.mjs'))
+})
+
+test('the brief stops at a horizontal rule that closes the task list', () => {
+  const plan = `### Task 1: X
+
+**Files:**
+- Create: \`a.mjs\`
+
+Brief body.
+
+---
+
+Closing prose with a fence:
+
+\`\`\`
+### Task 7: Fake
+\`\`\`
+`
+  const tasks = parsePlan(plan)
+  assert.equal(tasks.length, 1)
+  assert.ok(tasks[0].brief.includes('Brief body.'))
+  assert.ok(!tasks[0].brief.includes('Closing prose'), 'prose after --- must not land in the brief')
+  assert.ok(!tasks[0].brief.includes('```'), 'a fence after --- must not land in the brief')
+})
+
+test('a ## heading inside a fenced block does not end the task brief', () => {
+  const plan = `### Task 1: X
+
+**Files:**
+- Create: \`a.mjs\`
+
+Brief body.
+
+\`\`\`markdown
+## Not a real section
+
+---
+\`\`\`
+
+Still the same task brief.
+`
+  const tasks = parsePlan(plan)
+  assert.equal(tasks.length, 1)
+  assert.ok(tasks[0].brief.includes('```markdown'), 'fences inside a task body stay in the brief')
+  assert.ok(tasks[0].brief.includes('## Not a real section'))
+  assert.ok(tasks[0].brief.includes('Still the same task brief.'))
+})
+
+test('a document section between two tasks does not leak into either brief', () => {
+  const plan = `### Task 1: X
+
+**Files:**
+- Create: \`a.mjs\`
+
+First brief.
+
+## Interlude
+
+Interlude prose.
+
+### Task 2: Y
+
+**Files:**
+- Create: \`b.mjs\`
+
+Second brief.
+`
+  const tasks = parsePlan(plan)
+  assert.equal(tasks.length, 2)
+  assert.ok(tasks[0].brief.includes('First brief.'))
+  assert.ok(!tasks[0].brief.includes('Interlude'))
+  assert.ok(tasks[1].brief.includes('Second brief.'))
+  assert.ok(!tasks[1].brief.includes('Interlude'))
+})
+
+test('a ### sub-heading inside a task body stays in that task brief, and the Files block after it still parses', () => {
+  const plan = `### Task 1: X
+
+### Rationale
+
+Why this task exists.
+
+**Files:**
+- Create: \`a.mjs\`
+
+Brief body.
+
+### Task 2: Y
+
+**Files:**
+- Create: \`b.mjs\`
+`
+  const tasks = parsePlan(plan)
+  assert.equal(tasks.length, 2)
+  assert.ok(tasks[0].brief.includes('### Rationale'), 'a ### sub-heading must not end the task brief')
+  assert.ok(tasks[0].brief.includes('Why this task exists.'))
+  assert.ok(tasks[0].brief.includes('Brief body.'))
+  assert.deepEqual(tasks[0].files, ['a.mjs'], 'Files block after a ### sub-heading must still be parsed')
+})
+
+test('parses an unrecognised Model value without throwing', () => {
+  const plan = '### Task 1: X\n\n**Files:**\n- Create: `a.mjs`\n\n**Model:** enormous\n'
+  const tasks = parsePlan(plan)
+  assert.equal(tasks[0].tier, 'enormous')
+  assert.equal(tasks[0].tierSource, 'declared')
+})
