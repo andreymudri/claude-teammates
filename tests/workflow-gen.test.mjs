@@ -52,3 +52,33 @@ test('task titles containing quotes do not break the source', async () => {
   const body = src.replace(/^export const meta = /m, 'const meta = ')
   assert.doesNotThrow(() => new Function(`return (async () => { ${body} })`))
 })
+
+test('a task with a tiered model resolves to that model in the generated source', async () => {
+  const tiered = [{ id: 'T1', title: 'auth middleware', files: ['src/auth.ts'], phase: 1, tier: 'cheap' }]
+  const src = await generatePhaseWorkflow({
+    runId: 'x',
+    phase: 1,
+    tasks: tiered,
+    maxParallel: 2,
+    tierModels: { cheap: 'haiku' },
+  })
+  assert.match(src, /"model": "haiku"/)
+})
+
+test('a task whose tier is absent from tierModels emits no model key', async () => {
+  const tiered = [{ id: 'T1', title: 'auth middleware', files: ['src/auth.ts'], phase: 1, tier: 'capable' }]
+  const src = await generatePhaseWorkflow({
+    runId: 'x',
+    phase: 1,
+    tasks: tiered,
+    maxParallel: 2,
+    tierModels: { cheap: 'haiku' },
+  })
+  assert.ok(!src.includes('"model"'), 'expected no model key when tier is absent from tierModels')
+})
+
+test('calling with no tierModels at all emits no model key', async () => {
+  const tiered = [{ id: 'T1', title: 'auth middleware', files: ['src/auth.ts'], phase: 1, tier: 'cheap' }]
+  const src = await generatePhaseWorkflow({ runId: 'x', phase: 1, tasks: tiered, maxParallel: 2 })
+  assert.ok(!src.includes('"model"'), 'expected no model key when tierModels is not supplied')
+})

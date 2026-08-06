@@ -1,6 +1,6 @@
 // Static preamble for generated phase workflows. The generator replaces the TASKS
-// marker below with a JSON array of { id, title, files } and the META marker with
-// the meta literal.
+// marker below with a JSON array of { id, title, files, model? } and the META marker
+// with the meta literal.
 __META__
 
 const TASKS = __TASKS__
@@ -27,7 +27,7 @@ const results = await parallel(TASKS.map((t) => () =>
       'Touching any other file fails the phase gate.',
       'Commit your work on your worktree branch and return the structured result.',
     ].join('\n'),
-    { label: t.id, phase: 'Implement', schema: RESULT_SCHEMA, isolation: 'worktree' },
+    { label: t.id, phase: 'Implement', schema: RESULT_SCHEMA, isolation: 'worktree', ...(t.model ? { model: t.model } : {}) },
   ).then((r) => (r === null ? null : { taskId: t.id, ...r }))
 ))
 
