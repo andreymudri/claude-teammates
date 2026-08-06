@@ -11,6 +11,13 @@ export async function withMergePreview({ git, base, branches = [], link = [], re
   // Validated before the worktree exists, so a bad manifest costs nothing.
   const invalid = validateLinkPaths(link)
   if (invalid) throw new Error(invalid)
+  // Without this, an undefined repoRoot reaches path.resolve inside linkInto and the `merge`
+  // check reports `The "paths[0]" argument must be of type string`, naming neither the cause
+  // nor the entry. A caller that declares link entries and forgets the root it resolves them
+  // against should be told exactly that.
+  if (link.length > 0 && typeof repoRoot !== 'string') {
+    throw new Error('merge preview cannot resolve preview.link entries: no repoRoot was given')
+  }
   if (branches.length === 0) return run({ path: null, merged: [] })
   const dir = await mkdtemp(path.join(tmpdir(), 'tm-preview-'))
   let teardownLinks = null

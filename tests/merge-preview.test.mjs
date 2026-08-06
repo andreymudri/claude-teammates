@@ -259,6 +259,30 @@ test('an invalid link list rejects before addWorktreeDetached is called at all',
   assert.equal(git.calls.length, 0, 'a bad manifest must cost no worktree')
 })
 
+test('declaring link entries without a repoRoot is named as such, not as a raw TypeError', async () => {
+  const git = fakeGit()
+  await assert.rejects(
+    () => withMergePreview({
+      git, base: 'main', branches: ['T1'], link: ['node_modules'],
+      run: async () => {},
+    }),
+    (err) => {
+      assert.match(err.message, /repoRoot/)
+      // The raw path.resolve failure names neither the cause nor the entry.
+      assert.doesNotMatch(err.message, /argument must be of type string/)
+      return true
+    },
+  )
+  assert.equal(git.calls.length, 0, 'a caller error must cost no worktree')
+})
+
+test('an empty link list needs no repoRoot', async () => {
+  const git = fakeGit()
+  let ran = false
+  await withMergePreview({ git, base: 'main', branches: ['T1'], run: async () => { ran = true } })
+  assert.equal(ran, true)
+})
+
 test('a link failure after a clean merge rejects without invoking the callback and still removes the worktree', async () => {
   const git = fakeGit()
   const root = await fakeRepoRoot()

@@ -64,6 +64,14 @@ test('validateLinkPaths rejects two entries that differ only before normalisatio
   assert.match(validateLinkPaths(['a/b', 'a/./b']), /repeats/)
 })
 
+test('validateLinkPaths rejects a repeat that differs only by a trailing separator', () => {
+  assert.match(validateLinkPaths(['node_modules', 'node_modules/']), /repeats/)
+  assert.match(validateLinkPaths(['node_modules/', 'node_modules']), /repeats/)
+  if (process.platform === 'win32') {
+    assert.match(validateLinkPaths(['node_modules', 'node_modules\\']), /repeats/)
+  }
+})
+
 test('validateLinkPaths accepts distinct entries that share a prefix', () => {
   assert.equal(validateLinkPaths(['node_modules', 'packages/web/node_modules']), null)
 })
@@ -330,6 +338,52 @@ test("an entry resolving to the repository root itself is refused by that name, 
         },
       )
     }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an in-repo link that resolves to the repository root itself is refused', async () => {
+  const root = await scratch()
+  const dir = await scratch()
+  try {
+    // A generated `self -> .`: not textually the root, not outside it, and resolving to it.
+    // Accepting it links the preview to the ENTIRE repository, with write-through.
+    await symlink(root, path.join(root, 'self'), LINK_TYPE)
+    await assert.rejects(
+      () => linkInto(dir, root, ['self']),
+      (err) => {
+        assert.match(err.message, /repository root itself/)
+        assert.doesNotMatch(err.message, /resolves outside the repository/)
+        return true
+      },
+    )
+    await assert.rejects(() => lstat(path.join(dir, 'self')), /ENOENT/,
+      'no link to the whole repository may survive')
+  } finally {
+    await rm(path.join(root, 'self'), { recursive: true, force: true }).catch(() => {})
+    await rm(root, { recursive: true, force: true })
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a path the gate itself created for an earlier entry is not reported as tracked', async () => {
+  const root = await scratch()
+  const dir = await scratch()
+  try {
+    await mkdir(path.join(root, 'a', 'b', 'node_modules'), { recursive: true })
+    // Entry 1's recursive mkdir creates preview/a/b, so entry 2 collides with a directory this
+    // run made a moment ago — nothing is tracked and nothing shadows the merged result.
+    await assert.rejects(
+      () => linkInto(dir, root, [path.join('a', 'b', 'node_modules'), path.join('a', 'b')]),
+      (err) => {
+        assert.match(err.message, /earlier preview\.link entry/)
+        assert.doesNotMatch(err.message, /tracked/)
+        assert.doesNotMatch(err.message, /shadow/)
+        return true
+      },
+    )
   } finally {
     await rm(root, { recursive: true, force: true })
     await rm(dir, { recursive: true, force: true })
