@@ -1,4 +1,4 @@
-import { stat, symlink, unlink } from 'node:fs/promises'
+import { mkdir, realpath, stat, symlink, unlink } from 'node:fs/promises'
 import path from 'node:path'
 
 // A junction is the only directory link Windows creates without elevation. POSIX takes 'dir'.
@@ -33,16 +33,29 @@ export async function linkInto(dir, repoRoot, paths = []) {
     for (const linkPath of created.reverse()) await unlink(linkPath).catch(() => {})
   }
   for (const entry of paths) {
-    // Repeated even though validateLinkPaths already ran: that check cannot see the root, and a
-    // symlinked repo root can make a textually-safe entry resolve outside it.
+    // Repeated even though validateLinkPaths already ran: that check cannot see the root.
     const target = path.resolve(repoRoot, entry)
-    const rel = path.relative(repoRoot, target)
-    if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
+    if (escapesRoot(repoRoot, target)) {
+      await teardown()
+      throw new Error(`preview link ${JSON.stringify(entry)} resolves outside the repository`)
+    }
+    // The check above compares path *strings*: path.resolve and path.relative never follow a
+    // symlink or a junction, so an in-repo `node_modules` linked into a shared store — pnpm's
+    // default, and exactly what inferGateConfig emits — passes it while pointing outside the
+    // repository, with write-through. Resolve both sides for real. Resolving the root too is
+    // what keeps this correct when the root itself is a symlink (macOS /tmp is the classic
+    // case): comparing a resolved target against an unresolved root would reject every entry.
+    const real = await realpathBoth(repoRoot, target)
+    if (real && escapesRoot(real.root, real.target)) {
       await teardown()
       throw new Error(`preview link ${JSON.stringify(entry)} resolves outside the repository`)
     }
     const linkPath = path.resolve(dir, entry)
     try {
+      // A nested entry like 'packages/web/node_modules' has a parent that `git worktree add`
+      // never materializes when it holds no tracked files. Without this the symlink fails
+      // ENOENT and the handler blames the target, which does exist.
+      await mkdir(path.dirname(linkPath), { recursive: true })
       // Statted first because neither a POSIX symlink nor a Windows junction refuses a missing
       // target — both create a dangling link. A dangling link would defer the failure to a
       // command check, where a preview missing its build inputs looks exactly like a code defect.
@@ -60,6 +73,23 @@ export async function linkInto(dir, repoRoot, paths = []) {
     created.push(linkPath)
   }
   return teardown
+}
+
+// `rel.startsWith('..')` would be a string prefix test, so an in-repo directory legitimately
+// named '..cache' reads as an escape. Compare whole segments instead.
+function escapesRoot(root, target) {
+  const rel = path.relative(root, target)
+  return rel === '' || rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)
+}
+
+// Returns null when the target does not exist yet — the stat below then produces the ENOENT
+// message, which says something useful, rather than a raw realpath failure.
+async function realpathBoth(root, target) {
+  try {
+    return { root: await realpath(root), target: await realpath(target) }
+  } catch {
+    return null
+  }
 }
 
 // A missing target and a tracked path are both manifest errors, and each gets the sentence that

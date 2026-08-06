@@ -208,7 +208,11 @@ test('declared links exist while the callback runs and are gone after it returns
       },
     })
     assert.equal(readThroughLink, 'from-target')
-    assert.equal(existsSync(path.join(previewDir, 'deps')), false, 'the link must be torn down')
+    // Nothing is asserted about the preview tree here: the finally block removes the whole
+    // directory before this line runs, so any absence check would pass even with teardown
+    // deleted. Teardown is pinned by the ordering test below, which observes the link from
+    // inside removeWorktree, while the directory still exists.
+    assert.ok(previewDir, 'the callback must have been handed a preview path')
     assert.equal(existsSync(path.join(root, 'deps', 'marker.txt')), true, 'the target must survive')
   } finally {
     await rm(root, { recursive: true, force: true })
