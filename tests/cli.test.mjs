@@ -546,6 +546,121 @@ test('complete verifies only the calling task — a sibling with no branch does 
   })
 })
 
+// --- Fix round: the merge preview `runChecks` builds is phase-wide, which reintroduced
+// the coupling the scoping above removed, by another route: a sibling that stomped this
+// task's file made the preview fail and took the compliant task down with it. `complete`
+// now declares its scope once, as `ctx.taskScope`, and `gate-runner` honours it for both
+// the preview's branch set and `runFilesetCheck`'s phase-task list.
+//
+// SIBLING: the narrowing itself lives in `scripts/gate-runner.mjs` (task T5). Until that
+// commit lands, `runChecks` builds no preview at all, so this scenario passes for the
+// weaker reason that there is nothing phase-wide left to fail. It is written against the
+// merged behaviour and must keep passing once the preview exists.
+test('complete passes for a compliant task even when a sibling stomps its file', async () => {
+  await withRepo(async ({ root, io, lines, git: gitCmd }) => {
+    const planPath = path.join(root, 'plan.md')
+    gitCmd(['checkout', '--quiet', 'main'])
+    await writeFile(planPath, TWO_TASK_SAME_PHASE_PLAN, 'utf8')
+    await writeEnforcementManifest(root)
+    gitCmd(['add', 'plan.md', 'teammates.gate.json'])
+    gitCmd(['commit', '--quiet', '-m', 'two-task same-phase plan and gate manifest'])
+    gitCmd(['checkout', '--quiet', 'run-branch'])
+    gitCmd(['merge', '--quiet', '--ff-only', 'main'])
+
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+
+    // T1 is fully compliant: it declared a.mjs and committed exactly a.mjs.
+    gitCmd(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    gitCmd(['add', 'a.mjs'])
+    gitCmd(['commit', '--quiet', '-m', 'T1 work'])
+    gitCmd(['checkout', '--quiet', 'run-branch'])
+
+    // T2 declared only b.mjs but also stomps a.mjs — T2's problem, not T1's.
+    gitCmd(['checkout', '--quiet', '-b', 'teammates/r1/T2'])
+    await writeFile(path.join(root, 'b.mjs'), 'export const b = 2\n', 'utf8')
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 999\n', 'utf8')
+    gitCmd(['add', 'b.mjs', 'a.mjs'])
+    gitCmd(['commit', '--quiet', '-m', 'T2 work, stomping a.mjs'])
+    gitCmd(['checkout', '--quiet', 'run-branch'])
+
+    lines.length = 0
+    const codeT1 = await runCli(['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--root', root], io)
+    assert.equal(codeT1, 0, lines.join('\n'))
+    assert.match(lines.join('\n'), /T1 done/)
+
+    // T2 is the one at fault and still fails on its own undeclared write.
+    lines.length = 0
+    const codeT2 = await runCli(['complete', '--run', 'r1', '--task', 'T2', '--plan', 'plan.md', '--root', root], io)
+    assert.equal(codeT2, 4, lines.join('\n'))
+  })
+})
+
+// `gate` stays phase-wide: it must still see the sibling's undeclared write that
+// `complete --task T1` is allowed to ignore. This is the other half of the same contract —
+// scoping is `complete`'s alone.
+//
+// SIBLING: gains its full force once `gate-runner` honours `taskScope`, since only then
+// could a stray marker on gate's context narrow anything.
+test('gate stays phase-wide and still fails on a sibling that complete --task ignores', async () => {
+  await withRepo(async ({ root, io, lines, git: gitCmd }) => {
+    const planPath = path.join(root, 'plan.md')
+    gitCmd(['checkout', '--quiet', 'main'])
+    await writeFile(planPath, TWO_TASK_SAME_PHASE_PLAN, 'utf8')
+    await writeEnforcementManifest(root)
+    gitCmd(['add', 'plan.md', 'teammates.gate.json'])
+    gitCmd(['commit', '--quiet', '-m', 'two-task same-phase plan and gate manifest'])
+    gitCmd(['checkout', '--quiet', 'run-branch'])
+    gitCmd(['merge', '--quiet', '--ff-only', 'main'])
+
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+
+    gitCmd(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    gitCmd(['add', 'a.mjs'])
+    gitCmd(['commit', '--quiet', '-m', 'T1 work'])
+    gitCmd(['checkout', '--quiet', 'run-branch'])
+
+    gitCmd(['checkout', '--quiet', '-b', 'teammates/r1/T2'])
+    await writeFile(path.join(root, 'b.mjs'), 'export const b = 2\n', 'utf8')
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 999\n', 'utf8')
+    gitCmd(['add', 'b.mjs', 'a.mjs'])
+    gitCmd(['commit', '--quiet', '-m', 'T2 work, stomping a.mjs'])
+    gitCmd(['checkout', '--quiet', 'run-branch'])
+
+    lines.length = 0
+    const code = await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--root', root], io)
+    assert.equal(code, 1)
+    const parsed = JSON.parse(lines.join('\n'))
+    assert.equal(parsed.verdict, 'FAIL')
+    assert.ok(parsed.results.some((r) => r.name === 'fileset' && r.status === 'fail'))
+    // No result name is ever emitted twice: two entries under one name can disagree, and
+    // the verdict would then depend on which one a reader happened to look at.
+    const names = parsed.results.map((r) => r.name)
+    assert.deepEqual(names, [...new Set(names)])
+  })
+})
+
+// The contract with `scripts/gate-runner.mjs` is structural on this side: `complete` makes
+// exactly one `runChecks` call, over the whole check list, with `taskScope` set; `gate`
+// makes its own and sets no scope. Splitting `complete`'s call back into one per kind
+// rebuilds the preview per call and re-emits a duplicate `merge` result — a defect the
+// exit code alone does not show, since both calls can still agree on PASS.
+test('complete makes exactly one runChecks call carrying taskScope, and gate sets none', async () => {
+  const src = await readFile(new URL('../scripts/cli.mjs', import.meta.url), 'utf8')
+  const completeBody = src.slice(src.indexOf("if (command === 'complete')"))
+  const gateBody = src.slice(src.indexOf("if (command === 'gate')"), src.indexOf("if (command === 'complete')"))
+
+  assert.equal((completeBody.match(/runChecks\(/g) ?? []).length, 1)
+  assert.match(completeBody, /taskScope:\s*flags\.task/)
+  // The scoped context must not also narrow `tasks` — runOwnershipCheck has to stay
+  // run-wide to explain every commit on the run branch, not just this task's.
+  assert.doesNotMatch(completeBody, /tasks:\s*\(ctx\.tasks/)
+
+  assert.equal((gateBody.match(/runChecks\(/g) ?? []).length, 1)
+  assert.doesNotMatch(gateBody, /taskScope/)
+})
+
 // --- Review round: LOW — --run/--task must not be allowed to escape the run directory.
 test('init-run rejects a --run value that escapes the run directory', async () => {
   await withRepo(async ({ root, planPath, io, lines }) => {

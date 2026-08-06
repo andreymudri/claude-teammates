@@ -531,24 +531,28 @@ export async function runCli(argv, io = { out: console.log }) {
     const taskKnown = (ctx.tasks ?? []).some((t) => t.id === flags.task)
     if (!taskKnown) { io.out(`no task ${flags.task} in the plan`); return 4 }
 
-    // `complete` verifies the calling task, not the whole phase. `runFilesetCheck` walks
-    // every task in the current phase, so with the full context a 3-task phase always
-    // fails the first teammate to finish on a sibling's missing branch — indistinguishable
-    // from "my own work is wrong". Ownership stays run-wide (it explains every commit on
-    // the run branch, not just this task's, so scoping it would hide a direct write riding
-    // in behind whichever task finishes first); fileset is scoped to just the named task.
-    // The full, phase-wide gate remains `gate`'s job — phase-gate still runs it before
-    // integration, so a phase can never advance without every task passing.
-    const filesetChecks = allChecks.filter((c) => c.kind === 'fileset')
-    const otherChecks = allChecks.filter((c) => c.kind !== 'fileset')
-    const taskCtx = { ...ctx, tasks: (ctx.tasks ?? []).filter((t) => t.id === flags.task) }
+    // `complete` verifies the calling task, not the whole phase. Anything that walks every
+    // task in the current phase — `runFilesetCheck`, and the merge preview `runChecks`
+    // builds — otherwise fails the first teammate to finish on a sibling's missing or
+    // non-compliant branch, indistinguishable from "my own work is wrong". The scope is
+    // declared once, as an explicit `taskScope` marker on the context, and `gate-runner`
+    // honours it in both places. `gate` never sets it, so `gate` stays phase-wide: the
+    // full gate remains its job, and phase-gate still runs it before integration, so a
+    // phase can never advance without every task passing.
+    //
+    // `tasks` stays intact. `runOwnershipCheck` must stay run-wide — it explains every
+    // commit on the run branch, not just this task's, so narrowing the task list would
+    // hide a direct write riding in behind whichever task finishes first. Narrowing
+    // `tasks` is exactly what the marker replaces.
+    //
+    // One `runChecks` call over the combined list, not one per kind: each call builds its
+    // own merge preview, so splitting them did the work twice and emitted two results
+    // named `merge` that could disagree with each other.
+    const taskCtx = { ...ctx, taskScope: flags.task }
 
     // The gate is recomputed. A PASS recorded in status.json is never consulted, so a
     // stale or forged one buys nothing.
-    const results = [
-      ...(await runChecks(filesetChecks, taskCtx)),
-      ...(await runChecks(otherChecks, ctx)),
-    ]
+    const results = await runChecks(allChecks, taskCtx)
     const verdict = aggregateVerdict(results)
     if (verdict.verdict !== 'PASS') {
       const names = [...verdict.failed, ...verdict.pending]
