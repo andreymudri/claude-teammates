@@ -4,6 +4,7 @@ import path from 'node:path'
 
 const MANIFEST = 'teammates.gate.json'
 const INFERRED_ORDER = ['typecheck', 'lint', 'test', 'build']
+const DEFAULT_FIX_ROUNDS = 2
 
 export function defaultMaxParallel() {
   return Math.max(1, Math.min(8, availableParallelism() - 2))
@@ -35,10 +36,28 @@ export function inferGateConfig(pkg) {
     blockOn: ['high'],
   })
 
-  return { maxParallel: defaultMaxParallel(), phases: { default: { checks } } }
+  return {
+    maxParallel: defaultMaxParallel(),
+    phases: { default: { fixRounds: DEFAULT_FIX_ROUNDS, checks } },
+  }
 }
 
 export function checksForPhase(config, phaseName) {
   const phases = config?.phases ?? {}
   return phases[phaseName]?.checks ?? phases.default?.checks ?? []
+}
+
+// A fix-round budget is only meaningful as a non-negative whole number: the loop
+// compares `roundsSoFar >= budget`, and any other value makes that comparison
+// NaN -> false forever, leaving the retry loop unbounded. Discard anything else
+// so the next fallback in the chain supplies a usable bound.
+function validFixRounds(value) {
+  return Number.isInteger(value) && value >= 0 ? value : undefined
+}
+
+export function fixRoundsForPhase(config, phaseName) {
+  const phases = config?.phases ?? {}
+  return validFixRounds(phases[phaseName]?.fixRounds)
+    ?? validFixRounds(phases.default?.fixRounds)
+    ?? DEFAULT_FIX_ROUNDS
 }

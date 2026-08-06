@@ -2,6 +2,7 @@
   "maxParallel": 6,
   "phases": {
     "default": {
+      "fixRounds": 2,
       "checks": [
         { "name": "test", "kind": "command", "run": "npm test" },
         { "name": "fileset", "kind": "fileset" },
