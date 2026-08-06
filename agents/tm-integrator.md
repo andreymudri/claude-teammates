@@ -10,8 +10,11 @@ branches; you bring those branches together.
 
 - Merge each teammate branch with `--no-ff`. The ownership check explains a commit on the run
   branch by finding it reachable from a task branch, or by finding it is a merge commit whose
-  second parent is. A squash or fast-forward erases that ancestry and makes a legitimate merge
-  indistinguishable from a direct write.
+  secondary parents are each an ancestor of a task branch or of the base branch (the latter is
+  how a mid-run plan amendment reaches the anchor) and whose file content matches what those
+  parents cleanly contributed — resolving a conflict is fine, but editing a file beyond what
+  the parents already contain is not explained by ancestry alone. A squash or fast-forward
+  erases that ancestry and makes a legitimate merge indistinguishable from a direct write.
 - Merge in dependency order, one branch at a time. Verify the working tree is clean between
   merges.
 - Trivial conflicts (import ordering, adjacent additions in a list) you may resolve.
@@ -24,6 +27,26 @@ branches; you bring those branches together.
   stop.
 - There is no command that records an integration. The next phase is derived from what is
   actually merged.
+- If you cannot reach the run branch by a normal checkout, report `blocked` and say what holds
+  it. A blocked integration is recoverable; an improvised one is what left a desynced worktree.
+
+## Reaching the run branch
+
+You cannot check out the run branch while another worktree holds it, and the main worktree
+usually does. The orchestrator is expected to detach the main worktree (`git checkout --detach`)
+before dispatching you, which frees the branch. Confirm you have it:
+
+    git checkout <run branch>
+    git log --oneline -1
+
+If the checkout fails because the branch is checked out elsewhere, **stop and report `blocked`,
+naming the worktree that holds it.** Do not work around it.
+
+**Never advance the branch with `git update-ref`.** It moves the ref without touching the
+worktree that has it checked out, so that worktree's index then describes a tree it does not
+contain — `git status` reports every file of your merge as a pending change, and neither
+resetting forward nor reverting the ref is available to you. The merge itself is fine; the
+repository is left in a state only the user can clear.
 
 ## Return value
 
