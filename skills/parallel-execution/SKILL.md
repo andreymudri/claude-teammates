@@ -64,6 +64,35 @@ concrete models:
     node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" workflow --run <id> --phase <n> --root <root> \
       --models '{"cheap":"haiku","mid":"sonnet","capable":"opus"}'
 
+## Before dispatching tm-integrator
+
+Detach the main worktree first:
+
+    git checkout --detach
+
+The integrator is the sole writer to the run branch and cannot check it out while the main
+worktree holds it. Without this it has no supported way to advance the branch, and reaches for
+`git update-ref`, which desyncs the main worktree's index from its HEAD. Re-attach after the
+merge with `git checkout <run branch>`.
+
+## Amending a plan mid-run
+
+The gate reads the plan with `git show <mergeBase(base, runBranch)>:<planPath>` — never from the
+working tree, so a teammate cannot widen its own file set by editing the plan. That also means an
+amendment committed only on the run branch changes nothing: the merge-base does not move, and
+`fileset` still reads the old plan.
+
+To make an amendment authoritative:
+
+1. Commit it on the **base** branch.
+2. Rebuild the run branch on the new base tip, via `tm-integrator`, re-merging each task branch
+   with `--no-ff`.
+3. Rebase any in-flight task branch onto the new run-branch tip, or its diff against the new
+   anchor will contain every file the earlier phases merged.
+
+Amend only when a task's declared file set is genuinely wrong. Correcting a stale *interface* — a
+signature an earlier phase's fix rounds changed — belongs in the dispatch brief, not the plan.
+
 ## Invariants
 
 - A teammate **never touches the main worktree**; it works only in its own.
@@ -104,8 +133,9 @@ teammate automatically; a teammate never shares a worktree with another.
 - **Inspect:** `git worktree list` shows every worktree in the repo, including ones from
   other runs. Use it to confirm a teammate actually got an isolated workspace, and to spot
   stale ones before starting a new run.
-- **Prune after merge:** once `tm-integrator` has merged a teammate's branch, remove that
-  teammate's worktree (`git worktree remove <path>`) and run `git worktree prune` if the
-  directory was already deleted out-of-band. Only prune worktrees that belong to **this**
-  run — a worktree from a different run or a teammate still in flight is not yours to
-  touch.
+- **Prune as soon as a teammate returns, not only after merge:** a finished teammate's worktree
+  keeps its branch checked out, and the next dispatch that needs that branch — a fix round, a
+  retry, a rebase — fails with "already used by worktree". Remove the worktree when the task
+  returns (`git worktree remove <path>`), then `git worktree prune`. Only prune worktrees
+  belonging to **this** run. This blocked two dispatches in run `preview`, both times costing a
+  re-dispatch.

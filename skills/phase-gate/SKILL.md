@@ -21,10 +21,12 @@ On exit 3, show the user the inferred manifest, get confirmation, and save it as
 The CLI runs `command` checks itself and returns `agent` and `mcp` checks as `pending` —
 those you execute:
 
-- **agent** — dispatch one `tm-reviewer` per lens in parallel over the phase diff. Then take
-  every finding at a `blockOn` severity and dispatch a second reviewer prompted to **refute**
-  it. Only findings that survive refutation block the gate. This kills plausible-but-wrong
-  findings before they stop a run.
+- **agent** — dispatch one `tm-reviewer` per lens in parallel over the phase diff, **without a
+  `name`**. A named reviewer becomes an addressable teammate that goes idle without emitting its
+  result, and the review is lost; unnamed reviewers return normally. Six consecutive named
+  dispatches were lost this way in run `preview` before the pattern was identified. Then take
+  every finding at a `blockOn` severity and dispatch a second reviewer prompted to **refute** it.
+  Only findings that survive refutation block the gate.
 - **mcp** — call the declared tool and compare against `passWhen`. If the server is not
   connected and the check is `optional`, record `skip` and say so out loud. A missing optional
   server is never a silent pass.

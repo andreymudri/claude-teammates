@@ -199,3 +199,89 @@ test('phase-gate states that a failed link fails the merge check', async () => {
   // The sentence must NOT state the link is reported as a command-check failure.
   assert.doesNotMatch(body, /link[^.]*is reported as a command-check failure/i, 'phase-gate must not state a link is reported as a command-check failure')
 })
+
+// The four assertions below cover procedures discovered by hand during a run that existed in no
+// skill. Each binds its polarity in one contiguous phrase: an ordered chain of tokens scattered
+// across the document is satisfied by text stating the opposite, so scattered matching is not
+// evidence that the claim is present.
+function phrase(body) {
+  return body.replace(/[`*]/g, '').replace(/\s+/g, ' ')
+}
+
+test('parallel-execution says to prune a worktree when a teammate returns, not only after merge', async () => {
+  const { body } = await skill('parallel-execution')
+  const text = phrase(body)
+  assert.match(
+    text,
+    /prune as soon as a teammate returns, not only after merge/i,
+    'parallel-execution must state, in one phrase, that pruning happens when a teammate returns',
+  )
+  assert.match(
+    text,
+    /already used by worktree/i,
+    'parallel-execution must name the failure a stale worktree causes on the next dispatch',
+  )
+  assert.match(text, /git worktree remove/, 'parallel-execution must name the command that prunes')
+  assert.match(
+    text,
+    /only prune worktrees belonging to this run/i,
+    'the guarantee must state its limit: only this run’s worktrees',
+  )
+})
+
+test('parallel-execution requires detaching the main worktree before dispatching the integrator', async () => {
+  const { body } = await skill('parallel-execution')
+  const text = phrase(body)
+  assert.match(body, /--detach/, 'parallel-execution must name --detach')
+  assert.match(
+    text,
+    /before dispatching tm-integrator detach the main worktree first: git checkout --detach/i,
+    'parallel-execution must bind --detach to the step before the integrator dispatch, in one phrase',
+  )
+  assert.match(
+    text,
+    /cannot check it out while the main worktree holds it/i,
+    'parallel-execution must say why the integrator needs the branch released',
+  )
+  assert.match(text, /git update-ref/, 'parallel-execution must name the unsupported workaround it prevents')
+})
+
+test('parallel-execution states an amendment committed only on the run branch does not move the anchor', async () => {
+  const { body } = await skill('parallel-execution')
+  const text = phrase(body)
+  assert.match(
+    text,
+    /an amendment committed only on the run branch changes nothing: the merge-base does not move/i,
+    'the polarity must live in one contiguous phrase, not in tokens spread across the section',
+  )
+  assert.match(
+    text,
+    /commit it on the base branch/i,
+    'parallel-execution must say an authoritative amendment goes on the base branch',
+  )
+  assert.doesNotMatch(
+    text,
+    /commit(ting)? (it )?(only )?on the run branch (is enough|suffices|makes it authoritative)/i,
+    'parallel-execution must not claim a run-branch-only amendment is authoritative',
+  )
+})
+
+test('phase-gate states reviewers are dispatched without a name and a named one loses its result', async () => {
+  const { body } = await skill('phase-gate')
+  const text = phrase(body)
+  assert.match(
+    text,
+    /without a name\. A named reviewer becomes an addressable teammate that goes idle without emitting its result, and the review is lost/i,
+    'phase-gate must bind "no name" to "the result is lost" in one contiguous phrase',
+  )
+  assert.match(
+    text,
+    /unnamed reviewers return normally/i,
+    'phase-gate must state the positive half of the rule too',
+  )
+  assert.doesNotMatch(
+    text,
+    /dispatch one tm-reviewer per lens[^.]*with a name/i,
+    'phase-gate must not tell the reader to name a reviewer',
+  )
+})
