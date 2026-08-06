@@ -23,9 +23,12 @@ const RESULT_SCHEMA = {
   },
 }
 
-const brief = (t) => [
-  'You are tm-implementer for task ' + t.id + ': ' + t.title + '.',
-  '',
+// With a base branch, the brief opens with a checkout that has an explicit start point and a
+// log line the teammate can check against a named ref. With no base there is nothing to branch
+// from: emitting `git checkout -B <branch>` with a missing operand would silently create the
+// branch at the stale worktree HEAD while the brief claimed the base was verified, so the
+// no-base variant states the gap and refuses to name a starting commit.
+const checkoutSteps = (t) => (BASE_BRANCH ? [
   'MANDATORY FIRST STEP. Your worktree does not start on this run\'s base. Run exactly:',
   '',
   '    git checkout -B ' + t.branch + ' ' + BASE_BRANCH,
@@ -33,6 +36,19 @@ const brief = (t) => [
   '',
   'If the log does not show the tip of ' + BASE_BRANCH + ', STOP and report status "blocked".',
   'Every file you read before this command has stale content and must be re-read after it.',
+] : [
+  'MANDATORY FIRST STEP. No base branch was supplied for this phase, so the commit your worktree',
+  'starts on is UNVERIFIED and is probably stale. Do not guess a base, and do not run',
+  '"git checkout -B ' + t.branch + '" without a start point — that would branch from whatever',
+  'HEAD your worktree happens to be on. Ask the orchestrator which commit to start from, then',
+  'check out ' + t.branch + ' at that commit. If you cannot get an answer, report status "blocked".',
+  'Every file you read before that checkout has stale content and must be re-read after it.',
+])
+
+const brief = (t) => [
+  'You are tm-implementer for task ' + t.id + ': ' + t.title + '.',
+  '',
+  ...checkoutSteps(t),
   '',
   'BASELINE. Then run the project\'s test command once and confirm it is green before writing',
   'anything. A failure caused by a missing dependency looks exactly like a RED test, and the',

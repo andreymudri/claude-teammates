@@ -3,9 +3,20 @@ import { readFile } from 'node:fs/promises'
 const TEMPLATE = new URL('../templates/phase-workflow.js', import.meta.url)
 const IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/
 
+// Escapes every character that could terminate or extend the emitted literal. The double
+// quote matters even though the literal is single-quoted: a value carrying a `"` can break
+// out of a JSON string elsewhere in the generated source, so no unescaped quote of either
+// kind may survive. \r is escaped for the same reason as \n — a raw one ends the line.
 function jsString(value) {
-  return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n')}'`
+  return `'${value
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')}'`
 }
+
+const MARKER = /__(?:META|TASKS|PLAN_PATH|BASE_BRANCH|CONSTRAINTS)__/g
 
 // Serializes a plain JS value (string/number/boolean/null/array/object) as a JS
 // literal with unquoted identifier keys and single-quoted strings, matching the
@@ -51,14 +62,22 @@ export async function generatePhaseWorkflow({
   })
   const template = await readFile(TEMPLATE, 'utf8')
 
-  // Use function replacers, not string replacements: String.prototype.replace treats
-  // $&, $`, $', $$ and $<n> in a *string* replacement as special patterns, which would
-  // silently corrupt output for a task title/file containing e.g. "$&". Function
-  // replacers insert their return value literally.
-  return template
-    .replace('__META__', () => `export const meta = ${jsLiteral(meta)}`)
-    .replace('__TASKS__', () => JSON.stringify(slim, null, 2))
-    .replace('__PLAN_PATH__', () => jsLiteral(planPath))
-    .replace('__BASE_BRANCH__', () => jsLiteral(baseBranch))
-    .replace('__CONSTRAINTS__', () => jsLiteral(constraints))
+  const substitutions = {
+    __META__: () => `export const meta = ${jsLiteral(meta)}`,
+    __TASKS__: () => JSON.stringify(slim, null, 2),
+    __PLAN_PATH__: () => jsLiteral(planPath),
+    __BASE_BRANCH__: () => jsLiteral(baseBranch),
+    __CONSTRAINTS__: () => jsLiteral(constraints),
+  }
+
+  // One global pass over the template, not a chain of per-marker replacements. A chain
+  // rewrites the *first* occurrence anywhere in the string, so a value substituted early
+  // (a task title, say) could itself contain a later marker and be rescanned — turning
+  // caller-supplied text into a substitution site and, with a quote, into executable code.
+  // A single global pass resumes after each replacement, so inserted text is never rescanned.
+  //
+  // The replacer is a function, not a string: String.prototype.replace treats $&, $`, $',
+  // $$ and $<n> in a *string* replacement as special patterns, which would silently corrupt
+  // output for a title/plan path/branch/constraint containing e.g. "$&".
+  return template.replace(MARKER, (marker) => substitutions[marker]())
 }

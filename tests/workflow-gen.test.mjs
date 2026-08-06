@@ -187,6 +187,46 @@ test('the brief opens with a verifiable checkout of the task branch off the base
     'brief must spell out the exact checkout command',
   )
   assert.ok(prompt.includes('git log --oneline -1'), 'brief must ask the teammate to verify the checkout')
+
+  // Ordering is the whole point: a checkout instruction that arrives after the teammate has
+  // been told which files to edit cannot stop it reading stale content first. Substring
+  // presence alone would stay green if the block were moved to the end, so pin position.
+  const lines = prompt.split('\n').filter((l) => l.trim() !== '')
+  assert.match(lines[1], /^MANDATORY FIRST STEP\./, 'the checkout block must be the first instruction')
+  assert.ok(
+    prompt.indexOf('git checkout -B teammates/r1/T1 main') < prompt.indexOf('FILES.'),
+    'the checkout must come before the file set',
+  )
+  assert.ok(
+    prompt.indexOf('MANDATORY FIRST STEP.') < prompt.indexOf('BASELINE.'),
+    'the checkout must come before the baseline run',
+  )
+
+  // The log line is only worth running if it names a ref to compare against and attaches a
+  // consequence to the mismatch; asserting the bare command would survive both being dropped.
+  assert.ok(
+    prompt.includes('If the log does not show the tip of main, STOP and report status "blocked".'),
+    'the log check must name the base ref and require blocking on a mismatch',
+  )
+})
+
+test('the brief requires a green baseline before any writing and blocks otherwise', async () => {
+  const src = await generatePhaseWorkflow({
+    runId: 'r1',
+    phase: 1,
+    tasks: [{ id: 'T1', title: 'auth middleware', files: ['src/auth.ts'], phase: 1 }],
+    maxParallel: 2,
+    baseBranch: 'main',
+  })
+  const [prompt] = await captureAgentPrompts(src)
+  assert.ok(
+    prompt.includes('confirm it is green before writing'),
+    'the baseline must be required before writing, not merely suggested',
+  )
+  assert.ok(
+    prompt.includes('If the baseline is not green, report status "blocked".'),
+    'a red baseline must carry the blocked consequence',
+  )
 })
 
 test('the brief names the plan path when one is given', async () => {
@@ -214,6 +254,35 @@ test('omitting planPath, baseBranch and constraints renders no undefined anywher
   }
 })
 
+test('with no base branch the brief emits no checkout command and says the start point is unverified', async () => {
+  const src = await generatePhaseWorkflow({ runId: 'r1', phase: 1, tasks, maxParallel: 2 })
+  const prompts = await captureAgentPrompts(src)
+  for (const prompt of prompts) {
+    // `git checkout -B <branch>` with no start point silently branches from the stale worktree
+    // HEAD — the exact failure this brief exists to prevent. No runnable checkout may appear,
+    // with a missing operand or with a substitute start point invented by the template.
+    for (const line of prompt.split('\n')) {
+      assert.ok(
+        !/^\s*git checkout -B/.test(line),
+        `no runnable checkout is allowed without a base: ${line}`,
+      )
+    }
+    assert.ok(!prompt.includes('git checkout -B teammates/r1/T1 HEAD'), 'must not substitute HEAD for a base')
+    assert.ok(prompt.includes('MANDATORY FIRST STEP.'), 'the first step must still be present')
+    assert.ok(prompt.includes('No base branch was supplied'), 'the brief must say no base was supplied')
+    assert.ok(prompt.includes('UNVERIFIED'), 'the brief must flag the starting commit as unverified')
+    assert.ok(
+      prompt.includes('Ask the orchestrator which commit to start from'),
+      'the brief must route the teammate to the orchestrator before writing',
+    )
+    assert.ok(prompt.includes('report status "blocked"'), 'the no-base path must carry a blocked consequence')
+    assert.ok(
+      !prompt.includes('If the log does not show the tip of ,'),
+      'the brief must never ask the teammate to verify against an unnamed ref',
+    )
+  }
+})
+
 test('every constraint passed in appears in the generated source and in the brief', async () => {
   const constraints = ['Node >= 24.2.0', 'Zero new runtime dependencies', 'Tests use node:test']
   const src = await generatePhaseWorkflow({ runId: 'r1', phase: 1, tasks, maxParallel: 2, constraints })
@@ -229,6 +298,112 @@ test('a constraint containing $& survives the function replacer verbatim', async
   assert.ok(src.includes('never write $& into the log'), '$& must not be read as a replacement pattern')
   const [prompt] = await captureAgentPrompts(src)
   assert.ok(prompt.includes('- never write $& into the log'), '$& must reach the brief verbatim')
+})
+
+test('a plan path and a base branch containing $& survive the function replacer verbatim', async () => {
+  // Same hazard as the constraint case: a string replacement would read $& as "the match"
+  // and rewrite the marker back into the output instead of the caller's value.
+  const src = await generatePhaseWorkflow({
+    runId: 'r1',
+    phase: 1,
+    tasks,
+    maxParallel: 2,
+    planPath: 'docs/plans/$&-thing.md',
+    baseBranch: 'release/$&-base',
+  })
+  assert.ok(src.includes('docs/plans/$&-thing.md'), '$& in a plan path must not be read as a pattern')
+  assert.ok(src.includes('release/$&-base'), '$& in a base branch must not be read as a pattern')
+  const [prompt] = await captureAgentPrompts(src)
+  assert.ok(prompt.includes('PLAN. Read docs/plans/$&-thing.md'), '$& must reach the brief from the plan path')
+  assert.ok(
+    prompt.includes('git checkout -B teammates/r1/T1 release/$&-base'),
+    '$& must reach the brief from the base branch',
+  )
+})
+
+test('a task title containing a marker string is not rescanned as a substitution site', async () => {
+  // Marker substitution must be one pass. A chained .replace() rewrites the first occurrence
+  // *anywhere*, including inside a value already substituted, so a title carrying a later
+  // marker would have that marker expanded — caller text becoming a substitution site.
+  const tricky = [{ id: 'T1', title: 'ok__BASE_BRANCH__ and __CONSTRAINTS__ too', files: ['a.ts'], phase: 1 }]
+  const src = await generatePhaseWorkflow({
+    runId: 'r1',
+    phase: 1,
+    tasks: tricky,
+    maxParallel: 2,
+    baseBranch: 'main',
+    constraints: ['c1'],
+  })
+  assert.ok(
+    src.includes('ok__BASE_BRANCH__ and __CONSTRAINTS__ too'),
+    'markers inside a task title must survive untouched',
+  )
+  const [prompt] = await captureAgentPrompts(src)
+  assert.ok(prompt.includes('T1: ok__BASE_BRANCH__ and __CONSTRAINTS__ too.'), 'title must reach the brief verbatim')
+  assert.ok(prompt.includes('git checkout -B teammates/r1/T1 main'), 'the real marker must still be substituted')
+})
+
+test('an emitted literal never carries a raw double quote', async () => {
+  // Single-quoting alone makes a `"` inert only for as long as the value stays inside that
+  // literal. A raw quote is one refactor away from closing a JSON string elsewhere in the
+  // generated source, so the escape belongs in the escaper, not in the surrounding context.
+  const src = await generatePhaseWorkflow({
+    runId: 'r1',
+    phase: 1,
+    tasks,
+    maxParallel: 2,
+    planPath: 'docs/"p".md',
+    baseBranch: 'feat/"q"',
+    constraints: ['say "no"'],
+  })
+  assert.ok(src.includes(String.raw`const PLAN_PATH = 'docs/\"p\".md'`), 'plan path quote must be escaped')
+  assert.ok(src.includes(String.raw`const BASE_BRANCH = 'feat/\"q\"'`), 'base branch quote must be escaped')
+  assert.ok(src.includes(String.raw`'say \"no\"'`), 'constraint quote must be escaped')
+  for (const decl of ['const PLAN_PATH = ', 'const BASE_BRANCH = ']) {
+    const line = src.slice(src.indexOf(decl)).split('\n')[0]
+    assert.ok(!/[^\\]"/.test(line), `unescaped double quote in: ${line}`)
+  }
+  // Escaping is transparent: the teammate still reads the value it was given.
+  const [prompt] = await captureAgentPrompts(src)
+  assert.ok(prompt.includes('git checkout -B teammates/r1/T1 feat/"q"'), 'escape must round-trip')
+  assert.ok(prompt.includes('PLAN. Read docs/"p".md'), 'escape must round-trip in the plan path')
+  assert.ok(prompt.includes('- say "no"'), 'escape must round-trip in a constraint')
+})
+
+test('a base branch containing a double quote cannot inject code into the generated module', async () => {
+  // Reproduces the reviewed exploit: with chained substitution and an unescaped double quote,
+  // a title carrying a marker plus a quote-bearing base branch closed the JSON string of the
+  // already-substituted task list and appended an expression that ran on import.
+  const tricky = [{ id: 'T1', title: 'ok__BASE_BRANCH__', files: ['a.ts'], phase: 1 }]
+  const src = await generatePhaseWorkflow({
+    runId: 'r1',
+    phase: 1,
+    tasks: tricky,
+    maxParallel: 2,
+    baseBranch: '"+(globalThis.PWNED=1)+"',
+  })
+  const split = src.indexOf('\nconst TASKS')
+  const wrapped = `${src.slice(0, split)}\nexport const run = async (phase, parallel, agent) => {${src.slice(split)}\n}\n`
+  const dir = await mkdtemp(join(tmpdir(), 'workflow-gen-'))
+  try {
+    const file = join(dir, 'phase.mjs')
+    await writeFile(file, wrapped, 'utf8')
+    const mod = await import(pathToFileURL(file).href)
+    assert.equal(globalThis.PWNED, undefined, 'importing the generated module must not execute injected code')
+    const captured = []
+    await mod.run(() => {}, (fns) => Promise.all(fns.map((f) => f())), (prompt) => {
+      captured.push(prompt)
+      return Promise.resolve({ status: 'done', branch: 'b', filesChanged: [], summary: 's', blockers: [] })
+    })
+    assert.equal(globalThis.PWNED, undefined, 'running the generated workflow must not execute injected code')
+    assert.ok(
+      captured[0].includes('git checkout -B teammates/r1/T1 "+(globalThis.PWNED=1)+"'),
+      'the branch name must reach the brief as inert text',
+    )
+  } finally {
+    delete globalThis.PWNED
+    await rm(dir, { recursive: true, force: true })
+  }
 })
 
 test('the dispatch names a real agent type and keeps worktree isolation', async () => {
