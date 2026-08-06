@@ -236,10 +236,21 @@ test('parallel-execution requires detaching the main worktree before dispatching
   // Bounded gap, not strict adjacency: an inserted clarifying sentence between the heading and
   // the instruction is ordinary editing, not a regression, but an unbounded gap would let the
   // two halves drift into unrelated sections and stop binding anything.
-  assert.match(
-    text,
-    /before dispatching tm-integrator.{0,120}?detach the main worktree first: git checkout --detach/i,
+  const bound = text.match(
+    /before dispatching tm-integrator(.{0,120}?)detach the main worktree first: git checkout --detach/i,
+  )
+  assert.ok(
+    bound,
     'parallel-execution must bind --detach to the step before the integrator dispatch, in one phrase',
+  )
+  // The gap admits ordinary clarifying prose but not prose that cancels the instruction it
+  // introduces. Its limit: it recognises the vocabulary of negation, not arbitrary contradiction —
+  // a negation worded outside this set still slips through, so this narrows the gap rather than
+  // closing it.
+  assert.doesNotMatch(
+    bound[1],
+    /\b(optional|skip|skipped|skipping|unnecessary|not required|no need|need not|handles? (a|the) held branch)\b/i,
+    'prose inserted before the detach instruction must not negate it',
   )
   assert.match(
     text,
@@ -310,6 +321,20 @@ test('parallel-execution documents the base-merge amendment route and whose oper
     /every secondary parent is checked, so a rogue parent riding alongside the base parent still fails/i,
     'the acceptance must state its limit in the same breath',
   )
+  // The base merge is likewise not an integrator dispatch. tm-integrator merges teammate branches
+  // only after a gate PASS and stops on files outside a task's declared set; an amendment has no
+  // PASS (the failing gate is why it exists), the base is no teammate branch, and the merge carries
+  // planPath, which no task declares. A contracted integrator refuses, so the orchestrator does it.
+  assert.match(
+    text,
+    /merging the base into the run branch is the orchestrator's operation, not a tm-integrator dispatch/i,
+    'parallel-execution must assign the base merge to the orchestrator, in one contiguous phrase',
+  )
+  assert.doesNotMatch(
+    text,
+    /(so|then) dispatch tm-integrator, which is the sole writer to it/i,
+    'parallel-execution must not dispatch the integrator to merge the base',
+  )
   assert.match(
     text,
     /rebuilding the run branch is the orchestrator's operation, not the integrator's/i,
@@ -319,6 +344,30 @@ test('parallel-execution documents the base-merge amendment route and whose oper
     text,
     /rebuild the run branch on the new base tip, via tm-integrator/i,
     'parallel-execution must not dispatch the integrator to rebuild the run branch',
+  )
+})
+
+test('parallel-execution gives the rebase step a rationale runFilesetCheck does not contradict', async () => {
+  const { body } = await skill('parallel-execution')
+  const text = phrase(body)
+  // runFilesetCheck diffs each task branch from `await git.mergeBase(runSha, sha)` — the branch's
+  // own fork point off the run branch, never the run anchor. So an un-rebased in-flight branch
+  // still diffs to its own changes only, and the fileset failure the old rationale predicted
+  // cannot occur. The step is still right; a false reason invites skipping it.
+  assert.match(
+    text,
+    /never from the anchor, so an un-rebased branch still diffs to its own changes only/i,
+    'parallel-execution must state why an un-rebased branch does not fail fileset',
+  )
+  assert.match(
+    text,
+    /because the branch needs the amended plan and the interfaces earlier phases merged/i,
+    'parallel-execution must give the rebase step its actual reason',
+  )
+  assert.doesNotMatch(
+    text,
+    /or its diff against the new anchor will contain every file the earlier phases merged/i,
+    'parallel-execution must not justify the rebase with a fileset failure that cannot happen',
   )
 })
 

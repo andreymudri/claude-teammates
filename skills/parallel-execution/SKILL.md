@@ -95,10 +95,19 @@ To make an amendment authoritative:
 2. Merge the base into the run branch with `--no-ff`: that moves the merge-base onto the new base
    tip, and `ownership` accepts the merge because its secondary parent is an ancestor of the base.
    The limit on that acceptance: every secondary parent is checked, so a rogue parent riding
-   alongside the base parent still fails. This is a plain `--no-ff` merge on the run branch, so
-   dispatch `tm-integrator`, which is the sole writer to it.
-3. Rebase any in-flight task branch onto the new run-branch tip, or its diff against the new
-   anchor will contain every file the earlier phases merged.
+   alongside the base parent still fails. Merging the base into the run branch is the
+   orchestrator's operation, not a `tm-integrator` dispatch: the integrator's contract is scoped to
+   teammate branches after a passing gate, and an amendment happens precisely when neither holds —
+   the base is not a teammate branch, there is no gate PASS (the failing gate is *why* the
+   amendment exists), and the merge carries `planPath`, which belongs to no task's declared set, so
+   a contracted integrator stops and reports rather than merges. Do it yourself: detach the main
+   worktree with `git checkout --detach`, `git checkout <run branch>`, `git merge --no-ff <base>`,
+   then re-attach the main worktree to the run branch.
+3. Rebase any in-flight task branch onto the new run-branch tip. Not to avoid a `fileset` failure —
+   that check diffs each branch from `mergeBase(runBranch, branch)`, the branch's own fork point,
+   never from the anchor, so an un-rebased branch still diffs to its own changes only and that
+   failure cannot occur. Rebase because the branch needs the amended plan and the interfaces
+   earlier phases merged.
 
 If a merge is not appropriate — the base diverged such that merging would drag unrelated work into
 the run — rebuild the run branch on the new base tip and re-merge each task branch with `--no-ff`.
