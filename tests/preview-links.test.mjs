@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, readFile, rm, lstat, symlink } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, rm, lstat, symlink, readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { validateLinkPaths, linkInto } from '../scripts/preview-links.mjs'
@@ -47,6 +47,25 @@ test("validateLinkPaths rejects '../outside'", () => {
 
 test("validateLinkPaths rejects 'a/../../outside', which only escapes after normalisation", () => {
   assert.match(validateLinkPaths(['a/../../outside']), /escapes the repository/)
+})
+
+test('validateLinkPaths rejects a repeated entry and names it', () => {
+  const message = validateLinkPaths(['node_modules', 'node_modules'])
+  assert.ok(message, 'expected a rejection message')
+  assert.match(message, /repeats/)
+  assert.match(message, /node_modules/)
+  // The repeat must NOT be described as a tracked path that would shadow the merged result.
+  assert.doesNotMatch(message, /shadow/)
+  assert.doesNotMatch(message, /tracked/)
+})
+
+test('validateLinkPaths rejects two entries that differ only before normalisation', () => {
+  assert.match(validateLinkPaths(['node_modules', './node_modules']), /repeats/)
+  assert.match(validateLinkPaths(['a/b', 'a/./b']), /repeats/)
+})
+
+test('validateLinkPaths accepts distinct entries that share a prefix', () => {
+  assert.equal(validateLinkPaths(['node_modules', 'packages/web/node_modules']), null)
 })
 
 test('validateLinkPaths rejects a non-array argument', () => {
@@ -243,6 +262,74 @@ test("an in-repo directory named '..cache' is accepted, not read as an escape", 
     const teardown = await linkInto(dir, root, ['..cache'])
     assert.equal(await readFile(path.join(dir, '..cache', 'marker.txt'), 'utf8'), 'from-target')
     await teardown()
+  } finally {
+    await rm(root, { recursive: true, force: true })
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a later entry cannot mkdir through an earlier entry link into the real repository', async () => {
+  const root = await scratch()
+  const dir = await scratch()
+  try {
+    await mkdir(path.join(root, 'pkg'))
+    // Entry 1 puts a link to the real repo directory into the preview tree. Entry 2's linkPath
+    // is nested under that link, so a recursive mkdir on its parent lands in the REAL
+    // repository — and teardown only unlinks what it created, so those directories persist.
+    await assert.rejects(
+      () => linkInto(dir, root, ['pkg', path.join('pkg', 'injected', 'deep', 'node_modules')]),
+      /outside the preview tree/,
+    )
+    assert.deepEqual(await readdir(path.join(root, 'pkg')), [],
+      'nothing may be written into the real repository working tree')
+    await assert.rejects(() => lstat(path.join(dir, 'pkg')), /ENOENT/,
+      'the first link must be torn down')
+  } finally {
+    await rm(path.join(dir, 'pkg'), { recursive: true, force: true }).catch(() => {})
+    await rm(root, { recursive: true, force: true })
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an entry whose parent in the preview tree already links outside it is refused', async () => {
+  const root = await scratch()
+  const dir = await scratch()
+  const outside = await scratch()
+  try {
+    await mkdir(path.join(root, 'pkg', 'node_modules'), { recursive: true })
+    // The merged tree can contain a checked-out link of its own — this does not need an
+    // earlier entry to have made it.
+    await symlink(outside, path.join(dir, 'pkg'), LINK_TYPE)
+    await assert.rejects(
+      () => linkInto(dir, root, [path.join('pkg', 'node_modules')]),
+      /outside the preview tree/,
+    )
+    assert.deepEqual(await readdir(outside), [],
+      'nothing may be written through the pre-existing link')
+  } finally {
+    await rm(path.join(dir, 'pkg'), { recursive: true, force: true }).catch(() => {})
+    await rm(root, { recursive: true, force: true })
+    await rm(dir, { recursive: true, force: true })
+    await rm(outside, { recursive: true, force: true })
+  }
+})
+
+test("an entry resolving to the repository root itself is refused by that name, not as an escape", async () => {
+  const root = await scratch()
+  const dir = await scratch()
+  try {
+    for (const entry of ['.', path.join('a', '..')]) {
+      await assert.rejects(
+        () => linkInto(dir, root, [entry]),
+        (err) => {
+          assert.match(err.message, /repository root itself/)
+          assert.match(err.message, /not a build input/)
+          // The reason must not send the reader hunting for a '..' the entry does not have.
+          assert.doesNotMatch(err.message, /resolves outside the repository/)
+          return true
+        },
+      )
+    }
   } finally {
     await rm(root, { recursive: true, force: true })
     await rm(dir, { recursive: true, force: true })
