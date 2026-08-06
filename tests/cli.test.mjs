@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { runCli, mergeSuppliedResults } from '../scripts/cli.mjs'
+import { loadGateConfig, previewLinks } from '../scripts/gate-config.mjs'
 
 const PLAN = `### Task 1: A
 
@@ -1692,6 +1693,57 @@ test('gate wires a manifest\'s preview.link through to the merge preview', async
   })
 })
 
+// Fix round: `complete` builds its own ctx (~line 522) separately from `gate`'s (~line 440),
+// and only `gate`'s was wired to previewLinks(config). A manifest declaring preview.link
+// worked from `gate` and failed from `complete` with the identical repo, manifest, and
+// branch — every teammate's own `complete` call would blame its own work for a missing
+// build input the manifest declares. This pins that `complete` reaches the same linked file.
+test('complete wires a manifest\'s preview.link through to the merge preview', async () => {
+  await withRepo(async ({ root, io, lines, git: gitCmd }) => {
+    const planPath = path.join(root, 'plan.md')
+    gitCmd(['checkout', '--quiet', 'main'])
+    await writeFile(planPath, ONE_TASK_PLAN, 'utf8')
+    const gitignore = await readFile(path.join(root, '.gitignore'), 'utf8')
+    await writeFile(path.join(root, '.gitignore'), `${gitignore}deps/\n`, 'utf8')
+    await writeFile(
+      path.join(root, 'teammates.gate.json'),
+      JSON.stringify({
+        preview: { link: ['deps'] },
+        phases: {
+          default: {
+            checks: [{
+              name: 'reads-linked-file',
+              kind: 'command',
+              run: 'node -e "process.exit(require(\'fs\').existsSync(\'deps/marker.txt\') ? 0 : 1)"',
+            }],
+          },
+        },
+      }),
+      'utf8',
+    )
+    gitCmd(['add', 'plan.md', 'teammates.gate.json', '.gitignore'])
+    gitCmd(['commit', '--quiet', '-m', 'plan, gate manifest with preview.link, and gitignore'])
+    gitCmd(['checkout', '--quiet', 'run-branch'])
+    gitCmd(['merge', '--quiet', '--ff-only', 'main'])
+
+    await mkdir(path.join(root, 'deps'), { recursive: true })
+    await writeFile(path.join(root, 'deps', 'marker.txt'), 'linked build input\n', 'utf8')
+
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+
+    gitCmd(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    gitCmd(['add', 'a.mjs'])
+    gitCmd(['commit', '--quiet', '-m', 'T1 work'])
+    gitCmd(['checkout', '--quiet', 'run-branch'])
+
+    lines.length = 0
+    const code = await runCli(['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--root', root], io)
+    assert.equal(code, 0, lines.join('\n'))
+    assert.match(lines.join('\n'), /T1 done/)
+  })
+})
+
 test('gate passes no links when the manifest declares no preview.link', async () => {
   await withRepo(async ({ root, planPath, io, lines, git: gitCmd }) => {
     gitCmd(['checkout', '--quiet', 'main'])
@@ -1717,5 +1769,36 @@ test('gate passes no links when the manifest declares no preview.link', async ()
     // preview needs no repoRoot to satisfy zero link entries.
     assert.equal(parsed.verdict, 'PASS')
     assert.ok(!parsed.error, 'a manifest without preview.link must never fail while resolving a link')
+
+    // PASS alone does not distinguish "ctx.previewLink was [] and did nothing" from "the
+    // wiring never ran at all" — both look identical from the exit code and JSON output,
+    // which is exactly what a dozen pre-existing end-to-end tests already pin. Read the same
+    // manifest the runner boundary reads, through the same previewLinks(config) the `gate`
+    // path calls, to pin the actual value ctx.previewLink receives: [].
+    const config = await loadGateConfig(root)
+    assert.deepEqual(previewLinks(config), [])
+  })
+})
+
+// Fix round: `const root = flags.root ?? process.cwd()` used `??`, which only rejects
+// `undefined` — `--root ""` (e.g. an orchestrator templating an unset shell variable into
+// `--root "$PROJECT_ROOT"`) survived as `root = ''`. That empty string reaches
+// withMergePreview as `repoRoot`, passes its `typeof repoRoot !== 'string'` guard, and then
+// `realpath('')` rejects, silently disabling both realpath-guarded containment checks in
+// linkInto — including the one that stops a symlinked node_modules from writing outside the
+// repo. Reject empty/whitespace --root outright instead of silently substituting cwd.
+test('an empty --root is rejected rather than silently falling back to cwd', async () => {
+  await withRepo(async ({ planPath, io, lines }) => {
+    const code = await runCli(['init-run', planPath, '--run', 'r1', '--root', ''], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /--root/)
+  })
+})
+
+test('a whitespace-only --root is rejected rather than silently falling back to cwd', async () => {
+  await withRepo(async ({ planPath, io, lines }) => {
+    const code = await runCli(['init-run', planPath, '--run', 'r1', '--root', '   '], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /--root/)
   })
 })

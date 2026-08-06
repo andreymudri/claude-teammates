@@ -1463,6 +1463,10 @@ test('with ctx.previewLink absent, the preview receives no links and behaves exa
   assert.equal(ctx.previewLink, undefined)
   const results = await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], ctx)
   assert.deepEqual(results.map((r) => [r.name, r.status]), [['merge', 'pass'], ['test', 'pass']])
+  // The one property "identical to today" most needs: the command still runs inside the
+  // preview worktree, not at ctx.cwd, exactly as it did before ctx.previewLink existed.
+  assert.equal(calls.length, 1)
+  assert.match(calls[0].cwd, /tm-preview-/)
 })
 
 test('a solo run builds no preview and consults no links even when ctx.previewLink is set', async () => {

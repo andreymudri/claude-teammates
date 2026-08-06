@@ -258,6 +258,15 @@ async function derive(root, runId, flags) {
 export async function runCli(argv, io = { out: console.log }) {
   const [command, ...rest] = argv
   const { flags, positional } = parseFlags(rest)
+  // An empty or whitespace-only --root must never silently fall through to cwd: `??` only
+  // catches `undefined`, so `--root ""` survives to become `repoRoot: ''` downstream, which
+  // defeats the realpath-based containment checks in the merge preview (realpath('') rejects,
+  // so both guarded escape checks in linkInto get skipped instead of enforced). Fail loudly
+  // here instead of silently using the wrong root.
+  if (typeof flags.root === 'string' && flags.root.trim() === '') {
+    io.out(`--root must not be empty\n\n${USAGE}`)
+    return 2
+  }
   const root = flags.root ?? process.cwd()
   const runId = flags.run
 
@@ -517,15 +526,16 @@ export async function runCli(argv, io = { out: console.log }) {
   }
 
   if (command === 'complete') {
+    const config = await loadGateConfig(root)
+    if (!config) { io.out('no gate manifest — cannot verify completion'); return 4 }
+
     let ctx
     try {
-      ctx = { cwd: root, ...(await derive(root, runId, flags)) }
+      ctx = { cwd: root, previewLink: previewLinks(config), ...(await derive(root, runId, flags)) }
     } catch (err) {
       io.out(`cannot verify completion: ${err.message}`)
       return 4
     }
-    const config = await loadGateConfig(root)
-    if (!config) { io.out('no gate manifest — cannot verify completion'); return 4 }
 
     const allChecks = checksForPhase(config, flags.phase ?? 'default')
     const taskKnown = (ctx.tasks ?? []).some((t) => t.id === flags.task)
