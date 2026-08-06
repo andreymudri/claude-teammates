@@ -3,7 +3,13 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { loadGateConfig, inferGateConfig, checksForPhase, fixRoundsForPhase } from '../scripts/gate-config.mjs'
+import {
+  loadGateConfig,
+  inferGateConfig,
+  checksForPhase,
+  fixRoundsForPhase,
+  previewLinks,
+} from '../scripts/gate-config.mjs'
 
 async function withTempRoot(fn) {
   const root = await mkdtemp(path.join(tmpdir(), 'tm-gate-'))
@@ -136,4 +142,29 @@ test('fixRoundsForPhase rejects a non-integer default fixRounds and falls back t
 test('fixRoundsForPhase accepts zero as an explicit no-retry budget', () => {
   const config = { phases: { default: { fixRounds: 0, checks: [] } } }
   assert.equal(fixRoundsForPhase(config, 'default'), 0)
+})
+
+test('previewLinks returns the declared link list', () => {
+  assert.deepEqual(previewLinks({ preview: { link: ['node_modules'] } }), ['node_modules'])
+})
+
+test('previewLinks returns [] when there is nothing to link', () => {
+  assert.deepEqual(previewLinks({}), [])
+  assert.deepEqual(previewLinks({ preview: {} }), [])
+  assert.deepEqual(previewLinks({ preview: { link: null } }), [])
+  assert.deepEqual(previewLinks(null), [])
+})
+
+test('previewLinks returns [] when link is not an array', () => {
+  assert.deepEqual(previewLinks({ preview: { link: 'node_modules' } }), [])
+})
+
+test('inferGateConfig emits preview.link with node_modules when given a package', () => {
+  const config = inferGateConfig({ scripts: { test: 'node --test' } })
+  assert.deepEqual(config.preview, { link: ['node_modules'] })
+})
+
+test('inferGateConfig emits no preview key when given no package', () => {
+  assert.equal(inferGateConfig(null).preview, undefined)
+  assert.equal(inferGateConfig(undefined).preview, undefined)
 })

@@ -36,10 +36,23 @@ export function inferGateConfig(pkg) {
     blockOn: ['high'],
   })
 
-  return {
+  const config = {
     maxParallel: defaultMaxParallel(),
     phases: { default: { fixRounds: DEFAULT_FIX_ROUNDS, checks } },
   }
+  // Inference happens only while a manifest is being created — `gate` exits 3 and prints this
+  // for confirmation. At gate time nothing is inferred: the gate links exactly what the saved
+  // manifest says, so the default is visible in a file the user approved.
+  if (pkg) config.preview = { link: ['node_modules'] }
+  return config
+}
+
+// Top-level rather than per-phase: what a project needs in order to run its checks does not
+// vary by phase. Absent or empty means link nothing, which is the behaviour before this field
+// existed, so no existing manifest changes meaning.
+export function previewLinks(config) {
+  const link = config?.preview?.link
+  return Array.isArray(link) ? link : []
 }
 
 export function checksForPhase(config, phaseName) {
