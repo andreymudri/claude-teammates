@@ -415,6 +415,303 @@ test('a compliant run passes the gate and complete marks the task done', async (
   })
 })
 
+// ============================================================================================
+// Step 5 — the fix loop's trust boundary.
+//
+// What the two tests immediately below pin: the fix-round budget is bookkeeping that lives in
+// `.teammates/status.json`, and `.teammates/` is writable by exactly the agents the gate
+// enforces. So the budget bounds the loop against DRIFT AND MISTAKES — a check that stays red
+// because the retry did not help, an operator who re-runs `fix` after a crash, a phase that
+// would otherwise ping-pong forever — and against nothing else. What they do NOT pin, because
+// it is not true: that the budget survives a teammate aiming at it. A teammate that rewrites
+// its own round counter downward gets more retries (pinned below), and that is the accepted
+// cost, because the thing a retry cannot buy is a verdict: `gate`'s ENFORCEMENT CHECKS read no
+// file out of `.teammates/` at all, so every verdict is recomputed from git on every round.
+//
+// Stated at that precision on purpose, matching skills/phase-gate/SKILL.md. The gate *command*
+// does touch `.teammates/`: after the verdict is computed, `cli.mjs` calls
+// `readState(root, runId, 'status')` to write the record back, and `readState` rethrows
+// anything that is not ENOENT — a `status.json` containing `{ not json` makes `gate` throw a
+// SyntaxError rather than return an exit code. That is a fail-closed crash, not a hole, and it
+// happens strictly after the verdict exists; `.teammates/` is a report sink, never an input.
+// The budget protects tokens; git protects correctness. See scripts/state.mjs
+// (`readFixRounds`) and the spec's "Not defended against" list.
+// ============================================================================================
+
+test('the round counter is not an input to the verdict: the gate output is identical with five rounds recorded and with the counter wiped', async () => {
+  await withRepo(async (root) => {
+    await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
+    const statusPath = path.join(root, '.teammates', 'r1', 'status.json')
+
+    // Spend five rounds through the real writer. Asserting the counter actually reads 5 is
+    // load-bearing, not decoration: a fresh init-run status carries no `fixRounds` at all, so
+    // without this the "recorded then wiped" setup would be byte-identical to "never recorded"
+    // and the test would survive `recordFixRound` being neutered outright.
+    for (let i = 0; i < 5; i += 1) {
+      const recorded = await runCliOn(root, ['record-fix-round', '--run', 'r1', '--phase', '1', '--task', 'T1'])
+      assert.equal(recorded.code, 0)
+    }
+    assert.deepEqual(JSON.parse(await readFile(statusPath, 'utf8')).fixRounds, { 1: { T1: 5 } })
+
+    // No task branches exist, so the gate fails on T1's missing branch — with the counter
+    // sitting well above any budget the loop would ever grant.
+    const high = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(high.code, 1)
+    assert.equal(JSON.parse(high.out).verdict, 'FAIL')
+    assert.match(high.out, /T1/)
+
+    // Now wipe the counter — the most the round bookkeeping can be tampered with, short of
+    // deleting the file — and re-run the same gate against the same tree.
+    const status = JSON.parse(await readFile(statusPath, 'utf8'))
+    status.fixRounds = {}
+    await writeFile(statusPath, `${JSON.stringify(status, null, 2)}\n`, 'utf8')
+
+    const wiped = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(wiped.code, 1)
+    // Byte-identical, not merely both-FAIL. The gate result carries no timestamp, so the two
+    // runs differ in exactly one thing — the round counter — and the verdict does not move.
+    // A `gate` that consulted `fixRounds` for anything at all would have to break this.
+    assert.equal(wiped.out, high.out)
+  })
+})
+
+test('a fileset failure escalates as process-violation on round 0, with the whole budget still unspent', async () => {
+  await withRepo(async (root) => {
+    await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
+    // No task branches: fileset fails on T1's missing branch, and nothing has been recorded,
+    // so the full budget is available and no round has been spent.
+    const gateResult = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(gateResult.code, 1)
+    const verdictPath = path.join(root, '.teammates', 'verdict.json')
+    await writeFile(verdictPath, gateResult.out, 'utf8')
+
+    const fixResult = await runCliOn(root, ['fix', '--run', 'r1', '--phase', '1', '--verdict', verdictPath])
+    assert.equal(fixResult.code, 0)
+    const decision = JSON.parse(fixResult.out)
+    // A fileset failure is a process violation, not a code defect: retrying it would apply
+    // pressure toward widening the declared file set. The loop is therefore never entered for
+    // one, at round 0 or at any other round — the budget is irrelevant to this decision.
+    assert.equal(decision.decision, 'escalate')
+    assert.equal(decision.reason, 'process-violation')
+    assert.equal(decision.check, 'fileset')
+    assert.deepEqual(decision.tasks, [])
+    const status = await readStatus(root, 'r1')
+    assert.equal(status.fixRounds, undefined)
+  })
+})
+
+// A manifest whose enforcement checks all pass but whose command check always fails, naming
+// T1's declared file so `decideFix` can attribute it. This is the only shape that reaches the
+// retry branch at all: fileset and ownership escalate as process violations before the budget
+// is ever consulted (pinned above).
+//
+// `fixRounds` is deliberately 3, NOT the 2 that both `DEFAULT_FIX_ROUNDS` constants fall back to
+// (scripts/fix-loop.mjs and scripts/gate-config.mjs). With the manifest agreeing with the
+// default, every budget assertion below held even when the manifest value was never read at
+// all — a reviewer stubbed `fixRoundsForPhase` to return `undefined` unconditionally and the
+// whole file stayed green. A third round can only come from this literal, so the budget-key
+// plumbing in `scripts/cli.mjs` (the numeric-phase vs `phaseName` key-space split its own
+// comment documents as a live bug class) can no longer read the wrong key unnoticed.
+const RETRYABLE_BUDGET = 3
+const RETRYABLE_MANIFEST = {
+  phases: {
+    default: {
+      fixRounds: RETRYABLE_BUDGET,
+      checks: [
+        { name: 'fileset', kind: 'fileset' },
+        { name: 'ownership', kind: 'ownership' },
+        { name: 'test', kind: 'command', run: 'node -e "console.log(\'a.mjs failed\'); process.exit(1)"' },
+      ],
+    },
+  },
+}
+
+// Sets up a run whose gate fails on an attributable command check: T1 lands its declared
+// a.mjs, so both enforcement checks pass and only `test` is red.
+//
+// The swapped manifest is amended into the base commit rather than left in the working tree.
+// withRepo commits its own teammates.gate.json, so overwriting it in place would leave the
+// worktree dirty and fail `ownership` — turning every decision below into a process violation
+// for a reason that has nothing to do with the fix loop. run-branch is still at main's tip
+// here, so moving both refs onto the amended commit leaves the repo exactly as withRepo left
+// it, only with a different committed manifest.
+async function retryableRun(root) {
+  await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(RETRYABLE_MANIFEST), 'utf8')
+  git(root, ['checkout', '--quiet', 'main'])
+  git(root, ['add', 'teammates.gate.json'])
+  git(root, ['commit', '--quiet', '--amend', '--no-edit'])
+  git(root, ['branch', '--quiet', '-f', 'run-branch', 'main'])
+  git(root, ['checkout', '--quiet', 'run-branch'])
+
+  await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
+  await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+}
+
+// Runs the gate, asserts it FAILed, parks the verdict under the gitignored .teammates/ (so it
+// never dirties the worktree the ownership check inspects) and returns its path.
+async function gateVerdict(root) {
+  const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+  assert.equal(code, 1)
+  const verdictPath = path.join(root, '.teammates', 'verdict.json')
+  await writeFile(verdictPath, out, 'utf8')
+  return verdictPath
+}
+
+test('LIMIT (self-served budget): a teammate that rewrites its own fixRounds downward buys more retries and nothing else — the verdict is unchanged', async () => {
+  await withRepo(async (root) => {
+    await retryableRun(root)
+    // Spend the whole budget honestly first.
+    for (let i = 0; i < RETRYABLE_BUDGET; i += 1) {
+      await runCliOn(root, ['record-fix-round', '--run', 'r1', '--phase', '1', '--task', 'T1'])
+    }
+    const verdictPath = await gateVerdict(root)
+    const exhausted = JSON.parse((await runCliOn(root, ['fix', '--run', 'r1', '--phase', '1', '--verdict', verdictPath])).out)
+    assert.equal(exhausted.decision, 'escalate')
+    assert.equal(exhausted.reason, 'budget-exhausted')
+
+    // Now cheat: status.json is written by the agents the gate enforces, so the counter can
+    // simply be zeroed. The loop reopens.
+    const statusPath = path.join(root, '.teammates', 'r1', 'status.json')
+    const status = JSON.parse(await readFile(statusPath, 'utf8'))
+    status.fixRounds = { 1: { T1: 0 } }
+    await writeFile(statusPath, `${JSON.stringify(status, null, 2)}\n`, 'utf8')
+
+    const bought = JSON.parse((await runCliOn(root, ['fix', '--run', 'r1', '--phase', '1', '--verdict', verdictPath])).out)
+    assert.equal(bought.decision, 'retry')
+    assert.equal(bought.tasks[0].taskId, 'T1')
+    assert.equal(bought.tasks[0].round, 1)
+
+    // The rewritten counter bought rounds, not a verdict: the gate run after the tamper is
+    // still a FAIL. Read this assertion narrowly — RETRYABLE_MANIFEST's command check exits 1
+    // unconditionally, so this re-gate would stay red under an implementation that trusted
+    // `fixRounds` too, and it therefore does not by itself demonstrate recomputation. That the
+    // verdict is genuinely recomputed from git is pinned by the fileset tests above, which
+    // change the tree and watch the verdict follow.
+    const regated = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(regated.code, 1)
+    assert.equal(JSON.parse(regated.out).verdict, 'FAIL')
+  })
+})
+
+test('the budget comes from the manifest, walked end to end through the real subcommands: retry 1, retry 2, retry 3, then budget-exhausted', async () => {
+  await withRepo(async (root) => {
+    await retryableRun(root)
+
+    // Every round the manifest declares must be granted. Rounds 1 and 2 would be granted by
+    // `DEFAULT_FIX_ROUNDS` alone; round 3 exists only in RETRYABLE_MANIFEST, so reaching it is
+    // the assertion that the manifest's budget was actually read and keyed correctly.
+    for (let round = 1; round <= RETRYABLE_BUDGET; round += 1) {
+      const decision = JSON.parse((await runCliOn(root, ['fix', '--run', 'r1', '--phase', '1', '--verdict', await gateVerdict(root)])).out)
+      assert.equal(decision.decision, 'retry', `round ${round} must be granted by the manifest budget of ${RETRYABLE_BUDGET}`)
+      assert.deepEqual(decision.tasks.map((t) => [t.taskId, t.round]), [['T1', round]])
+      // The caller records a round only when it actually dispatches the retry — `fix` is a pure
+      // read, so without this writer the sequence loops at round 1 forever.
+      const recorded = await runCliOn(root, ['record-fix-round', '--run', 'r1', '--phase', '1', '--task', 'T1'])
+      assert.equal(recorded.code, 0)
+      assert.match(recorded.out, new RegExp(`T1 phase 1 round ${round}`))
+    }
+
+    // The manifest's budget is spent — and only now. The loop terminates at a human instead of
+    // granting a fourth round.
+    const exhausted = JSON.parse((await runCliOn(root, ['fix', '--run', 'r1', '--phase', '1', '--verdict', await gateVerdict(root)])).out)
+    assert.equal(exhausted.decision, 'escalate')
+    assert.equal(exhausted.reason, 'budget-exhausted')
+    assert.equal(exhausted.taskId, 'T1')
+    assert.deepEqual(exhausted.tasks, [])
+  })
+})
+
+// `fix` reads plan.json out of `.teammates/`, which is exactly as agent-writable as
+// status.json. The three tests below pin what that buys. None of them is a hole in the gate —
+// no verdict moves — but each changes which teammate the loop points at, and an untested
+// limitation drifts into an implied guarantee.
+
+async function rewritePlan(root, runId, mutate) {
+  const planPath = path.join(root, '.teammates', runId, 'plan.json')
+  const plan = JSON.parse(await readFile(planPath, 'utf8'))
+  mutate(plan)
+  await writeFile(planPath, `${JSON.stringify(plan, null, 2)}\n`, 'utf8')
+}
+
+test('LIMIT (plan.json rewrite): moving the failing file into another task\'s declared set redirects the retry onto that innocent task', async () => {
+  await withRepo(async (root) => {
+    await retryableRun(root)
+    // The gate itself is untouched by this: `fileset` reads plan.md out of the anchor COMMIT,
+    // so the phase still derives as 1, T1 still owns a.mjs there, and both enforcement checks
+    // still pass. Only `fix`'s attribution input is rewritten.
+    await rewritePlan(root, 'r1', (plan) => {
+      const t1 = plan.tasks.find((t) => t.id === 'T1')
+      const t2 = plan.tasks.find((t) => t.id === 'T2')
+      t1.files = ['zzz.mjs']
+      t2.phase = 1
+      t2.files = ['a.mjs']
+    })
+
+    const decision = JSON.parse((await runCliOn(root, ['fix', '--run', 'r1', '--phase', '1', '--verdict', await gateVerdict(root)])).out)
+    // T2 committed nothing and its branch does not even exist; the failing command named
+    // a.mjs, which T1 wrote. The retry goes to T2 anyway — the outcome scripts/fix-loop.mjs
+    // names as "pollutes an innocent branch", reached here through plan.json rather than
+    // through the attribution logic that comment guards.
+    assert.equal(decision.decision, 'retry')
+    assert.deepEqual(decision.tasks.map((t) => t.taskId), ['T2'])
+    // And nothing about the verdict moved: the gate is still recomputed from git and still red.
+    const regated = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(regated.code, 1)
+  })
+})
+
+test('LIMIT (plan.json rewrite): rewriting the failing task\'s own phase drops it from phaseTasks and the failure becomes unattributable', async () => {
+  await withRepo(async (root) => {
+    await retryableRun(root)
+    await rewritePlan(root, 'r1', (plan) => {
+      plan.tasks.find((t) => t.id === 'T1').phase = 2
+    })
+
+    const decision = JSON.parse((await runCliOn(root, ['fix', '--run', 'r1', '--phase', '1', '--verdict', await gateVerdict(root)])).out)
+    // `fix` filters plan.json's tasks to the numeric phase it was asked about, so T1 is no
+    // longer a candidate and the command output naming a.mjs matches nobody. Fail-safe — the
+    // phase halts at a human rather than retrying or passing — but undocumented until now.
+    assert.equal(decision.decision, 'escalate')
+    assert.equal(decision.reason, 'unattributable')
+    assert.equal(decision.check, 'test')
+    assert.deepEqual(decision.tasks, [])
+  })
+})
+
+test('LIMIT (persisted verdict): feeding the gate record stored in status.json back as --verdict decides none, exactly as the skill says is incidental', async () => {
+  await withRepo(async (root) => {
+    await retryableRun(root)
+    const gateResult = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(gateResult.code, 1)
+
+    // skills/phase-gate/SKILL.md forbids reading the verdict back from `.teammates/` and notes
+    // that doing it today "degenerates harmlessly, because the persisted object carries no
+    // `results` key and the decision comes back `none` … that is incidental, not guaranteed."
+    // This pins the incidental behaviour so it breaks loudly the day `results` starts being
+    // persisted and the on-disk record silently becomes a decision input.
+    const statusPath = path.join(root, '.teammates', 'r1', 'status.json')
+    const status = JSON.parse(await readFile(statusPath, 'utf8'))
+    const persisted = status.gates['1']
+    assert.equal(persisted.verdict, 'FAIL')
+    assert.equal(persisted.results, undefined)
+
+    const recordPath = path.join(root, '.teammates', 'persisted-verdict.json')
+    await writeFile(recordPath, JSON.stringify(persisted), 'utf8')
+    const fromRecord = JSON.parse((await runCliOn(root, ['fix', '--run', 'r1', '--phase', '1', '--verdict', recordPath])).out)
+    assert.equal(fromRecord.decision, 'none')
+    assert.deepEqual(fromRecord.tasks, [])
+
+    // The whole status.json is the same shape of mistake and lands the same way.
+    const fromStatus = JSON.parse((await runCliOn(root, ['fix', '--run', 'r1', '--phase', '1', '--verdict', statusPath])).out)
+    assert.equal(fromStatus.decision, 'none')
+
+    // A genuine verdict for the same tree, from the same moment, decides `retry`. That is what
+    // makes `none` above a real degeneration rather than the honest answer.
+    const fromGate = JSON.parse((await runCliOn(root, ['fix', '--run', 'r1', '--phase', '1', '--verdict', await gateVerdict(root)])).out)
+    assert.equal(fromGate.decision, 'retry')
+  })
+})
+
 test('a compliant two-phase run passes phase 1, is merged --no-ff, then derives and passes phase 2 with no manual state edits', async () => {
   await withRepo(async (root) => {
     await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
