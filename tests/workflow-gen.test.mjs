@@ -1,5 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { generatePhaseWorkflow } from '../scripts/workflow-gen.mjs'
 
 const tasks = [
@@ -149,4 +153,334 @@ test('calling with no tierModels at all emits no model key', async () => {
   const tiered = [{ id: 'T1', title: 'auth middleware', files: ['src/auth.ts'], phase: 1, tier: 'cheap' }]
   const src = await generatePhaseWorkflow({ runId: 'x', phase: 1, tasks: tiered, maxParallel: 2 })
   assert.ok(!src.includes('"model"'), 'expected no model key when tierModels is not supplied')
+})
+
+// Evaluates the generated body with stubbed primitives and returns every prompt the
+// generated code passed to agent(). The brief is assembled at run time by string
+// concatenation, so a line like the checkout command exists only once the generated
+// code runs — asserting on the source text alone would never see it.
+async function captureAgentPrompts(src) {
+  const body = src.replace(/^export const meta = /m, 'const meta = ')
+  const captured = []
+  const phase = () => {}
+  const parallel = (fns) => Promise.all(fns.map((f) => f()))
+  const agent = (prompt) => {
+    captured.push(prompt)
+    return Promise.resolve({ status: 'done', branch: 'b', filesChanged: [], summary: 's', blockers: [] })
+  }
+  const run = new Function('phase', 'parallel', 'agent', `return (async () => { ${body} })`)(phase, parallel, agent)
+  await run()
+  return captured
+}
+
+test('the brief opens with a verifiable checkout of the task branch off the base branch', async () => {
+  const src = await generatePhaseWorkflow({
+    runId: 'r1',
+    phase: 1,
+    tasks: [{ id: 'T1', title: 'auth middleware', files: ['src/auth.ts'], phase: 1 }],
+    maxParallel: 2,
+    baseBranch: 'main',
+  })
+  const [prompt] = await captureAgentPrompts(src)
+  assert.ok(
+    prompt.includes('git checkout -B teammates/r1/T1 main'),
+    'brief must spell out the exact checkout command',
+  )
+  assert.ok(prompt.includes('git log --oneline -1'), 'brief must ask the teammate to verify the checkout')
+
+  // Ordering is the whole point: a checkout instruction that arrives after the teammate has
+  // been told which files to edit cannot stop it reading stale content first. Substring
+  // presence alone would stay green if the block were moved to the end, so pin position.
+  assert.ok(
+    prompt.indexOf('git checkout -B teammates/r1/T1 main') < prompt.indexOf('FILES.'),
+    'the checkout must come before the file set',
+  )
+  assert.ok(
+    prompt.indexOf('MANDATORY FIRST STEP.') < prompt.indexOf('BASELINE.'),
+    'the checkout must come before the baseline run',
+  )
+
+  // The log line is only worth running if it names a ref to compare against and attaches a
+  // consequence to the mismatch; asserting the bare command would survive both being dropped.
+  assert.ok(
+    prompt.includes('If the log does not show the tip of main, STOP and report status "blocked".'),
+    'the log check must name the base ref and require blocking on a mismatch',
+  )
+})
+
+test('the brief requires a green baseline before any writing and blocks otherwise', async () => {
+  const src = await generatePhaseWorkflow({
+    runId: 'r1',
+    phase: 1,
+    tasks: [{ id: 'T1', title: 'auth middleware', files: ['src/auth.ts'], phase: 1 }],
+    maxParallel: 2,
+    baseBranch: 'main',
+  })
+  const [prompt] = await captureAgentPrompts(src)
+  assert.ok(
+    prompt.includes('confirm it is green'),
+    'the baseline must be required before writing, not merely suggested',
+  )
+  assert.ok(
+    prompt.includes('Report status "blocked" only if the baseline cannot be made green.'),
+    'a baseline that cannot be made green must carry the blocked consequence',
+  )
+})
+
+test('the brief bootstraps the worktree before the baseline run, not after it', async () => {
+  const src = await generatePhaseWorkflow({
+    runId: 'r1',
+    phase: 1,
+    tasks: [{ id: 'T1', title: 'auth middleware', files: ['src/auth.ts'], phase: 1 }],
+    maxParallel: 2,
+    baseBranch: 'main',
+  })
+  const [prompt] = await captureAgentPrompts(src)
+
+  // A fresh worktree has no installed dependencies. On any project whose test runner is itself
+  // a dependency — vitest, jest, pytest — the first baseline run fails on the missing runner,
+  // and a teammate obeying the brief blocks having done no work. The teammate never reads
+  // SKILL.md, so the install and config-copy steps have to be named here, and named before the
+  // test command, or the skill's remedy is unreachable.
+  const install = prompt.search(/install (the [^\n]*)?dependenc/i)
+  const config = prompt.search(/copy [^\n]*config/i)
+  const run = prompt.search(/test command/)
+  assert.ok(install !== -1, 'the brief must name a dependency install step')
+  assert.ok(config !== -1, 'the brief must name a config-copy step for untracked files')
+  assert.ok(run !== -1, 'the brief must still name the test command')
+  assert.ok(install < run, 'the install must come before the baseline test run')
+  assert.ok(config < run, 'the config copy must come before the baseline test run')
+
+  // The ordering is only justified by the reason a green baseline matters at all; dropping the
+  // explanation leaves a bare chore a teammate under time pressure will skip.
+  assert.ok(
+    prompt.includes('looks exactly like a RED test'),
+    'the brief must keep the reason a missing dependency is indistinguishable from a failure',
+  )
+})
+
+test('the brief names the plan path when one is given', async () => {
+  const src = await generatePhaseWorkflow({
+    runId: 'r1',
+    phase: 1,
+    tasks: [{ id: 'T1', title: 'auth middleware', files: ['src/auth.ts'], phase: 1 }],
+    maxParallel: 2,
+    planPath: 'docs/plans/2026-08-06-thing.md',
+  })
+  assert.ok(src.includes('docs/plans/2026-08-06-thing.md'), 'plan path must reach the generated source')
+  const [prompt] = await captureAgentPrompts(src)
+  assert.ok(prompt.includes('PLAN. Read docs/plans/2026-08-06-thing.md'), 'brief must point at the plan')
+  assert.ok(prompt.includes('"Task 1:"'), 'brief must name the task section to implement')
+})
+
+test('omitting planPath, baseBranch and constraints renders no undefined anywhere', async () => {
+  const src = await generatePhaseWorkflow({ runId: 'r1', phase: 1, tasks, maxParallel: 2 })
+  assert.ok(!src.includes('undefined'), 'omitted inputs must render empty, never the string undefined')
+  const prompts = await captureAgentPrompts(src)
+  for (const prompt of prompts) {
+    assert.ok(!prompt.includes('undefined'), 'brief must not contain undefined')
+    assert.ok(!prompt.includes('PLAN. Read'), 'no plan section without a plan path')
+    assert.ok(!prompt.includes('GLOBAL CONSTRAINTS'), 'no constraints section without constraints')
+  }
+})
+
+test('with no base branch the brief emits no checkout command and says the start point is unverified', async () => {
+  const src = await generatePhaseWorkflow({ runId: 'r1', phase: 1, tasks, maxParallel: 2 })
+  const prompts = await captureAgentPrompts(src)
+  for (const prompt of prompts) {
+    // `git checkout -B <branch>` with no start point silently branches from the stale worktree
+    // HEAD — the exact failure this brief exists to prevent. Two shapes are forbidden, and each
+    // needs its own assertion. First: a command occupying its own line, the copy-paste block a
+    // teammate runs verbatim, whether or not it carries an operand.
+    for (const line of prompt.split('\n')) {
+      assert.ok(
+        !/^\s*git checkout -B/.test(line),
+        `no runnable checkout is allowed without a base: ${line}`,
+      )
+    }
+    // Second: any occurrence anywhere — mid-sentence prose included — that hands the teammate a
+    // start point the template invented. A line-anchored check alone misses
+    // `... run: git checkout -B <branch> origin/main and proceed.`, which is just as runnable.
+    // The template's own negative mention closes the branch name with a quote and supplies no
+    // start point, so it is not matched.
+    assert.ok(
+      !/git checkout -B\s+[^\s"']+\s+[^\s"']/.test(prompt),
+      'no checkout may supply a start point the template invented',
+    )
+    assert.ok(!prompt.includes('git checkout -B teammates/r1/T1 HEAD'), 'must not substitute HEAD for a base')
+    assert.ok(prompt.includes('MANDATORY FIRST STEP.'), 'the first step must still be present')
+    assert.ok(prompt.includes('No base branch was supplied'), 'the brief must say no base was supplied')
+    assert.ok(prompt.includes('UNVERIFIED'), 'the brief must flag the starting commit as unverified')
+    assert.ok(
+      prompt.includes('Ask the orchestrator which commit to start from'),
+      'the brief must route the teammate to the orchestrator before writing',
+    )
+    assert.ok(prompt.includes('report status "blocked"'), 'the no-base path must carry a blocked consequence')
+    assert.ok(
+      !prompt.includes('If the log does not show the tip of ,'),
+      'the brief must never ask the teammate to verify against an unnamed ref',
+    )
+  }
+})
+
+test('every constraint passed in appears in the generated source and in the brief', async () => {
+  const constraints = ['Node >= 24.2.0', 'Zero new runtime dependencies', 'Tests use node:test']
+  const src = await generatePhaseWorkflow({ runId: 'r1', phase: 1, tasks, maxParallel: 2, constraints })
+  for (const c of constraints) assert.ok(src.includes(c), `missing constraint: ${c}`)
+  const [prompt] = await captureAgentPrompts(src)
+  assert.ok(prompt.includes('GLOBAL CONSTRAINTS:'), 'brief must head the constraints section')
+  for (const c of constraints) assert.ok(prompt.includes('- ' + c), `constraint missing from brief: ${c}`)
+})
+
+test('a constraint containing $& survives the function replacer verbatim', async () => {
+  const constraints = ['never write $& into the log']
+  const src = await generatePhaseWorkflow({ runId: 'r1', phase: 1, tasks, maxParallel: 2, constraints })
+  assert.ok(src.includes('never write $& into the log'), '$& must not be read as a replacement pattern')
+  const [prompt] = await captureAgentPrompts(src)
+  assert.ok(prompt.includes('- never write $& into the log'), '$& must reach the brief verbatim')
+})
+
+test('a plan path and a base branch containing $& survive the function replacer verbatim', async () => {
+  // Same hazard as the constraint case: a string replacement would read $& as "the match"
+  // and rewrite the marker back into the output instead of the caller's value.
+  const src = await generatePhaseWorkflow({
+    runId: 'r1',
+    phase: 1,
+    tasks,
+    maxParallel: 2,
+    planPath: 'docs/plans/$&-thing.md',
+    baseBranch: 'release/$&-base',
+  })
+  assert.ok(src.includes('docs/plans/$&-thing.md'), '$& in a plan path must not be read as a pattern')
+  assert.ok(src.includes('release/$&-base'), '$& in a base branch must not be read as a pattern')
+  const [prompt] = await captureAgentPrompts(src)
+  assert.ok(prompt.includes('PLAN. Read docs/plans/$&-thing.md'), '$& must reach the brief from the plan path')
+  assert.ok(
+    prompt.includes('git checkout -B teammates/r1/T1 release/$&-base'),
+    '$& must reach the brief from the base branch',
+  )
+})
+
+test('a task title containing a marker string is not rescanned as a substitution site', async () => {
+  // Marker substitution must be one pass. A chained .replace() rewrites the first occurrence
+  // *anywhere*, including inside a value already substituted, so a title carrying a later
+  // marker would have that marker expanded — caller text becoming a substitution site.
+  const tricky = [{ id: 'T1', title: 'ok__BASE_BRANCH__ and __CONSTRAINTS__ too', files: ['a.ts'], phase: 1 }]
+  const src = await generatePhaseWorkflow({
+    runId: 'r1',
+    phase: 1,
+    tasks: tricky,
+    maxParallel: 2,
+    baseBranch: 'main',
+    constraints: ['c1'],
+  })
+  assert.ok(
+    src.includes('ok__BASE_BRANCH__ and __CONSTRAINTS__ too'),
+    'markers inside a task title must survive untouched',
+  )
+  const [prompt] = await captureAgentPrompts(src)
+  assert.ok(prompt.includes('T1: ok__BASE_BRANCH__ and __CONSTRAINTS__ too.'), 'title must reach the brief verbatim')
+  assert.ok(prompt.includes('git checkout -B teammates/r1/T1 main'), 'the real marker must still be substituted')
+})
+
+test('an emitted literal never carries a raw double quote', async () => {
+  // Single-quoting alone makes a `"` inert only for as long as the value stays inside that
+  // literal. A raw quote is one refactor away from closing a JSON string elsewhere in the
+  // generated source, so the escape belongs in the escaper, not in the surrounding context.
+  const src = await generatePhaseWorkflow({
+    runId: 'r1',
+    phase: 1,
+    tasks,
+    maxParallel: 2,
+    planPath: 'docs/"p".md',
+    baseBranch: 'feat/"q"',
+    constraints: ['say "no"'],
+  })
+  assert.ok(src.includes(String.raw`const PLAN_PATH = 'docs/\"p\".md'`), 'plan path quote must be escaped')
+  assert.ok(src.includes(String.raw`const BASE_BRANCH = 'feat/\"q\"'`), 'base branch quote must be escaped')
+  assert.ok(src.includes(String.raw`'say \"no\"'`), 'constraint quote must be escaped')
+  for (const decl of ['const PLAN_PATH = ', 'const BASE_BRANCH = ']) {
+    const line = src.slice(src.indexOf(decl)).split('\n')[0]
+    assert.ok(!/[^\\]"/.test(line), `unescaped double quote in: ${line}`)
+  }
+  // Escaping is transparent: the teammate still reads the value it was given.
+  const [prompt] = await captureAgentPrompts(src)
+  assert.ok(prompt.includes('git checkout -B teammates/r1/T1 feat/"q"'), 'escape must round-trip')
+  assert.ok(prompt.includes('PLAN. Read docs/"p".md'), 'escape must round-trip in the plan path')
+  assert.ok(prompt.includes('- say "no"'), 'escape must round-trip in a constraint')
+})
+
+test('a base branch containing a double quote cannot inject code into the generated module', async () => {
+  // Reproduces the reviewed exploit: with chained substitution and an unescaped double quote,
+  // a title carrying a marker plus a quote-bearing base branch closed the JSON string of the
+  // already-substituted task list and appended an expression that ran on import.
+  const tricky = [{ id: 'T1', title: 'ok__BASE_BRANCH__', files: ['a.ts'], phase: 1 }]
+  const src = await generatePhaseWorkflow({
+    runId: 'r1',
+    phase: 1,
+    tasks: tricky,
+    maxParallel: 2,
+    baseBranch: '"+(globalThis.PWNED=1)+"',
+  })
+  const split = src.indexOf('\nconst TASKS')
+  const wrapped = `${src.slice(0, split)}\nexport const run = async (phase, parallel, agent) => {${src.slice(split)}\n}\n`
+  const dir = await mkdtemp(join(tmpdir(), 'workflow-gen-'))
+  try {
+    const file = join(dir, 'phase.mjs')
+    await writeFile(file, wrapped, 'utf8')
+    const mod = await import(pathToFileURL(file).href)
+    assert.equal(globalThis.PWNED, undefined, 'importing the generated module must not execute injected code')
+    const captured = []
+    await mod.run(() => {}, (fns) => Promise.all(fns.map((f) => f())), (prompt) => {
+      captured.push(prompt)
+      return Promise.resolve({ status: 'done', branch: 'b', filesChanged: [], summary: 's', blockers: [] })
+    })
+    assert.equal(globalThis.PWNED, undefined, 'running the generated workflow must not execute injected code')
+    assert.ok(
+      captured[0].includes('git checkout -B teammates/r1/T1 "+(globalThis.PWNED=1)+"'),
+      'the branch name must reach the brief as inert text',
+    )
+  } finally {
+    delete globalThis.PWNED
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the dispatch names a real agent type and keeps worktree isolation', async () => {
+  const src = await generatePhaseWorkflow({ runId: 'r1', phase: 1, tasks, maxParallel: 2 })
+  assert.ok(src.includes("agentType: 'claude-teammates:tm-implementer'"), 'missing agentType')
+  assert.ok(src.includes("isolation: 'worktree'"), 'missing worktree isolation')
+  const captured = await captureAgentOptions(src)
+  for (const options of captured) {
+    assert.equal(options.agentType, 'claude-teammates:tm-implementer')
+    assert.equal(options.isolation, 'worktree')
+  }
+})
+
+test('the generated source parses as a real module', async () => {
+  const src = await generatePhaseWorkflow({
+    runId: 'r1',
+    phase: 1,
+    tasks,
+    maxParallel: 2,
+    planPath: 'docs/plans/p.md',
+    baseBranch: 'main',
+    constraints: ["don't break $& things"],
+  })
+  // The workflow body ends in a top-level `return`, which is legal in the workflow host
+  // but not in an ES module, so wrap the body in a function. Every other byte — the whole
+  // brief included — is then parsed by the real module parser, which is exactly what the
+  // substring assertions above cannot do.
+  const split = src.indexOf('\nconst TASKS')
+  assert.ok(split > 0, 'expected a TASKS declaration after the meta literal')
+  const wrapped = `${src.slice(0, split)}\nexport const run = async (phase, parallel, agent) => {${src.slice(split)}\n}\n`
+  const dir = await mkdtemp(join(tmpdir(), 'workflow-gen-'))
+  try {
+    const file = join(dir, 'phase.mjs')
+    await writeFile(file, wrapped, 'utf8')
+    const mod = await import(pathToFileURL(file).href)
+    assert.equal(mod.meta.name, 'teammates-r1-phase-1')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })
