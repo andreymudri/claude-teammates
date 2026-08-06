@@ -30,7 +30,7 @@ function jsLiteral(value, indent = '') {
   return `{\n${entries}\n${indent}}`
 }
 
-export async function generatePhaseWorkflow({ runId, phase, tasks, maxParallel }) {
+export async function generatePhaseWorkflow({ runId, phase, tasks, maxParallel, tierModels }) {
   if (!tasks || tasks.length === 0) throw new Error(`no tasks for phase ${phase}`)
 
   const meta = {
@@ -39,7 +39,10 @@ export async function generatePhaseWorkflow({ runId, phase, tasks, maxParallel }
     phases: [{ title: 'Implement', detail: `${tasks.length} worktree-isolated implementers` }],
   }
 
-  const slim = tasks.map(({ id, title, files }) => ({ id, title, files }))
+  const slim = tasks.map(({ id, title, files, tier }) => {
+    const model = tierModels?.[tier]
+    return model ? { id, title, files, model } : { id, title, files }
+  })
   const template = await readFile(TEMPLATE, 'utf8')
 
   // Use function replacers, not string replacements: String.prototype.replace treats
