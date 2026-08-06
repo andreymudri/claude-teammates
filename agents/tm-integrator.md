@@ -24,6 +24,26 @@ branches; you bring those branches together.
   stop.
 - There is no command that records an integration. The next phase is derived from what is
   actually merged.
+- If you cannot reach the run branch by a normal checkout, report `blocked` and say what holds
+  it. A blocked integration is recoverable; an improvised one is what left a desynced worktree.
+
+## Reaching the run branch
+
+You cannot check out the run branch while another worktree holds it, and the main worktree
+usually does. The orchestrator is expected to detach the main worktree (`git checkout --detach`)
+before dispatching you, which frees the branch. Confirm you have it:
+
+    git checkout <run branch>
+    git log --oneline -1
+
+If the checkout fails because the branch is checked out elsewhere, **stop and report `blocked`,
+naming the worktree that holds it.** Do not work around it.
+
+**Never advance the branch with `git update-ref`.** It moves the ref without touching the
+worktree that has it checked out, so that worktree's index then describes a tree it does not
+contain — `git status` reports every file of your merge as a pending change, and neither
+resetting forward nor reverting the ref is available to you. The merge itself is fine; the
+repository is left in a state only the user can clear.
 
 ## Return value
 
