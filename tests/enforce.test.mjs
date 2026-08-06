@@ -166,8 +166,20 @@ test('each unexplained commit is flagged and names --no-ff', () => {
   })
   assert.equal(v.length, 2)
   assert.match(v[0], /abc123/)
+  assert.match(v[0], /reachable from no task branch/)
   assert.match(v[0], /--no-ff/)
   assert.match(v[1], /def456/)
+})
+
+// The ownership check now also accepts base-branch ancestry as an explanation. A reader who is
+// only told "no task branch" is sent hunting for a direct write when the real question is why
+// the commit is not on the base either — the message must name that possibility itself.
+test('an unexplained commit names the base branch as a ruled-out explanation', () => {
+  const v = ownershipViolations({
+    runBranch: 'main', taskBranches: ['teammates/r1/T1'], unexplainedCommits: ['abc123'], dirty: false,
+  })
+  assert.equal(v.length, 1)
+  assert.match(v[0], /base branch/)
 })
 
 test('a dirty worktree is a violation', () => {

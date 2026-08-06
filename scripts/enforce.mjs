@@ -91,7 +91,7 @@ export function ownershipViolations({ runBranch, taskBranches = [], unexplainedC
     }
   }
   for (const sha of unexplainedCommits) {
-    violations.push(`commit ${sha} on ${runBranch} is reachable from no task branch of this run — either it is a direct write, or the integrator merged without --no-ff and destroyed the ancestry this check reads`)
+    violations.push(`commit ${sha} on ${runBranch} is reachable from no task branch of this run and from no ancestor of the base branch — either it is a direct write, or the integrator merged without --no-ff and destroyed the ancestry this check reads`)
   }
   if (dirty) {
     violations.push('main worktree has uncommitted changes; teammates work only in their own worktrees')

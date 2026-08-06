@@ -452,6 +452,91 @@ test('runOwnershipCheck requires every parent of an octopus merge to be owned by
   assert.match(res.output, /m1/)
 })
 
+// Advancing the base branch mid-run and merging it into the run branch produces a merge whose
+// secondary parent is the base, never a task branch. Without base ancestry as an explanation
+// that legitimate advance is indistinguishable from a direct write — run `preview` hit exactly
+// this and paid for a full run-branch rebuild.
+test('runOwnershipCheck accepts a merge whose secondary parent is an ancestor of the base branch', async () => {
+  const baseSha = `refs/heads/${BASE_BRANCH}-sha`
+  const git = fakeGit({
+    branchExists: async () => true,
+    commitsBetween: async () => ['m1'],
+    // Nothing on a task branch explains this merge; only the base does.
+    isAncestor: async (a, b) => a === 'baseAdvance' && b === baseSha,
+    commitParents: async () => ['p0', 'baseAdvance'],
+  })
+  const check = { name: 'ownership', kind: 'ownership' }
+  const ctx = {
+    git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH,
+    anchorSha: 'anchorSha1', runSha: 'runSha1', tasks: [T1_TASK],
+  }
+  const res = await runOwnershipCheck(check, ctx)
+  assert.equal(res.status, 'pass')
+})
+
+// Accepting base ancestry must not turn into accepting anything: a plain, parentless-of-any-
+// -owner commit written straight onto the run branch is still the case this check exists for.
+test('runOwnershipCheck still fails a direct write explained by neither a task branch nor the base', async () => {
+  const git = fakeGit({
+    branchExists: async () => true,
+    commitsBetween: async () => ['c1'],
+    isAncestor: async () => false,
+    commitParents: async () => ['p0'],
+  })
+  const check = { name: 'ownership', kind: 'ownership' }
+  const ctx = {
+    git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH,
+    anchorSha: 'anchorSha1', runSha: 'runSha1', tasks: [T1_TASK],
+  }
+  const res = await runOwnershipCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.match(res.output, /c1/)
+})
+
+// The octopus case, now with base ancestry in play: one legitimate base parent must not vouch
+// for a rogue sibling parent. Every secondary parent is still checked independently.
+test('runOwnershipCheck fails an octopus merge mixing a base-owned parent with an unowned one', async () => {
+  const baseSha = `refs/heads/${BASE_BRANCH}-sha`
+  const git = fakeGit({
+    branchExists: async () => true,
+    commitsBetween: async () => ['m1'],
+    isAncestor: async (a, b) => a === 'baseAdvance' && b === baseSha,
+    commitParents: async () => ['p0', 'baseAdvance', 'rogue'],
+  })
+  const check = { name: 'ownership', kind: 'ownership' }
+  const ctx = {
+    git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH,
+    anchorSha: 'anchorSha1', runSha: 'runSha1', tasks: [T1_TASK],
+  }
+  const res = await runOwnershipCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.match(res.output, /m1/)
+})
+
+// A run configured with a base branch that does not exist keeps today's behaviour exactly:
+// no resolve is attempted (which would be a GitError and fail the check for a new reason),
+// and the commit stays unexplained.
+test('runOwnershipCheck leaves a commit unexplained when the base branch does not exist', async () => {
+  const git = fakeGit({
+    branchExists: async (name) => name === T1_BRANCH,
+    commitsBetween: async () => ['m1'],
+    isAncestor: async () => false,
+    commitParents: async () => ['p0', 'baseAdvance'],
+  })
+  const check = { name: 'ownership', kind: 'ownership' }
+  const ctx = {
+    git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: 'no-such-base',
+    anchorSha: 'anchorSha1', runSha: 'runSha1', tasks: [T1_TASK],
+  }
+  const res = await runOwnershipCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.match(res.output, /m1/)
+  assert.ok(
+    !git.resolveRefCalls.includes('refs/heads/no-such-base'),
+    'no resolve should be attempted for a base branch that does not exist',
+  )
+})
+
 test('runOwnershipCheck fails on a dirty worktree', async () => {
   const git = fakeGit({ isDirty: async () => true })
   const check = { name: 'ownership', kind: 'ownership' }
