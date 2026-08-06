@@ -6,7 +6,7 @@
 //   docs/plans/2026-08-05-tamper-evident-enforcement.md (Task 4)
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, rm, writeFile, readFile, realpath, stat } from 'node:fs/promises'
+import { mkdtemp, mkdir, rm, writeFile, readFile, realpath, lstat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -969,8 +969,13 @@ async function commitPreviewManifest(root, { link, checks, ignore = [] }) {
   git(root, ['branch', '--force', 'main', 'run-branch'])
 }
 
+// lstat, not stat: `stat` follows links, so it reports false for a dangling link — exactly the
+// artifact the escape assertions below exist to detect. For entry '../escape' the computed link
+// path is byte-identical to the escape target, and both a POSIX symlink and a Windows junction
+// are created happily against a missing target, so a regression that drops the pre-symlink guard
+// would leave a real link there that `stat` cannot see.
 async function exists(p) {
-  return await stat(p).then(() => true, () => false)
+  return await lstat(p).then(() => true, () => false)
 }
 
 const PREVIEW_CHECKS = [
@@ -1010,11 +1015,16 @@ function assertLinkRejected(code, parsed, entry, messagePattern) {
 
 test('a manifest declaring a preview.link that escapes the repository fails the gate and creates nothing at the escape target', async () => {
   await withRepo(async (root) => {
-    const escapeTarget = path.resolve(root, '..', 'escape')
+    // Namespaced by the repo's own mkdtemp suffix. `path.resolve(root, '..', 'escape')`
+    // collapses to a single fixed path in the system temp directory shared by every test that
+    // spells it that way, and nothing in withRepo's cleanup removes a path outside the repo —
+    // so one aborted run leaves a directory that fails the precondition of every later run.
+    const escapeName = `escape-${path.basename(root)}`
+    const escapeTarget = path.resolve(root, '..', escapeName)
     assert.equal(await exists(escapeTarget), false, 'fixture precondition: the escape target must not pre-exist')
 
-    const { code, parsed } = await gateWithLink(root, ['../escape'])
-    assertLinkRejected(code, parsed, '../escape', /escapes the repository/)
+    const { code, parsed } = await gateWithLink(root, [`../${escapeName}`])
+    assertLinkRejected(code, parsed, `../${escapeName}`, /escapes the repository/)
 
     // The entry is refused by validateLinkPaths before withMergePreview creates any worktree,
     // so there is no window in which a junction into the parent directory exists.
@@ -1024,7 +1034,7 @@ test('a manifest declaring a preview.link that escapes the repository fails the 
 
 test('a manifest declaring an absolute preview.link fails the gate and creates nothing at the escape target', async () => {
   await withRepo(async (root) => {
-    const escapeTarget = path.resolve(root, '..', 'abs-escape')
+    const escapeTarget = path.resolve(root, '..', `abs-escape-${path.basename(root)}`)
     assert.equal(await exists(escapeTarget), false, 'fixture precondition: the escape target must not pre-exist')
 
     const { code, parsed } = await gateWithLink(root, [escapeTarget])
@@ -1038,11 +1048,12 @@ test('a manifest declaring a preview.link that escapes only after normalisation 
   await withRepo(async (root) => {
     // 'a/../../escape' contains no leading '..' and names a plausible in-repo subdirectory; it
     // reaches the parent of the repository only once path.normalize collapses the segments.
-    const escapeTarget = path.resolve(root, '..', 'escape')
+    const escapeName = `escape-${path.basename(root)}`
+    const escapeTarget = path.resolve(root, '..', escapeName)
     assert.equal(await exists(escapeTarget), false, 'fixture precondition: the escape target must not pre-exist')
 
-    const { code, parsed } = await gateWithLink(root, ['a/../../escape'])
-    assertLinkRejected(code, parsed, 'a/../../escape', /escapes the repository/)
+    const { code, parsed } = await gateWithLink(root, [`a/../../${escapeName}`])
+    assertLinkRejected(code, parsed, `a/../../${escapeName}`, /escapes the repository/)
 
     assert.equal(await exists(escapeTarget), false, 'nothing may be created at the escape target')
   })
@@ -1129,5 +1140,20 @@ writeFileSync(${JSON.stringify(sentinel)}, JSON.stringify({
     // it a link rather than a copy the preview happened to contain.
     assert.equal(report.markerReal, path.join(realRoot, 'build', 'deps', 'marker.txt'))
     assert.equal(report.content, 'linked build input\n')
+
+    // The linked directory must survive the gate. This is the only test where a real junction,
+    // a real `git worktree remove` and a real recursive `rm` of the preview are all present at
+    // once, so it is the only place the *destructive* consequence of tearing links down in the
+    // wrong order can be observed. `tests/merge-preview.test.mjs` pins the ordering, but it
+    // records call order against a fake git with no link on disk — evidence about sequence, not
+    // about outcome. Move the teardown in `scripts/merge-preview.mjs` after the `rm` and every
+    // assertion above still passes while these two files are deleted from the repository: in
+    // production that is the user's real `node_modules` erased by a gate run.
+    assert.equal(await exists(path.join(root, 'build', 'deps', 'marker.txt')), true,
+      'the gate must not delete the linked directory it borrowed')
+    assert.equal(await exists(path.join(root, 'build', 'deps', 'probe.mjs')), true,
+      'the gate must not delete the linked directory it borrowed')
+    assert.equal(await readFile(path.join(root, 'build', 'deps', 'marker.txt'), 'utf8'),
+      'linked build input\n', 'the linked file must still be readable after the gate')
   })
 })
