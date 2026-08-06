@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
@@ -1393,4 +1393,92 @@ test('with taskScope set, runOwnershipCheck still sees every task in the run', a
   for (const branch of [T1_BRANCH, T2_BRANCH, T3_BRANCH]) {
     assert.ok(git.resolveRefCalls.includes(`refs/heads/${branch}`), `${branch} must still be consulted`)
   }
+})
+
+// --- ctx.previewLink: declared preview.link entries reaching withMergePreview --------------
+//
+// previewLinks(config) (gate-config.mjs) has to actually reach withMergePreview for the
+// feature to do anything. runChecks is the wiring point: it must pass ctx.previewLink through
+// as `link`, and ctx.cwd through as `repoRoot`, on every call — real linking, driven through
+// the real withMergePreview/linkInto, not a git double, since the double covers only the
+// worktree operations withMergePreview needs, and linking is real filesystem work.
+
+async function withLinkableRepoRoot(fn) {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-gate-runner-link-'))
+  try {
+    const deps = path.join(root, 'deps')
+    await mkdir(deps, { recursive: true })
+    await writeFile(path.join(deps, 'marker.txt'), 'linked build input\n', 'utf8')
+    await fn(root)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}
+
+test('ctx.previewLink reaches withMergePreview and is linked into the preview tree', async () => {
+  await withLinkableRepoRoot(async (root) => {
+    const seen = []
+    const ctx = previewCtx({
+      cwd: root,
+      previewLink: ['deps'],
+      git: previewGit(),
+      exec: async (cmd, cwd) => {
+        seen.push(await readFile(path.join(cwd, 'deps', 'marker.txt'), 'utf8'))
+        return { code: 0, output: '' }
+      },
+    })
+    const results = await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], ctx)
+    assert.deepEqual(results.map((r) => r.status), ['pass', 'pass'])
+    assert.deepEqual(seen, ['linked build input\n'])
+  })
+})
+
+test('a link failure records the merge check as fail with the link message and skips command checks', async () => {
+  await withLinkableRepoRoot(async (root) => {
+    const calls = []
+    const ctx = previewCtx({
+      cwd: root,
+      // 'absent' does not exist under root: linkInto fails with an ENOENT-shaped message
+      // before the callback (and so the command check) ever runs.
+      previewLink: ['absent'],
+      git: previewGit(),
+      exec: recordingExec(calls),
+    })
+    const results = await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], ctx)
+    assert.equal(results[0].name, 'merge')
+    assert.equal(results[0].status, 'fail')
+    assert.match(results[0].output, /preview link 'absent' failed/)
+    assert.equal(results[1].status, 'skip')
+    assert.equal(calls.length, 0, 'no command may run when linking failed')
+    assert.equal(aggregateVerdict(results).verdict, 'FAIL')
+  })
+})
+
+test('with ctx.previewLink absent, the preview receives no links and behaves exactly as before', async () => {
+  const calls = []
+  // cwd is not a real directory: with no link entries, repoRoot is passed through but never
+  // consulted, so this must behave identically to every preview test above that predates
+  // ctx.previewLink.
+  const ctx = previewCtx({ git: previewGit(), exec: recordingExec(calls) })
+  assert.equal(ctx.previewLink, undefined)
+  const results = await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], ctx)
+  assert.deepEqual(results.map((r) => [r.name, r.status]), [['merge', 'pass'], ['test', 'pass']])
+  // The one property "identical to today" most needs: the command still runs inside the
+  // preview worktree, not at ctx.cwd, exactly as it did before ctx.previewLink existed.
+  assert.equal(calls.length, 1)
+  assert.match(calls[0].cwd, /tm-preview-/)
+})
+
+test('a solo run builds no preview and consults no links even when ctx.previewLink is set', async () => {
+  const calls = []
+  const ctx = {
+    cwd: '/project/root',
+    exec: recordingExec(calls),
+    solo: true,
+    previewLink: ['deps'],
+    git: previewGit(),
+  }
+  const results = await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], ctx)
+  assert.deepEqual(results.map((r) => [r.name, r.status]), [['test', 'pass']])
+  assert.deepEqual(calls.map((c) => c.cwd), ['/project/root'])
 })

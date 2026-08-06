@@ -463,6 +463,8 @@ export async function runChecks(checks, ctx = {}) {
       git: ctx.git,
       base: ctx.runBranch,
       branches,
+      link: ctx.previewLink ?? [],
+      repoRoot: ctx.cwd,
       // Every check runs inside this callback, so the worktree is alive for all of them and
       // removed exactly once, after the last one. The merge check cannot be the thing holding
       // the worktree open — by the time a later check ran, the directory would be gone.

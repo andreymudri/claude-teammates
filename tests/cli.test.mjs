@@ -1622,3 +1622,206 @@ test('a corrupt status.json produces parseable JSON whose verdict is FAIL, not P
     assert.ok(parsed.results.some((r) => r.name === 'noop' && r.status === 'pass'))
   })
 })
+
+// --- Task 4: a manifest's preview.link must actually reach runChecks -----------------------
+//
+// gate-config.mjs's previewLinks(config) existed since T2 but nothing called it: `gate`
+// built ctx as `{ cwd: root, ...(await derive(...)) }`, so ctx.previewLink was always
+// undefined and no link was ever created end to end. These pin that the `gate` path wires
+// the saved manifest's preview.link through to the merge preview, and that a manifest
+// without one still yields the pre-existing, link-free behaviour.
+
+const ONE_TASK_PLAN = `### Task 1: A
+
+**Files:**
+- Create: \`a.mjs\`
+`
+
+test('gate wires a manifest\'s preview.link through to the merge preview', async () => {
+  await withRepo(async ({ root, io, lines, git: gitCmd }) => {
+    const planPath = path.join(root, 'plan.md')
+    gitCmd(['checkout', '--quiet', 'main'])
+    await writeFile(planPath, ONE_TASK_PLAN, 'utf8')
+    // Ignored so the real, untracked `deps` directory created below never reads as a dirty
+    // worktree to the ownership check — the same reason `.teammates/` is ignored.
+    const gitignore = await readFile(path.join(root, '.gitignore'), 'utf8')
+    await writeFile(path.join(root, '.gitignore'), `${gitignore}deps/\n`, 'utf8')
+    await writeFile(
+      path.join(root, 'teammates.gate.json'),
+      JSON.stringify({
+        preview: { link: ['deps'] },
+        phases: {
+          default: {
+            checks: [{
+              name: 'reads-linked-file',
+              kind: 'command',
+              run: 'node -e "process.exit(require(\'fs\').existsSync(\'deps/marker.txt\') ? 0 : 1)"',
+            }],
+          },
+        },
+      }),
+      'utf8',
+    )
+    gitCmd(['add', 'plan.md', 'teammates.gate.json', '.gitignore'])
+    gitCmd(['commit', '--quiet', '-m', 'plan, gate manifest with preview.link, and gitignore'])
+    gitCmd(['checkout', '--quiet', 'run-branch'])
+    gitCmd(['merge', '--quiet', '--ff-only', 'main'])
+
+    // The linked directory is real content sitting in the actual repository working tree —
+    // preview.link resolves against ctx.cwd (the repo root), not against anything committed.
+    await mkdir(path.join(root, 'deps'), { recursive: true })
+    await writeFile(path.join(root, 'deps', 'marker.txt'), 'linked build input\n', 'utf8')
+
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+
+    gitCmd(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    gitCmd(['add', 'a.mjs'])
+    gitCmd(['commit', '--quiet', '-m', 'T1 work'])
+    gitCmd(['checkout', '--quiet', 'run-branch'])
+
+    lines.length = 0
+    const code = await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--root', root], io)
+    assert.equal(code, 0, lines.join('\n'))
+    const parsed = JSON.parse(lines.join('\n'))
+    assert.equal(parsed.verdict, 'PASS')
+    assert.ok(
+      parsed.results.some((r) => r.name === 'reads-linked-file' && r.status === 'pass'),
+      'the command check must have found the linked file inside the preview',
+    )
+  })
+})
+
+// Fix round: `complete` builds its own ctx (~line 522) separately from `gate`'s (~line 440),
+// and only `gate`'s was wired to previewLinks(config). A manifest declaring preview.link
+// worked from `gate` and failed from `complete` with the identical repo, manifest, and
+// branch — every teammate's own `complete` call would blame its own work for a missing
+// build input the manifest declares. This pins that `complete` reaches the same linked file.
+test('complete wires a manifest\'s preview.link through to the merge preview', async () => {
+  await withRepo(async ({ root, io, lines, git: gitCmd }) => {
+    const planPath = path.join(root, 'plan.md')
+    gitCmd(['checkout', '--quiet', 'main'])
+    await writeFile(planPath, ONE_TASK_PLAN, 'utf8')
+    const gitignore = await readFile(path.join(root, '.gitignore'), 'utf8')
+    await writeFile(path.join(root, '.gitignore'), `${gitignore}deps/\n`, 'utf8')
+    // The check writes a sentinel file at an absolute path outside the merge preview's own
+    // worktree — reachable regardless of the command's cwd — but only after confirming the
+    // linked file is visible. `complete`'s exit code and "T1 done" stay identical whether this
+    // check genuinely ran and passed, or was silently skipped (aggregateVerdict counts `skip`
+    // as neither failed nor pending), so the exit code alone cannot tell those apart. The
+    // sentinel can: it exists only if the command actually executed inside the preview and
+    // found the linked file there.
+    const sentinelPath = path.join(root, 'sentinel-executed.txt')
+    // Built as a single-quoted JS string literal (backslashes doubled) rather than with
+    // JSON.stringify, which would emit double quotes that collide with the outer `-e "..."`
+    // quoting the same way the pre-existing check's `\'fs\'` escaping already avoids.
+    const sentinelLiteral = `'${sentinelPath.replace(/\\/g, '\\\\')}'`
+    await writeFile(
+      path.join(root, 'teammates.gate.json'),
+      JSON.stringify({
+        preview: { link: ['deps'] },
+        phases: {
+          default: {
+            checks: [{
+              name: 'reads-linked-file',
+              kind: 'command',
+              run: `node -e "const fs=require('fs'); const ok=fs.existsSync('deps/marker.txt'); if (ok) fs.writeFileSync(${sentinelLiteral}, 'ran'); process.exit(ok ? 0 : 1)"`,
+            }],
+          },
+        },
+      }),
+      'utf8',
+    )
+    gitCmd(['add', 'plan.md', 'teammates.gate.json', '.gitignore'])
+    gitCmd(['commit', '--quiet', '-m', 'plan, gate manifest with preview.link, and gitignore'])
+    gitCmd(['checkout', '--quiet', 'run-branch'])
+    gitCmd(['merge', '--quiet', '--ff-only', 'main'])
+
+    await mkdir(path.join(root, 'deps'), { recursive: true })
+    await writeFile(path.join(root, 'deps', 'marker.txt'), 'linked build input\n', 'utf8')
+
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+
+    gitCmd(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    gitCmd(['add', 'a.mjs'])
+    gitCmd(['commit', '--quiet', '-m', 'T1 work'])
+    gitCmd(['checkout', '--quiet', 'run-branch'])
+
+    lines.length = 0
+    const code = await runCli(['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--root', root], io)
+    assert.equal(code, 0, lines.join('\n'))
+    assert.match(lines.join('\n'), /T1 done/)
+    const ranInsidePreview = await readFile(sentinelPath, 'utf8').catch(() => null)
+    assert.equal(ranInsidePreview, 'ran', 'the command check must have actually run inside the preview and found the linked file')
+  })
+})
+
+test('gate passes no links when the manifest declares no preview.link', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: gitCmd }) => {
+    gitCmd(['checkout', '--quiet', 'main'])
+    await writeEnforcementManifest(root)
+    gitCmd(['add', 'teammates.gate.json'])
+    gitCmd(['commit', '--quiet', '-m', 'gate manifest'])
+    gitCmd(['checkout', '--quiet', 'run-branch'])
+    gitCmd(['merge', '--quiet', '--ff-only', 'main'])
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+
+    gitCmd(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    gitCmd(['add', 'a.mjs'])
+    gitCmd(['commit', '--quiet', '-m', 'T1 work'])
+    gitCmd(['checkout', '--quiet', 'run-branch'])
+
+    lines.length = 0
+    const code = await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--root', root], io)
+    assert.equal(code, 0, lines.join('\n'))
+    const parsed = JSON.parse(lines.join('\n'))
+    // PASS with no link-related error is exactly today's pre-existing, link-free behaviour
+    // for a manifest without a preview field: ctx.previewLink resolves to [], and the merge
+    // preview needs no repoRoot to satisfy zero link entries.
+    assert.equal(parsed.verdict, 'PASS')
+    assert.ok(!parsed.error, 'a manifest without preview.link must never fail while resolving a link')
+    // What ctx.previewLink actually resolves to for an absent preview.link, and that it is
+    // this same previewLinks(config) the `gate` path calls, is already pinned by the unit
+    // tests `previewLinks returns [] when there is nothing to link` and `previewLinks
+    // returns [] when link is not an array` — this end-to-end test only needs the PASS
+    // above, confirming the absent-link path never fails while resolving a link.
+  })
+})
+
+// Fix round: `const root = flags.root ?? process.cwd()` used `??`, which only rejects
+// `undefined` — `--root ""` (e.g. an orchestrator templating an unset shell variable into
+// `--root "$PROJECT_ROOT"`) survived as `root = ''`. That empty string reaches
+// withMergePreview as `repoRoot`, passes its `typeof repoRoot !== 'string'` guard, and then
+// `realpath('')` rejects, silently disabling both realpath-guarded containment checks in
+// linkInto — including the one that stops a symlinked node_modules from writing outside the
+// repo. Reject empty/whitespace --root outright instead of silently substituting cwd.
+test('an empty --root is rejected rather than silently falling back to cwd', async () => {
+  await withRepo(async ({ planPath, io, lines }) => {
+    const code = await runCli(['init-run', planPath, '--run', 'r1', '--root', ''], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /--root must not be empty/)
+  })
+})
+
+test('a whitespace-only --root is rejected rather than silently falling back to cwd', async () => {
+  await withRepo(async ({ planPath, io, lines }) => {
+    const code = await runCli(['init-run', planPath, '--run', 'r1', '--root', '   '], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /--root must not be empty/)
+  })
+})
+
+// Fix round: parseFlags maps a flag with no following value (last on argv, or immediately
+// followed by another flag) to `true`, not a string — so a bare `--root` with its value
+// missing entirely (the same unset-`$PROJECT_ROOT`-templated-unquoted mistake, one step
+// further) skipped the string-emptiness guard above and reached path.join(true, ...) as a
+// raw TypeError with no verdict. Solo `gate` has no `--run` to catch it incidentally.
+test('a --root with no value at all is rejected rather than crashing', async () => {
+  await withRepo(async ({ io, lines }) => {
+    const code = await runCli(['gate', '--no-fleet', '--root'], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /--root must not be empty/)
+  })
+})

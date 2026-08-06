@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { parsePlan } from './plan-parser.mjs'
 import { assignPhases } from './phases.mjs'
 import { readState, writeState, claimTask, releaseClaim, readFixRounds, recordFixRound } from './state.mjs'
-import { loadGateConfig, inferGateConfig, checksForPhase, defaultMaxParallel, fixRoundsForPhase } from './gate-config.mjs'
+import { loadGateConfig, inferGateConfig, checksForPhase, defaultMaxParallel, fixRoundsForPhase, previewLinks } from './gate-config.mjs'
 import { TIERS, inferTier } from './routing.mjs'
 import { decideFix } from './fix-loop.mjs'
 import { runChecks, aggregateVerdict } from './gate-runner.mjs'
@@ -258,6 +258,20 @@ async function derive(root, runId, flags) {
 export async function runCli(argv, io = { out: console.log }) {
   const [command, ...rest] = argv
   const { flags, positional } = parseFlags(rest)
+  // An empty or whitespace-only --root must never silently fall through to cwd: `??` only
+  // catches `undefined`, so `--root ""` survives to become `repoRoot: ''` downstream, which
+  // defeats the realpath-based containment checks in the merge preview (realpath('') rejects,
+  // so both guarded escape checks in linkInto get skipped instead of enforced). Fail loudly
+  // here instead of silently using the wrong root. A bare `--root` with no value at all (e.g.
+  // last on the argv, or immediately followed by another flag) is the same orchestrator
+  // mistake in a different guise: an unset `$PROJECT_ROOT` templated *unquoted* makes the
+  // argument vanish entirely rather than become empty, so parseFlags maps it to `true`
+  // instead of a string. That `true` would otherwise reach path.join() downstream and throw
+  // a raw TypeError with no verdict, which must never happen.
+  if (typeof flags.root !== 'undefined' && (typeof flags.root !== 'string' || flags.root.trim() === '')) {
+    io.out(`--root must not be empty\n\n${USAGE}`)
+    return 2
+  }
   const root = flags.root ?? process.cwd()
   const runId = flags.run
 
@@ -437,7 +451,7 @@ export async function runCli(argv, io = { out: console.log }) {
     let ctx = { cwd: root }
     if (!solo) {
       try {
-        ctx = { cwd: root, ...(await derive(root, runId, flags)) }
+        ctx = { cwd: root, previewLink: previewLinks(config), ...(await derive(root, runId, flags)) }
       } catch (err) {
         io.out(JSON.stringify({ verdict: 'FAIL', failed: ['derive'], error: err.message }, null, 2))
         return 1
@@ -517,15 +531,16 @@ export async function runCli(argv, io = { out: console.log }) {
   }
 
   if (command === 'complete') {
+    const config = await loadGateConfig(root)
+    if (!config) { io.out('no gate manifest — cannot verify completion'); return 4 }
+
     let ctx
     try {
-      ctx = { cwd: root, ...(await derive(root, runId, flags)) }
+      ctx = { cwd: root, previewLink: previewLinks(config), ...(await derive(root, runId, flags)) }
     } catch (err) {
       io.out(`cannot verify completion: ${err.message}`)
       return 4
     }
-    const config = await loadGateConfig(root)
-    if (!config) { io.out('no gate manifest — cannot verify completion'); return 4 }
 
     const allChecks = checksForPhase(config, flags.phase ?? 'default')
     const taskKnown = (ctx.tasks ?? []).some((t) => t.id === flags.task)
