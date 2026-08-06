@@ -37,7 +37,20 @@ any non-optional check is still pending.
 Ask the CLI for a fix decision before asking the user. Hand it the run, the failing phase, the
 run root, and the verdict JSON you just produced; it prints one of three decisions — `none`,
 `retry`, or `escalate` — and exits 0 for all three, so read the `decision` field rather than the
-exit status. (The invocation is documented with the subcommand that implements it.)
+exit status.
+
+The exact invocation and that exit-0-for-all-three contract are specified by the task that adds
+the decision subcommand — plan task T8, phase 2 — and are documented alongside it once it lands.
+Until then the command is not there to run: **pending, not missing.**
+
+**The verdict you hand it must be the JSON this gate printed in this same pass, and must never be
+read back from `.teammates/`.** The only verdict persisted on disk lives in
+`status.gates[<phase>]` inside `.teammates/<run>/status.json`, written by the very agents this
+gate exists to enforce — the same file `scripts/enforce.mjs` refuses to consult when picking a
+branch. Feeding that record in today degenerates harmlessly, because the persisted object carries
+no `results` key and the decision comes back `none`; that is incidental, not guaranteed. Treat it
+as a rule so a change that starts persisting `results` cannot quietly turn the on-disk record into
+a decision input.
 
 On `none`, the decision engine found no failing check in the verdict you handed it. **This does
 not mean "the failure needs no fix" and it is never permission to integrate.** You reached this

@@ -80,12 +80,50 @@ test('phase-gate says plainly what a none decision means and does not mean', asy
   assert.match(none.replace(/\s+/g, ' '), /gate again from scratch/i, '`none` must say to re-derive the verdict')
 })
 
-test('phase-gate names no cli subcommand that scripts/cli.mjs does not implement', async () => {
-  const { body } = await skill('phase-gate')
+// A subcommand exists only if the CLI dispatches on it. Matching any quoted token in cli.mjs
+// is too loose: `'status'` appears there several times as a state-file key, so a doc naming
+// `cli.mjs status` would pass while describing a subcommand the CLI never routes to.
+function dispatchedSubcommands(cli) {
+  const subs = new Set()
+  const usage = /usage:\s*cli\.mjs\s*<([^>]+)>/.exec(cli)
+  if (usage) for (const sub of usage[1].split('|')) subs.add(sub.trim())
+  for (const [, sub] of cli.matchAll(/command\s*===\s*'([a-z-]+)'/g)) subs.add(sub)
+  return subs
+}
+
+test('the subcommand check reads dispatch sites, not every quoted token', async () => {
   const cli = await readFile(new URL('../scripts/cli.mjs', import.meta.url), 'utf8')
+  const subs = dispatchedSubcommands(cli)
+  assert.ok(subs.has('gate'), 'gate is dispatched and must be recognised')
+  assert.ok(!subs.has('fix-decision'), 'an unimplemented subcommand must not be recognised')
+  assert.ok(cli.includes("'status'"), 'precondition: status appears quoted in cli.mjs')
+  assert.ok(!subs.has('status'), 'status is a state-file key, not a dispatched subcommand')
+})
+
+test('phase-gate names no cli subcommand that scripts/cli.mjs does not dispatch', async () => {
+  const { body } = await skill('phase-gate')
+  const subs = dispatchedSubcommands(await readFile(new URL('../scripts/cli.mjs', import.meta.url), 'utf8'))
   for (const [, sub] of body.matchAll(/cli\.mjs["']?\s+([a-z-]+)/g)) {
-    assert.ok(cli.includes(`'${sub}'`), `phase-gate documents unimplemented subcommand ${sub}`)
+    assert.ok(subs.has(sub), `phase-gate documents undispatched subcommand ${sub}`)
   }
+})
+
+test('phase-gate requires the fix decision to use this pass’s verdict, never the on-disk record', async () => {
+  const { body } = await skill('phase-gate')
+  const start = body.indexOf('## On FAIL')
+  const end = body.indexOf('## What the enforcement checks')
+  assert.ok(start >= 0 && end > start, 'On FAIL section not found')
+  const onFail = body.slice(start, end).replace(/\s+/g, ' ')
+  assert.match(onFail, /printed in this same pass/i, 'must pin the verdict to the current gate pass')
+  assert.match(onFail, /never.{0,80}\.teammates\//i, 'must forbid reading the verdict from .teammates/')
+  assert.match(onFail, /status\.gates/, 'must name the on-disk record it forbids')
+})
+
+test('phase-gate marks the fix-decision invocation as pending, not missing', async () => {
+  const { body } = await skill('phase-gate')
+  const start = body.indexOf('## On FAIL')
+  const onFail = body.slice(start, body.indexOf('## What the enforcement checks')).replace(/\s+/g, ' ')
+  assert.match(onFail, /pending, not missing/i, 'a reader who cannot find the command must know it is pending')
 })
 
 test('tm-implementer forbids weakening a test to satisfy a fix-round finding', async () => {
