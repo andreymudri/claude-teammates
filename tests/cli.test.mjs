@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { runCli, mergeSuppliedResults } from '../scripts/cli.mjs'
+import { runCli, mergeSuppliedResults, parseConstraints } from '../scripts/cli.mjs'
 
 const PLAN = `### Task 1: A
 
@@ -1824,4 +1824,226 @@ test('a --root with no value at all is rejected rather than crashing', async () 
     assert.equal(code, 2)
     assert.match(lines.join('\n'), /--root must not be empty/)
   })
+})
+
+// --- init-run re-run must not erase what the gate recorded ---------------------------
+//
+// `init-run` used to write a fresh status object unconditionally, so re-running it on an
+// existing run id dropped `gates` and `fixRounds` — the run's only history of what passed
+// and what it cost. A plan amendment mid-run is a normal reason to re-init, and after one
+// the rule "never report a phase done without a recorded PASS" became unsatisfiable.
+test('init-run run twice preserves a gates object recorded between the two runs', async () => {
+  await withRepo(async ({ root, planPath, io }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const status = await readStatus(root, 'r1')
+    status.gates = { 1: { verdict: 'PASS', at: '2026-08-06T00:00:00.000Z' } }
+    await writeFile(path.join(root, '.teammates', 'r1', 'status.json'), JSON.stringify(status), 'utf8')
+
+    assert.equal(await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io), 0)
+    const after = await readStatus(root, 'r1')
+    assert.deepEqual(after.gates, { 1: { verdict: 'PASS', at: '2026-08-06T00:00:00.000Z' } })
+  })
+})
+
+test('init-run run twice preserves fixRounds recorded between the two runs', async () => {
+  await withRepo(async ({ root, planPath, io }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const status = await readStatus(root, 'r1')
+    status.fixRounds = { 1: { T1: 2 } }
+    await writeFile(path.join(root, '.teammates', 'r1', 'status.json'), JSON.stringify(status), 'utf8')
+
+    assert.equal(await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io), 0)
+    const after = await readStatus(root, 'r1')
+    assert.deepEqual(after.fixRounds, { 1: { T1: 2 } })
+  })
+})
+
+// Absent, not empty: an empty `gates` object is indistinguishable from a recorded one to
+// anything that only checks the key's presence, so a fresh run must carry neither key.
+test('init-run on a fresh run id emits neither gates nor fixRounds', async () => {
+  await withRepo(async ({ root, planPath, io }) => {
+    await runCli(['init-run', planPath, '--run', 'fresh', '--root', root], io)
+    const status = await readStatus(root, 'fresh')
+    assert.ok(!('gates' in status), 'a fresh run must not carry a gates key at all')
+    assert.ok(!('fixRounds' in status), 'a fresh run must not carry a fixRounds key at all')
+  })
+})
+
+// The amendment case this exists for: the plan grew a phase and a task, and the re-init has
+// to pick both up while still preserving the earlier phase's recorded verdict.
+test('init-run re-run after a plan change updates totalPhases and tasks while preserving gates', async () => {
+  await withRepo(async ({ root, planPath, io }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const before = await readStatus(root, 'r1')
+    assert.equal(before.totalPhases, 2)
+    before.gates = { 1: { verdict: 'PASS' } }
+    await writeFile(path.join(root, '.teammates', 'r1', 'status.json'), JSON.stringify(before), 'utf8')
+
+    await writeFile(planPath, `${PLAN}
+### Task 3: C
+
+**Files:**
+- Create: \`c.mjs\`
+
+**Depends:** T2
+`, 'utf8')
+    assert.equal(await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io), 0)
+
+    const after = await readStatus(root, 'r1')
+    assert.equal(after.totalPhases, 3)
+    assert.deepEqual(after.tasks.map((t) => t.id), ['T1', 'T2', 'T3'])
+    assert.deepEqual(after.gates, { 1: { verdict: 'PASS' } })
+  })
+})
+
+// --- workflow wires --plan and --base through to the generated brief -----------------
+//
+// Evaluates the generated body with stubbed primitives and returns every prompt the
+// generated code passed to agent(). The brief is assembled at run time by string
+// concatenation, so the checkout command exists only once the generated code runs —
+// asserting on the source text alone would never see it.
+async function captureAgentPrompts(src) {
+  const body = src.replace(/^export const meta = /m, 'const meta = ')
+  const captured = []
+  const phaseFn = () => {}
+  const parallel = (fns) => Promise.all(fns.map((f) => f()))
+  const agent = (prompt) => {
+    captured.push(prompt)
+    return Promise.resolve({ status: 'done', branch: 'b', filesChanged: [], summary: 's', blockers: [] })
+  }
+  const run = new Function('phase', 'parallel', 'agent', `return (async () => { ${body} })`)(phaseFn, parallel, agent)
+  await run()
+  return captured
+}
+
+test('workflow --plan and --base put the base branch in a checkout line and name the plan', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const code = await runCli(
+      ['workflow', '--run', 'r1', '--phase', '1', '--root', root, '--plan', planPath, '--base', 'run-branch'],
+      io,
+    )
+    assert.equal(code, 0, lines.join('\n'))
+    const src = lines.join('\n')
+    const [prompt] = await captureAgentPrompts(src)
+    assert.ok(
+      prompt.includes('git checkout -B teammates/r1/T1 run-branch'),
+      'the base branch must reach the brief as a runnable checkout start point',
+    )
+    assert.ok(prompt.includes(planPath), 'the brief must point at the plan the run was initialised from')
+  })
+})
+
+test('workflow with a plan carrying Global Constraints puts every constraint in the brief', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await writeFile(planPath, `${PLAN}
+## Global Constraints
+
+- Node >= 24.2.0
+- Zero new runtime dependencies
+`, 'utf8')
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root, '--plan', planPath], io)
+    const [prompt] = await captureAgentPrompts(lines.join('\n'))
+    assert.ok(prompt.includes('- Node >= 24.2.0'), 'first constraint must reach the brief')
+    assert.ok(prompt.includes('- Zero new runtime dependencies'), 'second constraint must reach the brief')
+  })
+})
+
+// A --plan pointing at nothing must fail loudly. Silently generating a constraint-free
+// brief would hand every teammate in the phase a dispatch missing the very rules the
+// caller asked to include, with exit 0 and nothing on stdout to say so.
+test('workflow --plan naming a file that does not exist exits 2 rather than dropping the constraints', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const code = await runCli(
+      ['workflow', '--run', 'r1', '--phase', '1', '--root', root, '--plan', path.join(root, 'nope.md')],
+      io,
+    )
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /--plan/)
+  })
+})
+
+// Both flags are optional: omitted, the brief renders its no-base variant rather than
+// failing or, worse, rendering the string "undefined" where a branch name belongs.
+test('workflow with neither --plan nor --base still succeeds and emits no undefined', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const code = await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 0, lines.join('\n'))
+    const src = lines.join('\n')
+    assert.ok(!src.includes('undefined'), 'generated source must never contain the string undefined')
+    const [prompt] = await captureAgentPrompts(src)
+    assert.ok(!prompt.includes('undefined'), 'the brief must never contain the string undefined')
+  })
+})
+
+// A bare `--plan`/`--base` parses as `true` (parseFlags's boolean-switch reading). Coerced
+// into the generator it would render the literal `true` as a plan path or a branch name, so
+// each is treated as the omitted value it is.
+test('workflow with a valueless --base renders the no-base brief rather than the word true', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const code = await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root, '--base'], io)
+    assert.equal(code, 0, lines.join('\n'))
+    const [prompt] = await captureAgentPrompts(lines.join('\n'))
+    assert.ok(!prompt.includes('git checkout -B teammates/r1/T1 true'), 'a valueless --base must not become a branch')
+    assert.match(prompt, /UNVERIFIED/)
+  })
+})
+
+test('workflow names --plan and --base in its usage line', async () => {
+  await withRepo(async ({ io, lines }) => {
+    await runCli(['nope'], io)
+    assert.match(lines.join('\n'), /workflow .*--plan <path>.*--base <branch>/)
+  })
+})
+
+// --- parseConstraints ----------------------------------------------------------------
+test('parseConstraints returns every bullet of a Global Constraints section', async () => {
+  const constraints = parseConstraints(`# Plan
+
+## Global Constraints
+
+- Node >= 24.2.0
+- Zero new runtime dependencies and zero new dev dependencies
+- Tests use the built-in \`node:test\` runner
+
+## Tasks
+
+- not a constraint
+`)
+  assert.deepEqual(constraints, [
+    'Node >= 24.2.0',
+    'Zero new runtime dependencies and zero new dev dependencies',
+    'Tests use the built-in `node:test` runner',
+  ])
+})
+
+// A task heading is `###`, one level deeper than the section itself, and its file bullets
+// are not constraints. Terminating only on `##` would sweep every task's file list into
+// the list every teammate is told it must obey.
+test('parseConstraints stops at the next heading of any level', async () => {
+  assert.deepEqual(
+    parseConstraints('## Global Constraints\n\n- only this one\n\n### Task 1: A\n\n- Create: `a.mjs`\n'),
+    ['only this one'],
+  )
+})
+
+test('parseConstraints returns [] for a plan without a Global Constraints section', async () => {
+  assert.deepEqual(parseConstraints('# Plan\n\n## Tasks\n\n- a bullet\n'), [])
+  assert.deepEqual(parseConstraints(''), [])
+  assert.deepEqual(parseConstraints(undefined), [])
+})
+
+// The section running to the end of the file is the common case for a plan that lists its
+// constraints last, and it has no following heading to terminate on.
+test('parseConstraints reads a section that runs to the end of the file', async () => {
+  assert.deepEqual(parseConstraints('# Plan\n\n## Global Constraints\n\n- a\n- b\n'), ['a', 'b'])
 })
