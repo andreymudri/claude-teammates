@@ -55,3 +55,19 @@ export async function releaseClaim(root, runId, taskId) {
   }
   return true
 }
+
+// Round counts are bookkeeping, not enforcement. status.json is written by the agents the
+// gate enforces, so a teammate can reset its own count and buy more retries. That costs
+// tokens; it cannot produce a false PASS, because the verdict is recomputed from git every
+// round and reads nothing from .teammates/.
+export function readFixRounds(status, phase) {
+  return status?.fixRounds?.[String(phase)] ?? {}
+}
+
+export function recordFixRound(status, phase, taskId) {
+  const key = String(phase)
+  const fixRounds = { ...(status?.fixRounds ?? {}) }
+  fixRounds[key] = { ...(fixRounds[key] ?? {}) }
+  fixRounds[key][taskId] = (fixRounds[key][taskId] ?? 0) + 1
+  return { ...status, fixRounds }
+}
