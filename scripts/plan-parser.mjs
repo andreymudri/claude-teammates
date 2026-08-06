@@ -2,6 +2,9 @@ const TASK_HEADING = /^###\s+Task\s+(\d+)\s*:\s*(.+?)\s*$/
 const FILES_HEADING = /^\*\*Files:\*\*\s*$/
 const FILE_LINE = /^-\s+(?:Create|Modify|Test)\s*:\s*`([^`]+)`\s*$/
 const DEPENDS_LINE = /^\*\*Depends:\*\*\s*(.+?)\s*$/
+// Recorded verbatim, not validated: init-run owns the tier vocabulary via routing.mjs.
+// A second check here would let the two drift apart silently.
+const MODEL_LINE = /^\*\*Model:\*\*\s*(.+?)\s*$/
 const SECTION_BREAK = /^(\*\*|###|- \[[ x]\])/
 const NO_DEPS_SENTINELS = new Set(['none', 'n/a', 'na', '-', ''])
 
@@ -16,6 +19,7 @@ export function parsePlan(markdown) {
   let fenceLength = 0
 
   for (const line of lines) {
+    if (current && !TASK_HEADING.test(line)) current.brief.push(line)
     // Check for fence open/close
     const trimmed = line.trimStart()
     const fenceMatch = trimmed.match(/^(`{3,}|~{3,})/)
@@ -44,7 +48,7 @@ export function parsePlan(markdown) {
       const id = `T${heading[1]}`
       if (seen.has(id)) throw new Error(`duplicate task id: ${id}`)
       seen.add(id)
-      current = { id, title: heading[2], files: [], deps: [] }
+      current = { id, title: heading[2], files: [], deps: [], brief: [] }
       tasks.push(current)
       inFiles = false
       continue
@@ -63,6 +67,14 @@ export function parsePlan(markdown) {
       continue
     }
 
+    const model = MODEL_LINE.exec(line)
+    if (model) {
+      current.tier = model[1]
+      current.tierSource = 'declared'
+      inFiles = false
+      continue
+    }
+
     if (inFiles) {
       const file = FILE_LINE.exec(line)
       if (file) {
@@ -73,5 +85,5 @@ export function parsePlan(markdown) {
     }
   }
 
-  return tasks
+  return tasks.map((task) => ({ ...task, brief: task.brief.join('\n').trim() }))
 }

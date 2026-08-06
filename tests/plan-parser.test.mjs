@@ -161,3 +161,49 @@ test('an unknown dependency id still throws from assignPhases', () => {
   assert.deepEqual(tasks[0].deps, ['T99'])
   assert.throws(() => assignPhases(tasks), /unsatisfiable dependencies: T1/)
 })
+
+test('parses a declared Model line into tier and tierSource', () => {
+  const plan = '### Task 1: X\n\n**Files:**\n- Create: `a.mjs`\n\n**Model:** cheap\n'
+  const tasks = parsePlan(plan)
+  assert.equal(tasks[0].tier, 'cheap')
+  assert.equal(tasks[0].tierSource, 'declared')
+})
+
+test('leaves tier and tierSource undefined when there is no Model line', () => {
+  const plan = '### Task 1: X\n\n**Files:**\n- Create: `a.mjs`\n'
+  const tasks = parsePlan(plan)
+  assert.equal(tasks[0].tier, undefined)
+  assert.equal(tasks[0].tierSource, undefined)
+})
+
+test('captures the task brief including a fenced code block, stopping at the next heading', () => {
+  const plan = `### Task 1: X
+
+**Files:**
+- Create: \`a.mjs\`
+
+Some brief text.
+
+\`\`\`js
+const x = 1
+\`\`\`
+
+### Task 2: Y
+
+**Files:**
+- Create: \`b.mjs\`
+`
+  const tasks = parsePlan(plan)
+  assert.ok(tasks[0].brief.includes('Some brief text.'))
+  assert.ok(tasks[0].brief.includes('```js'))
+  assert.ok(tasks[0].brief.includes('const x = 1'))
+  assert.ok(!tasks[0].brief.includes('Task 2'))
+  assert.ok(!tasks[0].brief.includes('b.mjs'))
+})
+
+test('parses an unrecognised Model value without throwing', () => {
+  const plan = '### Task 1: X\n\n**Files:**\n- Create: `a.mjs`\n\n**Model:** enormous\n'
+  const tasks = parsePlan(plan)
+  assert.equal(tasks[0].tier, 'enormous')
+  assert.equal(tasks[0].tierSource, 'declared')
+})
