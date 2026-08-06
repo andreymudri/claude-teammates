@@ -148,6 +148,32 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
       await run(['fetch', '--no-tags', '--end-of-options', from, `+${src}:${dst}`])
       return (await run(['rev-parse', '--verify', '--end-of-options', dst, '--'])).trim()
     },
+    async addWorktreeDetached(dir, ref) {
+      if (!isNonEmptyString(dir) || !isNonEmptyString(ref)) {
+        throw new GitError(`addWorktreeDetached requires non-empty dir and ref, got dir=${JSON.stringify(dir)} ref=${JSON.stringify(ref)}`)
+      }
+      await run(['worktree', 'add', '--detach', '--end-of-options', dir, ref])
+      return dir
+    },
+    async removeWorktree(dir) {
+      if (!isNonEmptyString(dir)) {
+        throw new GitError(`removeWorktree requires a non-empty dir, got ${JSON.stringify(dir)}`)
+      }
+      await run(['worktree', 'remove', '--force', '--end-of-options', dir])
+      return true
+    },
+    // Returns null when the merge succeeded, or the conflicted paths when it did not.
+    // `--no-ff` keeps the preview's shape identical to what tm-integrator will produce.
+    async mergeInto(dir, branches) {
+      if (!isNonEmptyString(dir)) {
+        throw new GitError(`mergeInto requires a non-empty dir, got ${JSON.stringify(dir)}`)
+      }
+      const args = ['-C', dir, 'merge', '--no-ff', '-m', 'gate merge preview', '--end-of-options', ...branches]
+      const { code } = await exec(args, cwd)
+      if (code === 0) return null
+      const out = await exec(['-C', dir, 'diff', '--name-only', '--diff-filter=U'], cwd)
+      return out.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+    },
   }
 }
 

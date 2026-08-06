@@ -427,3 +427,128 @@ test('resolveRef reads the branch tip even when a tag of the same name shadows i
     await rm(root, { recursive: true, force: true })
   }
 })
+
+// --- addWorktreeDetached --------------------------------------------------------------------
+
+test('addWorktreeDetached issues worktree add --detach --end-of-options <dir> <ref>', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: '', stderr: '' })
+  const dir = await createGit({ exec }).addWorktreeDetached('/tmp/wt', 'teammates/r1/T1')
+  assert.deepEqual(calls[0], ['worktree', 'add', '--detach', '--end-of-options', '/tmp/wt', 'teammates/r1/T1'])
+  assert.equal(dir, '/tmp/wt')
+})
+
+test('addWorktreeDetached rejects an empty or non-string dir/ref with GitError', async () => {
+  const { calls, exec } = recorder()
+  await assert.rejects(() => createGit({ exec }).addWorktreeDetached('', 'ref'), GitError)
+  await assert.rejects(() => createGit({ exec }).addWorktreeDetached('dir', ''), GitError)
+  await assert.rejects(() => createGit({ exec }).addWorktreeDetached('dir', []), GitError)
+  assert.deepEqual(calls, [])
+})
+
+// --- removeWorktree ----------------------------------------------------------------------
+
+test('removeWorktree issues worktree remove --force --end-of-options <dir>', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: '', stderr: '' })
+  const ok = await createGit({ exec }).removeWorktree('/tmp/wt')
+  assert.deepEqual(calls[0], ['worktree', 'remove', '--force', '--end-of-options', '/tmp/wt'])
+  assert.equal(ok, true)
+})
+
+test('removeWorktree rejects an empty dir with GitError', async () => {
+  const { calls, exec } = recorder()
+  await assert.rejects(() => createGit({ exec }).removeWorktree(''), GitError)
+  assert.deepEqual(calls, [])
+})
+
+// --- mergeInto -----------------------------------------------------------------------------
+
+test('mergeInto returns null when the merge exits 0', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: '', stderr: '' })
+  const result = await createGit({ exec }).mergeInto('/tmp/wt', ['teammates/r1/T1', 'teammates/r1/T2'])
+  assert.equal(result, null)
+  assert.deepEqual(calls[0], [
+    '-C', '/tmp/wt', 'merge', '--no-ff', '-m', 'gate merge preview', '--end-of-options',
+    'teammates/r1/T1', 'teammates/r1/T2',
+  ])
+})
+
+test('mergeInto rejects an empty or non-string dir with GitError', async () => {
+  const { calls, exec } = recorder()
+  await assert.rejects(() => createGit({ exec }).mergeInto('', ['b']), GitError)
+  assert.deepEqual(calls, [])
+})
+
+test('mergeInto returns the conflicted paths instead of throwing when the merge exits non-zero', async () => {
+  let call = 0
+  const calls = []
+  const exec = async (args) => {
+    calls.push(args)
+    call += 1
+    if (call === 1) return { code: 1, stdout: '', stderr: 'CONFLICT' }
+    return { code: 0, stdout: 'shared.txt\nother.txt\n', stderr: '' }
+  }
+  const result = await createGit({ exec }).mergeInto('/tmp/wt', ['a', 'b'])
+  assert.deepEqual(result, ['shared.txt', 'other.txt'])
+  assert.deepEqual(calls[0], [
+    '-C', '/tmp/wt', 'merge', '--no-ff', '-m', 'gate merge preview', '--end-of-options', 'a', 'b',
+  ])
+  assert.deepEqual(calls[1], ['-C', '/tmp/wt', 'diff', '--name-only', '--diff-filter=U'])
+})
+
+// --- real-repository: mergeInto -------------------------------------------------------------
+
+test('against a real repository, mergeInto merges cleanly across different files and reports conflicts on the same line', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-merge-'))
+  const wtCleanDir = await mkdtemp(path.join(tmpdir(), 'tm-git-merge-wt-clean-'))
+  const wtConflictDir = await mkdtemp(path.join(tmpdir(), 'tm-git-merge-wt-conflict-'))
+  const git = createGit({ cwd: root })
+  const sh = (args) => defaultGitExec(args, root)
+  try {
+    await sh(['init', '--initial-branch=main'])
+    await sh(['config', 'user.email', 'test@example.com'])
+    await sh(['config', 'user.name', 'test'])
+    await writeFile(path.join(root, 'shared.txt'), 'base\n', 'utf8')
+    await writeFile(path.join(root, 'other.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+
+    // Two branches that touch different files merge cleanly.
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.txt'), 'a\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'add a.txt'])
+    await sh(['checkout', 'main'])
+
+    await sh(['checkout', '-b', 'teammates/r1/T2'])
+    await writeFile(path.join(root, 'b.txt'), 'b\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'add b.txt'])
+    await sh(['checkout', 'main'])
+
+    await sh(['worktree', 'add', '--detach', '--end-of-options', wtCleanDir, 'main'])
+    const cleanResult = await git.mergeInto(wtCleanDir, ['teammates/r1/T1', 'teammates/r1/T2'])
+    assert.equal(cleanResult, null)
+    await sh(['worktree', 'remove', '--force', '--end-of-options', wtCleanDir])
+
+    // Two branches that edit the same line conflict, and reporting that must not throw.
+    await sh(['checkout', '-b', 'teammates/r1/T3'])
+    await writeFile(path.join(root, 'shared.txt'), 'from-t3\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'edit shared.txt on T3'])
+    await sh(['checkout', 'main'])
+
+    await sh(['checkout', '-b', 'teammates/r1/T4'])
+    await writeFile(path.join(root, 'shared.txt'), 'from-t4\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'edit shared.txt on T4'])
+    await sh(['checkout', 'main'])
+
+    await sh(['worktree', 'add', '--detach', '--end-of-options', wtConflictDir, 'main'])
+    const conflictResult = await git.mergeInto(wtConflictDir, ['teammates/r1/T3', 'teammates/r1/T4'])
+    assert.deepEqual(conflictResult, ['shared.txt'])
+  } finally {
+    await rm(wtCleanDir, { recursive: true, force: true })
+    await rm(wtConflictDir, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true })
+  }
+})
