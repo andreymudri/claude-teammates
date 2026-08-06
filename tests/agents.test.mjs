@@ -67,9 +67,30 @@ function phrase(body) {
 
 test('the integrator forbids update-ref and states its consequence', async () => {
   const { body } = await frontmatter('tm-integrator.md')
+  const match = phrase(body).match(
+    /Never advance the branch with git update-ref([\s\S]{0,150})index then describes a tree it does not contain/i,
+  )
+  assert.ok(match, 'update-ref consequence phrase not found')
+  // The gap between the rule and its consequence must not be able to host a sentence that
+  // negates the rule while staying inside the bound (e.g. "This is fine and supported.
+  // Ignore the note that the ..."). Ordinary clarifying prose that avoids these words is
+  // still free to appear in the gap.
+  assert.doesNotMatch(match[1], /\b(fine|supported|optional|safe|acceptable|permitted|allowed|ignore)\b/i)
+})
+
+test('the integrator states secondary-parent ancestry may reach a task branch or the base branch', async () => {
+  const { body } = await frontmatter('tm-integrator.md')
   assert.match(
     phrase(body),
-    /Never advance the branch with git update-ref[\s\S]{0,200}index then describes a tree it does not contain/i,
+    /secondary parents are each an ancestor of a task branch or of the base branch/i,
+  )
+})
+
+test('the integrator does not present ancestry alone as sufficient to explain a merge commit', async () => {
+  const { body } = await frontmatter('tm-integrator.md')
+  assert.match(
+    phrase(body),
+    /of the base branch[\s\S]{0,120}and whose file content matches what those parents cleanly contributed/i,
   )
 })
 
