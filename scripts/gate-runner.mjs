@@ -136,8 +136,29 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
   }
 }
 
+// `complete` verifies the calling task, not the whole phase, and marks that with
+// `ctx.taskScope: <task id>`. `gate` never sets it, so `taskScope == null` is the phase-wide
+// path every gate invocation has always taken, byte for byte.
+//
+// The narrowing travels as a marker rather than as a pre-filtered `ctx.tasks` on purpose:
+// `runOwnershipCheck` must stay run-wide. It explains every commit on the run branch, not just
+// this task's, so handing it a filtered task list would let a direct write ride in behind
+// whichever task happens to finish first. A marker narrows exactly the two consumers that
+// should narrow and leaves ownership reading the full list.
+function scopedTasks(ctx) {
+  const tasks = ctx.tasks ?? []
+  return ctx.taskScope == null ? tasks : tasks.filter((t) => t.id === ctx.taskScope)
+}
+
+// The phase's tasks, then the scope. A `taskScope` naming a task outside the current phase
+// therefore narrows to zero, which the callers' existing "selected no tasks" guard fails —
+// fail-closed, never a vacuous pass.
+function scopedPhaseTasks(ctx) {
+  return scopedTasks(ctx).filter((t) => t.phase === ctx.currentPhase)
+}
+
 export async function runFilesetCheck(check, ctx = {}) {
-  const { git, runId, runSha, tasks, currentPhase, phaseError } = ctx
+  const { git, runId, runSha, currentPhase, phaseError } = ctx
   if (!git) return checkResult(check, 'fail', 'fileset check has no git access')
   if (phaseError) return checkResult(check, 'fail', phaseError)
   if (currentPhase == null) {
@@ -152,7 +173,9 @@ export async function runFilesetCheck(check, ctx = {}) {
     // even though this path performs no diff of its own.
     const branchShas = {}
     try {
-      for (const task of tasks ?? []) {
+      // Scoped too: a task-scoped verdict must not claim to cover a sibling's branch, or a
+      // sibling moving its branch would invalidate this task's verdict via verdictCoversTree.
+      for (const task of scopedTasks(ctx)) {
         const branch = resolveTaskBranch(task, runId)
         if (branch && await git.branchExists(branch)) {
           branchShas[branch] = await git.resolveRef(`refs/heads/${branch}`)
@@ -165,7 +188,7 @@ export async function runFilesetCheck(check, ctx = {}) {
     return { ...checkResult(check, 'pass', 'every phase in the plan is integrated'), branchShas }
   }
 
-  const phaseTasks = (tasks ?? []).filter((t) => t.phase === currentPhase)
+  const phaseTasks = scopedPhaseTasks(ctx)
   // Zero tasks is not "nothing to check" — the run and the plan disagree, and an earlier
   // version returned a clean pass for exactly this state.
   if (phaseTasks.length === 0) {
@@ -413,9 +436,14 @@ export async function runChecks(checks, ctx = {}) {
   if (!ctx.git || ctx.solo) return runCheckList(checks, ctx, ctx.cwd, false)
 
   // The same notion of "this phase's branches" the fileset check uses — same
-  // resolveTaskBranch call, same branchExists guard, same phase filter. Two different ones in
-  // one file would drift.
-  const phaseTasks = (ctx.tasks ?? []).filter((t) => t.phase === ctx.currentPhase)
+  // resolveTaskBranch call, same branchExists guard, same phase filter, and the same
+  // `taskScope` narrowing. Two different ones in one file would drift.
+  //
+  // Scoping matters here for the same reason it matters for fileset: with the phase-wide set,
+  // the first teammate of a 3-task phase to run `complete` gets every sibling's branch merged
+  // into its preview, so a sibling's stray commit — or a sibling branch that does not exist
+  // yet — fails the preview and reads to that teammate as "my own work is broken".
+  const phaseTasks = scopedPhaseTasks(ctx)
   const branches = []
   try {
     for (const task of phaseTasks) {

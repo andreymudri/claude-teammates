@@ -1257,3 +1257,140 @@ test('a branch lookup that throws while assembling the preview fails the merge c
   assert.equal(results[1].status, 'skip')
   assert.equal(calls.length, 0)
 })
+
+// --- ctx.taskScope: narrowing a `complete` invocation to one task --------------------------
+//
+// `complete` verifies the calling task, not the whole phase, so `cli.mjs` marks its context
+// with `taskScope: <task id>`. `gate` never sets it. Two places in this file honour the marker
+// — the previewed branch set and the fileset check's phase-task list — while `runOwnershipCheck`
+// deliberately does not, which is the whole reason the narrowing travels as a marker rather
+// than as a pre-filtered `ctx.tasks`: ownership must keep explaining *every* commit on the run
+// branch, and a filtered task list would silently hide a direct write riding in behind
+// whichever task happens to finish first.
+//
+// These tests drive `runChecks` / `runFilesetCheck` / `runOwnershipCheck` directly, so they pin
+// this file's half of the contract whether or not the `cli.mjs` half has landed yet.
+
+const T3_PHASE2_TASK = { id: 'T3', phase: 2, files: ['c.mjs'] }
+const T3_BRANCH = 'teammates/r1/T3'
+
+// The finding this closes: with the phase-wide branch set, the first teammate of a 3-task phase
+// to run `complete` gets every sibling's branch merged into its preview. A sibling's stray
+// commit — or a sibling branch that does not exist yet — fails the preview, and the teammate
+// reads it as "my own work is broken".
+test('with taskScope set, only that task\'s branch is merged into the preview', async () => {
+  const merged = []
+  const ctx = previewCtx({
+    git: previewGit({ mergeInto: async (_dir, branches) => { merged.push(...branches); return null } }),
+    exec: recordingExec([]),
+    tasks: [T1_TASK, T2_PHASE1_TASK],
+    taskScope: 'T2',
+  })
+  await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], ctx)
+  assert.deepEqual(merged, [T2_BRANCH])
+  assert.ok(!merged.includes(T1_BRANCH), 'a sibling\'s branch must not reach a task-scoped preview')
+})
+
+// The paired half, and the property most worth pinning: absent the marker — every `gate`
+// invocation — the previewed set is byte-for-byte the phase-wide set it has always been.
+test('with taskScope absent, the previewed branch set is the whole phase, unchanged', async () => {
+  const merged = []
+  const ctx = previewCtx({
+    git: previewGit({ mergeInto: async (_dir, branches) => { merged.push(...branches); return null } }),
+    exec: recordingExec([]),
+    tasks: [T1_TASK, T2_PHASE1_TASK, T3_PHASE2_TASK],
+  })
+  assert.equal(ctx.taskScope, undefined)
+  await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], ctx)
+  assert.deepEqual(merged, [T1_BRANCH, T2_BRANCH])
+})
+
+// A taskScope that names nothing in the current phase narrows to zero tasks, which the existing
+// "selected no tasks" guard turns into a fail. Fail-closed, not a vacuous pass.
+test('a taskScope naming no task in the current phase previews nothing and does not pass vacuously', async () => {
+  const merged = []
+  const ctx = previewCtx({
+    git: previewGit({ mergeInto: async (_dir, branches) => { merged.push(...branches); return null } }),
+    exec: recordingExec([]),
+    tasks: [T1_TASK, T3_PHASE2_TASK],
+    taskScope: 'T3',
+  })
+  const results = await runChecks([{ name: 'fileset', kind: 'fileset' }], ctx)
+  assert.deepEqual(merged, [])
+  assert.equal(results.find((r) => r.name === 'fileset').status, 'fail')
+  assert.equal(aggregateVerdict(results).verdict, 'FAIL')
+})
+
+const scopedFilesetGit = () => fakeGit({
+  branchExists: async () => true,
+  // T2's branch carries a path outside its declared set; T1's is clean.
+  changedFiles: async ({ branch }) => (branch.includes('T2') ? ['b.mjs', 'stray.mjs'] : ['a.mjs']),
+})
+
+test('with taskScope set, runFilesetCheck considers only that task', async () => {
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = {
+    git: scopedFilesetGit(), runId: RUN_ID, anchorSha: 'anchorSha1', runSha: 'runSha1',
+    tasks: [T1_TASK, T2_PHASE1_TASK], currentPhase: 1, phaseError: null, taskScope: 'T1',
+  }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'pass', 'a sibling\'s violation must not fail the scoped task')
+  assert.deepEqual(res.branchShas, { [T1_BRANCH]: `refs/heads/${T1_BRANCH}-sha` })
+})
+
+// The same context without the marker: the sibling's violation is exactly as fatal as it is
+// today. Together with the test above this pins that the narrowing is the marker's doing and
+// nothing else.
+test('with taskScope absent, runFilesetCheck still walks every task in the phase', async () => {
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = {
+    git: scopedFilesetGit(), runId: RUN_ID, anchorSha: 'anchorSha1', runSha: 'runSha1',
+    tasks: [T1_TASK, T2_PHASE1_TASK], currentPhase: 1, phaseError: null,
+  }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.match(res.output, /T2: outside declared set/)
+  assert.deepEqual(res.branchShas, {
+    [T1_BRANCH]: `refs/heads/${T1_BRANCH}-sha`,
+    [T2_BRANCH]: `refs/heads/${T2_BRANCH}-sha`,
+  })
+})
+
+// The all-integrated short-circuit records branch shas for verdictCoversTree rather than
+// diffing. A task-scoped verdict must not claim to cover a sibling's branch either: recording
+// one would let a sibling moving its branch invalidate this task's verdict.
+test('with taskScope set, the all-integrated path records only that task\'s branch sha', async () => {
+  const git = fakeGit({ branchExists: async () => true })
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = {
+    git, runId: RUN_ID, anchorSha: 'anchorSha1', tasks: [T1_TASK, T2_PHASE1_TASK],
+    currentPhase: null, phaseError: null, taskScope: 'T2',
+  }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'pass')
+  assert.deepEqual(res.branchShas, { [T2_BRANCH]: `refs/heads/${T2_BRANCH}-sha` })
+})
+
+// Ownership is the one that must NOT narrow. A commit explained only by a *sibling's* branch
+// stays explained under taskScope; if the marker leaked into runOwnershipCheck, that commit
+// would read as unexplained and the scoped teammate would be blocked by work it does not own —
+// and the same leak is what would let a direct write hide behind whichever task ran first.
+test('with taskScope set, runOwnershipCheck still sees every task in the run', async () => {
+  const git = fakeGit({
+    branchExists: async () => true,
+    commitsBetween: async () => ['c1'],
+    isAncestor: async (a, b) => a === 'c1' && b === `refs/heads/${T2_BRANCH}-sha`,
+  })
+  const check = { name: 'ownership', kind: 'ownership' }
+  const ctx = {
+    git, runId: RUN_ID, runBranch: RUN_BRANCH, anchorSha: 'anchorSha1', runSha: 'runSha1',
+    tasks: [T1_TASK, T2_PHASE1_TASK, T3_PHASE2_TASK], taskScope: 'T1',
+  }
+  const res = await runOwnershipCheck(check, ctx)
+  assert.equal(res.status, 'pass')
+  // Every task branch in the run was resolved, not just the scoped one — including a task from
+  // another phase, since ownership is run-wide and not phase-wide either.
+  for (const branch of [T1_BRANCH, T2_BRANCH, T3_BRANCH]) {
+    assert.ok(git.resolveRefCalls.includes(`refs/heads/${branch}`), `${branch} must still be consulted`)
+  }
+})
