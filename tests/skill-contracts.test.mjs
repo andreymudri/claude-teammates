@@ -182,3 +182,15 @@ test('phase-gate states that conflicts are escalated rather than retried', async
   const normalized = body.replace(/\s+/g, ' ')
   assert.match(normalized, /conflict.*escalate.*do not retry/i, 'phase-gate must state that conflicts are escalated and not retried')
 })
+
+test('phase-gate documents preview.link and states links are shared, not copied', async () => {
+  const { body } = await skill('phase-gate')
+  assert.match(body, /preview\.link/, 'phase-gate must mention preview.link')
+  assert.match(body, /shared.*not.*copies?/i, 'phase-gate must state links are shared, not copies')
+})
+
+test('phase-gate states that a failed link fails the merge check', async () => {
+  const { body } = await skill('phase-gate')
+  const normalized = body.replace(/\s+/g, ' ')
+  assert.match(normalized, /link.*fail.*merge.*check/i, 'phase-gate must state, in one phrase, that a failed link fails the merge check')
+})
