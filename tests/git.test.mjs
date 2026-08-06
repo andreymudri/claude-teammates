@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { createGit, GitError, defaultGitExec, teammateRef } from '../scripts/git.mjs'
@@ -453,6 +453,369 @@ test('resolveRef reads the branch tip even when a tag of the same name shadows i
     const changed = await git.changedFiles({ base: 'main', branch: resolved })
     assert.deepEqual(changed, ['task.txt'], 'diffing by the resolved sha must see the branch change the tag hid')
   } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+// --- addWorktreeDetached --------------------------------------------------------------------
+
+test('addWorktreeDetached resolves the name through refs/heads/ before worktree add', async () => {
+  const calls = []
+  const exec = async (args) => {
+    calls.push(args)
+    if (args[0] === 'rev-parse') return { code: 0, stdout: 'aaaa111\n', stderr: '' }
+    return { code: 0, stdout: '', stderr: '' }
+  }
+  const dir = await createGit({ exec }).addWorktreeDetached('/tmp/wt', 'teammates/r1/T1')
+  assert.deepEqual(calls[0], [
+    'rev-parse', '--verify', '--quiet', '--end-of-options', 'refs/heads/teammates/r1/T1', '--',
+  ])
+  // The sha, never the bare name: a tag named teammates/r1/T1 must not be what gets checked out.
+  assert.deepEqual(calls[1], ['worktree', 'add', '--detach', '--end-of-options', '/tmp/wt', 'aaaa111'])
+  assert.equal(dir, '/tmp/wt')
+})
+
+test('addWorktreeDetached falls back to the given ref when no such branch exists', async () => {
+  const calls = []
+  const exec = async (args) => {
+    calls.push(args)
+    if (args[0] === 'rev-parse') return { code: 1, stdout: '', stderr: '' }
+    return { code: 0, stdout: '', stderr: '' }
+  }
+  await createGit({ exec }).addWorktreeDetached('/tmp/wt', 'deadbeef')
+  assert.deepEqual(calls[1], ['worktree', 'add', '--detach', '--end-of-options', '/tmp/wt', 'deadbeef'])
+})
+
+test('addWorktreeDetached passes an already-qualified ref through untouched', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: '', stderr: '' })
+  await createGit({ exec }).addWorktreeDetached('/tmp/wt', 'refs/teammates/r1/T1')
+  assert.deepEqual(calls[0], [
+    'worktree', 'add', '--detach', '--end-of-options', '/tmp/wt', 'refs/teammates/r1/T1',
+  ])
+})
+
+test('addWorktreeDetached rejects an empty or non-string dir/ref with GitError', async () => {
+  const { calls, exec } = recorder()
+  await assert.rejects(() => createGit({ exec }).addWorktreeDetached('', 'ref'), GitError)
+  await assert.rejects(() => createGit({ exec }).addWorktreeDetached('dir', ''), GitError)
+  await assert.rejects(() => createGit({ exec }).addWorktreeDetached('dir', []), GitError)
+  assert.deepEqual(calls, [])
+})
+
+// --- removeWorktree ----------------------------------------------------------------------
+
+test('removeWorktree issues worktree remove --force --end-of-options <dir>', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: '', stderr: '' })
+  const ok = await createGit({ exec }).removeWorktree('/tmp/wt')
+  assert.deepEqual(calls[0], ['worktree', 'remove', '--force', '--end-of-options', '/tmp/wt'])
+  assert.equal(ok, true)
+})
+
+test('removeWorktree rejects an empty dir with GitError', async () => {
+  const { calls, exec } = recorder()
+  await assert.rejects(() => createGit({ exec }).removeWorktree(''), GitError)
+  assert.deepEqual(calls, [])
+})
+
+// --- mergeInto -----------------------------------------------------------------------------
+
+// One merge per branch, each resolved through refs/heads/ first. Handing git three or more
+// heads at once selects the octopus strategy, which resets the index before exiting and so
+// destroys the conflicted set the gate has to report.
+const mergeMock = ({ mergeResults = {}, unmerged = '', resolve = (n) => `sha-${n}` } = {}) => {
+  const calls = []
+  const exec = async (args) => {
+    calls.push(args)
+    if (args.includes('rev-parse')) {
+      const ref = args[args.length - 2]
+      const name = ref.replace(/^refs\/heads\//, '')
+      const sha = resolve(name)
+      return sha ? { code: 0, stdout: `${sha}\n`, stderr: '' } : { code: 1, stdout: '', stderr: '' }
+    }
+    if (args.includes('merge')) return mergeResults[args[args.length - 1]] ?? { code: 0, stdout: '', stderr: '' }
+    return { code: 0, stdout: unmerged, stderr: '' }
+  }
+  return { calls, exec }
+}
+
+test('mergeInto merges one branch at a time and returns null when each exits 0', async () => {
+  const { calls, exec } = mergeMock()
+  const result = await createGit({ exec }).mergeInto('/tmp/wt', ['teammates/r1/T1', 'teammates/r1/T2'])
+  assert.equal(result, null)
+  assert.deepEqual(calls[0], [
+    '-C', '/tmp/wt', 'rev-parse', '--verify', '--quiet', '--end-of-options',
+    'refs/heads/teammates/r1/T1', '--',
+  ])
+  assert.deepEqual(calls[1], [
+    '-C', '/tmp/wt', 'merge', '--no-ff', '-m', 'gate merge preview', '--end-of-options',
+    'sha-teammates/r1/T1',
+  ])
+  assert.deepEqual(calls[3], [
+    '-C', '/tmp/wt', 'merge', '--no-ff', '-m', 'gate merge preview', '--end-of-options',
+    'sha-teammates/r1/T2',
+  ])
+})
+
+test('mergeInto rejects an empty or non-string dir with GitError', async () => {
+  const { calls, exec } = recorder()
+  await assert.rejects(() => createGit({ exec }).mergeInto('', ['b']), GitError)
+  assert.deepEqual(calls, [])
+})
+
+test('mergeInto rejects a missing or non-string branch list with GitError', async () => {
+  const { calls, exec } = recorder()
+  const git = createGit({ exec })
+  await assert.rejects(() => git.mergeInto('/tmp/wt'), GitError)
+  await assert.rejects(() => git.mergeInto('/tmp/wt', []), GitError)
+  await assert.rejects(() => git.mergeInto('/tmp/wt', ['a', '']), GitError)
+  await assert.rejects(() => git.mergeInto('/tmp/wt', 'a'), GitError)
+  assert.deepEqual(calls, [])
+})
+
+test('mergeInto returns the conflicted paths instead of throwing when the merge exits non-zero', async () => {
+  const { calls, exec } = mergeMock({
+    mergeResults: { 'sha-a': { code: 1, stdout: '', stderr: 'CONFLICT' } },
+    unmerged: 'shared.txt\nother.txt\n',
+  })
+  const result = await createGit({ exec }).mergeInto('/tmp/wt', ['a', 'b'])
+  assert.deepEqual(result, ['shared.txt', 'other.txt'])
+  assert.deepEqual(calls[2], ['-C', '/tmp/wt', 'diff', '--name-only', '--diff-filter=U'])
+})
+
+test('mergeInto throws a GitError carrying stderr when a merge fails with nothing unmerged', async () => {
+  const { exec } = mergeMock({
+    mergeResults: { 'sha-a': { code: 128, stdout: '', stderr: '*** Please tell me who you are.\nCommitter identity unknown' } },
+    unmerged: '',
+  })
+  // An empty array is truthy: reporting one here would name a conflict with no paths and no
+  // reason. The failure must surface as a failure, with git's own words.
+  await assert.rejects(
+    () => createGit({ exec }).mergeInto('/tmp/wt', ['a', 'b']),
+    (err) => {
+      assert.ok(err instanceof GitError)
+      assert.match(err.message, /Committer identity unknown/)
+      assert.match(err.message, /\ba\b/)
+      return true
+    },
+  )
+})
+
+// --- real-repository: mergeInto -------------------------------------------------------------
+
+test('against a real repository, mergeInto merges cleanly across different files and reports conflicts on the same line', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-merge-'))
+  const wtCleanDir = await mkdtemp(path.join(tmpdir(), 'tm-git-merge-wt-clean-'))
+  const wtConflictDir = await mkdtemp(path.join(tmpdir(), 'tm-git-merge-wt-conflict-'))
+  const git = createGit({ cwd: root })
+  const sh = (args) => defaultGitExec(args, root)
+  try {
+    await sh(['init', '--initial-branch=main'])
+    await sh(['config', 'user.email', 'test@example.com'])
+    await sh(['config', 'user.name', 'test'])
+    await writeFile(path.join(root, 'shared.txt'), 'base\n', 'utf8')
+    await writeFile(path.join(root, 'other.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+
+    // Two branches that touch different files merge cleanly.
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.txt'), 'a\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'add a.txt'])
+    await sh(['checkout', 'main'])
+
+    await sh(['checkout', '-b', 'teammates/r1/T2'])
+    await writeFile(path.join(root, 'b.txt'), 'b\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'add b.txt'])
+    await sh(['checkout', 'main'])
+
+    await sh(['worktree', 'add', '--detach', '--end-of-options', wtCleanDir, 'main'])
+    const cleanResult = await git.mergeInto(wtCleanDir, ['teammates/r1/T1', 'teammates/r1/T2'])
+    assert.equal(cleanResult, null)
+    await sh(['worktree', 'remove', '--force', '--end-of-options', wtCleanDir])
+
+    // Two branches that edit the same line conflict, and reporting that must not throw.
+    await sh(['checkout', '-b', 'teammates/r1/T3'])
+    await writeFile(path.join(root, 'shared.txt'), 'from-t3\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'edit shared.txt on T3'])
+    await sh(['checkout', 'main'])
+
+    await sh(['checkout', '-b', 'teammates/r1/T4'])
+    await writeFile(path.join(root, 'shared.txt'), 'from-t4\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'edit shared.txt on T4'])
+    await sh(['checkout', 'main'])
+
+    await sh(['worktree', 'add', '--detach', '--end-of-options', wtConflictDir, 'main'])
+    const conflictResult = await git.mergeInto(wtConflictDir, ['teammates/r1/T3', 'teammates/r1/T4'])
+    assert.deepEqual(conflictResult, ['shared.txt'])
+  } finally {
+    await rm(wtCleanDir, { recursive: true, force: true })
+    await rm(wtConflictDir, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+// --- real-git regression: a tag must not shadow a branch on the way into the preview -------
+
+test('against a real repository, mergeInto and addWorktreeDetached take the branch tip even when a tag of the same name shadows it', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-mshadow-'))
+  const mergeDir = await mkdtemp(path.join(tmpdir(), 'tm-git-mshadow-wt-'))
+  const checkoutDir = await mkdtemp(path.join(tmpdir(), 'tm-git-mshadow-co-'))
+  const git = createGit({ cwd: root })
+  const sh = (args) => defaultGitExec(args, root)
+  const present = async (dir, file) => {
+    try {
+      await readFile(path.join(dir, file), 'utf8')
+      return true
+    } catch {
+      return false
+    }
+  }
+  try {
+    await sh(['init', '--initial-branch=main'])
+    await sh(['config', 'user.email', 'test@example.com'])
+    await sh(['config', 'user.name', 'test'])
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    const forkPoint = (await git.headSha())
+
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'work.txt'), 'work\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'the teammate work'])
+    await sh(['checkout', 'main'])
+
+    // One ordinary command inside the teammate's own worktree. --end-of-options stops flag
+    // injection but not namespace precedence: git resolves a bare name through refs/tags/
+    // BEFORE refs/heads/, warns on stderr only, and exits 0.
+    await sh(['tag', 'teammates/r1/T1', forkPoint])
+
+    // The trap, demonstrated: a bare-name merge takes the tag and reports "Already up to date",
+    // so the preview would be built from a tree with none of the teammate's work in it.
+    await sh(['worktree', 'add', '--detach', '--end-of-options', mergeDir, 'main'])
+    const bare = await defaultGitExec(
+      ['-C', mergeDir, 'merge', '--no-ff', '-m', 'bare', '--end-of-options', 'teammates/r1/T1'], root,
+    )
+    assert.equal(bare.code, 0, 'the bare-name merge is expected to succeed against the tag')
+    assert.equal(await present(mergeDir, 'work.txt'), false, 'the bare name is expected to merge the tag, not the branch')
+    await sh(['worktree', 'remove', '--force', '--end-of-options', mergeDir])
+
+    // mergeInto must be immune: it resolves the branch name through refs/heads/ first, so the
+    // preview really does carry the teammate's commit and `npm test` runs against their code.
+    await git.addWorktreeDetached(mergeDir, 'main')
+    const result = await git.mergeInto(mergeDir, ['teammates/r1/T1'])
+    assert.equal(result, null)
+    assert.equal(await present(mergeDir, 'work.txt'), true, 'mergeInto must merge the branch tip the tag hid')
+
+    // addWorktreeDetached must resolve the same way when it checks the branch out directly.
+    await git.addWorktreeDetached(checkoutDir, 'teammates/r1/T1')
+    assert.equal(await present(checkoutDir, 'work.txt'), true, 'addWorktreeDetached must check out the branch tip, not the tag')
+  } finally {
+    await rm(mergeDir, { recursive: true, force: true })
+    await rm(checkoutDir, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+// --- real-git regression: three or more branches (the octopus reset) -----------------------
+
+test('against a real repository, a conflict across three branches reports the conflicted paths rather than an empty list', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-octopus-'))
+  const wtDir = await mkdtemp(path.join(tmpdir(), 'tm-git-octopus-wt-'))
+  const git = createGit({ cwd: root })
+  const sh = (args) => defaultGitExec(args, root)
+  try {
+    await sh(['init', '--initial-branch=main'])
+    await sh(['config', 'user.email', 'test@example.com'])
+    await sh(['config', 'user.name', 'test'])
+    await writeFile(path.join(root, 'shared.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+
+    for (const id of ['T1', 'T2', 'T3']) {
+      await sh(['checkout', 'main'])
+      await sh(['checkout', '-b', `teammates/r1/${id}`])
+      await writeFile(path.join(root, 'shared.txt'), `from-${id}\n`, 'utf8')
+      await sh(['add', '.'])
+      await sh(['commit', '-m', `edit shared.txt on ${id}`])
+    }
+    await sh(['checkout', 'main'])
+
+    // Handing git all three heads at once selects the octopus strategy, which resets the
+    // working tree and index BEFORE exiting: nothing is left carrying U status, so a
+    // --diff-filter=U reading of that failure comes back empty and the gate reports a
+    // conflict that names nothing.
+    await sh(['worktree', 'add', '--detach', '--end-of-options', wtDir, 'main'])
+    const octopus = await defaultGitExec(
+      ['-C', wtDir, 'merge', '--no-ff', '-m', 'octopus', '--end-of-options',
+        'teammates/r1/T1', 'teammates/r1/T2', 'teammates/r1/T3'], root,
+    )
+    assert.notEqual(octopus.code, 0)
+    const afterOctopus = await defaultGitExec(['-C', wtDir, 'diff', '--name-only', '--diff-filter=U'], root)
+    assert.equal(afterOctopus.stdout.trim(), '', 'the octopus failure is expected to leave no unmerged paths')
+
+    const result = await git.mergeInto(wtDir, ['teammates/r1/T1', 'teammates/r1/T2', 'teammates/r1/T3'])
+    assert.deepEqual(result, ['shared.txt'], 'a three-branch conflict must still name the file it conflicted on')
+  } finally {
+    await rm(wtDir, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+// --- real-git regression: a merge failure is not a conflict --------------------------------
+
+test('against a real repository, a merge that fails without conflicting throws instead of reporting an empty conflict', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-mfail-'))
+  const wtDir = await mkdtemp(path.join(tmpdir(), 'tm-git-mfail-wt-'))
+  const otherRoot = await mkdtemp(path.join(tmpdir(), 'tm-git-mfail-other-'))
+  const git = createGit({ cwd: root })
+  const sh = (args) => defaultGitExec(args, root)
+  try {
+    await sh(['init', '--initial-branch=main'])
+    await sh(['config', 'user.email', 'test@example.com'])
+    await sh(['config', 'user.name', 'test'])
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['worktree', 'add', '--detach', '--end-of-options', wtDir, 'main'])
+
+    // A branch that no longer exists: git exits non-zero with "not something we can merge"
+    // and leaves nothing unmerged. Reported as a conflict it would be an empty list and a
+    // discarded reason; it has to arrive as a failure carrying git's own words.
+    await assert.rejects(
+      () => git.mergeInto(wtDir, ['teammates/r1/deleted']),
+      (err) => {
+        assert.ok(err instanceof GitError)
+        assert.match(err.message, /not something we can merge|did not match any|unknown revision/i)
+        return true
+      },
+    )
+
+    // An unrelated-histories merge fails the same way and must not read as a conflict either.
+    const shOther = (args) => defaultGitExec(args, otherRoot)
+    await shOther(['init', '--initial-branch=main'])
+    await shOther(['config', 'user.email', 'test@example.com'])
+    await shOther(['config', 'user.name', 'test'])
+    await writeFile(path.join(otherRoot, 'elsewhere.txt'), 'elsewhere\n', 'utf8')
+    await shOther(['add', '.'])
+    await shOther(['commit', '-m', 'unrelated base'])
+    await sh(['fetch', '--no-tags', '--end-of-options', otherRoot, '+refs/heads/main:refs/heads/unrelated'])
+
+    await assert.rejects(
+      () => git.mergeInto(wtDir, ['unrelated']),
+      (err) => {
+        assert.ok(err instanceof GitError)
+        assert.match(err.message, /unrelated histories/i)
+        return true
+      },
+    )
+  } finally {
+    await rm(wtDir, { recursive: true, force: true })
+    await rm(otherRoot, { recursive: true, force: true })
     await rm(root, { recursive: true, force: true })
   }
 })

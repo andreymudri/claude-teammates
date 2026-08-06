@@ -55,6 +55,17 @@ When a task has no dependencies, omit the **Depends:** line entirely — that is
 way to say "nothing." A sentinel like `**Depends:** none` is tolerated by the parser, but
 omission is the documented form; don't rely on the sentinel.
 
+## Declaring a model tier
+
+A task may declare the model tier it should run at:
+
+    **Model:** cheap
+
+Valid values are `cheap`, `mid`, and `capable`. Omit the line and `init-run` infers a tier
+from the task's shape — how many other tasks depend on it, how many files it declares, and
+whether its brief already contains the code to write. Declare one only when you know the
+inference would be wrong; an unrecognised value fails `init-run` with the offending task id.
+
 ## Declared files are the enforced write set
 
 An implementer may only create or modify the files its task declares. This is the permitted

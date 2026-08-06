@@ -3,7 +3,13 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { loadGateConfig, inferGateConfig, checksForPhase } from '../scripts/gate-config.mjs'
+import {
+  loadGateConfig,
+  inferGateConfig,
+  checksForPhase,
+  fixRoundsForPhase,
+  previewLinks,
+} from '../scripts/gate-config.mjs'
 
 async function withTempRoot(fn) {
   const root = await mkdtemp(path.join(tmpdir(), 'tm-gate-'))
@@ -73,4 +79,92 @@ test('checksForPhase prefers a named phase over default', () => {
 
 test('checksForPhase returns an empty array when nothing is configured', () => {
   assert.deepEqual(checksForPhase({ phases: {} }, 'default'), [])
+})
+
+test('inferGateConfig emits fixRounds: 2 on the default phase', () => {
+  const config = inferGateConfig({ scripts: { test: 'node --test' } })
+  assert.equal(config.phases.default.fixRounds, 2)
+})
+
+test('fixRoundsForPhase returns a named phase explicit value', () => {
+  const config = {
+    phases: {
+      default: { fixRounds: 2, checks: [] },
+      integration: { fixRounds: 5, checks: [] },
+    },
+  }
+  assert.equal(fixRoundsForPhase(config, 'integration'), 5)
+})
+
+test('fixRoundsForPhase falls back to the default phase value for an unknown phase name', () => {
+  const config = {
+    phases: {
+      default: { fixRounds: 5, checks: [] },
+    },
+  }
+  assert.equal(fixRoundsForPhase(config, 'phase-2'), 5)
+})
+
+test('fixRoundsForPhase returns 2 when no fixRounds is set anywhere, and for null', () => {
+  const config = { phases: { default: { checks: [] } } }
+  assert.equal(fixRoundsForPhase(config, 'default'), 2)
+  assert.equal(fixRoundsForPhase(config, 'unknown'), 2)
+  assert.equal(fixRoundsForPhase(null, 'default'), 2)
+})
+
+test('fixRoundsForPhase falls back key-by-key when a named phase omits fixRounds', () => {
+  const config = {
+    phases: {
+      default: { fixRounds: 5, checks: [{ name: 'test', kind: 'command', run: 'npm test' }] },
+      integration: { checks: [{ name: 'test', kind: 'command', run: 'npm test' }] },
+    },
+  }
+  assert.equal(fixRoundsForPhase(config, 'integration'), 5)
+})
+
+test('fixRoundsForPhase rejects a non-integer fixRounds and falls back to the default phase', () => {
+  const withDefault = (value) => ({
+    phases: { default: { fixRounds: 3, checks: [] }, integration: { fixRounds: value, checks: [] } },
+  })
+  assert.equal(fixRoundsForPhase(withDefault('many'), 'integration'), 3)
+  assert.equal(fixRoundsForPhase(withDefault(-1), 'integration'), 3)
+  assert.equal(fixRoundsForPhase(withDefault(1.5), 'integration'), 3)
+})
+
+test('fixRoundsForPhase rejects a non-integer default fixRounds and falls back to 2', () => {
+  const only = (value) => ({ phases: { default: { fixRounds: value, checks: [] } } })
+  assert.equal(fixRoundsForPhase(only('many'), 'default'), 2)
+  assert.equal(fixRoundsForPhase(only(-1), 'default'), 2)
+  assert.equal(fixRoundsForPhase(only(1.5), 'default'), 2)
+  assert.equal(fixRoundsForPhase(only(null), 'default'), 2)
+})
+
+test('fixRoundsForPhase accepts zero as an explicit no-retry budget', () => {
+  const config = { phases: { default: { fixRounds: 0, checks: [] } } }
+  assert.equal(fixRoundsForPhase(config, 'default'), 0)
+})
+
+test('previewLinks returns the declared link list', () => {
+  assert.deepEqual(previewLinks({ preview: { link: ['node_modules'] } }), ['node_modules'])
+})
+
+test('previewLinks returns [] when there is nothing to link', () => {
+  assert.deepEqual(previewLinks({}), [])
+  assert.deepEqual(previewLinks({ preview: {} }), [])
+  assert.deepEqual(previewLinks({ preview: { link: null } }), [])
+  assert.deepEqual(previewLinks(null), [])
+})
+
+test('previewLinks returns [] when link is not an array', () => {
+  assert.deepEqual(previewLinks({ preview: { link: 'node_modules' } }), [])
+})
+
+test('inferGateConfig emits preview.link with node_modules when given a package', () => {
+  const config = inferGateConfig({ scripts: { test: 'node --test' } })
+  assert.deepEqual(config.preview, { link: ['node_modules'] })
+})
+
+test('inferGateConfig emits no preview key when given no package', () => {
+  assert.equal(inferGateConfig(null).preview, undefined)
+  assert.equal(inferGateConfig(undefined).preview, undefined)
 })

@@ -3,23 +3,27 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parsePlan } from './plan-parser.mjs'
 import { assignPhases } from './phases.mjs'
-import { readState, writeState, claimTask, releaseClaim } from './state.mjs'
-import { loadGateConfig, inferGateConfig, checksForPhase, defaultMaxParallel } from './gate-config.mjs'
+import { readState, writeState, claimTask, releaseClaim, readFixRounds, recordFixRound } from './state.mjs'
+import { loadGateConfig, inferGateConfig, checksForPhase, defaultMaxParallel, fixRoundsForPhase, previewLinks } from './gate-config.mjs'
+import { TIERS, inferTier } from './routing.mjs'
+import { decideFix } from './fix-loop.mjs'
 import { runChecks, aggregateVerdict } from './gate-runner.mjs'
 import { renderDigest } from './digest.mjs'
 import { generatePhaseWorkflow } from './workflow-gen.mjs'
 import { createGit, GitError } from './git.mjs'
 import { deriveContext } from './gate-runner.mjs'
 
-const USAGE = `usage: cli.mjs <init-run|gate|digest|claim|unclaim|workflow|complete> [options]
+const USAGE = `usage: cli.mjs <init-run|gate|digest|claim|unclaim|workflow|complete|fix|record-fix-round> [options]
 
   init-run <planPath> --run <id> [--root <path>]
-  gate     --run <id> --plan <path> [--base <branch>] [--root <path>] [--phase <name>] [--no-fleet]
+  gate     --run <id> --plan <path> [--base <branch>] [--root <path>] [--phase <name>] [--no-fleet] [--results <path>]
   digest   --run <id> [--root <path>]
   claim    --run <id> --task <id> --by <teammate> [--root <path>]
   unclaim  --run <id> --task <id> [--root <path>]
-  workflow --run <id> --phase <n> [--root <path>]
-  complete --run <id> --task <id> --plan <path> [--base <branch>] [--root <path>]`
+  workflow --run <id> --phase <n> [--root <path>] [--models <json>] [--plan <path>] [--base <branch>]
+  complete --run <id> --task <id> --plan <path> [--base <branch>] [--root <path>]
+  fix      --run <id> --phase <n> --verdict <path> [--root <path>]
+  record-fix-round --run <id> --phase <n> --task <id> [--root <path>]`
 
 // A flag followed by nothing, or by another flag, is a boolean switch (e.g. --no-fleet)
 // and takes no value. Without this, a boolean flag anywhere but the very last argv
@@ -62,7 +66,14 @@ const REQUIRED = {
   unclaim: ['run', 'task'],
   workflow: ['run', 'phase'],
   complete: ['run', 'task', 'plan'],
+  fix: ['run', 'phase', 'verdict'],
+  'record-fix-round': ['run', 'phase', 'task'],
 }
+
+// Commands whose `--phase` names a numeric plan phase, not a manifest phase key. `gate` is
+// deliberately absent: its `--phase` is a NAME (`default`, `integration`) that selects a
+// block of checks from teammates.gate.json.
+const NUMERIC_PHASE_COMMANDS = new Set(['workflow', 'fix', 'record-fix-round'])
 
 // A skill branches on this CLI's exit code. A missing argument must produce the usage
 // message and exit 2, never an unhandled TypeError and a stack trace.
@@ -82,10 +93,66 @@ function missingArgs(command, flags, positional) {
     .filter((f) => !flags[f] || flags[f] === true)
     .map((f) => `--${f}`)
   if (command === 'init-run' && !positional[0]) missing.unshift('<planPath>')
-  if (command === 'workflow' && flags.phase && flags.phase !== true && !Number.isInteger(Number(flags.phase))) {
+  // Unvalidated, a non-numeric `--phase` reaches `fix`'s task filter, selects nothing, and
+  // comes back `escalate`/`unattributable` — "halt and ask the user" for what is only a
+  // mistyped flag, with a genuine retry lost. `default` is the likeliest mistype of all: it
+  // is the exact token `gate --phase` takes when omitted, and an operator carries it across.
+  if (NUMERIC_PHASE_COMMANDS.has(command)
+    && flags.phase && flags.phase !== true && !Number.isInteger(Number(flags.phase))) {
     missing.push('--phase <integer>')
   }
+  // `--results` is optional, so it is not in REQUIRED — but once given it takes a value, and
+  // a bare `--results` parses as `true` (parseFlags's boolean-switch reading). Left alone,
+  // the gate's own `flags.results !== true` guard skips the whole supplied-results block and
+  // the run exits 1 on the still-pending checks with nothing on stdout about the dropped
+  // flag. Same treatment every value-taking flag gets from the `=== true` rule above.
+  if (command === 'gate' && flags.results === true) missing.push('--results <path>')
   return missing
+}
+
+// The `## Global Constraints` section is plan-wide, so every dispatch in every phase carries
+// the same list. It is read from the plan markdown rather than restated per task: a constraint
+// that has to be repeated is a constraint that will drift.
+//
+// The section ends at the next heading of ANY level, not just `##`. A task heading is `###`
+// and its file list is a bullet list; terminating only on `##` would sweep every task's files
+// into the constraints every teammate is told it must obey. Scanning for the terminator with
+// a second exec on the remainder — rather than one regex with a lookahead — keeps the
+// end-of-file case honest: JS has no `\Z` anchor, and `\Z` inside a pattern is an identity
+// escape matching a literal "Z", which would silently drop a section that ends the file.
+export function parseConstraints(markdown) {
+  const text = String(markdown ?? '')
+  const heading = /^##\s+Global Constraints\s*$/m.exec(text)
+  if (!heading) return []
+  const rest = text.slice(heading.index + heading[0].length)
+  const next = /^#{1,6}\s/m.exec(rest)
+  const items = []
+  // A bullet wrapped over two lines is one constraint, not a truncated one. Keeping only
+  // the first line would hand every teammate the opening clause of a rule and silently
+  // drop the rest — the failure is invisible in the brief, which reads as a complete
+  // sentence. An indented, non-blank line directly under an item is joined onto it; a
+  // blank line closes the item, so a following indented paragraph is not swallowed. A
+  // nested bullet matches the bullet pattern first and so stays a standalone constraint.
+  //
+  // The continuation test excludes any indented line opening with `-`, so a line that looks
+  // like a bullet but that the bullet pattern rejects — an empty `-`, or one whose text is
+  // split by a Unicode line separator, which `.` does not match — is dropped rather than
+  // appended. Joining it would fuse two unrelated rules into a single constraint that reads
+  // as one sentence and says what neither author wrote; a dropped malformed rule is the
+  // lesser failure, and the only one that cannot silently misinform a teammate.
+  let open = false
+  for (const line of (next ? rest.slice(0, next.index) : rest).split('\n')) {
+    const bullet = /^\s*-\s+(.*\S)\s*$/.exec(line)
+    if (bullet) {
+      items.push(bullet[1])
+      open = true
+    } else if (open && /^\s+[^-\s]/.test(line)) {
+      items[items.length - 1] += ` ${line.trim()}`
+    } else {
+      open = false
+    }
+  }
+  return items
 }
 
 // runId/taskId become path segments under root/.teammates. Without containment, a value
@@ -116,6 +183,83 @@ async function resolveBaseBranch(git, flag) {
   }
   if (present.length === 1) return present[0]
   throw new Error('could not determine the base branch — pass --base')
+}
+
+// Only the checks the CLI cannot run itself may be supplied. `command`, `fileset` and
+// `ownership` are computed, so they are never in this set.
+const SUPPLIABLE_KINDS = new Set(['agent', 'mcp'])
+// The same vocabulary aggregateVerdict recognises, minus `pending` — supplying "still
+// pending" says nothing, and anything outside the set is an error rather than a pass.
+const SUPPLIED_STATUSES = new Set(['pass', 'fail', 'skip'])
+
+// `--results` is caller input for one run, never persisted authority. A result for a computed
+// check would be a way to hand the gate a passing `fileset`, so those are rejected outright.
+//
+// Module-private on purpose: this is a trust boundary, every branch below is covered
+// end-to-end through `runCli`, and nothing outside this module has any business calling it.
+function validateSuppliedResults(supplied, checks) {
+  const byName = new Map()
+  const duplicated = new Set()
+  for (const c of checks) {
+    if (byName.has(c.name)) duplicated.add(c.name)
+    byName.set(c.name, c)
+  }
+  for (const r of supplied) {
+    // `checksForPhase` does not enforce unique check names, and a name that resolves to more
+    // than one check cannot be validated: `byName` would resolve it to exactly one (last
+    // wins) while the merge below fills EVERY pending result carrying that name — so a
+    // manifest declaring `{name:'test',kind:'command'}` and `{name:'test',kind:'agent'}`
+    // would let an `agent` result land on the `command` check. Whether the file was accepted
+    // would then depend on declaration order rather than on what gets written. Reject the
+    // collision instead of resolving it.
+    if (duplicated.has(r?.name)) {
+      return `--results names a check declared more than once in this phase's manifest: ${JSON.stringify(r?.name)}`
+    }
+    const check = byName.get(r?.name)
+    if (!check) return `--results names a check not in this phase's manifest: ${JSON.stringify(r?.name)}`
+    if (!SUPPLIABLE_KINDS.has(check.kind)) return `--results may not supply a ${check.kind} check: ${check.name}`
+    if (!SUPPLIED_STATUSES.has(r.status)) return `--results carries an unrecognized status for ${check.name}: ${JSON.stringify(r.status)}`
+  }
+  return null
+}
+
+// Fills in the pending results only. A check the gate actually ran keeps its computed result,
+// so a supplied entry can never overwrite what the CLI itself determined. The merged list is
+// then handed to aggregateVerdict, which stays the only producer of a verdict — that is what
+// makes a recorded PASS CLI-computed rather than hand-written.
+//
+// `status`, `output` and `findings` come from the supplied entry — that is what the caller is
+// reporting. `optional` is taken from the COMPUTED result and never from the file: `optional`
+// is a manifest declaration that a check does not block, so letting a result declare itself
+// optional would turn a failing required review advisory by way of the very file reporting
+// its failure (PASS, exit 0, the failure demoted into `optionalFailed`).
+//
+// Each supplied entry is consumed once, so a name appearing twice in the raw results fills
+// only the first pending one and any collision is left pending rather than silently passed.
+// validateSuppliedResults already rejects duplicate names outright; this keeps the invariant
+// local to the function that does the writing.
+//
+// The `status !== 'pending'` guard is dormant future-proofing rather than dead code: no
+// suppliable kind has a runner today, so the gate always leaves `agent`/`mcp` pending. The
+// moment one of them does run, a supplied result must not overwrite the computed one.
+export function mergeSuppliedResults(rawResults, supplied) {
+  const unused = new Map()
+  for (const r of supplied) {
+    if (!unused.has(r.name)) unused.set(r.name, r)
+  }
+  return rawResults.map((r) => {
+    const s = unused.get(r.name)
+    if (!s || r.status !== 'pending') return r
+    unused.delete(r.name)
+    return {
+      name: r.name,
+      kind: r.kind,
+      status: s.status,
+      output: s.output ?? '',
+      optional: r.optional,
+      findings: s.findings ?? [],
+    }
+  })
 }
 
 async function derive(root, runId, flags) {
@@ -159,6 +303,20 @@ async function derive(root, runId, flags) {
 export async function runCli(argv, io = { out: console.log }) {
   const [command, ...rest] = argv
   const { flags, positional } = parseFlags(rest)
+  // An empty or whitespace-only --root must never silently fall through to cwd: `??` only
+  // catches `undefined`, so `--root ""` survives to become `repoRoot: ''` downstream, which
+  // defeats the realpath-based containment checks in the merge preview (realpath('') rejects,
+  // so both guarded escape checks in linkInto get skipped instead of enforced). Fail loudly
+  // here instead of silently using the wrong root. A bare `--root` with no value at all (e.g.
+  // last on the argv, or immediately followed by another flag) is the same orchestrator
+  // mistake in a different guise: an unset `$PROJECT_ROOT` templated *unquoted* makes the
+  // argument vanish entirely rather than become empty, so parseFlags maps it to `true`
+  // instead of a string. That `true` would otherwise reach path.join() downstream and throw
+  // a raw TypeError with no verdict, which must never happen.
+  if (typeof flags.root !== 'undefined' && (typeof flags.root !== 'string' || flags.root.trim() === '')) {
+    io.out(`--root must not be empty\n\n${USAGE}`)
+    return 2
+  }
   const root = flags.root ?? process.cwd()
   const runId = flags.run
 
@@ -185,20 +343,53 @@ export async function runCli(argv, io = { out: console.log }) {
 
   if (command === 'init-run') {
     const tasks = assignPhases(parsePlan(await readFile(positional[0], 'utf8')))
+
+    // Every task carries a tier from here on, so no consumer has to re-derive one.
+    // `plan-parser.mjs` records a declared tier verbatim and validates nothing; the
+    // vocabulary lives in routing.mjs, so this is the single place that checks it. A typo
+    // must fail the run at init, not silently route a task to a tier no dispatcher knows.
+    for (const task of tasks) {
+      if (task.tierSource === 'declared') {
+        if (!TIERS.includes(task.tier)) {
+          io.out(`${task.id}: unknown model tier '${task.tier}' (expected ${TIERS.join(', ')})`)
+          return 2
+        }
+        continue
+      }
+      task.tier = inferTier(task, tasks)
+      task.tierSource = 'inferred'
+    }
+
     const totalPhases = tasks.reduce((max, t) => Math.max(max, t.phase), 0)
     const config = await loadGateConfig(root)
     await writeState(root, runId, 'plan', { runId, totalPhases, tasks })
     // Recorded for reporting only. The gate derives the anchor, the phase, and every
     // verdict from git; nothing here decides anything.
+    //
+    // Re-running init-run must not erase what the gate recorded. `gates` and `fixRounds` are
+    // the run's only history of what passed and what it cost; a plan amendment mid-run is a
+    // normal reason to re-init, and it must not silently discard them — without this, "never
+    // report a phase done without a recorded PASS" becomes unsatisfiable after any re-init.
+    // The spreads are conditional so a fresh run emits neither key rather than an empty
+    // object, which anything testing only for presence would read as a recorded one.
+    const previous = await readState(root, runId, 'status')
     await writeState(root, runId, 'status', {
       runId,
-      phase: 1,
+      phase: previous?.phase ?? 1,
       totalPhases,
       maxParallel: config?.maxParallel ?? defaultMaxParallel(),
       tasks: tasks.map((t) => ({ id: t.id, title: t.title, state: 'pending' })),
+      ...(previous?.gates ? { gates: previous.gates } : {}),
+      ...(previous?.fixRounds ? { fixRounds: previous.fixRounds } : {}),
     })
     for (let p = 1; p <= totalPhases; p += 1) {
-      const ids = tasks.filter((t) => t.phase === p).map((t) => t.id).join(', ')
+      // Tier and its source are printed, not just the ids: routing decides what every
+      // dispatch in the phase costs, and an operator should see an inference they disagree
+      // with before the run starts, while a Model line is still cheap to add.
+      const ids = tasks
+        .filter((t) => t.phase === p)
+        .map((t) => `${t.id} (${t.tier}, ${t.tierSource})`)
+        .join(', ')
       io.out(`phase ${p}: ${ids}`)
     }
     return 0
@@ -228,11 +419,73 @@ export async function runCli(argv, io = { out: console.log }) {
     if (!plan) { io.out(`no plan for run ${runId}`); return 1 }
     const phase = Number(flags.phase)
     const config = await loadGateConfig(root)
+
+    // Concrete model names never enter this repository or teammates.gate.json — they live
+    // in the dispatching skill, which passes its own tier map through here. Absent, the
+    // generated agent() calls carry no model and inherit the session's, as before.
+    let tierModels
+    // `--models` written as a bare switch parses as `true` (parseFlags's boolean-switch
+    // reading). Skipping it silently would exit 0 with a model-free workflow — the caller
+    // asked for routing and got none, with nothing on stdout to say so. Treated as the
+    // missing argument it is, exactly as missingArgs treats `=== true` for required flags.
+    if (flags.models === true) {
+      io.out('--models needs a value: a JSON object mapping tiers to model names')
+      return 2
+    }
+    if (flags.models !== undefined) {
+      try {
+        tierModels = JSON.parse(flags.models)
+      } catch {
+        // A caller branches on this exit code. A malformed map must produce a message and
+        // 2, never a raw SyntaxError stack from deep inside JSON.parse.
+        io.out('--models must be a JSON object mapping tiers to model names')
+        return 2
+      }
+      if (tierModels === null || typeof tierModels !== 'object' || Array.isArray(tierModels)) {
+        io.out('--models must be a JSON object mapping tiers to model names')
+        return 2
+      }
+      // The container being an object is not enough: every value is emitted verbatim into
+      // the generated task list AND spread into the agent() options, so a nested object, a
+      // number or an empty string becomes a `model` field no dispatcher can act on and no
+      // reader can spot. A model name is a non-empty string or it is a mistake.
+      for (const [tier, model] of Object.entries(tierModels)) {
+        if (typeof model !== 'string' || model.trim() === '') {
+          io.out(`--models value for '${tier}' must be a non-empty string model name`)
+          return 2
+        }
+      }
+    }
+
+    // Both are optional: omitted, the brief renders without a plan pointer and falls back to
+    // its no-base variant rather than failing. A bare `--plan`/`--base` parses as `true`
+    // (parseFlags's boolean-switch reading), which is the value missing, not a value — coerced
+    // through it would render the literal `true` as a plan path or a branch name.
+    const planPath = flags.plan === true ? '' : (flags.plan ?? '')
+    const baseBranch = flags.base === true ? '' : (flags.base ?? '')
+
+    // A --plan pointing at nothing is a mistake worth an exit code. Swallowing the read error
+    // and generating a constraint-free brief would hand every teammate in the phase a dispatch
+    // missing the very rules the caller asked to carry, with exit 0 and nothing on stdout.
+    let planMarkdown = ''
+    if (planPath) {
+      try {
+        planMarkdown = await readFile(planPath, 'utf8')
+      } catch (err) {
+        io.out(`--plan ${planPath} could not be read: ${err.message}`)
+        return 2
+      }
+    }
+
     const src = await generatePhaseWorkflow({
       runId,
       phase,
       tasks: plan.tasks.filter((t) => t.phase === phase),
       maxParallel: config?.maxParallel ?? defaultMaxParallel(),
+      tierModels,
+      planPath,
+      baseBranch,
+      constraints: parseConstraints(planMarkdown),
     })
     io.out(src)
     return 0
@@ -255,21 +508,52 @@ export async function runCli(argv, io = { out: console.log }) {
     const checks = solo ? all.filter((c) => c.kind !== 'fileset' && c.kind !== 'ownership') : all
     if (solo) io.out('--no-fleet: enforcement checks are not running')
 
+    // Read once, at the moment of the run. The file is never persisted and never read back
+    // from `.teammates/`; it fills in this run's pending checks and nothing else.
+    let supplied = []
+    // A valueless `--results` never reaches here: missingArgs rejects it as the missing
+    // argument it is, rather than letting this guard silently drop the flag.
+    if (flags.results) {
+      try {
+        const parsed = JSON.parse(await readFile(flags.results, 'utf8'))
+        supplied = Array.isArray(parsed?.results) ? parsed.results : null
+      } catch {
+        supplied = null
+      }
+      if (supplied === null) {
+        io.out('--results must be a readable JSON file shaped { "results": [...] }\n')
+        return 2
+      }
+    }
+
     let ctx = { cwd: root }
     if (!solo) {
       try {
-        ctx = { cwd: root, ...(await derive(root, runId, flags)) }
+        ctx = { cwd: root, previewLink: previewLinks(config), ...(await derive(root, runId, flags)) }
       } catch (err) {
         io.out(JSON.stringify({ verdict: 'FAIL', failed: ['derive'], error: err.message }, null, 2))
         return 1
       }
     }
 
-    const results = await runChecks(checks, ctx)
+    const rawResults = await runChecks(checks, ctx)
+    const invalid = validateSuppliedResults(supplied, checks)
+    if (invalid) { io.out(`${invalid}\n`); return 2 }
+    const results = mergeSuppliedResults(rawResults, supplied)
     const verdict = aggregateVerdict(results)
     const branchShas = Object.assign({}, ...results.map((r) => r.branchShas ?? {}))
-    const bound = { ...verdict, anchorSha: ctx.anchorSha, planHash: ctx.planHash, branchShas, phase: ctx.currentPhase }
-    io.out(JSON.stringify({ ...bound, results }, null, 2))
+    // `phase` is the numeric plan phase derived from git; `phaseName` is the manifest key
+    // this gate selected its checks under. They are two different key spaces and the
+    // verdict carries both, so `fix` can filter tasks by the number while looking the
+    // fix-round budget up under the very key that produced these checks.
+    let bound = {
+      ...verdict,
+      anchorSha: ctx.anchorSha,
+      planHash: ctx.planHash,
+      branchShas,
+      phase: ctx.currentPhase,
+      phaseName,
+    }
 
     // Recorded for digests and supervision. Nothing reads this to decide anything.
     //
@@ -281,7 +565,32 @@ export async function runCli(argv, io = { out: console.log }) {
     const gateKey = solo ? `solo:${phaseName}` : String(ctx.currentPhase ?? phaseName)
     // --run is optional in solo mode (see missingArgs): without it there is no run to
     // record anything against, so skip straight to the exit code.
-    const status = typeof runId === 'string' ? await readState(root, runId, 'status') : null
+    //
+    // Read BEFORE the verdict is printed. status.json is agent-writable, and a corrupt one
+    // is a gate failure, not a footnote: printing a computed `"verdict": "PASS"` and then
+    // appending `could not read run state: ...` both contradicts the exit code and leaves
+    // stdout unparseable as JSON for the caller that has to read it.
+    let status = null
+    let stateError = null
+    if (typeof runId === 'string') {
+      try {
+        status = await readState(root, runId, 'status')
+      } catch (err) {
+        stateError = err.message
+      }
+    }
+    if (stateError) {
+      bound = {
+        ...bound,
+        verdict: 'FAIL',
+        failed: [...verdict.failed, 'run-state'],
+        error: `could not read run state: ${stateError}`,
+      }
+      io.out(JSON.stringify({ ...bound, results }, null, 2))
+      return 1
+    }
+    io.out(JSON.stringify({ ...bound, results }, null, 2))
+
     if (status) {
       status.gates = status.gates ?? {}
       // Object.defineProperty bypasses any inherited setter — notably the legacy
@@ -300,38 +609,43 @@ export async function runCli(argv, io = { out: console.log }) {
   }
 
   if (command === 'complete') {
+    const config = await loadGateConfig(root)
+    if (!config) { io.out('no gate manifest — cannot verify completion'); return 4 }
+
     let ctx
     try {
-      ctx = { cwd: root, ...(await derive(root, runId, flags)) }
+      ctx = { cwd: root, previewLink: previewLinks(config), ...(await derive(root, runId, flags)) }
     } catch (err) {
       io.out(`cannot verify completion: ${err.message}`)
       return 4
     }
-    const config = await loadGateConfig(root)
-    if (!config) { io.out('no gate manifest — cannot verify completion'); return 4 }
 
     const allChecks = checksForPhase(config, flags.phase ?? 'default')
     const taskKnown = (ctx.tasks ?? []).some((t) => t.id === flags.task)
     if (!taskKnown) { io.out(`no task ${flags.task} in the plan`); return 4 }
 
-    // `complete` verifies the calling task, not the whole phase. `runFilesetCheck` walks
-    // every task in the current phase, so with the full context a 3-task phase always
-    // fails the first teammate to finish on a sibling's missing branch — indistinguishable
-    // from "my own work is wrong". Ownership stays run-wide (it explains every commit on
-    // the run branch, not just this task's, so scoping it would hide a direct write riding
-    // in behind whichever task finishes first); fileset is scoped to just the named task.
-    // The full, phase-wide gate remains `gate`'s job — phase-gate still runs it before
-    // integration, so a phase can never advance without every task passing.
-    const filesetChecks = allChecks.filter((c) => c.kind === 'fileset')
-    const otherChecks = allChecks.filter((c) => c.kind !== 'fileset')
-    const taskCtx = { ...ctx, tasks: (ctx.tasks ?? []).filter((t) => t.id === flags.task) }
+    // `complete` verifies the calling task, not the whole phase. Anything that walks every
+    // task in the current phase — `runFilesetCheck`, and the merge preview `runChecks`
+    // builds — otherwise fails the first teammate to finish on a sibling's missing or
+    // non-compliant branch, indistinguishable from "my own work is wrong". The scope is
+    // declared once, as an explicit `taskScope` marker on the context, and `gate-runner`
+    // honours it in both places. `gate` never sets it, so `gate` stays phase-wide: the
+    // full gate remains its job, and phase-gate still runs it before integration, so a
+    // phase can never advance without every task passing.
+    //
+    // `tasks` stays intact. `runOwnershipCheck` must stay run-wide — it explains every
+    // commit on the run branch, not just this task's, so narrowing the task list would
+    // hide a direct write riding in behind whichever task finishes first. Narrowing
+    // `tasks` is exactly what the marker replaces.
+    //
+    // One `runChecks` call over the combined list, not one per kind: each call builds its
+    // own merge preview, so splitting them did the work twice and emitted two results
+    // named `merge` that could disagree with each other.
+    const taskCtx = { ...ctx, taskScope: flags.task }
 
     // The gate is recomputed. A PASS recorded in status.json is never consulted, so a
     // stale or forged one buys nothing.
-    const results = [
-      ...(await runChecks(filesetChecks, taskCtx)),
-      ...(await runChecks(otherChecks, ctx)),
-    ]
+    const results = await runChecks(allChecks, taskCtx)
     const verdict = aggregateVerdict(results)
     if (verdict.verdict !== 'PASS') {
       const names = [...verdict.failed, ...verdict.pending]
@@ -349,6 +663,90 @@ export async function runCli(argv, io = { out: console.log }) {
     task.state = 'done'
     await writeState(root, runId, 'status', status)
     io.out(`${flags.task} done`)
+    return 0
+  }
+
+  // Every computed decision — `none`, `retry`, and `escalate` alike — exits 0. The caller
+  // reads the `decision` field, not the exit code: a retry also has to carry the task list
+  // and the tier each task retries at, and an exit code cannot carry that. A non-zero exit
+  // here means this command could not compute a decision at all (missing run state, an
+  // unreadable verdict), which is a different condition from "the phase must escalate".
+  //
+  // This command decides nothing about the gate itself. The verdict it reads was computed
+  // from git by `gate`; nothing here can turn a FAIL into a PASS.
+  if (command === 'fix') {
+    const plan = await readState(root, runId, 'plan')
+    if (!plan) { io.out(`no plan for run ${runId}`); return 1 }
+    const status = await readState(root, runId, 'status')
+
+    let verdict
+    try {
+      verdict = JSON.parse(await readFile(flags.verdict, 'utf8'))
+    } catch (err) {
+      io.out(`cannot read verdict at ${flags.verdict}: ${err.message}`)
+      return 1
+    }
+
+    // Validated as an integer by missingArgs, then normalised: `--phase 01` and `--phase 1`
+    // must select the same tasks and read the same round counter, not two disjoint string
+    // keys. Every phase comparison below this line is numeric.
+    const phase = Number(flags.phase)
+
+    // The verdict names the phase it was computed for. A `--phase` that disagrees with it
+    // is an argument error, not a decision: adjudicating phase 3 against phase 1's verdict
+    // silently selects the wrong task set and reports `unattributable` for findings that
+    // are perfectly attributable to the phase that actually failed.
+    if (Number.isInteger(verdict?.phase) && verdict.phase !== phase) {
+      io.out(`--phase ${flags.phase} does not match the verdict's phase ${verdict.phase} at ${flags.verdict}\n\n${USAGE}`)
+      return 2
+    }
+
+    const config = (await loadGateConfig(root)) ?? {}
+    // decideFix attributes findings to the tasks that declared the cited files, so it must
+    // see only the failing phase's tasks — a file declared by a later phase's task is not
+    // this phase's to retry.
+    const phaseTasks = (plan.tasks ?? []).filter((t) => Number(t.phase) === phase)
+    // Two key spaces meet here. Task selection and the round counter are keyed by the
+    // NUMERIC phase; teammates.gate.json is keyed by phase NAME (`default`, `integration`),
+    // which is what `gate --phase` selects checks under. The manifest key space wins for
+    // the budget, and the gate's own verdict carries the name it used forward as
+    // `phaseName` — so the budget comes from the same manifest block that produced these
+    // checks instead of missing and silently falling back to the default.
+    const budgetKey = typeof verdict?.phaseName === 'string' ? verdict.phaseName : String(phase)
+    const decision = decideFix(
+      verdict,
+      phase,
+      phaseTasks,
+      // Already the per-phase `{ taskId: count }` map; decideFix does not index it again.
+      readFixRounds(status, phase),
+      { fixRounds: fixRoundsForPhase(config, budgetKey) },
+    )
+    io.out(JSON.stringify(decision, null, 2))
+    return 0
+  }
+
+  // The writer for the counter `fix` reads. Deliberately a separate subcommand rather than a
+  // side effect of `fix`: `fix` is a pure read that a caller may re-run freely (to re-inspect
+  // a decision, or after an unrelated crash), and a read that writes would double-count every
+  // one of those re-runs and burn the budget without a retry ever happening. The caller
+  // records a round when it ACTUALLY DISPATCHES a retry — that is the moment a round happens
+  // — and keeping the write separate from the decision is what makes it exactly-once.
+  if (command === 'record-fix-round') {
+    const phase = Number(flags.phase)
+    const plan = await readState(root, runId, 'plan')
+    if (!plan) { io.out(`no plan for run ${runId}`); return 1 }
+    const status = await readState(root, runId, 'status')
+    if (!status) { io.out(`no status for run ${runId}`); return 1 }
+
+    // A round is spent against a budget that belongs to one task in one phase, so the pair
+    // must exist in the plan. This also keeps an arbitrary caller-supplied string — say
+    // `__proto__` — from ever reaching the round map as a key.
+    const known = (plan.tasks ?? []).some((t) => t.id === flags.task && Number(t.phase) === phase)
+    if (!known) { io.out(`no task ${flags.task} in phase ${phase} of run ${runId}`); return 1 }
+
+    const next = recordFixRound(status, phase, flags.task)
+    await writeState(root, runId, 'status', next)
+    io.out(`${flags.task} phase ${phase} round ${readFixRounds(next, phase)[flags.task]}`)
     return 0
   }
 

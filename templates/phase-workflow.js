@@ -1,9 +1,15 @@
 // Static preamble for generated phase workflows. The generator replaces the TASKS
-// marker below with a JSON array of { id, title, files } and the META marker with
-// the meta literal.
+// marker below with a JSON array of { id, title, files, branch, model? }, the META
+// marker with the meta literal, and the PLAN_PATH / BASE_BRANCH / CONSTRAINTS markers
+// with plain JS literals. An input the caller omitted renders as '' or [], so the
+// corresponding section of the brief disappears rather than naming a missing value.
 __META__
 
 const TASKS = __TASKS__
+
+const PLAN_PATH = __PLAN_PATH__
+const BASE_BRANCH = __BASE_BRANCH__
+const CONSTRAINTS = __CONSTRAINTS__
 
 const RESULT_SCHEMA = {
   type: 'object',
@@ -17,17 +23,66 @@ const RESULT_SCHEMA = {
   },
 }
 
+// With a base branch, the brief opens with a checkout that has an explicit start point and a
+// log line the teammate can check against a named ref. With no base there is nothing to branch
+// from: emitting `git checkout -B <branch>` with a missing operand would silently create the
+// branch at the stale worktree HEAD while the brief claimed the base was verified, so the
+// no-base variant states the gap and refuses to name a starting commit.
+const checkoutSteps = (t) => (BASE_BRANCH ? [
+  'MANDATORY FIRST STEP. Your worktree does not start on this run\'s base. Run exactly:',
+  '',
+  '    git checkout -B ' + t.branch + ' ' + BASE_BRANCH,
+  '    git log --oneline -1',
+  '',
+  'If the log does not show the tip of ' + BASE_BRANCH + ', STOP and report status "blocked".',
+  'Every file you read before this command has stale content and must be re-read after it.',
+] : [
+  'MANDATORY FIRST STEP. No base branch was supplied for this phase, so the commit your worktree',
+  'starts on is UNVERIFIED and is probably stale. Do not guess a base, and do not run',
+  '"git checkout -B ' + t.branch + '" without a start point — that would branch from whatever',
+  'HEAD your worktree happens to be on. Ask the orchestrator which commit to start from, then',
+  'check out ' + t.branch + ' at that commit. If you cannot get an answer, report status "blocked".',
+  'Every file you read before that checkout has stale content and must be re-read after it.',
+])
+
+const brief = (t) => [
+  'You are tm-implementer for task ' + t.id + ': ' + t.title + '.',
+  '',
+  ...checkoutSteps(t),
+  '',
+  'BASELINE. Then bootstrap the worktree, before writing anything, in this order:',
+  '1. Install the project\'s dependencies as the project requires.',
+  '2. Copy over any untracked config the project needs (for example .env).',
+  '3. Run the project\'s test command once and confirm it is green.',
+  'A fresh worktree starts with none of that in place, and a failure caused by a missing',
+  'dependency looks exactly like a RED test, which the gate cannot tell apart from a real one.',
+  'Report status "blocked" only if the baseline cannot be made green.',
+  '',
+  PLAN_PATH ? 'PLAN. Read ' + PLAN_PATH + ' and implement the section titled "Task '
+    + t.id.replace(/^T/, '') + ':" — every numbered step, in order. The plan is the spec.' : '',
+  '',
+  'FILES. You may create or modify ONLY these files: ' + t.files.join(', ') + '.',
+  'Touching any other file fails the phase gate.',
+  '',
+  CONSTRAINTS.length ? 'GLOBAL CONSTRAINTS:' : '',
+  ...CONSTRAINTS.map((c) => '- ' + c),
+  '',
+  'Commit your work on ' + t.branch + ' and return the structured result.',
+].filter((line) => line !== '').join('\n')
+
 phase('Implement')
 
 const results = await parallel(TASKS.map((t) => () =>
   agent(
-    [
-      'You are tm-implementer for task ' + t.id + ': ' + t.title + '.',
-      'You may create or modify ONLY these files: ' + t.files.join(', ') + '.',
-      'Touching any other file fails the phase gate.',
-      'Commit your work on your worktree branch and return the structured result.',
-    ].join('\n'),
-    { label: t.id, phase: 'Implement', schema: RESULT_SCHEMA, isolation: 'worktree' },
+    brief(t),
+    {
+      label: t.id,
+      phase: 'Implement',
+      schema: RESULT_SCHEMA,
+      isolation: 'worktree',
+      agentType: 'claude-teammates:tm-implementer',
+      ...(t.model ? { model: t.model } : {}),
+    },
   ).then((r) => (r === null ? null : { taskId: t.id, ...r }))
 ))
 
