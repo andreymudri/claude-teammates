@@ -20,7 +20,7 @@ const USAGE = `usage: cli.mjs <init-run|gate|digest|claim|unclaim|workflow|compl
   digest   --run <id> [--root <path>]
   claim    --run <id> --task <id> --by <teammate> [--root <path>]
   unclaim  --run <id> --task <id> [--root <path>]
-  workflow --run <id> --phase <n> [--root <path>] [--models <json>]
+  workflow --run <id> --phase <n> [--root <path>] [--models <json>] [--plan <path>] [--base <branch>]
   complete --run <id> --task <id> --plan <path> [--base <branch>] [--root <path>]
   fix      --run <id> --phase <n> --verdict <path> [--root <path>]
   record-fix-round --run <id> --phase <n> --task <id> [--root <path>]`
@@ -108,6 +108,51 @@ function missingArgs(command, flags, positional) {
   // flag. Same treatment every value-taking flag gets from the `=== true` rule above.
   if (command === 'gate' && flags.results === true) missing.push('--results <path>')
   return missing
+}
+
+// The `## Global Constraints` section is plan-wide, so every dispatch in every phase carries
+// the same list. It is read from the plan markdown rather than restated per task: a constraint
+// that has to be repeated is a constraint that will drift.
+//
+// The section ends at the next heading of ANY level, not just `##`. A task heading is `###`
+// and its file list is a bullet list; terminating only on `##` would sweep every task's files
+// into the constraints every teammate is told it must obey. Scanning for the terminator with
+// a second exec on the remainder — rather than one regex with a lookahead — keeps the
+// end-of-file case honest: JS has no `\Z` anchor, and `\Z` inside a pattern is an identity
+// escape matching a literal "Z", which would silently drop a section that ends the file.
+export function parseConstraints(markdown) {
+  const text = String(markdown ?? '')
+  const heading = /^##\s+Global Constraints\s*$/m.exec(text)
+  if (!heading) return []
+  const rest = text.slice(heading.index + heading[0].length)
+  const next = /^#{1,6}\s/m.exec(rest)
+  const items = []
+  // A bullet wrapped over two lines is one constraint, not a truncated one. Keeping only
+  // the first line would hand every teammate the opening clause of a rule and silently
+  // drop the rest — the failure is invisible in the brief, which reads as a complete
+  // sentence. An indented, non-blank line directly under an item is joined onto it; a
+  // blank line closes the item, so a following indented paragraph is not swallowed. A
+  // nested bullet matches the bullet pattern first and so stays a standalone constraint.
+  //
+  // The continuation test excludes any indented line opening with `-`, so a line that looks
+  // like a bullet but that the bullet pattern rejects — an empty `-`, or one whose text is
+  // split by a Unicode line separator, which `.` does not match — is dropped rather than
+  // appended. Joining it would fuse two unrelated rules into a single constraint that reads
+  // as one sentence and says what neither author wrote; a dropped malformed rule is the
+  // lesser failure, and the only one that cannot silently misinform a teammate.
+  let open = false
+  for (const line of (next ? rest.slice(0, next.index) : rest).split('\n')) {
+    const bullet = /^\s*-\s+(.*\S)\s*$/.exec(line)
+    if (bullet) {
+      items.push(bullet[1])
+      open = true
+    } else if (open && /^\s+[^-\s]/.test(line)) {
+      items[items.length - 1] += ` ${line.trim()}`
+    } else {
+      open = false
+    }
+  }
+  return items
 }
 
 // runId/taskId become path segments under root/.teammates. Without containment, a value
@@ -320,12 +365,22 @@ export async function runCli(argv, io = { out: console.log }) {
     await writeState(root, runId, 'plan', { runId, totalPhases, tasks })
     // Recorded for reporting only. The gate derives the anchor, the phase, and every
     // verdict from git; nothing here decides anything.
+    //
+    // Re-running init-run must not erase what the gate recorded. `gates` and `fixRounds` are
+    // the run's only history of what passed and what it cost; a plan amendment mid-run is a
+    // normal reason to re-init, and it must not silently discard them — without this, "never
+    // report a phase done without a recorded PASS" becomes unsatisfiable after any re-init.
+    // The spreads are conditional so a fresh run emits neither key rather than an empty
+    // object, which anything testing only for presence would read as a recorded one.
+    const previous = await readState(root, runId, 'status')
     await writeState(root, runId, 'status', {
       runId,
-      phase: 1,
+      phase: previous?.phase ?? 1,
       totalPhases,
       maxParallel: config?.maxParallel ?? defaultMaxParallel(),
       tasks: tasks.map((t) => ({ id: t.id, title: t.title, state: 'pending' })),
+      ...(previous?.gates ? { gates: previous.gates } : {}),
+      ...(previous?.fixRounds ? { fixRounds: previous.fixRounds } : {}),
     })
     for (let p = 1; p <= totalPhases; p += 1) {
       // Tier and its source are printed, not just the ids: routing decides what every
@@ -402,12 +457,35 @@ export async function runCli(argv, io = { out: console.log }) {
       }
     }
 
+    // Both are optional: omitted, the brief renders without a plan pointer and falls back to
+    // its no-base variant rather than failing. A bare `--plan`/`--base` parses as `true`
+    // (parseFlags's boolean-switch reading), which is the value missing, not a value — coerced
+    // through it would render the literal `true` as a plan path or a branch name.
+    const planPath = flags.plan === true ? '' : (flags.plan ?? '')
+    const baseBranch = flags.base === true ? '' : (flags.base ?? '')
+
+    // A --plan pointing at nothing is a mistake worth an exit code. Swallowing the read error
+    // and generating a constraint-free brief would hand every teammate in the phase a dispatch
+    // missing the very rules the caller asked to carry, with exit 0 and nothing on stdout.
+    let planMarkdown = ''
+    if (planPath) {
+      try {
+        planMarkdown = await readFile(planPath, 'utf8')
+      } catch (err) {
+        io.out(`--plan ${planPath} could not be read: ${err.message}`)
+        return 2
+      }
+    }
+
     const src = await generatePhaseWorkflow({
       runId,
       phase,
       tasks: plan.tasks.filter((t) => t.phase === phase),
       maxParallel: config?.maxParallel ?? defaultMaxParallel(),
       tierModels,
+      planPath,
+      baseBranch,
+      constraints: parseConstraints(planMarkdown),
     })
     io.out(src)
     return 0
