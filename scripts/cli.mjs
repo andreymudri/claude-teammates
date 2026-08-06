@@ -16,7 +16,7 @@ import { deriveContext } from './gate-runner.mjs'
 const USAGE = `usage: cli.mjs <init-run|gate|digest|claim|unclaim|workflow|complete|fix|record-fix-round> [options]
 
   init-run <planPath> --run <id> [--root <path>]
-  gate     --run <id> --plan <path> [--base <branch>] [--root <path>] [--phase <name>] [--no-fleet]
+  gate     --run <id> --plan <path> [--base <branch>] [--root <path>] [--phase <name>] [--no-fleet] [--results <path>]
   digest   --run <id> [--root <path>]
   claim    --run <id> --task <id> --by <teammate> [--root <path>]
   unclaim  --run <id> --task <id> [--root <path>]
@@ -132,6 +132,46 @@ async function resolveBaseBranch(git, flag) {
   }
   if (present.length === 1) return present[0]
   throw new Error('could not determine the base branch — pass --base')
+}
+
+// Only the checks the CLI cannot run itself may be supplied. `command`, `fileset` and
+// `ownership` are computed, so they are never in this set.
+const SUPPLIABLE_KINDS = new Set(['agent', 'mcp'])
+// The same vocabulary aggregateVerdict recognises, minus `pending` — supplying "still
+// pending" says nothing, and anything outside the set is an error rather than a pass.
+const SUPPLIED_STATUSES = new Set(['pass', 'fail', 'skip'])
+
+// `--results` is caller input for one run, never persisted authority. A result for a computed
+// check would be a way to hand the gate a passing `fileset`, so those are rejected outright.
+export function validateSuppliedResults(supplied, checks) {
+  const byName = new Map(checks.map((c) => [c.name, c]))
+  for (const r of supplied) {
+    const check = byName.get(r?.name)
+    if (!check) return `--results names a check not in this phase's manifest: ${JSON.stringify(r?.name)}`
+    if (!SUPPLIABLE_KINDS.has(check.kind)) return `--results may not supply a ${check.kind} check: ${check.name}`
+    if (!SUPPLIED_STATUSES.has(r.status)) return `--results carries an unrecognized status for ${check.name}: ${JSON.stringify(r.status)}`
+  }
+  return null
+}
+
+// Fills in the pending results only. A check the gate actually ran keeps its computed result,
+// so a supplied entry can never overwrite what the CLI itself determined. The merged list is
+// then handed to aggregateVerdict, which stays the only producer of a verdict — that is what
+// makes a recorded PASS CLI-computed rather than hand-written.
+export function mergeSuppliedResults(rawResults, supplied) {
+  const suppliedByName = new Map(supplied.map((r) => [r.name, r]))
+  return rawResults.map((r) => {
+    const s = suppliedByName.get(r.name)
+    if (!s || r.status !== 'pending') return r
+    return {
+      name: r.name,
+      kind: r.kind,
+      status: s.status,
+      output: s.output ?? '',
+      optional: r.optional,
+      findings: s.findings ?? [],
+    }
+  })
 }
 
 async function derive(root, runId, flags) {
@@ -333,6 +373,22 @@ export async function runCli(argv, io = { out: console.log }) {
     const checks = solo ? all.filter((c) => c.kind !== 'fileset' && c.kind !== 'ownership') : all
     if (solo) io.out('--no-fleet: enforcement checks are not running')
 
+    // Read once, at the moment of the run. The file is never persisted and never read back
+    // from `.teammates/`; it fills in this run's pending checks and nothing else.
+    let supplied = []
+    if (flags.results && flags.results !== true) {
+      try {
+        const parsed = JSON.parse(await readFile(flags.results, 'utf8'))
+        supplied = Array.isArray(parsed?.results) ? parsed.results : null
+      } catch {
+        supplied = null
+      }
+      if (supplied === null) {
+        io.out('--results must be a readable JSON file shaped { "results": [...] }\n')
+        return 2
+      }
+    }
+
     let ctx = { cwd: root }
     if (!solo) {
       try {
@@ -343,7 +399,10 @@ export async function runCli(argv, io = { out: console.log }) {
       }
     }
 
-    const results = await runChecks(checks, ctx)
+    const rawResults = await runChecks(checks, ctx)
+    const invalid = validateSuppliedResults(supplied, checks)
+    if (invalid) { io.out(`${invalid}\n`); return 2 }
+    const results = mergeSuppliedResults(rawResults, supplied)
     const verdict = aggregateVerdict(results)
     const branchShas = Object.assign({}, ...results.map((r) => r.branchShas ?? {}))
     // `phase` is the numeric plan phase derived from git; `phaseName` is the manifest key
@@ -370,7 +429,17 @@ export async function runCli(argv, io = { out: console.log }) {
     const gateKey = solo ? `solo:${phaseName}` : String(ctx.currentPhase ?? phaseName)
     // --run is optional in solo mode (see missingArgs): without it there is no run to
     // record anything against, so skip straight to the exit code.
-    const status = typeof runId === 'string' ? await readState(root, runId, 'status') : null
+    let status = null
+    if (typeof runId === 'string') {
+      try {
+        status = await readState(root, runId, 'status')
+      } catch (err) {
+        // status.json is agent-writable. A corrupt one must not turn a computed verdict into
+        // a stack trace for a caller that branches on exit codes.
+        io.out(`could not read run state: ${err.message}\n`)
+        return 1
+      }
+    }
     if (status) {
       status.gates = status.gates ?? {}
       // Object.defineProperty bypasses any inherited setter — notably the legacy
