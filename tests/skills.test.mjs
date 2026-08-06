@@ -81,3 +81,30 @@ test('parallel-execution falls back to the direct-agent path when Workflow is de
   assert.match(body, /do not stop/i)
   assert.match(body, /Fall back to the\s+direct-agent path/)
 })
+
+test('phase-gate states its limit as tamper-evident, not tamper-proof, and points at the spec', async () => {
+  const { body } = await skill('phase-gate')
+  assert.match(body, /tamper-evident/i)
+  assert.match(body, /not tamper-proof/i)
+  assert.match(body, /docs\/specs\/2026-08-05-tamper-evident-enforcement-design\.md/)
+})
+
+test('parallel-execution requires --no-ff on the integration merge', async () => {
+  const { body } = await skill('parallel-execution')
+  assert.match(body, /--no-ff/)
+})
+
+test('no skill instructs recording an integration', async () => {
+  for (const name of await allSkills()) {
+    const { body } = await skill(name)
+    assert.doesNotMatch(body, /record(?:s|ed|ing)?\s+(?:an?\s+)?integration/i, `${name} should not instruct recording an integration`)
+    assert.doesNotMatch(body, /cli\.mjs["']?\s+integrated/, `${name} should not call a non-existent 'integrated' command`)
+  }
+})
+
+test('README states the phase gate guarantee and its limit', async () => {
+  const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8')
+  assert.match(readme, /\bcommitted\b/)
+  assert.match(readme, /tamper-evident/i)
+  assert.match(readme, /not tamper-proof/i)
+})

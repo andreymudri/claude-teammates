@@ -46,3 +46,15 @@ test('the integrator is declared the sole writer to the run branch', async () =>
   assert.match(body, /sole writer/)
   assert.match(body, /never auto-resolve/i)
 })
+
+test('the implementer states the branch convention and that the check reads committed changes', async () => {
+  const { body } = await frontmatter('tm-implementer.md')
+  assert.match(body, /teammates\/<runId>\/<taskId>/)
+  assert.match(body, /\bcommitted\b/)
+})
+
+test('the integrator requires --no-ff and records no integration', async () => {
+  const { body } = await frontmatter('tm-integrator.md')
+  assert.match(body, /--no-ff/)
+  assert.doesNotMatch(body, /\bintegrated\b/i)
+})

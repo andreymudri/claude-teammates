@@ -1,11 +1,12 @@
 ---
 name: finishing-a-development-branch
-description: Use when implementation is complete and needs integrating - verifies recorded gate verdicts, then decides how the run branch lands.
+description: Use when implementation is complete and needs integrating - re-runs the gate to verify each phase, then decides how the run branch lands.
 ---
 
 # Finishing a Development Branch
 
-Work is not finished because the code looks done. It is finished when the record says so.
+Work is not finished because the code looks done. It is finished when a gate you just ran
+says so — not when a record claims one already did.
 
 ## The completion gate
 
@@ -16,7 +17,9 @@ what state the run is in — check in this order.
 ### 1. Fleet run: `status.gates` is recorded
 
 If `.teammates/<run-id>/status.json` exists and has a non-empty `status.gates`, this is a fleet
-run. Each phase that ran must have an entry there, and that entry's `verdict` must be `PASS`:
+run — but a record in `status.gates` is a report written by the agents being enforced, and
+`status.json` is agent-writable, so it is never trusted as evidence. A recorded `verdict` of
+`PASS` proves nothing by itself:
 
     {
       "gates": {
@@ -30,9 +33,14 @@ run. Each phase that ran must have an entry there, and that entry's `verdict` mu
       }
     }
 
-Walk every phase the run actually executed. If a phase is missing from `status.gates`, or its
-`verdict` is not `PASS`, the work is not finished — name the phase and stop. Only a recorded
-PASS counts.
+Use `status.gates` only to see which phases the run executed. For each of those phases,
+**re-run the gate now**:
+
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" gate --run <runId> --plan <planPath> --root <project root> --phase <name>
+
+`gate` recomputes `fileset` and `ownership` from git at the moment it runs — it does not read
+or trust the old record. If any phase's fresh run does not exit `0`, the work is not finished —
+name the phase and stop.
 
 ### 2. Inline run: a run directory exists but gates are absent or empty
 
@@ -40,15 +48,20 @@ PASS counts.
 verdict — that's by design, not an omission. If `status.json` exists but `status.gates` is
 absent or empty, the run is inline, and the absent gates are expected, not a fault to fix here.
 
-Instead, run the project's full test suite now and confirm it passes from fresh output. A
-remembered result, or a run from earlier in this session, is not evidence — only a suite run
-you just executed counts. Once it's green, proceed.
+There is no fleet history to derive `fileset` or `ownership` from, so run the gate solo:
+
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" gate --no-fleet --root <project root>
+
+`--no-fleet` is the only way the enforcement checks are skipped, and it runs the project's
+full test suite (and any other command checks `teammates.gate.json` declares) fresh — a
+remembered result, or a run from earlier in this session, is not evidence. Once it exits
+`0`, proceed.
 
 ### 3. No run directory at all
 
 Someone may have finished work on a branch without ever calling `init-run` — there's no
-`.teammates/<run-id>/` to read. Run the project's full test suite now, confirm it is green from
-fresh output, and proceed the same way as case 2.
+`.teammates/<run-id>/` to read. Run the gate solo the same way as case 2, confirm it exits `0`
+from fresh output, and proceed the same way.
 
 ## Branch taxonomy
 
@@ -89,7 +102,7 @@ silently.
 
 ## Integration options
 
-Once the gate has recorded PASS for every phase and any parked findings are on the table,
+Once a freshly re-run gate has passed for every phase and any parked findings are on the table,
 present the choice — do not pick one unilaterally:
 
 1. **Merge to the default branch.**
