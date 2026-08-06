@@ -191,8 +191,6 @@ test('the brief opens with a verifiable checkout of the task branch off the base
   // Ordering is the whole point: a checkout instruction that arrives after the teammate has
   // been told which files to edit cannot stop it reading stale content first. Substring
   // presence alone would stay green if the block were moved to the end, so pin position.
-  const lines = prompt.split('\n').filter((l) => l.trim() !== '')
-  assert.match(lines[1], /^MANDATORY FIRST STEP\./, 'the checkout block must be the first instruction')
   assert.ok(
     prompt.indexOf('git checkout -B teammates/r1/T1 main') < prompt.indexOf('FILES.'),
     'the checkout must come before the file set',
@@ -220,12 +218,44 @@ test('the brief requires a green baseline before any writing and blocks otherwis
   })
   const [prompt] = await captureAgentPrompts(src)
   assert.ok(
-    prompt.includes('confirm it is green before writing'),
+    prompt.includes('confirm it is green'),
     'the baseline must be required before writing, not merely suggested',
   )
   assert.ok(
-    prompt.includes('If the baseline is not green, report status "blocked".'),
-    'a red baseline must carry the blocked consequence',
+    prompt.includes('Report status "blocked" only if the baseline cannot be made green.'),
+    'a baseline that cannot be made green must carry the blocked consequence',
+  )
+})
+
+test('the brief bootstraps the worktree before the baseline run, not after it', async () => {
+  const src = await generatePhaseWorkflow({
+    runId: 'r1',
+    phase: 1,
+    tasks: [{ id: 'T1', title: 'auth middleware', files: ['src/auth.ts'], phase: 1 }],
+    maxParallel: 2,
+    baseBranch: 'main',
+  })
+  const [prompt] = await captureAgentPrompts(src)
+
+  // A fresh worktree has no installed dependencies. On any project whose test runner is itself
+  // a dependency — vitest, jest, pytest — the first baseline run fails on the missing runner,
+  // and a teammate obeying the brief blocks having done no work. The teammate never reads
+  // SKILL.md, so the install and config-copy steps have to be named here, and named before the
+  // test command, or the skill's remedy is unreachable.
+  const install = prompt.search(/install (the [^\n]*)?dependenc/i)
+  const config = prompt.search(/copy [^\n]*config/i)
+  const run = prompt.search(/test command/)
+  assert.ok(install !== -1, 'the brief must name a dependency install step')
+  assert.ok(config !== -1, 'the brief must name a config-copy step for untracked files')
+  assert.ok(run !== -1, 'the brief must still name the test command')
+  assert.ok(install < run, 'the install must come before the baseline test run')
+  assert.ok(config < run, 'the config copy must come before the baseline test run')
+
+  // The ordering is only justified by the reason a green baseline matters at all; dropping the
+  // explanation leaves a bare chore a teammate under time pressure will skip.
+  assert.ok(
+    prompt.includes('looks exactly like a RED test'),
+    'the brief must keep the reason a missing dependency is indistinguishable from a failure',
   )
 })
 
@@ -259,14 +289,24 @@ test('with no base branch the brief emits no checkout command and says the start
   const prompts = await captureAgentPrompts(src)
   for (const prompt of prompts) {
     // `git checkout -B <branch>` with no start point silently branches from the stale worktree
-    // HEAD — the exact failure this brief exists to prevent. No runnable checkout may appear,
-    // with a missing operand or with a substitute start point invented by the template.
+    // HEAD — the exact failure this brief exists to prevent. Two shapes are forbidden, and each
+    // needs its own assertion. First: a command occupying its own line, the copy-paste block a
+    // teammate runs verbatim, whether or not it carries an operand.
     for (const line of prompt.split('\n')) {
       assert.ok(
         !/^\s*git checkout -B/.test(line),
         `no runnable checkout is allowed without a base: ${line}`,
       )
     }
+    // Second: any occurrence anywhere — mid-sentence prose included — that hands the teammate a
+    // start point the template invented. A line-anchored check alone misses
+    // `... run: git checkout -B <branch> origin/main and proceed.`, which is just as runnable.
+    // The template's own negative mention closes the branch name with a quote and supplies no
+    // start point, so it is not matched.
+    assert.ok(
+      !/git checkout -B\s+[^\s"']+\s+[^\s"']/.test(prompt),
+      'no checkout may supply a start point the template invented',
+    )
     assert.ok(!prompt.includes('git checkout -B teammates/r1/T1 HEAD'), 'must not substitute HEAD for a base')
     assert.ok(prompt.includes('MANDATORY FIRST STEP.'), 'the first step must still be present')
     assert.ok(prompt.includes('No base branch was supplied'), 'the brief must say no base was supplied')
