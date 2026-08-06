@@ -78,17 +78,33 @@ merge with `git checkout <run branch>`.
 ## Amending a plan mid-run
 
 The gate reads the plan with `git show <mergeBase(base, runBranch)>:<planPath>` — never from the
-working tree, so a teammate cannot widen its own file set by editing the plan. That also means an
-amendment committed only on the run branch changes nothing: the merge-base does not move, and
-`fileset` still reads the old plan.
+working tree, so a teammate cannot widen its own file set by editing the plan in its worktree.
+That also means an amendment committed only on the run branch changes nothing: the merge-base does
+not move, and `fileset` still reads the old plan.
+
+State the limit with the guarantee: the plan is read from git at the anchor, so a working-tree edit
+is inert, but a commit on the base branch is authoritative by design and is not distinguishable
+from an amendment the user made. A teammate has Bash; if it can move `refs/heads/<base>` it can
+commit a widened `**Files:**` list for its own task, and once that reaches the anchor `fileset`
+permits every path it declared for itself. What bounds this is write access to the base branch,
+not the plan read.
 
 To make an amendment authoritative:
 
 1. Commit it on the **base** branch.
-2. Rebuild the run branch on the new base tip, via `tm-integrator`, re-merging each task branch
-   with `--no-ff`.
+2. Merge the base into the run branch with `--no-ff`: that moves the merge-base onto the new base
+   tip, and `ownership` accepts the merge because its secondary parent is an ancestor of the base.
+   The limit on that acceptance: every secondary parent is checked, so a rogue parent riding
+   alongside the base parent still fails. This is a plain `--no-ff` merge on the run branch, so
+   dispatch `tm-integrator`, which is the sole writer to it.
 3. Rebase any in-flight task branch onto the new run-branch tip, or its diff against the new
    anchor will contain every file the earlier phases merged.
+
+If a merge is not appropriate — the base diverged such that merging would drag unrelated work into
+the run — rebuild the run branch on the new base tip and re-merge each task branch with `--no-ff`.
+Rebuilding the run branch is the orchestrator's operation, not the integrator's: `tm-integrator`
+does checkout plus `--no-ff` merge and reports `blocked` rather than reset or force-move a branch,
+so a dispatch asking it to rebuild asks for something its contract does not cover.
 
 Amend only when a task's declared file set is genuinely wrong. Correcting a stale *interface* — a
 signature an earlier phase's fix rounds changed — belongs in the dispatch brief, not the plan.

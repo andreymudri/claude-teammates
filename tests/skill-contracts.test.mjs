@@ -233,9 +233,12 @@ test('parallel-execution requires detaching the main worktree before dispatching
   const { body } = await skill('parallel-execution')
   const text = phrase(body)
   assert.match(body, /--detach/, 'parallel-execution must name --detach')
+  // Bounded gap, not strict adjacency: an inserted clarifying sentence between the heading and
+  // the instruction is ordinary editing, not a regression, but an unbounded gap would let the
+  // two halves drift into unrelated sections and stop binding anything.
   assert.match(
     text,
-    /before dispatching tm-integrator detach the main worktree first: git checkout --detach/i,
+    /before dispatching tm-integrator.{0,120}?detach the main worktree first: git checkout --detach/i,
     'parallel-execution must bind --detach to the step before the integrator dispatch, in one phrase',
   )
   assert.match(
@@ -263,6 +266,59 @@ test('parallel-execution states an amendment committed only on the run branch do
     text,
     /commit(ting)? (it )?(only )?on the run branch (is enough|suffices|makes it authoritative)/i,
     'parallel-execution must not claim a run-branch-only amendment is authoritative',
+  )
+})
+
+test('parallel-execution states the limit of the anchored plan read in the same breath', async () => {
+  const { body } = await skill('parallel-execution')
+  const text = phrase(body)
+  // The guarantee ("a teammate cannot widen its own file set by editing the plan") holds only for
+  // the working tree. A teammate that can move refs/heads/<base> can commit a widened file set for
+  // itself, and that commit is exactly the step the amendment procedure prescribes — the anchor
+  // then reads it. One contiguous phrase, so text asserting the opposite cannot satisfy it.
+  assert.match(
+    text,
+    /a working-tree edit is inert, but a commit on the base branch is authoritative by design and is not distinguishable from an amendment the user made/i,
+    'parallel-execution must state the base-branch limit in the same breath as the guarantee',
+  )
+  assert.match(
+    text,
+    /write access to the base branch/i,
+    'parallel-execution must name what actually bounds the guarantee',
+  )
+  assert.doesNotMatch(
+    text,
+    /a teammate cannot widen its own file set by editing the plan\./i,
+    'the guarantee must not be stated unqualified',
+  )
+})
+
+test('parallel-execution documents the base-merge amendment route and whose operation a rebuild is', async () => {
+  const { body } = await skill('parallel-execution')
+  const text = phrase(body)
+  // tm-integrator does checkout plus --no-ff merge and reports blocked otherwise, so "rebuild the
+  // run branch, via tm-integrator" prescribes an operation its contract does not cover. The route
+  // the gate's ownership check actually accepts is a base merge: its secondary parent is an
+  // ancestor of the base, and it moves mergeBase(base, runBranch).
+  assert.match(
+    text,
+    /merge the base into the run branch with --no-ff: that moves the merge-base onto the new base tip, and ownership accepts the merge because its secondary parent is an ancestor of the base/i,
+    'parallel-execution must document the base-merge route in one contiguous phrase',
+  )
+  assert.match(
+    text,
+    /every secondary parent is checked, so a rogue parent riding alongside the base parent still fails/i,
+    'the acceptance must state its limit in the same breath',
+  )
+  assert.match(
+    text,
+    /rebuilding the run branch is the orchestrator's operation, not the integrator's/i,
+    'parallel-execution must assign the rebuild fallback to the orchestrator',
+  )
+  assert.doesNotMatch(
+    text,
+    /rebuild the run branch on the new base tip, via tm-integrator/i,
+    'parallel-execution must not dispatch the integrator to rebuild the run branch',
   )
 })
 
