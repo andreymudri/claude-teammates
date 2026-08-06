@@ -639,3 +639,487 @@ test('gate reports an actionable message, not raw git stderr, when the plan is a
     assert.doesNotMatch(parsed.error, /fatal:/i)
   })
 })
+
+// --- Task 8: model routing in init-run/workflow, and the fix decision subcommand.
+
+async function readPlan(root, runId) {
+  return JSON.parse(await readFile(path.join(root, '.teammates', runId, 'plan.json'), 'utf8'))
+}
+
+// A plan whose first task declares a tier. Written to its own file so the shared PLAN,
+// which declares none, keeps pinning the inference path.
+function planWithModel(tier) {
+  return `### Task 1: A
+
+**Files:**
+- Create: \`a.mjs\`
+
+**Model:** ${tier}
+
+### Task 2: B
+
+**Files:**
+- Create: \`b.mjs\`
+
+**Depends:** T1
+`
+}
+
+async function writeVerdict(root, verdict) {
+  const file = path.join(root, 'verdict.json')
+  await writeFile(file, JSON.stringify(verdict), 'utf8')
+  return file
+}
+
+test('usage lists the fix subcommand', async () => {
+  await withRepo(async ({ io, lines }) => {
+    assert.equal(await runCli(['nope'], io), 2)
+    assert.match(lines.join('\n'), /init-run\|gate\|digest\|claim\|unclaim\|workflow\|complete\|fix/)
+    assert.match(lines.join('\n'), /fix\s+--run <id> --phase <n> --verdict <path>/)
+  })
+})
+
+test('fix with no flags exits 2 and prints usage', async () => {
+  await withRepo(async ({ io, lines }) => {
+    const code = await runCli(['fix'], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /missing required argument/)
+    assert.match(lines.join('\n'), /--run/)
+    assert.match(lines.join('\n'), /--phase/)
+    assert.match(lines.join('\n'), /--verdict/)
+    assert.match(lines.join('\n'), /usage: cli\.mjs/)
+  })
+})
+
+test('init-run infers a tier for every task when the plan declares none', async () => {
+  await withRepo(async ({ root, planPath, io }) => {
+    assert.equal(await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io), 0)
+    const plan = await readPlan(root, 'r1')
+    assert.equal(plan.tasks.length, 2)
+    for (const task of plan.tasks) {
+      assert.ok(['cheap', 'mid', 'capable'].includes(task.tier), `bad tier for ${task.id}: ${task.tier}`)
+      assert.equal(task.tierSource, 'inferred')
+    }
+  })
+})
+
+test('init-run prints each task tier and its source in the phase breakdown', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const out = lines.join('\n')
+    assert.match(out, /phase 1: T1 \((cheap|mid|capable), inferred\)/)
+    assert.match(out, /phase 2: T2 \((cheap|mid|capable), inferred\)/)
+  })
+})
+
+test('init-run records a declared tier verbatim as declared', async () => {
+  await withRepo(async ({ root, io }) => {
+    const declaredPath = path.join(root, 'declared.md')
+    await writeFile(declaredPath, planWithModel('capable'), 'utf8')
+    assert.equal(await runCli(['init-run', declaredPath, '--run', 'r1', '--root', root], io), 0)
+    const plan = await readPlan(root, 'r1')
+    const t1 = plan.tasks.find((t) => t.id === 'T1')
+    assert.equal(t1.tier, 'capable')
+    assert.equal(t1.tierSource, 'declared')
+    const t2 = plan.tasks.find((t) => t.id === 'T2')
+    assert.equal(t2.tierSource, 'inferred')
+  })
+})
+
+test('init-run rejects an unknown declared tier and names the offending task', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const declaredPath = path.join(root, 'declared.md')
+    await writeFile(declaredPath, planWithModel('enormous'), 'utf8')
+    const code = await runCli(['init-run', declaredPath, '--run', 'r1', '--root', root], io)
+    assert.equal(code, 2)
+    const out = lines.join('\n')
+    assert.match(out, /T1/)
+    assert.match(out, /enormous/)
+    assert.match(out, /cheap, mid, capable/)
+    await assert.rejects(readPlan(root, 'r1'))
+  })
+})
+
+test('workflow --models resolves each task tier to a concrete model', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const models = JSON.stringify({ cheap: 'haiku', mid: 'sonnet', capable: 'opus' })
+    const code = await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root, '--models', models], io)
+    assert.equal(code, 0)
+    assert.match(lines.join('\n'), /"model": "(haiku|sonnet|opus)"/)
+  })
+})
+
+test('workflow with malformed --models exits 2 with a message and no stack trace', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const code = await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root, '--models', '{'], io)
+    assert.equal(code, 2)
+    const out = lines.join('\n')
+    assert.match(out, /--models must be a JSON object mapping tiers to model names/)
+    assert.doesNotMatch(out, /SyntaxError/)
+    assert.doesNotMatch(out, /at .*cli\.mjs/)
+    assert.doesNotMatch(out, /export const meta/)
+  })
+})
+
+test('fix prints a retry decision and exits 0 for an attributable agent failure', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const verdictPath = await writeVerdict(root, {
+      verdict: 'FAIL',
+      results: [{ name: 'review', kind: 'agent', status: 'fail', findings: [{ file: 'a.mjs' }] }],
+    })
+    lines.length = 0
+    const code = await runCli(['fix', '--run', 'r1', '--phase', '1', '--verdict', verdictPath, '--root', root], io)
+    assert.equal(code, 0)
+    const out = lines.join('\n')
+    assert.match(out, /"decision": "retry"/)
+    const decision = JSON.parse(out)
+    assert.deepEqual(decision.tasks.map((t) => t.taskId), ['T1'])
+    assert.equal(decision.tasks[0].round, 1)
+    assert.ok(['cheap', 'mid', 'capable'].includes(decision.tasks[0].tier))
+  })
+})
+
+test('fix escalates a fileset failure as a process violation and still exits 0', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const verdictPath = await writeVerdict(root, {
+      verdict: 'FAIL',
+      results: [{ name: 'fileset', kind: 'fileset', status: 'fail' }],
+    })
+    lines.length = 0
+    const code = await runCli(['fix', '--run', 'r1', '--phase', '1', '--verdict', verdictPath, '--root', root], io)
+    assert.equal(code, 0)
+    const out = lines.join('\n')
+    assert.match(out, /"decision": "escalate"/)
+    assert.match(out, /"reason": "process-violation"/)
+  })
+})
+
+test('fix honours the manifest fix-round budget for the phase', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await writeFile(
+      path.join(root, 'teammates.gate.json'),
+      JSON.stringify({ phases: { default: { fixRounds: 1, checks: [] } } }),
+      'utf8',
+    )
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const status = await readStatus(root, 'r1')
+    status.fixRounds = { 1: { T1: 1 } }
+    await writeFile(path.join(root, '.teammates', 'r1', 'status.json'), JSON.stringify(status), 'utf8')
+    const verdictPath = await writeVerdict(root, {
+      verdict: 'FAIL',
+      results: [{ name: 'review', kind: 'agent', status: 'fail', findings: [{ file: 'a.mjs' }] }],
+    })
+    lines.length = 0
+    const code = await runCli(['fix', '--run', 'r1', '--phase', '1', '--verdict', verdictPath, '--root', root], io)
+    assert.equal(code, 0)
+    const decision = JSON.parse(lines.join('\n'))
+    assert.equal(decision.decision, 'escalate')
+    assert.equal(decision.reason, 'budget-exhausted')
+    assert.equal(decision.taskId, 'T1')
+  })
+})
+
+test('fix prints decision none and exits 0 when nothing is failing', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const verdictPath = await writeVerdict(root, {
+      verdict: 'PASS',
+      results: [{ name: 'noop', kind: 'command', status: 'pass' }],
+    })
+    lines.length = 0
+    const code = await runCli(['fix', '--run', 'r1', '--phase', '1', '--verdict', verdictPath, '--root', root], io)
+    assert.equal(code, 0)
+    assert.match(lines.join('\n'), /"decision": "none"/)
+  })
+})
+
+// --- Task 8, fix round: the fix-round counter's writer, --phase validation for `fix`,
+// --- --models value validation, and the coverage gaps three reviewers found.
+
+// The whole point of `record-fix-round` is that `fix` stays a pure read. These tests drive
+// the counter the way the skill does — record a round at the moment a retry is dispatched,
+// then re-derive the decision — so the loop's own termination is what is under test, not
+// a hand-placed `status.fixRounds`.
+test('record-fix-round is listed in usage', async () => {
+  await withRepo(async ({ io, lines }) => {
+    assert.equal(await runCli(['nope'], io), 2)
+    assert.match(lines.join('\n'), /record-fix-round\s+--run <id> --phase <n> --task <id>/)
+  })
+})
+
+test('record-fix-round with no flags exits 2 naming every missing flag', async () => {
+  await withRepo(async ({ io, lines }) => {
+    const code = await runCli(['record-fix-round'], io)
+    assert.equal(code, 2)
+    const out = lines.join('\n')
+    assert.match(out, /missing required argument/)
+    assert.match(out, /--run/)
+    assert.match(out, /--phase/)
+    assert.match(out, /--task/)
+  })
+})
+
+test('record-fix-round increments the per-phase count for the task and prints it', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    assert.equal(
+      await runCli(['record-fix-round', '--run', 'r1', '--phase', '1', '--task', 'T1', '--root', root], io),
+      0,
+    )
+    assert.match(lines.join('\n'), /T1.*1/)
+    assert.deepEqual((await readStatus(root, 'r1')).fixRounds, { 1: { T1: 1 } })
+
+    lines.length = 0
+    assert.equal(
+      await runCli(['record-fix-round', '--run', 'r1', '--phase', '1', '--task', 'T1', '--root', root], io),
+      0,
+    )
+    assert.match(lines.join('\n'), /T1.*2/)
+    assert.deepEqual((await readStatus(root, 'r1')).fixRounds, { 1: { T1: 2 } })
+  })
+})
+
+test('record-fix-round refuses a task that is not in the named phase', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    // T2 is a phase-2 task; recording a phase-1 round against it would spend a budget that
+    // belongs to a different phase.
+    const code = await runCli(['record-fix-round', '--run', 'r1', '--phase', '1', '--task', 'T2', '--root', root], io)
+    assert.equal(code, 1)
+    assert.match(lines.join('\n'), /T2/)
+    assert.equal((await readStatus(root, 'r1')).fixRounds, undefined)
+  })
+})
+
+test('recording a round each dispatch drives fix from retry to budget-exhausted', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await writeFile(
+      path.join(root, 'teammates.gate.json'),
+      JSON.stringify({ phases: { default: { fixRounds: 2, checks: [] } } }),
+      'utf8',
+    )
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const verdictPath = await writeVerdict(root, {
+      verdict: 'FAIL',
+      results: [{ name: 'review', kind: 'agent', status: 'fail', findings: [{ file: 'a.mjs' }] }],
+    })
+    const decide = async () => {
+      lines.length = 0
+      assert.equal(
+        await runCli(['fix', '--run', 'r1', '--phase', '1', '--verdict', verdictPath, '--root', root], io),
+        0,
+      )
+      return JSON.parse(lines.join('\n'))
+    }
+    const record = async () => runCli(
+      ['record-fix-round', '--run', 'r1', '--phase', '1', '--task', 'T1', '--root', root],
+      io,
+    )
+
+    const first = await decide()
+    assert.equal(first.decision, 'retry')
+    assert.equal(first.tasks[0].round, 1)
+    await record()
+
+    const second = await decide()
+    assert.equal(second.decision, 'retry')
+    // The counter has a writer, so the round advances instead of pinning at 1 forever.
+    assert.equal(second.tasks[0].round, 2)
+    await record()
+
+    const third = await decide()
+    assert.equal(third.decision, 'escalate')
+    assert.equal(third.reason, 'budget-exhausted')
+    assert.equal(third.taskId, 'T1')
+  })
+})
+
+test('fix rejects a non-integer --phase instead of deciding unattributable', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const verdictPath = await writeVerdict(root, {
+      verdict: 'FAIL',
+      results: [{ name: 'review', kind: 'agent', status: 'fail', findings: [{ file: 'a.mjs' }] }],
+    })
+    lines.length = 0
+    // `default` is the exact token `gate` uses when --phase is omitted, so it is the most
+    // likely thing an operator carries across to `fix`.
+    const code = await runCli(['fix', '--run', 'r1', '--phase', 'default', '--verdict', verdictPath, '--root', root], io)
+    assert.equal(code, 2)
+    const out = lines.join('\n')
+    assert.match(out, /--phase <integer>/)
+    assert.doesNotMatch(out, /unattributable/)
+  })
+})
+
+test('fix accepts a zero-padded --phase and still selects the phase', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const verdictPath = await writeVerdict(root, {
+      verdict: 'FAIL',
+      results: [{ name: 'review', kind: 'agent', status: 'fail', findings: [{ file: 'a.mjs' }] }],
+    })
+    lines.length = 0
+    const code = await runCli(['fix', '--run', 'r1', '--phase', '01', '--verdict', verdictPath, '--root', root], io)
+    assert.equal(code, 0)
+    const decision = JSON.parse(lines.join('\n'))
+    assert.equal(decision.decision, 'retry')
+    assert.deepEqual(decision.tasks.map((t) => t.taskId), ['T1'])
+  })
+})
+
+test('fix rejects a --phase that disagrees with the verdict it was handed', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const verdictPath = await writeVerdict(root, {
+      verdict: 'FAIL',
+      phase: 1,
+      results: [{ name: 'review', kind: 'agent', status: 'fail', findings: [{ file: 'a.mjs' }] }],
+    })
+    lines.length = 0
+    const code = await runCli(['fix', '--run', 'r1', '--phase', '3', '--verdict', verdictPath, '--root', root], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /phase/)
+    assert.doesNotMatch(lines.join('\n'), /"decision"/)
+  })
+})
+
+test('the fix-round budget is read under the same manifest key the gate used for checks', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    // The manifest is keyed by phase NAME. `gate --phase integration` picks that phase's
+    // checks; adjudicating that same gate must pick that phase's fixRounds, not default's.
+    await writeFile(
+      path.join(root, 'teammates.gate.json'),
+      JSON.stringify({
+        phases: {
+          default: { fixRounds: 2, checks: [{ name: 'noop', kind: 'command', run: 'node -e ""' }] },
+          integration: { fixRounds: 5, checks: [{ name: 'noop', kind: 'command', run: 'node -e ""' }] },
+        },
+      }),
+      'utf8',
+    )
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    assert.equal(
+      await runCli(
+        ['gate', '--run', 'r1', '--plan', 'plan.md', '--phase', 'integration', '--no-fleet', '--root', root],
+        io,
+      ),
+      0,
+    )
+    const gateOut = JSON.parse(lines[lines.length - 1])
+    const verdictPath = await writeVerdict(root, {
+      ...gateOut,
+      verdict: 'FAIL',
+      results: [{ name: 'review', kind: 'agent', status: 'fail', findings: [{ file: 'a.mjs' }] }],
+    })
+    // Four rounds already spent: over the default budget of 2, under integration's 5.
+    const status = await readStatus(root, 'r1')
+    status.fixRounds = { 1: { T1: 4 } }
+    await writeFile(path.join(root, '.teammates', 'r1', 'status.json'), JSON.stringify(status), 'utf8')
+
+    lines.length = 0
+    assert.equal(
+      await runCli(['fix', '--run', 'r1', '--phase', '1', '--verdict', verdictPath, '--root', root], io),
+      0,
+    )
+    const decision = JSON.parse(lines.join('\n'))
+    assert.equal(decision.decision, 'retry')
+    assert.equal(decision.tasks[0].round, 5)
+  })
+})
+
+test('workflow rejects --models values that are not non-empty strings', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    for (const models of ['{"mid":{"evil":1}}', '{"mid":1}', '{"mid":null}', '{"mid":""}', '{"mid":["a"]}']) {
+      lines.length = 0
+      const code = await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root, '--models', models], io)
+      assert.equal(code, 2, `expected rejection for ${models}`)
+      assert.match(lines.join('\n'), /--models/)
+      assert.doesNotMatch(lines.join('\n'), /export const meta/)
+    }
+  })
+})
+
+test('workflow rejects --models given as a bare switch instead of dropping it', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const code = await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root, '--models'], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /--models/)
+    assert.doesNotMatch(lines.join('\n'), /export const meta/)
+  })
+})
+
+test('workflow rejects a --models payload that is not a JSON object', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    // An array, a null, a bare scalar and a quoted string all parse as valid JSON; none of
+    // them is a tier map, and each would otherwise reach generatePhaseWorkflow.
+    for (const models of ['["sonnet"]', 'null', '5', 'true', '"sonnet"']) {
+      lines.length = 0
+      const code = await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root, '--models', models], io)
+      assert.equal(code, 2, `expected rejection for ${models}`)
+      assert.match(lines.join('\n'), /--models must be a JSON object mapping tiers to model names/)
+      assert.doesNotMatch(lines.join('\n'), /export const meta/)
+    }
+  })
+})
+
+test('fix reads a verdict file the real gate produced, not a hand-written one', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    // A full, derived gate — no --no-fleet — so the fileset check really runs and really
+    // fails (no teammates/r1/T1 branch exists). Every field `fix` reads (`results`, each
+    // result's `kind` and `status`, the bound `phase`) is produced by the gate itself, so
+    // a rename or a dropped field on either side fails here instead of in production.
+    await writeEnforcementManifest(root)
+    lines.length = 0
+    const gateCode = await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--root', root], io)
+    assert.equal(gateCode, 1)
+    const verdictPath = path.join(root, 'gate-verdict.json')
+    await writeFile(verdictPath, lines[lines.length - 1], 'utf8')
+    const gateOut = JSON.parse(lines[lines.length - 1])
+    assert.equal(gateOut.phase, 1)
+    assert.ok(gateOut.results.some((r) => r.name === 'fileset' && r.status === 'fail'))
+
+    lines.length = 0
+    const code = await runCli(['fix', '--run', 'r1', '--phase', '1', '--verdict', verdictPath, '--root', root], io)
+    assert.equal(code, 0)
+    const decision = JSON.parse(lines.join('\n'))
+    // A fileset failure is a process violation. If the gate ever stopped labelling its
+    // results with `kind`, this would come back `unattributable` instead.
+    assert.equal(decision.decision, 'escalate')
+    assert.equal(decision.reason, 'process-violation')
+    assert.equal(decision.check, 'fileset')
+  })
+})
+
+test('fix does not retry a later phase task whose file a finding cites', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    // b.mjs belongs to T2, a phase-2 task. Adjudicating phase 1 must not reach it: the
+    // finding is unattributable within phase 1, and phase 2 has not run yet.
+    const verdictPath = await writeVerdict(root, {
+      verdict: 'FAIL',
+      results: [{ name: 'review', kind: 'agent', status: 'fail', findings: [{ file: 'b.mjs' }] }],
+    })
+    lines.length = 0
+    const code = await runCli(['fix', '--run', 'r1', '--phase', '1', '--verdict', verdictPath, '--root', root], io)
+    assert.equal(code, 0)
+    const decision = JSON.parse(lines.join('\n'))
+    assert.equal(decision.decision, 'escalate')
+    assert.equal(decision.reason, 'unattributable')
+    assert.deepEqual(decision.tasks, [])
+  })
+})
