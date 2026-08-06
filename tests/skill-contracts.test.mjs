@@ -186,11 +186,17 @@ test('phase-gate states that conflicts are escalated rather than retried', async
 test('phase-gate documents preview.link and states links are shared, not copied', async () => {
   const { body } = await skill('phase-gate')
   assert.match(body, /preview\.link/, 'phase-gate must mention preview.link')
-  assert.match(body, /shared.*not.*copies?/i, 'phase-gate must state links are shared, not copies')
+  // Bind the polarity within one sentence: require "shared", "not", and "copies" to appear before the
+  // next period, so the assertion fails if the text says "copied, not shared" or inverts the claim.
+  const normalized = body.replace(/\s+/g, ' ')
+  assert.match(normalized, /shared[^.]*not[^.]*copies?/i, 'phase-gate must state links are shared, not copies, in one sentence')
 })
 
 test('phase-gate states that a failed link fails the merge check', async () => {
   const { body } = await skill('phase-gate')
   const normalized = body.replace(/\s+/g, ' ')
-  assert.match(normalized, /link.*fail.*merge.*check/i, 'phase-gate must state, in one phrase, that a failed link fails the merge check')
+  // Bind the polarity within one sentence: require "link", "is reported", "merge", and "fail" to appear
+  // before the next period, so the assertion fails if the text says "is NOT reported" or changes which
+  // check fails. Do not match loose subsequences across the entire document.
+  assert.match(normalized, /link[^.]*is reported[^.]*merge[^.]*fail/i, 'phase-gate must state, in one sentence, that a link is reported as a merge failure')
 })
