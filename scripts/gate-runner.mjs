@@ -465,6 +465,12 @@ export async function runChecks(checks, ctx = {}) {
 
 const RECOGNIZED = new Set(['pass', 'fail', 'skip', 'pending'])
 
+// Kinds the gate computes for itself rather than reading from the manifest. They are real
+// results — they fail, they block, they are reported — but they are not evidence that anything
+// the manifest asked for was actually verified, so they do not satisfy the fail-closed
+// "some check ran" clause below.
+const GATE_COMPUTED_KINDS = new Set(['merge'])
+
 export function aggregateVerdict(results) {
   // An unrecognized or missing status is a failure, never a pass. This function is the
   // single source of truth for whether a phase proceeds; it must never fail open.
@@ -478,6 +484,15 @@ export function aggregateVerdict(results) {
   const optionalFailed = results.filter((r) => r.status === 'fail' && r.optional).map((r) => r.name)
   const skipped = results.filter((r) => r.status === 'skip').map((r) => r.name)
   const pending = results.filter((r) => r.status === 'pending' && !r.optional).map((r) => r.name)
-  const passed = results.length > 0 && failed.length === 0 && pending.length === 0
+  // "At least one check ran" is decided over the manifest-supplied results only. `runChecks`
+  // prepends the gate's own `merge` result to every fleet check list, so counting `results`
+  // wholesale would read a check list of one self-generated pass as a verified phase — which is
+  // exactly what an enforced agent buys by emptying the working-tree manifest, the same edit
+  // that stops `fileset` and `ownership` from running. Confirmed reachable: the working tree's
+  // manifest is loaded with plain `fs` and never compared against the committed copy. A
+  // manifest entry that merely *claims* a gate-computed kind is excluded here too; it lands as
+  // a non-optional pending and blocks on its own, so exclusion only ever fails closed.
+  const verified = results.filter((r) => !GATE_COMPUTED_KINDS.has(r.kind))
+  const passed = verified.length > 0 && failed.length === 0 && pending.length === 0
   return { verdict: passed ? 'PASS' : 'FAIL', failed, optionalFailed, skipped, pending }
 }

@@ -1149,6 +1149,101 @@ test('the preview worktree is removed once, after the last check has run inside 
   assert.equal(order.filter((o) => o === 'remove').length, 1)
 })
 
+// The fail-closed clause in aggregateVerdict ("no checks ran, so nothing was verified") has to
+// survive the gate prepending its own computed results to the list. An enforced agent that
+// empties the working-tree manifest — the very edit that stops `fileset` and `ownership` from
+// running — must not turn the phase green just because the gate's own `merge` check is sitting
+// in the results array. The regression test for this invariant that calls aggregateVerdict([])
+// directly cannot see it: the array is never empty by the time it is aggregated. These go
+// through runChecks.
+test('a manifest that contributed zero checks fails the phase even though the gate computed a merge result', async () => {
+  const ctx = previewCtx({ git: previewGit(), exec: recordingExec([]) })
+  const results = await runChecks([], ctx)
+  assert.deepEqual(results.map((r) => [r.name, r.status]), [['merge', 'pass']])
+  const verdict = aggregateVerdict(results)
+  assert.equal(verdict.verdict, 'FAIL', 'a passing self-generated merge is not a verified phase')
+})
+
+test('an empty manifest fails the phase on every preview outcome, and matches --no-fleet', async () => {
+  const outcomes = {
+    clean: previewGit(),
+    conflicted: previewGit({ mergeInto: async () => ['a.mjs'] }),
+    // mergeInto reporting a conflict with no paths: withMergePreview throws, so this is the
+    // preview-could-not-be-built path.
+    unbuildable: previewGit({ mergeInto: async () => [] }),
+  }
+  for (const [name, git] of Object.entries(outcomes)) {
+    const results = await runChecks([], previewCtx({ git, exec: recordingExec([]) }))
+    assert.equal(aggregateVerdict(results).verdict, 'FAIL', `empty manifest passed on the ${name} preview`)
+  }
+  // The solo path builds no preview at all and has always failed closed here. The two modes
+  // must agree: an empty check list is never a pass.
+  assert.equal(aggregateVerdict(await runChecks([], { cwd: '/project/root', solo: true })).verdict, 'FAIL')
+})
+
+// The counterpart: one real manifest check is enough to make the list non-empty, so the fix
+// above cannot be satisfied by failing every fleet phase.
+test('a single passing manifest check still yields PASS alongside the computed merge result', async () => {
+  const ctx = previewCtx({ git: previewGit(), exec: recordingExec([]) })
+  const results = await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], ctx)
+  assert.equal(aggregateVerdict(results).verdict, 'PASS')
+})
+
+// The preview must be built from the *run branch*, the tree integration actually merges into,
+// not from the base branch. In a two-phase run whose phase 1 is already merged into the run
+// branch, a preview built from the base would hand phase 2 a tree with none of phase 1's code
+// in it: command checks fail against a tree integration will never produce, and a
+// phase-1/phase-2 conflict is blamed on the wrong pair. Nothing else asserts the ref, so
+// swapping it stays green.
+test('the preview worktree is created from the run branch, not the base branch', async () => {
+  const bases = []
+  const ctx = previewCtx({
+    git: previewGit({ addWorktreeDetached: async (dir, base) => { bases.push(base); return dir } }),
+    exec: recordingExec([]),
+  })
+  await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], ctx)
+  assert.deepEqual(bases, [RUN_BRANCH])
+  assert.notEqual(bases[0], BASE_BRANCH)
+})
+
+// The previewed branch set is the current phase's, resolved exactly the way the fileset check
+// resolves it. Without this, a phase-2 teammate pushing a branch while phase 1 is being gated
+// gets merged into phase 1's preview, and a conflict or a broken command among branches outside
+// the phase fails phase 1 — sending the fix loop at tasks that are not even in it.
+test('only the current phase\'s branches are merged into the preview', async () => {
+  const merged = []
+  const ctx = previewCtx({
+    git: previewGit({ mergeInto: async (_dir, branches) => { merged.push(...branches); return null } }),
+    exec: recordingExec([]),
+    tasks: [T1_TASK, T2_PHASE1_TASK, { id: 'T3', phase: 2, files: ['c.mjs'] }],
+  })
+  await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], ctx)
+  assert.deepEqual(merged, [T1_BRANCH, T2_BRANCH])
+  assert.ok(!merged.includes('teammates/r1/T3'), 'a phase-2 branch must not reach a phase-1 preview')
+})
+
+// The `previewed` guard exists so a throw raised *after* the callback resolved can never re-run
+// checks that already ran. Unreachable with the real accessor — its removeWorktree is async, so
+// withMergePreview's `.catch()` swallows it — but reachable with one that throws synchronously,
+// which is exactly the shape a future edit could introduce.
+test('a throw raised after the checks already ran does not run them a second time', async () => {
+  const calls = []
+  let branchExistsCalls = 0
+  const git = previewGit({
+    branchExists: async () => { branchExistsCalls += 1; return true },
+    // Synchronous throw: `git.removeWorktree(dir).catch(...)` never gets a promise to catch, so
+    // the rejection escapes the `finally` after `run` has already resolved.
+    removeWorktree: () => { throw new Error('worktree teardown boom') },
+  })
+  const results = await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], previewCtx({ git, exec: recordingExec(calls) }))
+
+  assert.equal(branchExistsCalls, 1, 'the branch set must not be reassembled for a second run')
+  assert.equal(calls.length, 1, 'the command check must not execute twice')
+  assert.deepEqual(results.map((r) => [r.name, r.status]), [['merge', 'fail'], ['test', 'fail']])
+  assert.match(results[0].output, /worktree teardown boom/)
+  assert.equal(aggregateVerdict(results).verdict, 'FAIL')
+})
+
 test('a branch lookup that throws while assembling the preview fails the merge check, not the run', async () => {
   const calls = []
   const ctx = previewCtx({
