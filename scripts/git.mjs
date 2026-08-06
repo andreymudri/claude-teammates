@@ -30,6 +30,30 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
 
   const isNonEmptyString = (v) => typeof v === 'string' && v.trim() !== ''
 
+  // --end-of-options blocks flag injection but not NAMESPACE PRECEDENCE: git resolves a bare
+  // name through refs/tags/ BEFORE refs/heads/, warns on stderr only, and exits 0. One
+  // ordinary `git tag teammates/r1/T1 <fork-point>` inside a teammate's own worktree is
+  // therefore enough to make `worktree add` check out, and `merge` merge, a commit that
+  // carries none of the teammate's work — the gate then runs the suite against a tree missing
+  // the code it is meant to be testing and records a pass. It also fires by accident wherever
+  // a release tag and a branch share a name. Every name that reaches a ref-consuming git
+  // command goes through here first: if a branch of that name exists, its sha wins outright.
+  // Anything that is not a branch (a sha, HEAD, an already-qualified refs/… ref) is passed on
+  // unchanged, so the qualification never narrows what a caller can ask for.
+  const qualifyBranch = async (name, prefix = []) => {
+    if (!isNonEmptyString(name)) {
+      throw new GitError(`a branch name must be a non-empty string, got ${JSON.stringify(name)}`)
+    }
+    if (name.startsWith('refs/')) return name
+    const { code, stdout } = await exec(
+      [...prefix, 'rev-parse', '--verify', '--quiet', '--end-of-options', `refs/heads/${name}`, '--'],
+      cwd,
+    )
+    // Exit 1 with no output is git's "no such branch"; only a resolved sha displaces the name.
+    if (code === 0 && stdout.trim() !== '') return stdout.trim()
+    return name
+  }
+
   return {
     async changedFiles({ base, branch }) {
       // base/branch build the rev range by string interpolation below, so an empty or
@@ -147,6 +171,60 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
       // the shadowing primitive the boundary exists to remove.
       await run(['fetch', '--no-tags', '--end-of-options', from, `+${src}:${dst}`])
       return (await run(['rev-parse', '--verify', '--end-of-options', dst, '--'])).trim()
+    },
+    async addWorktreeDetached(dir, ref) {
+      if (!isNonEmptyString(dir) || !isNonEmptyString(ref)) {
+        throw new GitError(`addWorktreeDetached requires non-empty dir and ref, got dir=${JSON.stringify(dir)} ref=${JSON.stringify(ref)}`)
+      }
+      await run(['worktree', 'add', '--detach', '--end-of-options', dir, await qualifyBranch(ref)])
+      return dir
+    },
+    async removeWorktree(dir) {
+      if (!isNonEmptyString(dir)) {
+        throw new GitError(`removeWorktree requires a non-empty dir, got ${JSON.stringify(dir)}`)
+      }
+      await run(['worktree', 'remove', '--force', '--end-of-options', dir])
+      return true
+    },
+    // Returns null when every branch merged, or the conflicted paths when one did not.
+    // Throws a GitError when the merge FAILED rather than conflicted — the two are different
+    // answers and the caller cannot act on them the same way.
+    //
+    // One merge per branch, in order. Handing git three or more heads at once selects the
+    // octopus strategy, which RESETS the working tree and index before exiting (verified on
+    // git 2.53.0: exit 2, "Merge with strategy octopus failed", and nothing left carrying U
+    // status). Read after that reset, --diff-filter=U comes back empty — and an empty array is
+    // truthy, so the caller took the conflict branch and reported a conflict naming no
+    // branches and no paths. A phase with three or more task branches is the normal case, not
+    // an edge one. Merging one at a time keeps every merge on the recursive/ort strategy,
+    // which leaves the unmerged index entries in place, and matches the order tm-integrator
+    // merges in — so the preview's shape stays the one the integrator will actually produce.
+    //
+    // `--no-ff` keeps each merge a real merge commit, as tm-integrator produces.
+    async mergeInto(dir, branches) {
+      if (!isNonEmptyString(dir)) {
+        throw new GitError(`mergeInto requires a non-empty dir, got ${JSON.stringify(dir)}`)
+      }
+      if (!Array.isArray(branches) || branches.length === 0 || !branches.every(isNonEmptyString)) {
+        throw new GitError(`mergeInto requires a non-empty array of branch names, got ${JSON.stringify(branches)}`)
+      }
+      for (const branch of branches) {
+        const ref = await qualifyBranch(branch, ['-C', dir])
+        const { code, stderr } = await exec(
+          ['-C', dir, 'merge', '--no-ff', '-m', 'gate merge preview', '--end-of-options', ref], cwd,
+        )
+        if (code === 0) continue
+        const out = await exec(['-C', dir, 'diff', '--name-only', '--diff-filter=U'], cwd)
+        const conflicted = out.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+        // A conflict is a merge that failed AND left unmerged paths. Everything else — an
+        // unset user.email in CI, a branch deleted out from under the run, unrelated
+        // histories, a stale index.lock — is a failure whose reason lives only in git's
+        // stderr. Returning [] for those would discard the reason and dress the failure up as
+        // a conflict that names nothing.
+        if (conflicted.length > 0) return conflicted
+        throw new GitError(`git merge ${branch} into ${dir} failed with no unmerged paths: ${stderr.trim() || `exit ${code}`}`)
+      }
+      return null
     },
   }
 }
