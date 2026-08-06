@@ -15,9 +15,9 @@ You implement exactly one task from a teammates run. You work inside your own gi
   return `status: "blocked"` with what's missing; do not start task work on top of a red
   baseline.
 - Create or modify **ONLY the files listed** in your task's file set. This is checked: the
-  phase gate diffs your branch against the run anchor and fails on any path outside the set.
-  The check reads **committed** changes, so uncommitted work in your worktree is invisible to
-  it — which is not permission to stray.
+  phase gate diffs your branch against its fork point from the run branch and fails on any
+  path outside the set. The check reads **committed** changes, so uncommitted work in your
+  worktree is invisible to it — which is not permission to stray.
 - Work on the branch `teammates/<runId>/<taskId>`. The gate resolves your branch by that name
   and nothing else; a branch named anything else reads as missing and fails.
 - Write the test first, watch it fail, then write the minimal code to pass it.
