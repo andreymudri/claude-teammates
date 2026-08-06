@@ -29,8 +29,29 @@ those you execute:
   connected and the check is `optional`, record `skip` and say so out loud. A missing optional
   server is never a silent pass.
 
-Feed the completed results back through the CLI verdict shape: FAIL if anything failed or if
-any non-optional check is still pending.
+Then hand those results back and let the CLI recompute:
+
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" gate --run <runId> --plan <planPath> --root <project root> --results <path>
+
+The file is `{ "results": [ { "name": "review", "kind": "agent", "status": "pass", "findings": [] } ] }`.
+Only `agent` and `mcp` checks may be supplied; a `command`, `fileset`, or `ownership` entry is
+rejected, because those are computed and supplying one would be a way to hand the gate a passing
+enforcement check. The verdict is recomputed from the merged set, so a recorded PASS is always
+CLI-computed — never hand-written into `status.json`.
+
+## What the `merge` check does
+
+Before the `command` checks run, the gate merges the phase's task branches into a scratch
+worktree under the system temp directory and runs those checks there. So `test` measures what
+integration will actually produce, not the run branch as it stands.
+
+A conflict fails the `merge` check and names both branches and the conflicting paths. The
+`command` checks are then recorded `skip` — never `pass`. Treat a conflict like a process
+violation: escalate it, do not retry. No single teammate can fix a conflict between two file
+sets, so redispatching one owner cannot resolve it.
+
+The preview is a preview. `tm-integrator` still performs the real merge with `--no-ff`, and a
+passing preview is not permission to skip it.
 
 ## On FAIL
 

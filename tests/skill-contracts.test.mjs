@@ -130,3 +130,17 @@ test('tm-implementer forbids weakening a test to satisfy a fix-round finding', a
   const body = await readFile(new URL('../agents/tm-implementer.md', import.meta.url), 'utf8')
   assert.match(body, /do not weaken or delete a test/i)
 })
+
+test('phase-gate documents --results flag and rejects computed checks', async () => {
+  const { body } = await skill('phase-gate')
+  assert.match(body, /--results/, 'phase-gate must document the --results flag')
+  assert.match(body, /command.*fileset.*ownership/, 'phase-gate must mention command, fileset, and ownership')
+  assert.match(body, /entry is\s+rejected/, 'phase-gate must state that entries are rejected')
+})
+
+test('phase-gate states that conflicts are escalated rather than retried', async () => {
+  const { body } = await skill('phase-gate')
+  assert.match(body, /merge.*check/i, 'phase-gate must document the merge check')
+  const normalized = body.replace(/\s+/g, ' ')
+  assert.match(normalized, /conflict.*escalate.*do not retry/i, 'phase-gate must state that conflicts are escalated and not retried')
+})
