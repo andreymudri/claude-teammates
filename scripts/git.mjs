@@ -2,6 +2,9 @@ import { spawn } from 'node:child_process'
 
 export class GitError extends Error {}
 
+// Where the Claude Code harness creates agent worktrees, relative to the repo root.
+const HARNESS_WORKTREES = /^\.claude\//
+
 // argv array, shell: false. Branch names reach git as a single argv entry, so a name
 // containing shell metacharacters is data, never a command.
 export function defaultGitExec(args, cwd) {
@@ -64,8 +67,19 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
     async currentBranch() {
       return (await run(['rev-parse', '--abbrev-ref', 'HEAD'])).trim()
     },
+    // `--porcelain` reports untracked paths, and the harness stores each teammate's worktree
+    // under `.claude/` inside the repo. Those directories exist for the whole run, so counting
+    // them would fail the ownership check at every phase of every fleet — in a repo that has
+    // not happened to ignore that path. The plugin, not the project, chose that location, so
+    // the exemption belongs here rather than in each adopting project's .gitignore.
+    //
+    // Only that one path is exempt. Every other untracked file still counts: a stray file in
+    // the main worktree is exactly what this check exists to catch.
     async isDirty() {
-      return (await run(['status', '--porcelain'])).trim() !== ''
+      const lines = (await run(['-c', 'core.quotePath=false', 'status', '--porcelain']))
+        .split('\n')
+        .filter((line) => line.trim() !== '')
+      return lines.some((line) => !HARNESS_WORKTREES.test(line.slice(3)))
     },
     async branchExists(name) {
       const args = ['rev-parse', '--verify', '--quiet', `refs/heads/${name}`]

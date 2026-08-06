@@ -122,6 +122,35 @@ test('isDirty is false when porcelain output is empty', async () => {
   assert.equal(await createGit({ exec }).isDirty(), false)
 })
 
+// The harness creates these for the whole run. Counting them would fail ownership at every
+// phase of every fleet, in any repo that has not happened to ignore the path.
+test('isDirty ignores the harness worktree directory', async () => {
+  const { exec } = recorder({ code: 0, stdout: '?? .claude/\n', stderr: '' })
+  assert.equal(await createGit({ exec }).isDirty(), false)
+})
+
+test('isDirty ignores nested harness worktree paths', async () => {
+  const { exec } = recorder({ code: 0, stdout: '?? .claude/worktrees/wf_abc-1/src/x.mjs\n', stderr: '' })
+  assert.equal(await createGit({ exec }).isDirty(), false)
+})
+
+// The exemption is one path, not a licence for untracked files generally.
+test('isDirty still reports a stray untracked file alongside harness worktrees', async () => {
+  const { exec } = recorder({ code: 0, stdout: '?? .claude/\n?? stray.mjs\n', stderr: '' })
+  assert.equal(await createGit({ exec }).isDirty(), true)
+})
+
+test('isDirty still reports a modified tracked file alongside harness worktrees', async () => {
+  const { exec } = recorder({ code: 0, stdout: '?? .claude/\n M scripts/git.mjs\n', stderr: '' })
+  assert.equal(await createGit({ exec }).isDirty(), true)
+})
+
+// A path merely starting with the same letters is not the harness directory.
+test('isDirty does not exempt a lookalike path', async () => {
+  const { exec } = recorder({ code: 0, stdout: '?? .claude-notes/x.md\n', stderr: '' })
+  assert.equal(await createGit({ exec }).isDirty(), true)
+})
+
 test('currentBranch trims the abbreviated ref', async () => {
   const { calls, exec } = recorder({ code: 0, stdout: 'master\n', stderr: '' })
   assert.equal(await createGit({ exec }).currentBranch(), 'master')
