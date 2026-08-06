@@ -25,6 +25,25 @@ function fakeGit({ conflictPaths = null } = {}) {
   }
 }
 
+// A git accessor that records operation order into a shared array, so tests can pin whether
+// the worktree teardown happens before or after the callback settles.
+function orderedGit(order, { conflictPaths = null } = {}) {
+  return {
+    async addWorktreeDetached(dir, ref) {
+      order.push('addWorktreeDetached')
+      return dir
+    },
+    async mergeInto(dir, branches) {
+      order.push('mergeInto')
+      return conflictPaths
+    },
+    async removeWorktree(dir) {
+      order.push('removeWorktree')
+      return true
+    },
+  }
+}
+
 test('a clean merge calls run with a non-null path and the merged branch list', async () => {
   const git = fakeGit()
   const branches = ['teammates/r1/T1', 'teammates/r1/T2']
@@ -73,6 +92,69 @@ test('the worktree is removed after a conflict', async () => {
   await withMergePreview({ git, base: 'main', branches: ['T1'], run: async () => {} })
   const removeCalls = git.calls.filter((c) => c.op === 'removeWorktree')
   assert.equal(removeCalls.length, 1)
+})
+
+test('an empty conflict array is a failed preview, not a clean merge and not a reportable conflict', async () => {
+  // mergeInto can return [] when the merge fails without leaving unmerged paths: an octopus
+  // merge of 3+ branches resets the index before exiting, and non-conflict failures (unset
+  // user.email, a deleted branch, unrelated histories, a stale index.lock) never produce one
+  // either. `[]` must not be treated as truthy-conflict-with-no-branches, and must not fall
+  // through to the clean path. withMergePreview throws instead, so the failure can never be
+  // mistaken for either outcome by a caller.
+  const git = fakeGit({ conflictPaths: [] })
+  let runCalled = false
+  await assert.rejects(
+    () => withMergePreview({
+      git, base: 'main', branches: ['T1'],
+      run: async () => { runCalled = true },
+    }),
+    /merge preview failed/,
+  )
+  assert.equal(runCalled, false, 'the callback must not run on a failed preview')
+  const removeCalls = git.calls.filter((c) => c.op === 'removeWorktree')
+  assert.equal(removeCalls.length, 1, 'the worktree must still be cleaned up')
+})
+
+test('the clean-merge branch awaits the callback before removing the worktree', async () => {
+  const order = []
+  const git = orderedGit(order)
+  await withMergePreview({
+    git, base: 'main', branches: ['T1'],
+    run: async () => {
+      order.push('run:start')
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      order.push('run:end')
+    },
+  })
+  assert.deepEqual(order, ['addWorktreeDetached', 'mergeInto', 'run:start', 'run:end', 'removeWorktree'])
+})
+
+test('the conflict branch awaits the callback before removing the worktree', async () => {
+  const order = []
+  const git = orderedGit(order, { conflictPaths: ['a.mjs'] })
+  await withMergePreview({
+    git, base: 'main', branches: ['T1'],
+    run: async () => {
+      order.push('run:start')
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      order.push('run:end')
+    },
+  })
+  assert.deepEqual(order, ['addWorktreeDetached', 'mergeInto', 'run:start', 'run:end', 'removeWorktree'])
+})
+
+test('an accessor that throws from addWorktreeDetached still cleans up and propagates the error', async () => {
+  const git = fakeGit()
+  git.addWorktreeDetached = async (dir, ref) => {
+    git.calls.push({ op: 'addWorktreeDetached', dir, ref })
+    throw new Error('boom-add')
+  }
+  await assert.rejects(
+    () => withMergePreview({ git, base: 'main', branches: ['T1'], run: async () => {} }),
+    /boom-add/,
+  )
+  const removeCalls = git.calls.filter((c) => c.op === 'removeWorktree')
+  assert.equal(removeCalls.length, 1, 'the worktree must still be cleaned up even when addWorktreeDetached throws')
 })
 
 test('the worktree is removed after run throws, and the throw propagates', async () => {

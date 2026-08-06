@@ -12,7 +12,18 @@ export async function withMergePreview({ git, base, branches = [], run }) {
   try {
     await git.addWorktreeDetached(dir, base)
     const conflict = await git.mergeInto(dir, branches)
-    if (conflict) return run({ path: null, conflict })
+    if (conflict) {
+      // An empty array is not a clean merge and not a reportable conflict: an octopus merge
+      // of three or more branches resets the index before exiting, and non-conflict failures
+      // (unset user.email, a deleted branch, unrelated histories, a stale index.lock) never
+      // produce unmerged paths either. Passing `[]` through would let a caller mistake it for
+      // a conflict naming no branches, or silently fall back to the raw worktree. Throw instead
+      // so the failure cannot be confused with either outcome.
+      if (conflict.length === 0) {
+        throw new Error('merge preview failed: mergeInto reported a conflict with no paths')
+      }
+      return await run({ path: null, conflict })
+    }
     return await run({ path: dir, merged: branches })
   } finally {
     await git.removeWorktree(dir).catch(() => {})
