@@ -126,11 +126,26 @@ export function parseConstraints(markdown) {
   if (!heading) return []
   const rest = text.slice(heading.index + heading[0].length)
   const next = /^#{1,6}\s/m.exec(rest)
-  return (next ? rest.slice(0, next.index) : rest)
-    .split('\n')
-    .map((line) => /^\s*-\s+(.*\S)\s*$/.exec(line))
-    .filter(Boolean)
-    .map((m) => m[1])
+  const items = []
+  // A bullet wrapped over two lines is one constraint, not a truncated one. Keeping only
+  // the first line would hand every teammate the opening clause of a rule and silently
+  // drop the rest — the failure is invisible in the brief, which reads as a complete
+  // sentence. An indented, non-blank line directly under an item is joined onto it; a
+  // blank line closes the item, so a following indented paragraph is not swallowed. A
+  // nested bullet matches the bullet pattern first and so stays a standalone constraint.
+  let open = false
+  for (const line of (next ? rest.slice(0, next.index) : rest).split('\n')) {
+    const bullet = /^\s*-\s+(.*\S)\s*$/.exec(line)
+    if (bullet) {
+      items.push(bullet[1])
+      open = true
+    } else if (open && /^\s+\S/.test(line)) {
+      items[items.length - 1] += ` ${line.trim()}`
+    } else {
+      open = false
+    }
+  }
+  return items
 }
 
 // runId/taskId become path segments under root/.teammates. Without containment, a value

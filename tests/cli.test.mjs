@@ -1896,6 +1896,31 @@ test('init-run re-run after a plan change updates totalPhases and tasks while pr
   })
 })
 
+// `phase` is run history too: it is how far the run got. Re-writing it as 1 on a re-init
+// is the same "re-init erases what the gate recorded" failure as dropping `gates`, and it
+// is the one that silently rewinds a mid-run plan amendment back to the first phase.
+test('init-run re-run preserves a recorded phase rather than rewinding the run to 1', async () => {
+  await withRepo(async ({ root, planPath, io }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const status = await readStatus(root, 'r1')
+    status.phase = 2
+    await writeFile(path.join(root, '.teammates', 'r1', 'status.json'), JSON.stringify(status), 'utf8')
+
+    assert.equal(await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io), 0)
+    const after = await readStatus(root, 'r1')
+    assert.equal(after.phase, 2, 're-init must not rewind a run that already reached phase 2')
+  })
+})
+
+// The other direction: with no previous status there is nothing to carry forward, so a
+// fresh run must start at 1 rather than at undefined.
+test('init-run on a fresh run id starts at phase 1', async () => {
+  await withRepo(async ({ root, planPath, io }) => {
+    await runCli(['init-run', planPath, '--run', 'fresh', '--root', root], io)
+    assert.equal((await readStatus(root, 'fresh')).phase, 1)
+  })
+})
+
 // --- workflow wires --plan and --base through to the generated brief -----------------
 //
 // Evaluates the generated body with stubbed primitives and returns every prompt the
@@ -1992,9 +2017,32 @@ test('workflow with a valueless --base renders the no-base brief rather than the
     lines.length = 0
     const code = await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root, '--base'], io)
     assert.equal(code, 0, lines.join('\n'))
-    const [prompt] = await captureAgentPrompts(lines.join('\n'))
+    const src = lines.join('\n')
+    // Structural, not prose: the emitted BASE_BRANCH literal is what cli.mjs decides here.
+    // Matching a word out of the template's warning paragraph would turn a reword of that
+    // paragraph into a failure of this test, which is about cli.mjs and nothing else.
+    assert.match(src, /const BASE_BRANCH = ''/, 'a valueless --base must reach the generator as the empty string')
+    const [prompt] = await captureAgentPrompts(src)
     assert.ok(!prompt.includes('git checkout -B teammates/r1/T1 true'), 'a valueless --base must not become a branch')
-    assert.match(prompt, /UNVERIFIED/)
+  })
+})
+
+// The symmetric case. Without the `=== true` guard, `--plan` written bare reaches readFile
+// as the boolean `true`, which throws — so the command exits 2 with "--plan true could not
+// be read" instead of rendering the no-plan brief and exiting 0.
+test('workflow with a valueless --plan renders the no-plan brief rather than failing to read "true"', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const code = await runCli(
+      ['workflow', '--run', 'r1', '--phase', '1', '--root', root, '--base', 'main', '--plan'],
+      io,
+    )
+    assert.equal(code, 0, lines.join('\n'))
+    const src = lines.join('\n')
+    assert.match(src, /const PLAN_PATH = ''/, 'a valueless --plan must reach the generator as the empty string')
+    const [prompt] = await captureAgentPrompts(src)
+    assert.ok(!prompt.includes('PLAN. Read true'), 'a valueless --plan must not become a plan path')
   })
 })
 
@@ -2046,4 +2094,41 @@ test('parseConstraints returns [] for a plan without a Global Constraints sectio
 // constraints last, and it has no following heading to terminate on.
 test('parseConstraints reads a section that runs to the end of the file', async () => {
   assert.deepEqual(parseConstraints('# Plan\n\n## Global Constraints\n\n- a\n- b\n'), ['a', 'b'])
+})
+
+// A wrapped bullet is one constraint, not a truncated one. A plan author who wraps a long
+// rule at the margin must not ship every teammate its first line and silently drop the rest.
+test('parseConstraints joins a bullet wrapped over more than one line', async () => {
+  assert.deepEqual(
+    parseConstraints('## Global Constraints\n\n- a constraint that\n  wraps a line\n- a second one\n'),
+    ['a constraint that wraps a line', 'a second one'],
+  )
+})
+
+// A blank line closes the item, so a following indented paragraph is not swallowed into
+// the constraint above it.
+test('parseConstraints does not join an indented line separated from its bullet by a blank line', async () => {
+  assert.deepEqual(
+    parseConstraints('## Global Constraints\n\n- a constraint\n\n  an indented aside\n'),
+    ['a constraint'],
+  )
+})
+
+// Pinned as-is: a nested bullet is flattened to a standalone constraint. Every teammate
+// reads it as a rule in its own right, which is the intended reading for a plan that
+// indents a sub-rule, and a change to the bullet regex must not alter it unnoticed.
+test('parseConstraints flattens a nested bullet into a standalone constraint', async () => {
+  assert.deepEqual(
+    parseConstraints('## Global Constraints\n\n- a\n  - nested\n- b\n'),
+    ['a', 'nested', 'b'],
+  )
+})
+
+// Prose with no bullets is not a constraint list. It yields nothing rather than becoming
+// one constraint per line of the paragraph.
+test('parseConstraints returns [] for a section of prose with no bullets', async () => {
+  assert.deepEqual(
+    parseConstraints('## Global Constraints\n\nThere are no constraints on this run.\n\n## Tasks\n'),
+    [],
+  )
 })
