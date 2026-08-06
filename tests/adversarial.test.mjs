@@ -6,7 +6,7 @@
 //   docs/plans/2026-08-05-tamper-evident-enforcement.md (Task 4)
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, rm, writeFile, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -709,6 +709,200 @@ test('LIMIT (persisted verdict): feeding the gate record stored in status.json b
     // makes `none` above a real degeneration rather than the honest answer.
     const fromGate = JSON.parse((await runCliOn(root, ['fix', '--run', 'r1', '--phase', '1', '--verdict', await gateVerdict(root)])).out)
     assert.equal(fromGate.decision, 'retry')
+  })
+})
+
+// ============================================================================================
+// Step 6 — the `--results` trust boundary, against real repositories with real violations.
+//
+// What these pin: `--results` is caller input for one run and can only ever fill in a check
+// the CLI cannot run itself. It cannot supply a computed check (`command`, `fileset`,
+// `ownership`), cannot name a check the phase's manifest does not declare, cannot name one the
+// manifest declares twice, and cannot smuggle `optional: true` past a failing review. In every
+// rejection the gate exits 2 having recorded nothing, and the genuine violation is still there
+// on the next plain run — the file buys the caller no credit and no erasure.
+//
+// What these do NOT pin: that a determined teammate cannot get arbitrary code to run. It
+// still can — `--results` is read by a CLI the teammate may invoke, in a repository the
+// teammate may write, and a teammate that can run `node` can run anything. Nothing here
+// narrows or widens the boundary the rest of this file describes; `--results` is a re-entry
+// path for the pending checks, not a new privilege, and these tests exist to keep it that way.
+// ============================================================================================
+
+// The manifests below declare an `agent` check alongside the two enforcement checks, because
+// `agent` is the only suppliable kind this repo's checks exercise. Written per test rather
+// than into `withRepo`'s default, which stays enforcement-only on purpose (see MANIFEST).
+//
+// Amended INTO the initial commit, with main moved along, rather than left in the working
+// tree: teammates.gate.json is tracked, so a plain overwrite leaves the worktree dirty and
+// `ownership` fails the run on that instead of on what the test is about. Committing it on
+// run-branch alone would be worse — an unexplained commit, which `ownership` also fails.
+// Call before taskBranch, so task branches fork from the amended commit.
+async function commitManifest(root, checks) {
+  await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({ phases: { default: { checks } } }), 'utf8')
+  git(root, ['add', '.'])
+  git(root, ['commit', '--quiet', '--amend', '--no-edit'])
+  git(root, ['branch', '--force', 'main', 'run-branch'])
+}
+
+// Under `.teammates/` because that is the one path withRepo's .gitignore excludes. Dropped in
+// the repo root instead, the results file is an untracked file in the worktree and `ownership`
+// fails the run on it — which would mask the very rejection each test below means to pin, and
+// did exactly that on the first draft of the last test here.
+async function writeResults(root, results) {
+  const file = path.join(root, '.teammates', 'supplied-results.json')
+  await mkdir(path.dirname(file), { recursive: true })
+  await writeFile(file, JSON.stringify({ results }), 'utf8')
+  return file
+}
+
+test('--results supplying a passing fileset does not erase a real fileset violation', async () => {
+  await withRepo(async (root) => {
+    await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n', 'stray.mjs': 'y\n' } })
+
+    // Establish the violation is genuine BEFORE the attack, so the exit 2 below can only be
+    // the rejection and not a fixture that never had anything to suppress in the first place.
+    const before = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(before.code, 1)
+    assert.match(before.out, /stray\.mjs/)
+
+    const file = await writeResults(root, [{ name: 'fileset', kind: 'fileset', status: 'pass' }])
+    const attack = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md', '--results', file])
+    // Rejected on the check's DECLARED kind, not on the kind the file claims — the file's own
+    // `kind` field is never consulted, so relabelling it `agent` would not help either.
+    assert.equal(attack.code, 2)
+    assert.match(attack.out, /--results may not supply a fileset check/)
+
+    const after = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(after.code, 1)
+    assert.match(after.out, /stray\.mjs/)
+  })
+})
+
+test('--results supplying a passing ownership does not erase an unexplained commit', async () => {
+  await withRepo(async (root) => {
+    await writeFile(path.join(root, 'sneaky.mjs'), 'x\n', 'utf8')
+    git(root, ['add', 'sneaky.mjs'])
+    git(root, ['commit', '--quiet', '-m', 'direct write to the run branch'])
+    const sha = git(root, ['rev-parse', 'HEAD']).trim()
+
+    const before = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(before.code, 1)
+    assert.match(before.out, new RegExp(sha))
+
+    const file = await writeResults(root, [{ name: 'ownership', kind: 'ownership', status: 'pass' }])
+    const attack = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md', '--results', file])
+    assert.equal(attack.code, 2)
+    assert.match(attack.out, /--results may not supply a ownership check/)
+
+    const after = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(after.code, 1)
+    assert.match(after.out, new RegExp(sha))
+  })
+})
+
+test('--results naming a check absent from the manifest exits 2 and records no verdict', async () => {
+  await withRepo(async (root) => {
+    await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
+    await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+
+    const file = await writeResults(root, [{ name: 'invented', kind: 'agent', status: 'pass' }])
+    const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md', '--results', file])
+    assert.equal(code, 2)
+    assert.match(out, /--results names a check not in this phase's manifest: "invented"/)
+
+    // Exit 2 happens before the gate record is written, so an invented name cannot even
+    // create a status.gates entry to be read back later as evidence the phase was gated.
+    const status = await readStatus(root, 'r1')
+    assert.equal(status.gates, undefined)
+  })
+})
+
+test('--results naming a check the manifest declares twice is rejected rather than resolved', async () => {
+  await withRepo(async (root) => {
+    // One name, two kinds. `byName` resolves such a name to exactly one check (last wins)
+    // while the merge fills EVERY pending result carrying it — so without this rejection an
+    // `agent` result would land on the `command` check, and whether the file was accepted at
+    // all would depend on which of the two the manifest happened to declare second.
+    await commitManifest(root, [
+      { name: 'fileset', kind: 'fileset' },
+      { name: 'ownership', kind: 'ownership' },
+      { name: 'review', kind: 'command', run: 'node -e ""' },
+      { name: 'review', kind: 'agent' },
+    ])
+    await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+
+    const file = await writeResults(root, [{ name: 'review', kind: 'agent', status: 'pass' }])
+    const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md', '--results', file])
+    assert.equal(code, 2)
+    assert.match(out, /--results names a check declared more than once in this phase's manifest: "review"/)
+  })
+})
+
+test('--results cannot declare a failing review optional and turn the verdict into a PASS', async () => {
+  await withRepo(async (root) => {
+    await commitManifest(root, [
+      { name: 'fileset', kind: 'fileset' },
+      { name: 'ownership', kind: 'ownership' },
+      { name: 'review', kind: 'agent' },
+    ])
+    await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+
+    const file = await writeResults(root, [
+      { name: 'review', kind: 'agent', status: 'fail', optional: true, findings: [{ severity: 'high' }] },
+    ])
+    const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md', '--results', file])
+    // `optional` is a manifest declaration that a check does not block. Taking it from the
+    // supplied file would let the very report of a failure demote that failure to advisory —
+    // PASS, exit 0, the failed review filed under `optionalFailed`. It comes from the
+    // COMPUTED result instead, so the manifest's silence means required and the gate blocks.
+    assert.equal(code, 1)
+    const parsed = JSON.parse(out)
+    assert.equal(parsed.verdict, 'FAIL')
+    // Exactly `review` — the phase is otherwise compliant, so a FAIL that dragged in a dirty
+    // worktree or a missing branch would not be evidence that `optional` was ignored.
+    assert.deepEqual(parsed.failed, ['review'])
+    assert.deepEqual(parsed.optionalFailed, [])
+    assert.equal(parsed.results.find((r) => r.name === 'review').optional, false)
+  })
+})
+
+test('supplying a legitimate agent result leaves the fileset and ownership results untouched', async () => {
+  await withRepo(async (root) => {
+    await commitManifest(root, [
+      { name: 'fileset', kind: 'fileset' },
+      { name: 'ownership', kind: 'ownership' },
+      { name: 'review', kind: 'agent' },
+    ])
+    await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+
+    // A compliant phase: both enforcement checks pass and only `review` is pending, so the
+    // plain run fails on the pending check alone. That isolates the supplied result as the
+    // one thing that changes between the two runs.
+    const plain = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(plain.code, 1)
+    const plainResults = JSON.parse(plain.out).results
+    assert.equal(plainResults.find((r) => r.name === 'review').status, 'pending')
+    assert.equal(plainResults.find((r) => r.name === 'fileset').status, 'pass')
+    assert.equal(plainResults.find((r) => r.name === 'ownership').status, 'pass')
+
+    const file = await writeResults(root, [{ name: 'review', kind: 'agent', status: 'pass', findings: [] }])
+    const supplied = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md', '--results', file])
+    assert.equal(supplied.code, 0)
+    const suppliedResults = JSON.parse(supplied.out).results
+    assert.equal(JSON.parse(supplied.out).verdict, 'PASS')
+
+    // Byte-identical, not merely equivalent: `mergeSuppliedResults` returns the computed
+    // entry itself for any name the file does not fill, so nothing about fileset or
+    // ownership — status, output, optional, the branchShas the fileset check carries — may
+    // differ. Both are recomputed from the same git state, so there is nothing legitimately
+    // time-varying in them to exempt.
+    for (const name of ['fileset', 'ownership']) {
+      assert.equal(
+        JSON.stringify(suppliedResults.find((r) => r.name === name)),
+        JSON.stringify(plainResults.find((r) => r.name === name)),
+      )
+    }
   })
 })
 
