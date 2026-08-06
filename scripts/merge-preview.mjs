@@ -1,14 +1,26 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { validateLinkPaths, linkInto } from './preview-links.mjs'
 
 // The worktree lives under the system temp directory, never inside the repository. An
 // in-repo worktree is untracked, so `git status --porcelain` reports it and the ownership
 // check reads the main worktree as dirty for the whole run — the deadlock that cost run
 // `fixloop` an entire phase gate.
-export async function withMergePreview({ git, base, branches = [], run }) {
+export async function withMergePreview({ git, base, branches = [], link = [], repoRoot, run }) {
+  // Validated before the worktree exists, so a bad manifest costs nothing.
+  const invalid = validateLinkPaths(link)
+  if (invalid) throw new Error(invalid)
+  // Without this, an undefined repoRoot reaches path.resolve inside linkInto and the `merge`
+  // check reports `The "paths[0]" argument must be of type string`, naming neither the cause
+  // nor the entry. A caller that declares link entries and forgets the root it resolves them
+  // against should be told exactly that.
+  if (link.length > 0 && typeof repoRoot !== 'string') {
+    throw new Error('merge preview cannot resolve preview.link entries: no repoRoot was given')
+  }
   if (branches.length === 0) return run({ path: null, merged: [] })
   const dir = await mkdtemp(path.join(tmpdir(), 'tm-preview-'))
+  let teardownLinks = null
   try {
     await git.addWorktreeDetached(dir, base)
     const conflict = await git.mergeInto(dir, branches)
@@ -24,8 +36,15 @@ export async function withMergePreview({ git, base, branches = [], run }) {
       }
       return await run({ path: null, conflict })
     }
+    // Links are created only on the clean-merge path: the conflict path hands the callback
+    // `path: null`, so there is no preview tree to provision.
+    teardownLinks = await linkInto(dir, repoRoot, link)
     return await run({ path: dir, merged: branches })
   } finally {
+    // Before removeWorktree: `git worktree remove` run against a tree still containing a
+    // junction into the repository's real node_modules is not a behaviour to discover in
+    // production.
+    if (teardownLinks) await teardownLinks()
     await git.removeWorktree(dir).catch(() => {})
     await rm(dir, { recursive: true, force: true }).catch(() => {})
   }
