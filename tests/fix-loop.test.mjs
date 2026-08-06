@@ -442,3 +442,157 @@ test('a task with no files key yields a serialisable decision, not a TypeError (
   assert.equal(result.reason, 'unattributable')
   assert.deepEqual(JSON.parse(JSON.stringify(result)), result)
 })
+
+// --- decideFix must be total: every input shape yields a serialisable decision ---
+//
+// The caller treats decideFix's return value as the loop's decision and serialises it. A throw
+// is not a decision: the loop's decision step dies with no verdict recorded, which hangs the
+// loop exactly the way the `pending` -> `none` deadlock did, by a different door. `fix` reads
+// `plan.json` out of `.teammates/`, which is agent-writable, so none of these shapes are
+// hypothetical — `init-run` validates declared tiers but `fix` re-reads the file afterwards.
+
+test('an out-of-vocabulary tier yields a decision instead of throwing', () => {
+  const tasks = [{ id: 'T1', files: ['src/a.mjs'], tier: 'fast' }]
+  const verdict = emitVerdict([commandCheck('unit', 'error in src/a.mjs')])
+  const result = decideFix(verdict, 1, tasks, {}, { fixRounds: 2 })
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), result)
+  assert.equal(result.decision, 'retry')
+  // Treated exactly the way a missing tier is: fall back to DEFAULT_TIER ('mid'), then escalate it.
+  assert.equal(result.tasks[0].tier, 'capable')
+})
+
+test('an empty-string, numeric or structural tier is treated as unrecognised, not as a crash', () => {
+  for (const tier of ['', 3, {}, [], true]) {
+    const label = JSON.stringify(tier) ?? String(tier)
+    const tasks = [{ id: 'T1', files: ['src/a.mjs'], tier }]
+    const verdict = emitVerdict([commandCheck('unit', 'error in src/a.mjs')])
+    const result = decideFix(verdict, 1, tasks, {}, { fixRounds: 2 })
+    assert.deepEqual(JSON.parse(JSON.stringify(result)), result, label)
+    assert.equal(result.tasks[0].tier, 'capable', label)
+  }
+})
+
+test('a recognised tier is still escalated normally, so the fallback did not swallow the vocabulary', () => {
+  const tasks = [{ id: 'T1', files: ['src/a.mjs'], tier: 'cheap' }]
+  const verdict = emitVerdict([commandCheck('unit', 'error in src/a.mjs')])
+  const result = decideFix(verdict, 1, tasks, {}, { fixRounds: 2 })
+  assert.equal(result.tasks[0].tier, 'mid')
+})
+
+// `verdict?.results ?? []` accepted any non-nullish value, and the caller's try covers only
+// readFile/JSON.parse — so "valid JSON but not a verdict" is precisely the shape that escapes it.
+test('a verdict whose results is not an array escalates instead of throwing', () => {
+  const tasks = makePhase()
+  for (const results of [{}, 'fail', 7, true, { find: 1 }]) {
+    const result = decideFix({ results }, 1, tasks, {}, { fixRounds: 2 })
+    assert.deepEqual(JSON.parse(JSON.stringify(result)), result)
+    // Not `none`: a verdict the loop cannot read must reach a human, never re-enter the gate,
+    // because re-derivation is deterministic and would otherwise repeat forever.
+    assert.equal(result.decision, 'escalate')
+    assert.equal(result.reason, 'malformed-verdict')
+    assert.deepEqual(result.tasks, [])
+  }
+})
+
+test('a missing or empty verdict still decides none, so the array guard did not widen to nullish', () => {
+  const tasks = makePhase()
+  for (const verdict of [undefined, null, {}]) {
+    const result = decideFix(verdict, 1, tasks, {}, { fixRounds: 2 })
+    assert.equal(result.decision, 'none')
+  }
+})
+
+test('an agent check whose findings is not an array yields a decision, not a TypeError', () => {
+  const tasks = makePhase()
+  for (const findings of [5, 'src/a.mjs', {}, true]) {
+    const verdict = emitVerdict([agentCheck('agent-check', findings)])
+    const result = decideFix(verdict, 1, tasks, {}, { fixRounds: 2 })
+    assert.deepEqual(JSON.parse(JSON.stringify(result)), result)
+    // No usable findings means nothing to attribute, which is already an escalate path.
+    assert.equal(result.decision, 'escalate')
+    assert.equal(result.reason, 'unattributable')
+  }
+})
+
+test('a task whose files is not an array yields a decision, not a TypeError', () => {
+  const verdict = emitVerdict([commandCheck('unit', 'error in src/b.mjs')])
+  for (const files of [{}, 7, true]) {
+    const tasks = [{ id: 'T1', files, tier: 'mid' }, { id: 'T2', files: ['src/b.mjs'], tier: 'mid' }]
+    const result = decideFix(verdict, 1, tasks, {}, { fixRounds: 2 })
+    assert.deepEqual(JSON.parse(JSON.stringify(result)), result)
+    assert.deepEqual(result.tasks.map((t) => t.taskId), ['T2'])
+  }
+})
+
+test('a string files value does not iterate as characters and claim files it never declared', () => {
+  const tasks = [{ id: 'T1', files: 'src/a.mjs', tier: 'mid' }]
+  const verdict = emitVerdict([commandCheck('unit', 'error in src/a.mjs')])
+  const result = decideFix(verdict, 1, tasks, {}, { fixRounds: 2 })
+  assert.equal(result.decision, 'escalate')
+  assert.equal(result.reason, 'unattributable')
+})
+
+// `rounds` comes from JSON.parse, so bracket-indexing it by a task id reaches up the prototype
+// chain, and `??` does not catch an inherited value because it is not nullish.
+test('a task id inherited from Object.prototype does not bypass the round budget', () => {
+  const tasks = [{ id: 'constructor', files: ['src/a.mjs'], tier: 'mid' }]
+  const verdict = emitVerdict([commandCheck('unit', 'error in src/a.mjs')])
+  const result = decideFix(verdict, 1, tasks, {}, { fixRounds: 0 })
+  assert.equal(result.decision, 'escalate')
+  assert.equal(result.reason, 'budget-exhausted')
+  assert.equal(result.taskId, 'constructor')
+})
+
+test('every Object.prototype key used as a task id counts as zero rounds, not as an inherited value', () => {
+  const verdict = emitVerdict([commandCheck('unit', 'error in src/a.mjs')])
+  for (const id of ['constructor', 'toString', 'hasOwnProperty', 'valueOf', '__proto__']) {
+    const tasks = [{ id, files: ['src/a.mjs'], tier: 'mid' }]
+    const result = decideFix(verdict, 1, tasks, {}, { fixRounds: 2 })
+    assert.equal(result.decision, 'retry', id)
+    // The round must be a number, not a string produced by concatenating an inherited function.
+    assert.equal(result.tasks[0].round, 1, id)
+    assert.equal(typeof result.tasks[0].round, 'number', id)
+  }
+})
+
+test('an own round count is still honoured, so the prototype guard did not disable the budget', () => {
+  const tasks = makePhase()
+  const verdict = emitVerdict([commandCheck('unit', 'error in src/a.mjs')])
+  assert.equal(decideFix(verdict, 1, tasks, { T1: 2 }, { fixRounds: 2 }).reason, 'budget-exhausted')
+  assert.equal(decideFix(verdict, 1, tasks, { T1: 1 }, { fixRounds: 2 }).tasks[0].round, 2)
+})
+
+test('a non-numeric own round count counts as zero rather than poisoning the round number', () => {
+  const tasks = makePhase()
+  const verdict = emitVerdict([commandCheck('unit', 'error in src/a.mjs')])
+  for (const value of ['2', null, {}, NaN, -1]) {
+    const label = String(value)
+    const result = decideFix(verdict, 1, tasks, { T1: value }, { fixRounds: 2 })
+    assert.equal(result.decision, 'retry', label)
+    assert.equal(result.tasks[0].round, 1, label)
+  }
+})
+
+test('a rounds map that is not an object at all does not throw', () => {
+  const tasks = makePhase()
+  const verdict = emitVerdict([commandCheck('unit', 'error in src/a.mjs')])
+  for (const rounds of [null, undefined, 7, 'x', ['a']]) {
+    const result = decideFix(verdict, 1, tasks, rounds, { fixRounds: 2 })
+    assert.equal(result.decision, 'retry')
+    assert.equal(result.tasks[0].round, 1)
+  }
+})
+
+// Pins `Object.hasOwn` itself rather than the numeric guard behind it. Every Object.prototype
+// member happens to be a function, so the "must be a number" check alone kills the `constructor`
+// case — but the rule being enforced is *own key*, not *not a function*. An inherited count that
+// IS a number must still read as zero, or a task borrows a budget it never spent.
+test('an inherited numeric round count is not borrowed, so the own-key check is load-bearing', () => {
+  const tasks = makePhase()
+  const verdict = emitVerdict([commandCheck('unit', 'error in src/a.mjs')])
+  const rounds = Object.create({ T1: 9 })
+  assert.equal(rounds.T1, 9, 'fixture must actually inherit the count')
+  const result = decideFix(verdict, 1, tasks, rounds, { fixRounds: 2 })
+  assert.equal(result.decision, 'retry')
+  assert.equal(result.tasks[0].round, 1)
+})

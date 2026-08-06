@@ -1,4 +1,4 @@
-import { escalateTier } from './routing.mjs'
+import { escalateTier, TIERS } from './routing.mjs'
 import { normalizePath } from './enforce.mjs'
 
 // A fileset or ownership failure is a process violation, not a code defect. Retrying it would
@@ -12,6 +12,33 @@ const DEFAULT_FIX_ROUNDS = 2
 // serialise, so an old plan must not turn a gate FAIL into an uncaught crash. `mid` is the
 // same default `inferTier` falls through to.
 const DEFAULT_TIER = 'mid'
+
+// `??` guarded only null/undefined, but `fix` reads plan.json out of `.teammates/`, which is
+// agent-writable and re-read AFTER `init-run` validated the declared tiers. Any other value —
+// `"fast"`, `""`, `3`, an object — reached `escalateTier` and threw `unknown tier`, killing the
+// decision step with nothing on stdout. An unrecognised tier is no more informative than a
+// missing one, so it takes the same fallback and `escalateTier` only ever sees a member of TIERS.
+function safeTier(tier) {
+  return TIERS.includes(tier) ? tier : DEFAULT_TIER
+}
+
+// `rounds` is JSON.parse output, so `rounds[id]` resolves up the prototype chain: a task id of
+// `constructor` yielded Object itself, which `??` does not catch (not nullish) and which compares
+// false against the budget, so the task retried forever with `round` a concatenated function
+// source. Own keys only, and only a finite non-negative number counts — anything else is 0.
+function roundsFor(rounds, id) {
+  if (rounds === null || typeof rounds !== 'object') return 0
+  if (!Object.hasOwn(rounds, id)) return 0
+  const value = rounds[id]
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0
+}
+
+// Every list decideFix walks arrives from JSON.parse, where "valid JSON" is far wider than
+// "array". `?? []` accepted `{}` and `5` alike, and the caller's try covers only readFile and
+// JSON.parse, so a non-array here threw past it. Absent and malformed both mean "nothing usable".
+function asArray(value) {
+  return Array.isArray(value) ? value : []
+}
 
 // Both sides of every comparison go through `normalizePath` (the repo-wide convention, from
 // enforce.mjs) so a reviewer that reports `C:\repo\src\a.mjs` still matches the plan's
@@ -41,7 +68,7 @@ function ownerOf(tasks, reported) {
   let owner = null
   let best = 0
   for (const task of tasks) {
-    for (const declared of task.files ?? []) {
+    for (const declared of asArray(task.files)) {
       const score = declaredMatch(declared, candidate)
       if (score > best) {
         best = score
@@ -78,7 +105,7 @@ function mentionEnds(output, declared) {
 function attribute(check, tasks) {
   const ids = new Set()
   if (check.kind === 'agent') {
-    for (const finding of check.findings ?? []) {
+    for (const finding of asArray(check.findings)) {
       const owner = ownerOf(tasks, finding?.file)
       if (owner) ids.add(owner.id)
     }
@@ -93,7 +120,7 @@ function attribute(check, tasks) {
     // `vendor/src/a.mjs` and `src/a.mjs` on separate lines still attributes to both owners.
     const byEnd = new Map()
     for (const task of tasks) {
-      for (const declared of task.files ?? []) {
+      for (const declared of asArray(task.files)) {
         const length = normalizePath(declared).length
         for (const end of mentionEnds(output, declared)) {
           const current = byEnd.get(end)
@@ -135,7 +162,15 @@ function isBlocking(check) {
 // map, already unwrapped. Indexing it by phase a second time yields `{}`, which silently
 // disabled the budget and pinned every retry at round 1.
 export function decideFix(verdict, phase, tasks, rounds, config) {
-  const results = verdict?.results ?? []
+  // Nullish `results` is the empty verdict and still decides `none`. Present-but-not-an-array is
+  // a different animal: the file parsed as JSON but is not a verdict, so nothing about the gate
+  // is actually known. Returning `none` there would claim the phase is clean on unread evidence,
+  // and would loop forever besides — re-derivation is deterministic. It escalates to a human.
+  const raw = verdict?.results
+  if (raw !== null && raw !== undefined && !Array.isArray(raw)) {
+    return { decision: 'escalate', tasks: [], reason: 'malformed-verdict', check: null }
+  }
+  const results = asArray(raw)
 
   // The process-violation scan runs BEFORE the optional filter, over anything not `pass` and
   // not `skip`. `ALWAYS_ENFORCED_KINDS` forces `optional: false` at result-construction time
@@ -169,17 +204,17 @@ export function decideFix(verdict, phase, tasks, rounds, config) {
   }
 
   const budget = config?.fixRounds ?? DEFAULT_FIX_ROUNDS
-  const phaseRounds = rounds ?? {}
+  const phaseRounds = rounds
   for (const id of targets.keys()) {
-    if ((phaseRounds[id] ?? 0) >= budget) {
+    if (roundsFor(phaseRounds, id) >= budget) {
       return { decision: 'escalate', tasks: [], reason: 'budget-exhausted', taskId: id }
     }
   }
 
   const retries = [...targets].map(([id, checks]) => {
     const task = tasks.find((t) => t.id === id)
-    const tier = escalateTier(task?.tier ?? DEFAULT_TIER)
-    return { taskId: id, tier, round: (phaseRounds[id] ?? 0) + 1, checks }
+    const tier = escalateTier(safeTier(task?.tier))
+    return { taskId: id, tier, round: roundsFor(phaseRounds, id) + 1, checks }
   })
   return { decision: 'retry', tasks: retries, reason: null }
 }
