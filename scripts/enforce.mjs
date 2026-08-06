@@ -1,0 +1,130 @@
+// Plans are authored by hand on Windows and read by git, which always emits posix
+// separators. Both sides are normalized before comparison. Comparison stays
+// case-sensitive: git is case-sensitive, and a case-only mismatch is a real mistake.
+export function normalizePath(p) {
+  return String(p).replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '')
+}
+
+export function taskBranchName(runId, taskId) {
+  return `teammates/${runId}/${taskId}`
+}
+
+// Convention only, deliberately. An earlier version preferred a branch recorded in
+// status.json, but that file is written by the agents being enforced — letting it choose
+// which branch is inspected hands the subject of the check control over the check. A
+// teammate that commits somewhere other than the convention now fails the gate, which is
+// the intended outcome rather than a limitation.
+export function resolveTaskBranch(task, runId) {
+  return task?.id ? taskBranchName(runId, task.id) : null
+}
+
+export function filesetViolations(changed, declared) {
+  const allowed = new Set((declared ?? []).map(normalizePath))
+  return (changed ?? []).map(normalizePath).filter((p) => !allowed.has(p))
+}
+
+// Different spellings can name the same ref to git: `refs/heads/main`, `heads/main`
+// and `main` are one ref. Strip a leading refs/heads/ or heads/ repeatedly (not just
+// once), so a branch whose actual name itself starts with refs/heads/ — whose full ref
+// is refs/heads/refs/heads/<name> — still normalizes to the same string as its short
+// spelling.
+//
+// The comparison then folds case. Whether that fold is *necessary* depends on the
+// filesystem the check runs on: on a case-insensitive filesystem (Windows, macOS) git
+// itself treats `Main` and `main` as one branch, so folding is required there to catch
+// a real alias. On a case-sensitive filesystem (Linux, most CI) `main` and `Main` are
+// genuinely different branches to git, so the fold can over-trigger — reporting `Main`
+// as a violation of the `main` run branch even though git would allow both to exist.
+// That over-triggering is deliberate: this is an enforcement check, and only reachable
+// by a branch deliberately named against the `teammates/<runId>/<taskId>` convention,
+// so failing closed toward "flag it" is the right default in both directions.
+//
+// This is still a string comparison, not a git query: this module stays pure and has
+// no git access, so it cannot resolve either side to a sha. A branch that is the same
+// commit as the run branch under a name this normalization does not recognize will not
+// be caught here — a sha-based comparison would be strictly correct but needs the git
+// wrapper, which lives in the caller, not this predicate.
+function normalizeBranchRef(name) {
+  let ref = String(name)
+  let stripped = true
+  while (stripped) {
+    stripped = false
+    if (ref.startsWith('refs/heads/')) { ref = ref.slice('refs/heads/'.length); stripped = true }
+    else if (ref.startsWith('heads/')) { ref = ref.slice('heads/'.length); stripped = true }
+  }
+  return ref.toLowerCase()
+}
+
+// "Lowest un-integrated phase" is wrong when a later phase is integrated and an earlier one
+// is not: the check would run against the earlier phase, and once that integrates it would
+// return null (nothing to check) — so the later phase's declared file set is never enforced
+// at all. That state is not a legitimate run; it is reported, not resolved.
+export function derivePhase({ tasks = [], integratedPhases = [] } = {}) {
+  const list = tasks ?? []
+  const phases = [...new Set(list.map((t) => t?.phase))]
+  if (phases.some((p) => !Number.isInteger(p))) {
+    return { error: 'the plan contains a task with a non-integer phase' }
+  }
+  phases.sort((a, b) => a - b)
+  const integrated = new Set(integratedPhases ?? [])
+  const known = phases.filter((p) => integrated.has(p))
+  const firstOpen = phases.find((p) => !integrated.has(p))
+  if (firstOpen !== undefined && known.some((p) => p > firstOpen)) {
+    return { error: `phase ${firstOpen} is not integrated but a later phase is — refusing to guess which phase to enforce` }
+  }
+  return { phase: firstOpen ?? null }
+}
+
+// Ownership no longer asks "did HEAD move since a stored baseline" — that baseline lived in
+// status.json and any teammate could reset it, which turned a direct write to the run
+// branch into an accepted one. It now asks the question git can answer: is every commit on
+// the run branch since the anchor accounted for by this run's task branches?
+export function ownershipViolations({ runBranch, taskBranches = [], unexplainedCommits = [], dirty = false } = {}) {
+  const violations = []
+  if (!runBranch) {
+    violations.push('no run branch was supplied — the gate cannot establish what it is protecting')
+    return violations
+  }
+  for (const branch of taskBranches) {
+    if (normalizeBranchRef(branch) === normalizeBranchRef(runBranch)) {
+      violations.push(`task branch ${branch} is the run branch; only tm-integrator writes there`)
+    }
+  }
+  for (const sha of unexplainedCommits) {
+    violations.push(`commit ${sha} on ${runBranch} is reachable from no task branch of this run — either it is a direct write, or the integrator merged without --no-ff and destroyed the ancestry this check reads`)
+  }
+  if (dirty) {
+    violations.push('main worktree has uncommitted changes; teammates work only in their own worktrees')
+  }
+  return violations
+}
+
+// A recorded PASS is no longer consulted to decide completion — the gate is recomputed
+// instead. This predicate exists for the narrower job of deciding whether an already-known
+// verdict still describes the current tree: a teammate that amends its branch after a
+// passing gate leaves the verdict describing a tree that no longer exists.
+export function verdictCoversTree(verdict, current) {
+  if (!verdict || verdict.verdict !== 'PASS') return 'no passing verdict'
+  if (!verdict.anchorSha || verdict.anchorSha !== current?.anchorSha) return 'anchor moved since the verdict was recorded'
+  if (verdict.planHash !== current?.planHash) return 'the plan changed since the verdict was recorded'
+  const recorded = verdict.branchShas ?? {}
+  const now = current?.branchShas ?? {}
+  const names = new Set([...Object.keys(recorded), ...Object.keys(now)])
+  for (const name of names) {
+    if (recorded[name] !== now[name]) return `branch ${name} moved since the verdict was recorded`
+  }
+  return null
+}
+
+// FNV-1a over the plan markdown. Not a security hash and not required to be: it detects a
+// plan that changed between a verdict and its use, in a module that must stay import-free.
+// Tamper-evidence here rests on git, not on this digest.
+export function planHash(markdown) {
+  let hash = 0x811c9dc5
+  const text = String(markdown ?? '')
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash.toString(16).padStart(8, '0')
+}

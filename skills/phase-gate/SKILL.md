@@ -38,6 +38,25 @@ Halt before integration. Report, in this order: which check failed, the exact co
 or finding list, the offending diff hunks, and the owning teammate. Then offer three choices —
 retry the failing task with the findings fed back, override and proceed, or abort the phase.
 
+## What the enforcement checks do and do not cover
+
+`fileset` and `ownership` are computed by the gate from git, at the moment it runs. They read
+no file from `.teammates/`: the run phase, the anchor, and the plan all come from git, because
+`status.json` is written by the agents being enforced. `complete` recomputes rather than
+trusting a recorded verdict.
+
+**These checks are tamper-evident, not tamper-proof.** They catch drift, mistakes, and attacks
+that are not aimed at them. They do not stop a teammate that targets them: a teammate runs its
+own tests, and running a teammate's code is arbitrary execution, so a determined teammate can
+do anything the user can — including fast-forwarding the run branch to make a phase look
+integrated. `docs/specs/2026-08-05-tamper-evident-enforcement-design.md` lists what is out of
+scope; `tests/adversarial.test.mjs` pins each limit with a test.
+
+Skipped only when the caller passes `--no-fleet`. Missing state is a failure, never a skip.
+
+A `fileset` or `ownership` failure is a process violation, not a code defect. Do not widen the
+plan's file set to make it pass.
+
 ## Reporting rule
 
 **Never report a phase done without a recorded PASS in `status.json`.** A check that was

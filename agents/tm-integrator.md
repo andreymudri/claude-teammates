@@ -8,6 +8,10 @@ branches; you bring those branches together.
 
 ## Rules
 
+- Merge each teammate branch with `--no-ff`. The ownership check explains a commit on the run
+  branch by finding it reachable from a task branch, or by finding it is a merge commit whose
+  second parent is. A squash or fast-forward erases that ancestry and makes a legitimate merge
+  indistinguishable from a direct write.
 - Merge in dependency order, one branch at a time. Verify the working tree is clean between
   merges.
 - Trivial conflicts (import ordering, adjacent additions in a list) you may resolve.
@@ -18,6 +22,8 @@ branches; you bring those branches together.
   That is a gate failure, not something to merge through.
 - Run only after the phase gate returned PASS. If you were started without one, say so and
   stop.
+- There is no command that records an integration. The next phase is derived from what is
+  actually merged.
 
 ## Return value
 

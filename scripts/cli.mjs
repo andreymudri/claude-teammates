@@ -8,23 +8,36 @@ import { loadGateConfig, inferGateConfig, checksForPhase, defaultMaxParallel } f
 import { runChecks, aggregateVerdict } from './gate-runner.mjs'
 import { renderDigest } from './digest.mjs'
 import { generatePhaseWorkflow } from './workflow-gen.mjs'
+import { createGit, GitError } from './git.mjs'
+import { deriveContext } from './gate-runner.mjs'
 
-const USAGE = `usage: cli.mjs <init-run|gate|digest|claim|unclaim|workflow> [options]
+const USAGE = `usage: cli.mjs <init-run|gate|digest|claim|unclaim|workflow|complete> [options]
 
   init-run <planPath> --run <id> [--root <path>]
-  gate     --run <id> [--root <path>] [--phase <name>]
+  gate     --run <id> --plan <path> [--base <branch>] [--root <path>] [--phase <name>] [--no-fleet]
   digest   --run <id> [--root <path>]
   claim    --run <id> --task <id> --by <teammate> [--root <path>]
   unclaim  --run <id> --task <id> [--root <path>]
-  workflow --run <id> --phase <n> [--root <path>]`
+  workflow --run <id> --phase <n> [--root <path>]
+  complete --run <id> --task <id> --plan <path> [--base <branch>] [--root <path>]`
 
+// A flag followed by nothing, or by another flag, is a boolean switch (e.g. --no-fleet)
+// and takes no value. Without this, a boolean flag anywhere but the very last argv
+// position swallows the next flag's name as its own value, and at the very last position
+// reads as `undefined` — either way `flags['no-fleet'] !== undefined` never sees it.
 function parseFlags(argv) {
   const flags = {}
   const positional = []
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i].startsWith('--')) {
-      flags[argv[i].slice(2)] = argv[i + 1]
-      i += 1
+      const name = argv[i].slice(2)
+      const next = argv[i + 1]
+      if (next === undefined || next.startsWith('--')) {
+        flags[name] = true
+      } else {
+        flags[name] = next
+        i += 1
+      }
     } else {
       positional.push(argv[i])
     }
@@ -43,22 +56,104 @@ async function readPackage(root) {
 
 const REQUIRED = {
   'init-run': ['run'],
-  gate: ['run'],
+  gate: ['run', 'plan'],
   digest: ['run'],
   claim: ['run', 'task', 'by'],
   unclaim: ['run', 'task'],
   workflow: ['run', 'phase'],
+  complete: ['run', 'task', 'plan'],
 }
 
 // A skill branches on this CLI's exit code. A missing argument must produce the usage
 // message and exit 2, never an unhandled TypeError and a stack trace.
+//
+// `flags[f] === true` means the flag was given with no value (parseFlags's boolean-switch
+// reading) — for every flag in REQUIRED that takes a value, that is a missing argument,
+// not a truthy one. `complete --plan` (value omitted) must not sneak past this check and
+// die inside git with a raw diagnostic instead.
+//
+// `gate --no-fleet` never derives anything from git, so it never reads `--plan` and never
+// records anything under `--run` — requiring either would only teach a caller to invent a
+// throwaway value to get past this check. Solo drops both from the requirement.
 function missingArgs(command, flags, positional) {
-  const missing = (REQUIRED[command] ?? []).filter((f) => !flags[f]).map((f) => `--${f}`)
+  const solo = command === 'gate' && flags['no-fleet'] !== undefined
+  const requiredList = solo ? [] : (REQUIRED[command] ?? [])
+  const missing = requiredList
+    .filter((f) => !flags[f] || flags[f] === true)
+    .map((f) => `--${f}`)
   if (command === 'init-run' && !positional[0]) missing.unshift('<planPath>')
-  if (command === 'workflow' && flags.phase && !Number.isInteger(Number(flags.phase))) {
+  if (command === 'workflow' && flags.phase && flags.phase !== true && !Number.isInteger(Number(flags.phase))) {
     missing.push('--phase <integer>')
   }
   return missing
+}
+
+// runId/taskId become path segments under root/.teammates. Without containment, a value
+// like `../../ESCAPED` writes state outside the run directory entirely — the same class
+// of ref/path-escape primitive the git layer already closes for branch and tag names.
+function assertContained(baseDir, segment, flagName) {
+  const resolvedBase = path.resolve(baseDir)
+  const resolvedTarget = path.resolve(path.join(baseDir, String(segment)))
+  const rel = path.relative(resolvedBase, resolvedTarget)
+  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new Error(`${flagName} ${segment} escapes the run directory`)
+  }
+}
+
+// Preferring `main` when both `main` and `master` exist is the same ref-creation primitive
+// as the tag-shadowing bypass the design closed elsewhere: a teammate creates a branch
+// named `main`, the heuristic silently prefers it, mergeBase(main, run) collapses onto the
+// run tip, and every downstream diff and commit range becomes vacuous. When both exist and
+// the caller did not disambiguate, refuse rather than guess.
+async function resolveBaseBranch(git, flag) {
+  if (flag) return flag
+  const present = []
+  for (const candidate of ['main', 'master']) {
+    if (await git.branchExists(candidate)) present.push(candidate)
+  }
+  if (present.length > 1) {
+    throw new Error(`ambiguous base branch — both ${present.join(' and ')} exist; pass --base to choose one`)
+  }
+  if (present.length === 1) return present[0]
+  throw new Error('could not determine the base branch — pass --base')
+}
+
+async function derive(root, runId, flags) {
+  const git = createGit({ cwd: root })
+  const runBranch = await git.currentBranch()
+  const baseBranch = await resolveBaseBranch(git, flags.base)
+  // Every other failure path here fails closed; a plain operator mistake — running the
+  // gate while checked out on the base branch itself — must not be the one that fails
+  // open. merge-base(X, X) is X's own tip, so every diff and commit range this computes
+  // is vacuous and both checks pass trivially with nothing actually verified. This is a
+  // name comparison, not a state comparison: it must fire even on a truly fresh run,
+  // where the run branch (a distinct branch) has no commits past the base yet — that
+  // state is legitimate and is not what this guards against.
+  if (runBranch === baseBranch) {
+    throw new Error(
+      `the run branch and the base branch are both '${runBranch}' — check out the run branch before running the gate, or pass --base to name a different base`,
+    )
+  }
+  try {
+    return await deriveContext({ git, runId, runBranch, baseBranch, planPath: flags.plan })
+  } catch (err) {
+    // deriveContext reads the plan via `git show <anchorSha>:<planPath>`, which fails with
+    // raw git stderr ("fatal: bad revision ..."). That is often an adopting project's
+    // first interaction with enforcement, so it must name the anchor and say what to check
+    // rather than surface git's own diagnostic.
+    if (err instanceof GitError && flags.plan && err.message.includes(`:${flags.plan}`)) {
+      let anchorSha = 'unknown'
+      try {
+        const baseSha = await git.resolveRef(`refs/heads/${baseBranch}`)
+        const runSha = await git.resolveRef(`refs/heads/${runBranch}`)
+        anchorSha = await git.mergeBase(baseSha, runSha)
+      } catch { /* best-effort context for the message only */ }
+      throw new Error(
+        `plan not found at anchor ${anchorSha}: ${flags.plan} — check --plan and confirm the plan is committed on ${baseBranch}`,
+      )
+    }
+    throw err
+  }
 }
 
 export async function runCli(argv, io = { out: console.log }) {
@@ -75,11 +170,26 @@ export async function runCli(argv, io = { out: console.log }) {
     }
   }
 
+  // runId and taskId become path segments under root/.teammates before any command runs.
+  // Checked once, here, rather than in each command — a value like `../../ESCAPED` must
+  // never reach a filesystem call.
+  try {
+    if (typeof runId === 'string') assertContained(path.join(root, '.teammates'), runId, '--run')
+    if ((command === 'claim' || command === 'unclaim') && typeof flags.task === 'string') {
+      assertContained(path.join(root, '.teammates', runId, 'claims'), flags.task, '--task')
+    }
+  } catch (err) {
+    io.out(`${err.message}\n\n${USAGE}`)
+    return 2
+  }
+
   if (command === 'init-run') {
     const tasks = assignPhases(parsePlan(await readFile(positional[0], 'utf8')))
     const totalPhases = tasks.reduce((max, t) => Math.max(max, t.phase), 0)
     const config = await loadGateConfig(root)
     await writeState(root, runId, 'plan', { runId, totalPhases, tasks })
+    // Recorded for reporting only. The gate derives the anchor, the phase, and every
+    // verdict from git; nothing here decides anything.
     await writeState(root, runId, 'status', {
       runId,
       phase: 1,
@@ -137,26 +247,109 @@ export async function runCli(argv, io = { out: console.log }) {
       return 3
     }
     const phaseName = flags.phase ?? 'default'
-    const results = await runChecks(checksForPhase(config, phaseName), { cwd: root })
-    const verdict = aggregateVerdict(results)
-    io.out(JSON.stringify({ ...verdict, results }, null, 2))
+    const all = checksForPhase(config, phaseName)
+    const solo = flags['no-fleet'] !== undefined
 
-    const status = await readState(root, runId, 'status')
-    if (status) {
-      status.gates = status.gates ?? {}
-      status.gates[phaseName] = {
-        verdict: verdict.verdict,
-        failed: verdict.failed,
-        skipped: verdict.skipped,
-        pending: verdict.pending,
-        recordedAt: Date.now(),
+    // --no-fleet is the only way the enforcement checks are skipped, and the caller must
+    // say it. Inferring "solo" from missing state let deleting one file record a PASS.
+    const checks = solo ? all.filter((c) => c.kind !== 'fileset' && c.kind !== 'ownership') : all
+    if (solo) io.out('--no-fleet: enforcement checks are not running')
+
+    let ctx = { cwd: root }
+    if (!solo) {
+      try {
+        ctx = { cwd: root, ...(await derive(root, runId, flags)) }
+      } catch (err) {
+        io.out(JSON.stringify({ verdict: 'FAIL', failed: ['derive'], error: err.message }, null, 2))
+        return 1
       }
-      await writeState(root, runId, 'status', status)
-    } else {
-      io.out(`verdict was not recorded because run ${runId} has no status`)
     }
 
+    const results = await runChecks(checks, ctx)
+    const verdict = aggregateVerdict(results)
+    const branchShas = Object.assign({}, ...results.map((r) => r.branchShas ?? {}))
+    const bound = { ...verdict, anchorSha: ctx.anchorSha, planHash: ctx.planHash, branchShas, phase: ctx.currentPhase }
+    io.out(JSON.stringify({ ...bound, results }, null, 2))
+
+    // Recorded for digests and supervision. Nothing reads this to decide anything.
+    //
+    // A solo (--no-fleet) verdict never derived an anchor, so it must not land under the
+    // same key a real, derived phase record uses — otherwise `--phase 1 --no-fleet`
+    // silently overwrites phase 1's real, anchorSha-bearing record with one that carries
+    // no anchor at all. Solo records get a `solo:` prefix so the two namespaces cannot
+    // collide, however the phase name is spelled.
+    const gateKey = solo ? `solo:${phaseName}` : String(ctx.currentPhase ?? phaseName)
+    // --run is optional in solo mode (see missingArgs): without it there is no run to
+    // record anything against, so skip straight to the exit code.
+    const status = typeof runId === 'string' ? await readState(root, runId, 'status') : null
+    if (status) {
+      status.gates = status.gates ?? {}
+      // Object.defineProperty bypasses any inherited setter — notably the legacy
+      // `__proto__` accessor on Object.prototype — so a manifest or CLI flag naming a
+      // phase "__proto__" creates a real, retrievable own property instead of silently
+      // rewriting status.gates's prototype and losing the record.
+      Object.defineProperty(status.gates, gateKey, {
+        value: { ...bound, recordedAt: Date.now() },
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      })
+      await writeState(root, runId, 'status', status)
+    }
     return verdict.verdict === 'PASS' ? 0 : 1
+  }
+
+  if (command === 'complete') {
+    let ctx
+    try {
+      ctx = { cwd: root, ...(await derive(root, runId, flags)) }
+    } catch (err) {
+      io.out(`cannot verify completion: ${err.message}`)
+      return 4
+    }
+    const config = await loadGateConfig(root)
+    if (!config) { io.out('no gate manifest — cannot verify completion'); return 4 }
+
+    const allChecks = checksForPhase(config, flags.phase ?? 'default')
+    const taskKnown = (ctx.tasks ?? []).some((t) => t.id === flags.task)
+    if (!taskKnown) { io.out(`no task ${flags.task} in the plan`); return 4 }
+
+    // `complete` verifies the calling task, not the whole phase. `runFilesetCheck` walks
+    // every task in the current phase, so with the full context a 3-task phase always
+    // fails the first teammate to finish on a sibling's missing branch — indistinguishable
+    // from "my own work is wrong". Ownership stays run-wide (it explains every commit on
+    // the run branch, not just this task's, so scoping it would hide a direct write riding
+    // in behind whichever task finishes first); fileset is scoped to just the named task.
+    // The full, phase-wide gate remains `gate`'s job — phase-gate still runs it before
+    // integration, so a phase can never advance without every task passing.
+    const filesetChecks = allChecks.filter((c) => c.kind === 'fileset')
+    const otherChecks = allChecks.filter((c) => c.kind !== 'fileset')
+    const taskCtx = { ...ctx, tasks: (ctx.tasks ?? []).filter((t) => t.id === flags.task) }
+
+    // The gate is recomputed. A PASS recorded in status.json is never consulted, so a
+    // stale or forged one buys nothing.
+    const results = [
+      ...(await runChecks(filesetChecks, taskCtx)),
+      ...(await runChecks(otherChecks, ctx)),
+    ]
+    const verdict = aggregateVerdict(results)
+    if (verdict.verdict !== 'PASS') {
+      const names = [...verdict.failed, ...verdict.pending]
+      io.out(`gate does not pass for phase ${ctx.currentPhase}: ${names.join(', ')}`)
+      for (const r of results) {
+        if (names.includes(r.name) && r.output) io.out(`${r.name}: ${r.output}`)
+      }
+      return 4
+    }
+
+    const status = await readState(root, runId, 'status')
+    if (!status) { io.out(`no status for run ${runId}`); return 1 }
+    const task = (status.tasks ?? []).find((t) => t.id === flags.task)
+    if (!task) { io.out(`no task ${flags.task} in run ${runId}`); return 1 }
+    task.state = 'done'
+    await writeState(root, runId, 'status', status)
+    io.out(`${flags.task} done`)
+    return 0
   }
 
   io.out(USAGE)
