@@ -4,6 +4,7 @@ import path from 'node:path'
 
 const MANIFEST = 'teammates.gate.json'
 const INFERRED_ORDER = ['typecheck', 'lint', 'test', 'build']
+const DEFAULT_FIX_ROUNDS = 2
 
 export function defaultMaxParallel() {
   return Math.max(1, Math.min(8, availableParallelism() - 2))
@@ -35,10 +36,19 @@ export function inferGateConfig(pkg) {
     blockOn: ['high'],
   })
 
-  return { maxParallel: defaultMaxParallel(), phases: { default: { checks } } }
+  return {
+    maxParallel: defaultMaxParallel(),
+    phases: { default: { fixRounds: DEFAULT_FIX_ROUNDS, checks } },
+  }
 }
 
 export function checksForPhase(config, phaseName) {
   const phases = config?.phases ?? {}
   return phases[phaseName]?.checks ?? phases.default?.checks ?? []
+}
+
+export function fixRoundsForPhase(config, phaseName) {
+  const phases = config?.phases ?? {}
+  const phase = phases[phaseName] ?? phases.default
+  return phase?.fixRounds ?? DEFAULT_FIX_ROUNDS
 }

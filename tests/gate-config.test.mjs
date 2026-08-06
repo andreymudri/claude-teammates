@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { loadGateConfig, inferGateConfig, checksForPhase } from '../scripts/gate-config.mjs'
+import { loadGateConfig, inferGateConfig, checksForPhase, fixRoundsForPhase } from '../scripts/gate-config.mjs'
 
 async function withTempRoot(fn) {
   const root = await mkdtemp(path.join(tmpdir(), 'tm-gate-'))
@@ -73,4 +73,35 @@ test('checksForPhase prefers a named phase over default', () => {
 
 test('checksForPhase returns an empty array when nothing is configured', () => {
   assert.deepEqual(checksForPhase({ phases: {} }, 'default'), [])
+})
+
+test('inferGateConfig emits fixRounds: 2 on the default phase', () => {
+  const config = inferGateConfig({ scripts: { test: 'node --test' } })
+  assert.equal(config.phases.default.fixRounds, 2)
+})
+
+test('fixRoundsForPhase returns a named phase explicit value', () => {
+  const config = {
+    phases: {
+      default: { fixRounds: 2, checks: [] },
+      integration: { fixRounds: 5, checks: [] },
+    },
+  }
+  assert.equal(fixRoundsForPhase(config, 'integration'), 5)
+})
+
+test('fixRoundsForPhase falls back to the default phase value for an unknown phase name', () => {
+  const config = {
+    phases: {
+      default: { fixRounds: 5, checks: [] },
+    },
+  }
+  assert.equal(fixRoundsForPhase(config, 'phase-2'), 5)
+})
+
+test('fixRoundsForPhase returns 2 when no fixRounds is set anywhere, and for null', () => {
+  const config = { phases: { default: { checks: [] } } }
+  assert.equal(fixRoundsForPhase(config, 'default'), 2)
+  assert.equal(fixRoundsForPhase(config, 'unknown'), 2)
+  assert.equal(fixRoundsForPhase(null, 'default'), 2)
 })
