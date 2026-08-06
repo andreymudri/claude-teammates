@@ -45,11 +45,24 @@ alone. No bookkeeping call follows the merge: the next phase is derived from wha
 
 ## Choosing a model per dispatch
 
-Set the model explicitly on every dispatch — an omitted model inherits the session's, which is
-usually the most expensive tier, and that cost multiplies across every teammate in a phase. Use
-the cheapest tier that fits the task: mechanical tasks whose brief already contains the code to
-write take the cheapest model; integration work and tasks that require judgment calls take a
-mid tier; architecture-level work and the final review take the most capable model available.
+Every task in `plan.json` carries a `tier`, either declared in the plan or inferred by
+`init-run`. Read it; do not re-derive it. Resolve it at dispatch:
+
+    cheap    -> haiku
+    mid      -> sonnet
+    capable  -> opus
+
+An omitted model inherits the session's, which is usually the most expensive tier, and that
+cost multiplies across every teammate in a phase. Set it explicitly on every dispatch.
+
+Role dispatches are fixed and not read from the plan: `tm-integrator` runs at `mid`,
+`tm-reviewer` at `capable`. Review is the last line of defence before integration.
+
+When generating a Workflow, pass the same map through so the generated dispatches carry
+concrete models:
+
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" workflow --run <id> --phase <n> --root <root> \
+      --models '{"cheap":"haiku","mid":"sonnet","capable":"opus"}'
 
 ## Invariants
 

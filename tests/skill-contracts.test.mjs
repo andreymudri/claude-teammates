@@ -49,3 +49,84 @@ test('adapted skills credit the upstream project', async () => {
     assert.match(body, /Adapted from the MIT-licensed superpowers plugin/, `${name}: missing attribution line`)
   }
 })
+
+test('parallel-execution documents all three model tiers and the --models flag', async () => {
+  const { body } = await skill('parallel-execution')
+  assert.match(body, /\bcheap\b/)
+  assert.match(body, /\bmid\b/)
+  assert.match(body, /\bcapable\b/)
+  assert.match(body, /--models/)
+})
+
+test('phase-gate documents the fix decision and the cost-bound framing', async () => {
+  const { body } = await skill('phase-gate')
+  assert.match(body, /fix decision/)
+  for (const decision of ['none', 'retry', 'escalate']) {
+    assert.match(body, new RegExp('`' + decision + '`'), `phase-gate must document the ${decision} decision`)
+  }
+  assert.match(body, /cost bound, not a security bound/)
+})
+
+test('phase-gate says plainly what a none decision means and does not mean', async () => {
+  const { body } = await skill('phase-gate')
+  const start = body.indexOf('## On FAIL')
+  const end = body.indexOf('## What the enforcement checks')
+  assert.ok(start >= 0 && end > start, 'On FAIL section not found')
+  const onFail = body.slice(start, end)
+  const noneStart = onFail.indexOf('On `none`')
+  assert.ok(noneStart >= 0, 'On FAIL must have a `none` branch')
+  const none = onFail.slice(noneStart, onFail.indexOf('On `retry`'))
+  assert.match(none, /never permission to integrate/i, '`none` must not read as "no fix needed"')
+  assert.match(none.replace(/\s+/g, ' '), /gate again from scratch/i, '`none` must say to re-derive the verdict')
+})
+
+// A subcommand exists only if the CLI dispatches on it. Matching any quoted token in cli.mjs
+// is too loose: `'status'` appears there several times as a state-file key, so a doc naming
+// `cli.mjs status` would pass while describing a subcommand the CLI never routes to.
+function dispatchedSubcommands(cli) {
+  const subs = new Set()
+  const usage = /usage:\s*cli\.mjs\s*<([^>]+)>/.exec(cli)
+  if (usage) for (const sub of usage[1].split('|')) subs.add(sub.trim())
+  for (const [, sub] of cli.matchAll(/command\s*===\s*'([a-z-]+)'/g)) subs.add(sub)
+  return subs
+}
+
+test('the subcommand check reads dispatch sites, not every quoted token', async () => {
+  const cli = await readFile(new URL('../scripts/cli.mjs', import.meta.url), 'utf8')
+  const subs = dispatchedSubcommands(cli)
+  assert.ok(subs.has('gate'), 'gate is dispatched and must be recognised')
+  assert.ok(!subs.has('fix-decision'), 'an unimplemented subcommand must not be recognised')
+  assert.ok(cli.includes("'status'"), 'precondition: status appears quoted in cli.mjs')
+  assert.ok(!subs.has('status'), 'status is a state-file key, not a dispatched subcommand')
+})
+
+test('phase-gate names no cli subcommand that scripts/cli.mjs does not dispatch', async () => {
+  const { body } = await skill('phase-gate')
+  const subs = dispatchedSubcommands(await readFile(new URL('../scripts/cli.mjs', import.meta.url), 'utf8'))
+  for (const [, sub] of body.matchAll(/cli\.mjs["']?\s+([a-z-]+)/g)) {
+    assert.ok(subs.has(sub), `phase-gate documents undispatched subcommand ${sub}`)
+  }
+})
+
+test('phase-gate requires the fix decision to use this pass’s verdict, never the on-disk record', async () => {
+  const { body } = await skill('phase-gate')
+  const start = body.indexOf('## On FAIL')
+  const end = body.indexOf('## What the enforcement checks')
+  assert.ok(start >= 0 && end > start, 'On FAIL section not found')
+  const onFail = body.slice(start, end).replace(/\s+/g, ' ')
+  assert.match(onFail, /printed in this same pass/i, 'must pin the verdict to the current gate pass')
+  assert.match(onFail, /never.{0,80}\.teammates\//i, 'must forbid reading the verdict from .teammates/')
+  assert.match(onFail, /status\.gates/, 'must name the on-disk record it forbids')
+})
+
+test('phase-gate marks the fix-decision invocation as pending, not missing', async () => {
+  const { body } = await skill('phase-gate')
+  const start = body.indexOf('## On FAIL')
+  const onFail = body.slice(start, body.indexOf('## What the enforcement checks')).replace(/\s+/g, ' ')
+  assert.match(onFail, /pending, not missing/i, 'a reader who cannot find the command must know it is pending')
+})
+
+test('tm-implementer forbids weakening a test to satisfy a fix-round finding', async () => {
+  const body = await readFile(new URL('../agents/tm-implementer.md', import.meta.url), 'utf8')
+  assert.match(body, /do not weaken or delete a test/i)
+})
