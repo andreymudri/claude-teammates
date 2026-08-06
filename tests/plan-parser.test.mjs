@@ -298,6 +298,31 @@ Second brief.
   assert.ok(!tasks[1].brief.includes('Interlude'))
 })
 
+test('a ### sub-heading inside a task body stays in that task brief, and the Files block after it still parses', () => {
+  const plan = `### Task 1: X
+
+### Rationale
+
+Why this task exists.
+
+**Files:**
+- Create: \`a.mjs\`
+
+Brief body.
+
+### Task 2: Y
+
+**Files:**
+- Create: \`b.mjs\`
+`
+  const tasks = parsePlan(plan)
+  assert.equal(tasks.length, 2)
+  assert.ok(tasks[0].brief.includes('### Rationale'), 'a ### sub-heading must not end the task brief')
+  assert.ok(tasks[0].brief.includes('Why this task exists.'))
+  assert.ok(tasks[0].brief.includes('Brief body.'))
+  assert.deepEqual(tasks[0].files, ['a.mjs'], 'Files block after a ### sub-heading must still be parsed')
+})
+
 test('parses an unrecognised Model value without throwing', () => {
   const plan = '### Task 1: X\n\n**Files:**\n- Create: `a.mjs`\n\n**Model:** enormous\n'
   const tasks = parsePlan(plan)
