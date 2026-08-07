@@ -1988,19 +1988,60 @@ test('workflow --plan and --base put the base branch in a checkout line and name
 })
 
 test('workflow with a plan carrying Global Constraints puts every constraint in the brief', async () => {
-  await withRepo(async ({ root, planPath, io, lines }) => {
+  await withRepo(async ({ root, planPath, io, lines, git }) => {
     await writeFile(planPath, `${PLAN}
 ## Global Constraints
 
 - Node >= 24.2.0
 - Zero new runtime dependencies
 `, 'utf8')
+    // Committed on the base branch, because that is where the anchor reads it from. A plan
+    // that exists only in the working tree is not the plan the gate will enforce.
+    git(['add', '.'])
+    git(['commit', '--quiet', '-m', 'plan with constraints'])
+    git(['branch', '--force', 'main', 'HEAD'])
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     lines.length = 0
     await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root, '--plan', planPath], io)
     const [prompt] = await captureAgentPrompts(lines.join('\n'))
     assert.ok(prompt.includes('- Node >= 24.2.0'), 'first constraint must reach the brief')
     assert.ok(prompt.includes('- Zero new runtime dependencies'), 'second constraint must reach the brief')
+  })
+})
+
+// The brief is generated from the plan at the anchor, never from the checked-out copy. Both
+// `gate` and `complete` already read it that way, so that a teammate cannot widen its own
+// declared file set by editing the working tree. Reading it from disk here left the two
+// disagreeing: constraints injected into every dispatch would have come from mutable,
+// uncommitted markdown while the gate enforced the committed plan.
+test('workflow reads the plan from the anchor, not the working tree', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git }) => {
+    await writeFile(planPath, `${PLAN}
+## Global Constraints
+
+- committed rule
+`, 'utf8')
+    git(['add', '.'])
+    git(['commit', '--quiet', '-m', 'plan with constraints'])
+    git(['branch', '--force', 'main', 'HEAD'])
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    // Edited after the commit and left uncommitted: this is the text an enforced agent could
+    // put on disk between phases. It must not reach any brief.
+    await writeFile(planPath, `${PLAN}
+## Global Constraints
+
+- committed rule
+- injected from the working tree
+`, 'utf8')
+    lines.length = 0
+    const code = await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root, '--plan', planPath], io)
+    assert.equal(code, 0, lines.join('\n'))
+    const [prompt] = await captureAgentPrompts(lines.join('\n'))
+    assert.ok(prompt.includes('- committed rule'), 'the committed constraint must reach the brief')
+    assert.ok(
+      !prompt.includes('injected from the working tree'),
+      'an uncommitted edit must not reach the brief',
+    )
   })
 })
 
