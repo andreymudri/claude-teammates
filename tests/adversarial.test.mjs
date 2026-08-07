@@ -1191,11 +1191,16 @@ writeFileSync(${JSON.stringify(sentinel)}, JSON.stringify({
 // `fileset` and `ownership` — the two checks that catch it — and the inflated budget would keep
 // the fix loop retrying long past the point the operator meant to stop.
 //
-// `fixRounds` appears twice on purpose. `fixRoundsForPhase` reads `phases.<name>.fixRounds`, so
-// that is where a budget would actually be honoured from; the top-level copy is the spelling an
-// attacker guessing at the schema would more likely reach for. Pinning only one of the two would
-// leave the other as an untested path, and each is checked by a different test below: the empty
-// check list by the verdict test, the budget by the fix-loop test after it.
+// `fixRounds` appears twice, and the two copies do different jobs — do not assume the top-level
+// one is a duplicate and delete it.
+//
+// `phases.<name>.fixRounds` then `phases.default.fixRounds` is the only spelling any production
+// path reads (`fixRoundsForPhase`), so it is the one the fix-loop test below pins. The top-level
+// copy is read by nothing: removing it changes no gate or fix behaviour, and no single-step
+// mutation makes it matter. It earns its place in a different test — it is the spelling an
+// attacker guessing at the schema reaches for, and being an *unknown* key rather than an
+// enforcement one it is the nearest neighbour the `config list` test rules out, pinning that the
+// validator names `phases` and not `fixRounds`. Delete it and that assertion asserts nothing.
 const HOSTILE_LOCAL = {
   phases: { default: { checks: [], fixRounds: 99 } },
   fixRounds: 99,
@@ -1211,8 +1216,13 @@ const HOSTILE_LOCAL = {
 // its own manifest swap: a commit on run-branch that no task branch explains is itself an
 // ownership violation, and it must also survive `retryableRun`'s later amend of the same commit.
 // Call this BEFORE `retryableRun`, never after — the second amend keeps the first's content, but
-// not the other way round.
+// not the other way round. The guard below makes that a real constraint rather than a comment:
+// swapped, this function's `branch -f run-branch main` orphans the task branch `retryableRun`
+// already cut, and the run fails as a gate exit 1 while `decideFix` reports `none` — loud, but
+// pointing at the wrong subsystem entirely.
 async function ignoreLocalLayer(root) {
+  const branches = git(root, ['branch', '--list', 'teammates/*', '--format=%(refname:short)']).trim()
+  assert.equal(branches, '', 'ignoreLocalLayer must run before any task branch exists — call it before retryableRun')
   await writeFile(path.join(root, '.gitignore'), '.teammates/\nteammates.local.json\n', 'utf8')
   git(root, ['checkout', '--quiet', 'main'])
   git(root, ['add', '.gitignore'])
@@ -1284,9 +1294,16 @@ test('the same hostile file cannot extend the fix-round budget the tracked manif
     }
 
     const exhausted = JSON.parse((await runCliOn(root, ['fix', '--run', 'r1', '--phase', '1', '--verdict', verdictPath])).out)
-    // `budget-exhausted` by name, not merely `escalate`: a `fix` that read the local layer's
-    // `phases.default` would find an empty check list and no manifest budget there, and could
-    // escalate for a quite different reason while looking identical at this assertion's altitude.
+    // The discrimination lives in the loop above, not here: a `fix` that merged the hostile
+    // layer's 99 would keep granting rounds, so `granted.round === round` for exactly
+    // RETRYABLE_BUDGET rounds and a stop on the next one is what proves the budget came from the
+    // tracked manifest. Do not drop those as redundant with this assertion — without them this
+    // one holds for a run that never granted a round at all.
+    //
+    // `budget-exhausted` by name, not merely `escalate`, because `decideFix` has four escalate
+    // reasons (`malformed-verdict`, `process-violation`, `unattributable`, `budget-exhausted`)
+    // and the first three would stop the loop here too, at the same decision, for reasons that
+    // say nothing about whose budget was honoured.
     assert.equal(exhausted.decision, 'escalate')
     assert.equal(exhausted.reason, 'budget-exhausted')
     assert.deepEqual(exhausted.tasks, [])

@@ -689,6 +689,11 @@ test('validateGate rejects a lens that is not an array, by exact message', () =>
   assert.throws(
     () => validateGate({ lens: 'performance' }),
     (err) => {
+      // Anchored on its own message, not only on the absence of the wrong one: six failure
+      // modes in this CLI share exit 2, so a bare `doesNotMatch` is satisfied by five of them
+      // — and by a TypeError from a validator that never ran at all.
+      assert.ok(err instanceof ConfigError)
+      assert.equal(err.message, 'lens must be a non-empty array of strings')
       assert.doesNotMatch(err.message, /unknown config key/)
       return true
     },
@@ -752,6 +757,11 @@ test('validateGate distinguishes a bad phases container from a bad phase entry',
   assert.throws(
     () => validateGate({ phases: [] }),
     (err) => {
+      // The container message, pinned exactly. Without this the predicate passes for any error
+      // whose message merely fails to start with `phases.` — including one raised before the
+      // `phases` validator was reached.
+      assert.ok(err instanceof ConfigError)
+      assert.equal(err.message, 'phases must be an object keyed by phase name')
       assert.doesNotMatch(err.message, /^phases\./)
       return true
     },
@@ -821,6 +831,10 @@ test('validateGate distinguishes a bad preview container from a bad preview.link
   assert.throws(
     () => validateGate({ preview: [] }),
     (err) => {
+      // Same anchoring: the container failure has its own message, and asserting only that
+      // `preview.link` is absent from it would hold for an unrelated error just as well.
+      assert.ok(err instanceof ConfigError)
+      assert.equal(err.message, 'preview must be an object')
       assert.doesNotMatch(err.message, /preview\.link/)
       return true
     },
