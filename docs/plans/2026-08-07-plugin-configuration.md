@@ -909,3 +909,93 @@ export function unsetKey(obj, dotted) {
   returns without throwing; and provenance is per field — with `tier` in the gate layer and
   `effort` in the local layer, `sources['agents.implementer.tier']` is the gate file while
   `sources['agents.implementer.effort']` is the local file.
+
+---
+
+### Task 9: validate the tracked gate layer as strictly as the local layer
+
+**Files:**
+- Modify: `scripts/config.mjs`
+- Test: `tests/config.test.mjs`
+
+**Depends:** T8
+
+**Model:** capable
+
+T8 made the gitignored local layer strict. The tracked layer was left as
+`(await readLayer(root, GATE_FILE)) ?? {}`, so it accepts anything. The asymmetry has now produced
+two separate defects in two different reviews, which makes it a design problem rather than two
+bugs. Neither is attacker-reachable — both need an operator typo in a tracked, reviewable file —
+but both fail *silently*, and the tracked manifest is the one an operator believes is authoritative.
+
+Both symptoms were reproduced by reviewers:
+
+    teammates.gate.json = []                       -> every key silently resolves to its default
+    agents.implementer.tier = "capabel" (typo)     -> tierModels lookup yields undefined, so the
+                                                      dispatch carries no model at all, exit 0,
+                                                      nothing on stdout
+
+- [ ] **Step 1:** Add `validateGate(gate)` to `scripts/config.mjs`, mirroring `validateLocal`'s
+  shape but permitting the enforcement keys, since the gate file is where they belong. It rejects a
+  non-object body by name, and validates the domain of every ergonomics key it does contain:
+
+```js
+// The gate file is tracked and reviewable, so a bad value here is an operator typo rather than an
+// attack. It is validated anyway, and for the same reason validateLocal is: a key that silently
+// resolves to a default is a key the operator believes is set. Enforcement keys are permitted
+// here — this is the file they belong in — so only their presence is unchecked, not their shape.
+export function validateGate(gate) {
+  if (gate === null || typeof gate !== 'object' || Array.isArray(gate)) {
+    throw new ConfigError(`${GATE_FILE} must contain a JSON object`)
+  }
+  if (gate.maxParallel !== undefined) VALIDATORS.maxParallel(gate.maxParallel)
+  if (gate.caveman !== undefined) VALIDATORS.caveman(gate.caveman)
+  if (gate.agents !== undefined) {
+    if (gate.agents === null || typeof gate.agents !== 'object' || Array.isArray(gate.agents)) {
+      throw new ConfigError('agents must be an object keyed by role')
+    }
+    for (const [role, entry] of Object.entries(gate.agents)) {
+      if (!ROLES.includes(role)) throw new ConfigError(`unknown agent role: ${role}`)
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw new ConfigError(`agents.${role} must be an object`)
+      }
+      for (const field of Object.keys(entry)) {
+        if (field !== 'tier' && field !== 'effort') {
+          throw new ConfigError(`unknown key in ${GATE_FILE}: agents.${role}.${field}`)
+        }
+      }
+      if (entry.tier !== undefined) VALIDATORS.tier(entry.tier)
+      if (entry.effort !== undefined) VALIDATORS.effort(entry.effort)
+    }
+  }
+  return gate
+}
+```
+
+  Note the deliberate difference from `validateLocal`: `agents.reviewer` is **permitted** here.
+  The reviewer's tier and effort are enforcement keys, and this is the file enforcement keys live
+  in. Rejecting the role in this layer would leave no way to configure it at all.
+
+- [ ] **Step 2:** Call it from `loadConfig`, using the same `missing` sentinel `readLayer` already
+  supports so an absent gate file stays distinguishable from one whose body is literally `null`:
+
+```js
+  const gateRaw = await readLayer(root, GATE_FILE, { missing: undefined })
+  const gate = gateRaw === undefined ? {} : validateGate(gateRaw)
+```
+
+  An absent file still resolves to defaults with no error — that is the ordinary case for a project
+  with no manifest, and `gate` exits 3 with an inferred manifest rather than failing here.
+
+- [ ] **Step 3:** Leave `loadGateConfig` alone. `gate`, `complete` and `fix` read the manifest
+  through it for enforcement keys only, and adding validation there would change the exit-code
+  behaviour of the three commands the phase gate depends on. This task tightens `loadConfig`,
+  which is the ergonomics path, and nothing else.
+
+- [ ] **Step 4:** Add tests to `tests/config.test.mjs`: a gate file whose body is `[]`, `"text"`,
+  `false`, `0`, `""` or `null` raises naming `teammates.gate.json`; an absent gate file still
+  resolves to defaults without raising; `agents.implementer.tier: "capabel"` raises listing the
+  valid tiers rather than resolving to no model; `agents.reviewer.tier: "capable"` is ACCEPTED in
+  the gate layer and still rejected in the local layer, pinning the asymmetry that is intentional;
+  an unknown sub-key under `agents.<role>` in the gate file raises naming the full path; and the
+  enforcement keys `phases`, `lens` and `preview` are accepted in the gate file untouched.
