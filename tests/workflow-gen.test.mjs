@@ -242,14 +242,29 @@ test('the brief bootstraps the worktree before the baseline run, not after it', 
   // and a teammate obeying the brief blocks having done no work. The teammate never reads
   // SKILL.md, so the install and config-copy steps have to be named here, and named before the
   // test command, or the skill's remedy is unreachable.
-  const install = prompt.search(/install (the [^\n]*)?dependenc/i)
-  const config = prompt.search(/copy [^\n]*config/i)
+  // Matched across line breaks and without binding a fixed wording: `[\s\S]` rather than
+  // `[^\n]` so a reflow does not fail this, and each step is identified by the word that
+  // carries its meaning — `dependenc`, `config`, `test` — rather than by the sentence the
+  // template happens to use. An earlier form asserted `/copy [^\n]*config/i`, which failed
+  // when step 2 was reflowed across two array entries with identical rendered text, and
+  // `/install (the [^\n]*)?dependenc/i`, which failed on any rewording that kept the step
+  // first. Both were false failures on ordinary maintenance.
+  const install = prompt.search(/install[\s\S]{0,60}?dependenc/i)
+  const config = prompt.search(/copy[\s\S]{0,60}?config/i)
   const run = prompt.search(/test command/)
+  const checkout = prompt.search(/git checkout -B/)
   assert.ok(install !== -1, 'the brief must name a dependency install step')
   assert.ok(config !== -1, 'the brief must name a config-copy step for untracked files')
   assert.ok(run !== -1, 'the brief must still name the test command')
   assert.ok(install < run, 'the install must come before the baseline test run')
   assert.ok(config < run, 'the config copy must come before the baseline test run')
+  // Bootstrapping is pinned relative to the checkout as well as to the test run. Pinned only
+  // against the test command, both steps could be hoisted above MANDATORY FIRST STEP and stay
+  // green — telling the teammate to install dependencies into a worktree still sitting on the
+  // stale commit the checkout exists to correct.
+  assert.ok(checkout !== -1, 'the brief must still carry the verified checkout')
+  assert.ok(checkout < install, 'the checkout must come before the install step')
+  assert.ok(checkout < config, 'the checkout must come before the config copy')
 
   // The ordering is only justified by the reason a green baseline matters at all; dropping the
   // explanation leaves a bare chore a teammate under time pressure will skip.
