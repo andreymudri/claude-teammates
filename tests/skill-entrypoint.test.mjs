@@ -5,24 +5,51 @@ import { readFile, readdir } from 'node:fs/promises'
 const skillsDir = new URL('../skills/', import.meta.url)
 const body = async () => readFile(new URL('using-teammates/SKILL.md', skillsDir), 'utf8')
 
-test('routes to every skill that exists', async () => {
-  const names = (await readdir(skillsDir, { withFileTypes: true }))
+// The routing table is the pairing under test, so it is parsed as a table — every row's Skill
+// cell, taken whole. The previous version filtered candidate names through a hardcoded prefix
+// allowlist, which silently stopped covering any skill whose name did not start with one of
+// them: `teammates-config` matched none, so deleting `skills/teammates-config/` while keeping
+// its routing row left the whole suite green. A shape the table itself defines cannot fall out
+// of step with the table the way a name list does.
+function routedSkills(b) {
+  const section = b.split(/^## Routing$/m)[1]
+  assert.ok(section, 'using-teammates has no ## Routing section')
+  const rows = section.split(/^## /m)[0]
+    .split('\n')
+    .filter((line) => line.startsWith('|') && !/^\|[\s|:-]+\|$/.test(line))
+    .slice(1) // the header row
+  const routed = []
+  for (const row of rows) {
+    const cells = row.split('|').slice(1, -1).map((c) => c.trim())
+    assert.equal(cells.length, 2, `routing row is not two cells: ${row}`)
+    const named = [...cells[1].matchAll(/`([^`]+)`/g)].map((m) => m[1])
+    // One skill per row, backticked. A row that names none would otherwise contribute nothing
+    // and be counted as covered.
+    assert.equal(named.length, 1, `routing row names ${named.length} skills, expected 1: ${row}`)
+    routed.push(named[0])
+  }
+  // Guards against the whole check going vacuous if the table is ever reformatted out of shape.
+  assert.ok(routed.length >= 10, `routing table parsed to only ${routed.length} rows`)
+  return routed
+}
+
+async function skillDirs() {
+  return (await readdir(skillsDir, { withFileTypes: true }))
     .filter((e) => e.isDirectory() && e.name !== 'using-teammates')
     .map((e) => e.name)
-  const b = await body()
-  for (const name of names) {
-    assert.ok(b.includes(name), `entrypoint does not route to ${name}`)
+}
+
+test('routes to every skill that exists', async () => {
+  const routed = new Set(routedSkills(await body()))
+  for (const name of await skillDirs()) {
+    assert.ok(routed.has(name), `entrypoint does not route to ${name}`)
   }
 })
 
 test('every skill the routing table names actually exists', async () => {
-  const present = (await readdir(skillsDir, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name)
-  const b = await body()
-  for (const m of b.matchAll(/`([a-z-]+)`/g)) {
-    const candidate = m[1]
-    if (candidate.includes('-') && /^(brainstorming|writing-|executing-|test-driven|systematic-|receiving-|finishing-|fleet-|parallel-|phase-|using-)/.test(candidate)) {
-      assert.ok(present.includes(candidate), `routing table names missing skill ${candidate}`)
-    }
+  const present = new Set(await skillDirs())
+  for (const name of routedSkills(await body())) {
+    assert.ok(present.has(name), `routing table names missing skill ${name}`)
   }
 })
 
