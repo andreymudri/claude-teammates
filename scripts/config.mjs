@@ -96,20 +96,27 @@ export function validateLocal(local) {
   return local
 }
 
-export async function readLayer(root, file) {
+// A layer file whose whole body is `null` parses to the same value this returns for a missing
+// file. Callers that must tell the two apart pass their own `missing` sentinel; the default
+// stays `null` so "absent" reads naturally everywhere else.
+export async function readLayer(root, file, { missing = null } = {}) {
   try {
     return JSON.parse(await readFile(path.join(root, file), 'utf8'))
   } catch (err) {
-    if (err.code === 'ENOENT') return null
+    if (err.code === 'ENOENT') return missing
     if (err instanceof SyntaxError) throw new ConfigError(`${file} is not valid JSON: ${err.message}`)
     throw err
   }
 }
 
+const MISSING = Symbol('missing layer')
+
 export async function loadConfig(root) {
   const gate = (await readLayer(root, GATE_FILE)) ?? {}
-  const local = await readLayer(root, LOCAL_FILE)
-  if (local) validateLocal(local)
+  // Only an absent file skips validation. A present file holding `false`, `0`, `""` or `null` is
+  // a malformed layer, and guarding on truthiness would silently ignore it instead of saying so.
+  const raw = await readLayer(root, LOCAL_FILE, { missing: MISSING })
+  const local = raw === MISSING ? null : validateLocal(raw)
 
   const sources = {}
   const pick = (key, fallback) => {
@@ -144,17 +151,23 @@ export async function loadConfig(root) {
   }
 }
 
+// `config get <key>` hands this a raw user key, so it needs the same boundary as its siblings:
+// without it `config get constructor` prints the Object function instead of raising.
 export function getKey(obj, dotted) {
+  assertSafeKey(dotted)
   return dotted.split('.').reduce((acc, part) => (acc == null ? acc : acc[part]), obj)
 }
 
+// Every descent below tests own-ness, never mere reachability: an inherited branch belongs to
+// some other object, and writing through it mutates that object while leaving this one empty.
 export function setKey(obj, dotted, value) {
   assertSafeKey(dotted)
   const parts = dotted.split('.')
   const last = parts.pop()
   let cursor = obj
   for (const part of parts) {
-    if (cursor[part] === null || typeof cursor[part] !== 'object' || Array.isArray(cursor[part])) {
+    const next = Object.hasOwn(cursor, part) ? cursor[part] : undefined
+    if (next === null || typeof next !== 'object' || Array.isArray(next)) {
       cursor[part] = {}
     }
     cursor = cursor[part]
@@ -169,10 +182,12 @@ export function unsetKey(obj, dotted) {
   const last = parts.pop()
   let cursor = obj
   for (const part of parts) {
-    const next = cursor?.[part]
+    if (cursor === null || typeof cursor !== 'object' || !Object.hasOwn(cursor, part)) return obj
+    const next = cursor[part]
     if (next === null || typeof next !== 'object') return obj
     cursor = next
   }
+  if (!Object.hasOwn(cursor, last)) return obj
   delete cursor[last]
   return obj
 }
@@ -197,7 +212,9 @@ export function isEnforcementKey(dotted) {
   // is. That makes them enforcement, not ergonomics, however much they look like the other two
   // roles: a teammate that could set them from the gitignored layer would be choosing the
   // reviewer that grades its own diff, leaving no fileset or ownership evidence behind.
-  return /^agents\.reviewer\.(tier|effort)$/.test(dotted)
+  // Anchored on the role, not the field: `agents.reviewer` with no field names the same
+  // enforcement surface, and a caller that only tested the two field paths would wave it through.
+  return /^agents\.reviewer(\..*)?$/.test(dotted)
 }
 
 export async function writeLayer(root, file, obj) {

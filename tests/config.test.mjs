@@ -125,6 +125,29 @@ test('loadConfig surfaces a corrupt local layer as a ConfigError, not a SyntaxEr
   })
 })
 
+test('loadConfig rejects a falsy non-object local layer rather than ignoring it', async () => {
+  for (const body of ['false', '0', '""', 'null']) {
+    await withTempRoot(async (root) => {
+      await writeFile(path.join(root, LOCAL_FILE), body, 'utf8')
+      await assert.rejects(
+        () => loadConfig(root),
+        (err) => err instanceof ConfigError && /must contain a JSON object/.test(err.message)
+          && err.message.includes(LOCAL_FILE),
+        `expected a local layer of ${body} to be rejected`,
+      )
+    })
+  }
+})
+
+test('loadConfig still treats an absent local layer as absent, not as a bad one', async () => {
+  await withTempRoot(async (root) => {
+    await writeJson(root, GATE_FILE, { maxParallel: 7 })
+    const { resolved, sources } = await loadConfig(root)
+    assert.equal(resolved.maxParallel, 7)
+    assert.equal(sources.maxParallel, GATE_FILE)
+  })
+})
+
 test('validateLocal rejects every enforcement key by name', () => {
   for (const key of ENFORCEMENT_KEYS) {
     assert.throws(
@@ -142,8 +165,13 @@ test('validateLocal rejects an unknown key by name rather than dropping it', () 
 })
 
 test('validateLocal rejects a non-object local layer', () => {
-  for (const bad of [null, [], 'text', 3]) {
-    assert.throws(() => validateLocal(bad), ConfigError)
+  for (const bad of [null, [], 'text', 3, false, 0, '']) {
+    assert.throws(
+      () => validateLocal(bad),
+      (err) => err instanceof ConfigError && /must contain a JSON object/.test(err.message)
+        && err.message.includes(LOCAL_FILE),
+      `expected ${JSON.stringify(bad)} to be rejected as a local layer`,
+    )
   }
 })
 
@@ -157,9 +185,18 @@ test('validateLocal rejects an unknown agent role and a bad agent field', () => 
     () => validateLocal({ agents: { nobody: { tier: 'mid' } } }),
     (err) => err instanceof ConfigError && err.message.includes('nobody'),
   )
-  assert.throws(() => validateLocal({ agents: { implementer: { tier: 'nonsense' } } }), ConfigError)
-  assert.throws(() => validateLocal({ agents: { implementer: { effort: 'nonsense' } } }), ConfigError)
-  assert.throws(() => validateLocal({ agents: [] }), ConfigError)
+  assert.throws(
+    () => validateLocal({ agents: { implementer: { tier: 'nonsense' } } }),
+    (err) => err instanceof ConfigError && /tier must be one of/.test(err.message),
+  )
+  assert.throws(
+    () => validateLocal({ agents: { implementer: { effort: 'nonsense' } } }),
+    (err) => err instanceof ConfigError && /effort must be one of/.test(err.message),
+  )
+  assert.throws(
+    () => validateLocal({ agents: [] }),
+    (err) => err instanceof ConfigError && /agents must be an object keyed by role/.test(err.message),
+  )
 })
 
 test('maxParallel accepts an integer >= 1 and rejects everything else', () => {
@@ -314,7 +351,7 @@ test('assertSafeKey rejects every prototype-reaching segment by name', () => {
   ]) {
     assert.throws(
       () => assertSafeKey(dotted),
-      (err) => err instanceof ConfigError && /unsafe/.test(err.message),
+      (err) => err instanceof ConfigError && /unsafe config key segment/.test(err.message),
       `expected ${dotted} to be rejected`,
     )
   }
@@ -326,32 +363,66 @@ test('assertSafeKey returns a safe key unchanged', () => {
 })
 
 test('setKey refuses a prototype-polluting path and leaves Object.prototype clean', () => {
+  const unsafe = (err) => err instanceof ConfigError && /unsafe config key segment/.test(err.message)
   const target = {}
-  assert.throws(() => setKey(target, '__proto__.pollutedBySetKey', 'PWNED'), ConfigError)
-  assert.throws(
-    () => setKey(target, 'constructor.prototype.pollutedBySetKey', 'PWNED'),
-    ConfigError,
-  )
-  assert.throws(() => setKey(target, 'agents.__proto__.tier', 'PWNED'), ConfigError)
+  assert.throws(() => setKey(target, '__proto__.pollutedBySetKey', 'PWNED'), unsafe)
+  assert.throws(() => setKey(target, 'constructor.prototype.pollutedBySetKey', 'PWNED'), unsafe)
+  assert.throws(() => setKey(target, 'agents.__proto__.tier', 'PWNED'), unsafe)
   assert.deepEqual(Object.keys(target), [])
   assert.equal({}.pollutedBySetKey, undefined)
   assert.equal(Object.prototype.pollutedBySetKey, undefined)
 })
 
 test('unsetKey refuses a prototype-reaching path rather than walking it', () => {
+  const unsafe = (err) => err instanceof ConfigError && /unsafe config key segment/.test(err.message)
   const target = { agents: { reviewer: { tier: 'mid' } } }
-  assert.throws(() => unsetKey(target, '__proto__.toString'), ConfigError)
-  assert.throws(() => unsetKey(target, 'constructor.prototype.toString'), ConfigError)
-  assert.throws(() => unsetKey(target, 'agents.__proto__.tier'), ConfigError)
+  assert.throws(() => unsetKey(target, '__proto__.toString'), unsafe)
+  assert.throws(() => unsetKey(target, 'constructor.prototype.toString'), unsafe)
+  assert.throws(() => unsetKey(target, 'agents.__proto__.tier'), unsafe)
   assert.equal(typeof {}.toString, 'function')
   assert.deepEqual(target, { agents: { reviewer: { tier: 'mid' } } })
 })
 
+// The class alone proves nothing here: every one of these paths also falls through to the
+// pre-existing `unknown config key` throw, which is a ConfigError too. Only the message
+// distinguishes the assertSafeKey guard from that fallback, so assert the message.
 test('validateKey refuses a prototype-reaching path before matching a known key', () => {
-  assert.throws(() => validateKey('__proto__.maxParallel', 4), ConfigError)
-  assert.throws(() => validateKey('agents.__proto__.tier', 'mid'), ConfigError)
-  assert.throws(() => validateKey('constructor.prototype.caveman', 'full'), ConfigError)
+  const unsafe = (err) => err instanceof ConfigError && /unsafe config key segment/.test(err.message)
+  assert.throws(() => validateKey('__proto__.maxParallel', 4), unsafe)
+  assert.throws(() => validateKey('agents.__proto__.tier', 'mid'), unsafe)
+  assert.throws(() => validateKey('constructor.prototype.caveman', 'full'), unsafe)
+  assert.throws(() => validateKey('__proto__', 4), unsafe)
+  assert.throws(() => validateKey('constructor', 1), unsafe)
+  assert.throws(() => validateKey('agents.reviewer.prototype', 'mid'), unsafe)
   assert.equal({}.maxParallel, undefined)
+})
+
+test('getKey refuses a prototype-reaching path instead of reading through it', () => {
+  const unsafe = (err) => err instanceof ConfigError && /unsafe config key segment/.test(err.message)
+  const obj = { agents: { reviewer: { tier: 'capable' } } }
+  assert.throws(() => getKey(obj, 'constructor'), unsafe)
+  assert.throws(() => getKey(obj, '__proto__'), unsafe)
+  assert.throws(() => getKey(obj, 'constructor.prototype'), unsafe)
+  assert.throws(() => getKey(obj, 'agents.__proto__.tier'), unsafe)
+  assert.throws(() => getKey(obj, 'agents.reviewer.prototype'), unsafe)
+})
+
+test('setKey writes an own property rather than mutating an inherited branch', () => {
+  const shared = { x: 'inherited' }
+  const target = Object.create({ shared })
+  setKey(target, 'shared.x', 'own')
+  assert.deepEqual(Object.keys(target), ['shared'])
+  assert.equal(Object.hasOwn(target, 'shared'), true)
+  assert.equal(target.shared.x, 'own')
+  assert.equal(shared.x, 'inherited')
+})
+
+test('unsetKey refuses to delete through an inherited branch', () => {
+  const shared = { x: 'inherited' }
+  const target = Object.create({ shared })
+  unsetKey(target, 'shared.x')
+  assert.equal(shared.x, 'inherited')
+  assert.deepEqual(Object.keys(target), [])
 })
 
 test('isEnforcementKey tests every segment, not only the first', () => {
@@ -369,13 +440,25 @@ test('isEnforcementKey treats the reviewer tier and effort as enforcement', () =
   assert.equal(isEnforcementKey('agents.integrator.effort'), false)
 })
 
+test('isEnforcementKey treats the bare reviewer role as enforcement too', () => {
+  assert.equal(isEnforcementKey('agents.reviewer'), true)
+  assert.equal(isEnforcementKey('agents.reviewer.tier'), true)
+  assert.equal(isEnforcementKey('agents.reviewer.anything.deeper'), true)
+  assert.equal(isEnforcementKey('agents.implementer'), false)
+  assert.equal(isEnforcementKey('agents.reviewerish.tier'), false)
+  assert.equal(isEnforcementKey('agents'), false)
+})
+
 test('validateLocal rejects agents.reviewer by name and points at the gate file', () => {
   assert.throws(
     () => validateLocal({ agents: { reviewer: { tier: 'cheap' } } }),
     (err) => err instanceof ConfigError && err.message.includes('agents.reviewer')
       && err.message.includes(GATE_FILE),
   )
-  assert.throws(() => validateLocal({ agents: { reviewer: {} } }), ConfigError)
+  assert.throws(
+    () => validateLocal({ agents: { reviewer: {} } }),
+    (err) => err instanceof ConfigError && /agents\.reviewer is an enforcement key/.test(err.message),
+  )
 })
 
 test('validateLocal rejects an agent sub-key outside tier and effort, naming the path', () => {
