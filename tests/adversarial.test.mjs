@@ -6,7 +6,8 @@
 //   docs/plans/2026-08-05-tamper-evident-enforcement.md (Task 4)
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, rm, writeFile, readFile, realpath, lstat } from 'node:fs/promises'
+import { mkdtemp, mkdir, rm, writeFile, readFile, lstat } from 'node:fs/promises'
+import { realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -338,6 +339,13 @@ test('LIMIT (mode-only change): a merge that only flips a file\'s executable bit
     // Spec: fileAtCommit returns bytes and never mode. The ownership check's merge-content
     // verification compares byte content only, so a merge that silently changes a file's
     // permission bits beyond what the honest task branch committed is accepted as clean.
+    // `update-index --chmod` writes the bit into the index without touching the file on disk.
+    // Where git honours filemode — POSIX, not Windows — the working tree then differs from
+    // HEAD, and the next `checkout -b <branch> main` is refused as an overwrite of local
+    // changes, so the test failed on Linux and macOS while passing here. Turning filemode off
+    // for this repository makes the platforms agree, and costs the test nothing: the point is
+    // that ownership compares bytes and never mode, and the bit still reaches the commit.
+    git(root, ['config', 'core.fileMode', 'false'])
     await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
     git(root, ['merge', '--quiet', '--no-ff', '--no-commit', 'teammates/r1/T1'])
     git(root, ['update-index', '--chmod=+x', 'a.mjs'])
@@ -1089,12 +1097,17 @@ test('a legitimate preview.link provisions the preview and a command check reads
     // the repository working tree" — the two are indistinguishable by exit code alone, and a
     // check that was skipped still yields PASS and exit 0.
     const sentinel = path.join(root, '.teammates', 'link-probe.json')
+    // realpathSync.native, not realpathSync: on Windows the plain form can return an 8.3 short
+    // path (`C:\Users\RUNNER~1\...`) while the test's own side resolves to the long one
+    // (`C:\Users\runneradmin\...`), and the two compare unequal for the same file. The native
+    // form canonicalises both to the long name. This bit CI on windows-latest, where the temp
+    // directory sits under a user whose name is long enough to be shortened.
     const probe = `import { realpathSync, readFileSync, writeFileSync } from 'node:fs'
 // Throws — and so exits non-zero, failing the check — if the link was never created.
 const marker = 'build/deps/marker.txt'
 writeFileSync(${JSON.stringify(sentinel)}, JSON.stringify({
-  cwd: realpathSync(process.cwd()),
-  markerReal: realpathSync(marker),
+  cwd: realpathSync.native(process.cwd()),
+  markerReal: realpathSync.native(marker),
   content: readFileSync(marker, 'utf8'),
 }))
 `
@@ -1129,7 +1142,8 @@ writeFileSync(${JSON.stringify(sentinel)}, JSON.stringify({
     // The sentinel exists only if the command genuinely executed; `pass` above cannot be
     // reached by a withheld check, but neither can it distinguish WHERE the check ran.
     const report = JSON.parse(await readFile(sentinel, 'utf8'))
-    const realRoot = await realpath(root)
+    // Native form on both sides of the comparison, for the 8.3 short-name reason above.
+    const realRoot = realpathSync.native(root)
     // Ran inside the merge preview's scratch worktree, not in the repository working tree —
     // where `build/deps/marker.txt` also exists and would have satisfied a naive probe with no
     // link created at all.
