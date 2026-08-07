@@ -7,7 +7,7 @@
     {
       "name": "claude-teammates",
       "source": "./",
-      "description": "Superpowers-style development process running on Claude Code teammates: brainstorming, planning, TDD, debugging, worktree-isolated parallel execution, automated phase gates, and supervision."
+      "description": "Runs a written plan across background teammates, each in its own git worktree, with an automated gate between phases: brainstorming, planning, TDD, debugging, parallel execution, and supervision."
     }
   ]
 }
