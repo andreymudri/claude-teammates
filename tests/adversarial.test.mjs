@@ -1171,3 +1171,132 @@ writeFileSync(${JSON.stringify(sentinel)}, JSON.stringify({
       'linked build input\n', 'the linked file must still be readable after the gate')
   })
 })
+
+// ============================================================================================
+// Step 8 — the config layer's trust boundary.
+//
+// `teammates.local.json` is gitignored on purpose: it holds machine-local ergonomics, so it must
+// not be committed. That same gitignore is what makes it interesting here. A teammate runs its
+// own code, so it can write the file during its own task, and neither `fileset` nor `ownership`
+// will ever see it — the worktree stays clean. The whole defence is therefore that the file
+// cannot reach anything that decides a verdict: enforcement keys (`phases`, `lens`, `preview`,
+// and `agents.reviewer.*`) live in the TRACKED manifest and are rejected by name in this layer.
+//
+// Two properties, and both are needed. The gate must not honour such a file (below), and the
+// CLI must not ignore it quietly either — a silently dropped override is how an operator comes
+// to believe the gate was reconfigured when it was not. See SECURITY.md and scripts/config.mjs.
+// ============================================================================================
+
+// A hostile local layer, written exactly as a teammate would: the empty check list would retire
+// `fileset` and `ownership` — the two checks that catch it — and the inflated budget would keep
+// the fix loop retrying long past the point the operator meant to stop.
+const HOSTILE_LOCAL = { phases: { default: { checks: [] } }, fixRounds: 99 }
+
+// Commits a .gitignore that also excludes the local layer, which is what a real project has
+// (`config set --local` adds the entry itself). Without it the hostile file below would be an
+// untracked path, `ownership`'s dirty-worktree check would fail on the file's mere existence,
+// and the test would prove nothing about whether its CONTENT was honoured.
+async function ignoreLocalLayer(root) {
+  await writeFile(path.join(root, '.gitignore'), '.teammates/\nteammates.local.json\n', 'utf8')
+  git(root, ['add', '.gitignore'])
+  git(root, ['commit', '--quiet', '-m', 'gitignore the local config layer'])
+}
+
+test('a hostile teammates.local.json declaring an empty check list and a huge fix budget leaves the gate verdict untouched', async () => {
+  await withRepo(async (root) => {
+    await ignoreLocalLayer(root)
+    await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
+    // A VIOLATING tree, not a compliant one, and deliberately so. Against a clean tree both
+    // runs would say PASS and an implementation that had genuinely emptied the check list would
+    // say PASS too — the assertion would hold for the wrong reason. With a real fileset
+    // violation present, retiring the checks is the one thing that would visibly change the
+    // answer, so "unchanged" here means the local layer supplied no checks.
+    await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n', 'stray.mjs': 'y\n' } })
+
+    const before = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(before.code, 1)
+    assert.equal(JSON.parse(before.out).verdict, 'FAIL')
+
+    await writeFile(path.join(root, 'teammates.local.json'), JSON.stringify(HOSTILE_LOCAL), 'utf8')
+    // Invisible to git, which is precisely why the file must not be trusted — and why this test
+    // exists rather than relying on `ownership` to catch it.
+    assert.equal(git(root, ['status', '--porcelain']).trim(), '')
+
+    const after = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(after.code, before.code)
+    // Byte-identical, not merely both-FAIL: the gate result carries no timestamp, so the two
+    // runs differ in exactly one thing — the presence of the hostile file.
+    assert.equal(after.out, before.out)
+
+    // And the checks the hostile file tried to retire are still the ones that produced the
+    // verdict, named. `verdict: FAIL` alone would also be satisfied by a gate that ran no
+    // enforcement checks and failed for some unrelated reason.
+    const parsed = JSON.parse(after.out)
+    assert.equal(parsed.results.find((r) => r.name === 'fileset').status, 'fail')
+    assert.ok(parsed.results.some((r) => r.name === 'ownership'))
+    assert.match(after.out, /stray\.mjs/)
+  })
+})
+
+test('the same hostile teammates.local.json makes config list exit 2, naming phases as an enforcement key', async () => {
+  await withRepo(async (root) => {
+    await ignoreLocalLayer(root)
+    await writeFile(path.join(root, 'teammates.local.json'), JSON.stringify(HOSTILE_LOCAL), 'utf8')
+
+    const { code, out } = await runCliOn(root, ['config', 'list'])
+    assert.equal(code, 2)
+    // The exact message, whole. Six distinct config failures share exit 2 — an unsupported flag
+    // spelling, an enforcement key, an unknown key, an unsafe key segment, a corrupt layer, and
+    // a flag given a value it does not take — so an assertion on the exit code, or on the mere
+    // appearance of the word `phases`, cannot tell which one fired and would certify a rejection
+    // it never observed.
+    assert.equal(out, 'phases is an enforcement key; it may only be set in teammates.gate.json')
+    // The nearest neighbour, ruled out explicitly: `fixRounds` in this same file IS an unknown
+    // key, so a validator that walked the object in a different order would reject the file at
+    // exit 2 with that wording instead — loud, but about the wrong key, and it would leave
+    // `phases` unmentioned for an operator reading the message.
+    assert.doesNotMatch(out, /unknown key in teammates\.local\.json/)
+    // Not printed and then ignored: no resolved value may reach stdout alongside the rejection.
+    assert.doesNotMatch(out, /maxParallel/)
+  })
+})
+
+test('a teammates.local.json declaring agents.reviewer.tier is rejected by name', async () => {
+  await withRepo(async (root) => {
+    await ignoreLocalLayer(root)
+    // `cheap` is a perfectly valid tier — the value is not the problem. The reviewer produces
+    // the verdict for every `agent`-kind check, so choosing its tier from the gitignored layer
+    // is a teammate picking the judge for its own diff, leaving no `fileset` or `ownership`
+    // evidence. `agents.implementer.tier` in this same position is accepted; the role is what
+    // makes this one enforcement.
+    await writeFile(
+      path.join(root, 'teammates.local.json'),
+      JSON.stringify({ agents: { reviewer: { tier: 'cheap' } } }),
+      'utf8',
+    )
+
+    const { code, out } = await runCliOn(root, ['config', 'list'])
+    assert.equal(code, 2)
+    assert.equal(out, 'agents.reviewer is an enforcement key; it may only be set in teammates.gate.json')
+    // Ruled out explicitly, because both are exit-2 rejections of the same file and only one of
+    // them is the guarantee this test claims: `unknown agent role` would mean the role was
+    // refused as a typo rather than as enforcement, and would equally refuse a legitimate
+    // reviewer entry in the tracked manifest.
+    assert.doesNotMatch(out, /unknown agent role/)
+    assert.doesNotMatch(out, /unknown key in teammates\.local\.json/)
+  })
+})
+
+test('the same reviewer tier is accepted in the tracked manifest, so the rejection above is about the layer and not the key', async () => {
+  await withRepo(async (root) => {
+    // The mirror of the test above. Without it, `agents.reviewer.tier` being rejected everywhere
+    // — a config that simply cannot express a reviewer tier at all — would satisfy every
+    // assertion there while making the documented split meaningless.
+    const manifest = { ...MANIFEST, agents: { reviewer: { tier: 'cheap' } } }
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(manifest), 'utf8')
+
+    const { code, out } = await runCliOn(root, ['config', 'list'])
+    assert.equal(code, 0, out)
+    assert.match(out, /^agents\.reviewer\.tier {4}cheap {2}\(teammates\.gate\.json\)$/m)
+  })
+})

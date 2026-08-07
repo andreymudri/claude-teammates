@@ -89,6 +89,56 @@ preview:
 The preview contains tracked content only, so without that a command check runs against a tree
 with no dependencies installed and fails for a reason that has nothing to do with the code.
 
+## Configuration
+
+Two files, split by trust rather than by topic.
+
+**`teammates.gate.json`** is tracked. Alongside the manifest above it holds every key that can
+change a verdict: `phases` (the checks and their fix-round budgets), `lens`, `preview`, and
+`agents.reviewer.tier` / `agents.reviewer.effort`. Those go here and nowhere else — see
+`SECURITY.md` for why the reviewer's tier counts as enforcement.
+
+**`teammates.local.json`** is gitignored and holds machine-local ergonomics. Allowlisted keys,
+and nothing else:
+
+| Key | Domain | Default |
+|---|---|---|
+| `maxParallel` | integer >= 1 | `min(8, cores - 2)` |
+| `caveman` | `false \| "lite" \| "full" \| "ultra"` | `false` |
+| `agents.<role>.tier` | `"cheap" \| "mid" \| "capable"` | unset — routing infers per task |
+| `agents.<role>.effort` | `"low" \| "medium" \| "high" \| "xhigh" \| "max"` | unset — inherits session |
+
+`<role>` is `implementer` or `integrator` in the local file; `reviewer` is accepted only in the
+tracked manifest. An unknown key, or an enforcement key in the local file, is a hard error naming
+the key — a setting that was silently dropped is a setting you believe took effect.
+
+Both files are read through the same four subcommands. Writes target the tracked manifest unless
+you pass `--local`:
+
+    node scripts/cli.mjs config list
+    node scripts/cli.mjs config get maxParallel
+    node scripts/cli.mjs config set <key> <value> [--local]
+    node scripts/cli.mjs config unset <key> [--local]
+
+Worked example — raise the fan-out on a large machine without committing that choice:
+
+    $ node scripts/cli.mjs config set maxParallel 12 --local
+    wrote teammates.local.json
+    added teammates.local.json to .gitignore
+
+    $ node scripts/cli.mjs config list
+    maxParallel  12  (teammates.local.json)
+    caveman      false  (default)
+    ...
+
+`config list` prints the layer each value came from, so a value you did not expect can be traced
+to the file that set it.
+
+**Model names never appear in either file.** Configuration stores a *tier* — `cheap`, `mid` or
+`capable`. The map from tier to a concrete model lives in the dispatching skill and reaches the
+CLI through `workflow --models`, so this repository and `teammates.gate.json` stay free of model
+names that would otherwise go stale. Setting a model name as a tier is rejected.
+
 ## Layout
 
 - `skills/` — process and human interaction (entrypoint: `using-teammates`)

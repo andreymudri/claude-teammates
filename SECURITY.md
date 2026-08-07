@@ -20,6 +20,15 @@ So the following are **known and documented**, not vulnerabilities:
   read from that file.
 - A teammate writing `.teammates/` state. No check reads it when deciding a verdict; the worst it
   buys is wasted fix rounds, not a false PASS.
+- A teammate writing `teammates.local.json`. That file is gitignored, so a teammate can change it
+  without leaving the dirty worktree `fileset` and `ownership` detect — and it buys nothing,
+  because the file carries only ergonomics: `maxParallel`, `caveman`, and `tier` / `effort` for
+  the **implementer and integrator**. Every key that decides a verdict is rejected there by name,
+  including — read this one specifically — **`agents.reviewer.tier` and `agents.reviewer.effort`**.
+  The reviewer produces the verdict for every `agent`-kind check, so its tier and effort decide
+  how good the judge is; allowing them in the gitignored layer would let a teammate weaken the
+  reviewer grading its own diff, from a file that leaves no evidence behind. They are enforcement
+  keys and live only in the tracked `teammates.gate.json`. So do `phases`, `lens` and `preview`.
 - Anything requiring write access to a shared ref, which is outside the model.
 
 ## What is worth reporting

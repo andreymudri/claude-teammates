@@ -1,5 +1,9 @@
 node_modules/
 .teammates/
+# Machine-local ergonomics only (maxParallel, caveman, implementer/integrator tier and
+# effort). Never commit it: the gate trusts the TRACKED teammates.gate.json for every key
+# that decides a verdict, and a committed local layer would blur that split.
+teammates.local.json
 # Agent worktrees live here during a fleet run. Untracked, they make the main
 # worktree permanently dirty and the ownership check fail for the whole run.
 .claude/
