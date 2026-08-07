@@ -39,12 +39,31 @@ const USAGE = `usage: cli.mjs <init-run|gate|digest|claim|unclaim|workflow|compl
 // and takes no value. Without this, a boolean flag anywhere but the very last argv
 // position swallows the next flag's name as its own value, and at the very last position
 // reads as `undefined` — either way `flags['no-fleet'] !== undefined` never sees it.
+// Flags that are a switch and nothing else: present or absent, never carrying a value. Their
+// presence is the whole signal, so any value written after one is a spelling this CLI cannot
+// act on — see the refusal in parseFlags. Kept as a named set so the advice printed for a
+// rejected spelling can name a form that actually works, per flag.
+const VALUELESS_FLAGS = new Set(['no-fleet'])
+
+// What to tell a caller who wrote a spelling this CLI does not take. It must never name a form
+// that fails — and for `--no-fleet` it must never name one that does the OPPOSITE of what the
+// caller was reaching for: someone typing `--no-fleet=false` wants the enforcement checks
+// running, and "write `--no-fleet`" would hand them the spelling that switches those checks off.
+function spellingAdvice(name) {
+  if (name === 'no-fleet') {
+    return '`--no-fleet` takes no value: omit it entirely to keep the fileset and ownership'
+      + ' checks running, or pass it alone to run without them'
+  }
+  if (VALUELESS_FLAGS.has(name)) return `\`--${name}\` takes no value: write \`--${name}\` alone`
+  return `write \`--${name} <value>\``
+}
+
 function parseFlags(argv) {
   const flags = {}
   const positional = []
   // Rejected spellings, reported by the caller before any command runs — never dropped, or the
   // flag would go missing exactly as it did before.
-  const equals = []
+  const rejected = []
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i].startsWith('--')) {
       const token = argv[i].slice(2)
@@ -61,15 +80,26 @@ function parseFlags(argv) {
       // would open the entire solo path, which is the one guarantee SECURITY.md makes about a
       // fleet run.
       //
-      // No allowlist of "boolean flags" here: an allowlist is a second place to keep in step
-      // with the flag table, and the next value-less flag added would silently fall out of it.
-      // One rule for every flag, and the caller is told the spelling this CLI does take.
       if (token.includes('=')) {
-        equals.push(argv[i])
+        rejected.push({ raw: argv[i], name: token.slice(0, token.indexOf('=')) })
         continue
       }
       const name = token
       const next = argv[i + 1]
+      // A flag in VALUELESS_FLAGS never consumes the token after it, and never carries a value
+      // of its own. `--no-fleet false` reads to a human as "solo mode off" and meant the exact
+      // opposite: any value at all left `flags['no-fleet']` defined, which is what both
+      // consumers tested, so the fileset and ownership checks were skipped by an argv written
+      // to keep them. Refused rather than interpreted, for the same reason `=` is.
+      if (VALUELESS_FLAGS.has(name)) {
+        if (next !== undefined && !next.startsWith('--')) {
+          rejected.push({ raw: `${argv[i]} ${next}`, name })
+          i += 1
+          continue
+        }
+        flags[name] = true
+        continue
+      }
       if (next === undefined || next.startsWith('--')) {
         flags[name] = true
       } else {
@@ -80,7 +110,7 @@ function parseFlags(argv) {
       positional.push(argv[i])
     }
   }
-  return { flags, positional, equals }
+  return { flags, positional, rejected }
 }
 
 async function readPackage(root) {
@@ -125,7 +155,11 @@ const NUMERIC_PHASE_COMMANDS = new Set(['workflow', 'fix', 'record-fix-round'])
 // records anything under `--run` — requiring either would only teach a caller to invent a
 // throwaway value to get past this check. Solo drops both from the requirement.
 function missingArgs(command, flags, positional) {
-  const solo = command === 'gate' && flags['no-fleet'] !== undefined
+  // `=== true`, not `!== undefined`: solo mode is entered only by the one spelling that means
+  // it. parseFlags already refuses `--no-fleet <value>` outright, and this is the second half
+  // of the same rule — the check that decides whether the enforcement checks run should test
+  // for the switch being SET, not merely for something having been written after it.
+  const solo = command === 'gate' && flags['no-fleet'] === true
   const requiredList = solo ? [] : (REQUIRED[command] ?? [])
   const missing = requiredList
     .filter((f) => !flags[f] || flags[f] === true)
@@ -466,14 +500,14 @@ async function isTracked(root, file) {
 
 export async function runCli(argv, io = { out: console.log }) {
   const [command, ...rest] = argv
-  const { flags, positional, equals } = parseFlags(rest)
+  const { flags, positional, rejected } = parseFlags(rest)
   // Refused before EVERYTHING else — before the required-argument check, before any command
   // body. A rejected spelling must not be able to reach a guard that tests the flag it was
   // meant to set: `gate --no-fleet=false` has to exit here, not after `missingArgs` has
   // already decided that a solo run needs neither --run nor --plan.
-  if (equals.length > 0) {
-    const names = equals.map((token) => `\`${token}\` — write \`${token.split('=')[0]} <value>\`, or \`${token.split('=')[0]}\` alone for a switch`)
-    io.out(`unsupported flag spelling: ${names.join('; ')}\n\n${USAGE}`)
+  if (rejected.length > 0) {
+    const advice = rejected.map(({ raw, name }) => `\`${raw}\` — ${spellingAdvice(name)}`)
+    io.out(`unsupported flag spelling: ${advice.join('; ')}\n\n${USAGE}`)
     return 2
   }
   // An empty or whitespace-only --root must never silently fall through to cwd: `??` only
@@ -763,7 +797,10 @@ export async function runCli(argv, io = { out: console.log }) {
     }
     const phaseName = flags.phase ?? 'default'
     const all = checksForPhase(config, phaseName)
-    const solo = flags['no-fleet'] !== undefined
+    // `=== true`, matching missingArgs: the two must agree about what counts as solo, or one
+    // of them drops --run and --plan from the requirements while the other still runs the
+    // enforcement checks, or vice versa.
+    const solo = flags['no-fleet'] === true
 
     // --no-fleet is the only way the enforcement checks are skipped, and the caller must
     // say it. Inferring "solo" from missing state let deleting one file record a PASS.

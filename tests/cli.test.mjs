@@ -2823,6 +2823,48 @@ test('gate treats an empty --results as the missing argument the bare flag alrea
   })
 })
 
+// Whole-body shapes (`[]`, `"text"`, `3`, `null`) are rejected by any validator worth the name,
+// so the tests above cannot tell the real gate validator from a bare shape check. These are the
+// cases that can: a body that IS an object and whose FIELDS are wrong. Each one is a value the
+// operator believes is set and that silently resolves to a default — a misspelled tier makes
+// the tierModels lookup yield undefined, so the dispatch carries no model at all, at exit 0.
+//
+// The file must come back byte-identical: refusing a write and then rewriting the file anyway
+// would launder the bad value into a file this CLI itself wrote.
+const BAD_GATE_FIELDS = [
+  [{ agents: { implementer: { tier: 'capabel' } } }, /^tier must be one of cheap, mid, capable$/m],
+  [{ agents: { nope: { tier: 'capable' } } }, /^unknown agent role: nope$/m],
+  [{ agents: { implementer: { fast: true } } }, /^unknown key in teammates\.gate\.json: agents\.implementer\.fast$/m],
+  [{ maxParallel: 0 }, /^maxParallel must be an integer >= 1$/m],
+]
+
+test('config set refuses a gate manifest whose fields are invalid, not just its shape', async () => {
+  for (const [gate, message] of BAD_GATE_FIELDS) {
+    // eslint-disable-next-line no-await-in-loop
+    await withRepo(async ({ root, io, lines }) => {
+      const where = JSON.stringify(gate)
+      const body = JSON.stringify({ ...gate, phases: { default: { checks: [] } } })
+      await writeFile(path.join(root, 'teammates.gate.json'), body, 'utf8')
+      const code = await runCli(['config', 'set', 'caveman', 'false', '--root', root], io)
+      assert.equal(code, 2, where)
+      assert.match(lines.join('\n'), message, where)
+      assert.doesNotMatch(lines.join('\n'), /wrote/, where)
+      assert.equal(await readFile(path.join(root, 'teammates.gate.json'), 'utf8'), body, where)
+    })
+  }
+})
+
+// `unset` reads and rewrites the same layer through the same call, so it answers the same way.
+test('config unset refuses a gate manifest whose fields are invalid', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const body = JSON.stringify({ agents: { implementer: { tier: 'capabel' } } })
+    await writeFile(path.join(root, 'teammates.gate.json'), body, 'utf8')
+    assert.equal(await runCli(['config', 'unset', 'caveman', '--root', root], io), 2)
+    assert.match(lines.join('\n'), /^tier must be one of cheap, mid, capable$/m)
+    assert.equal(await readFile(path.join(root, 'teammates.gate.json'), 'utf8'), body)
+  })
+})
+
 // `config list` and `config set` must agree about the same file. This is the assertion that
 // pins the two halves together rather than testing each in isolation.
 test('config list and config set give the same answer about a malformed gate layer', async () => {
@@ -2855,7 +2897,7 @@ test('--local=true is refused rather than silently writing the tracked manifest'
     const code = await runCli(['config', 'set', 'maxParallel', '12', '--local=true', '--root', root], io)
     assert.equal(code, 2)
     assert.match(lines.join('\n'), /unsupported flag spelling: `--local=true`/)
-    assert.match(lines.join('\n'), /write `--local <value>`, or `--local` alone for a switch/)
+    assert.match(lines.join('\n'), /write `--local <value>`/)
     // Neither layer is written: the point of the refusal is that no file is chosen for the
     // caller when the CLI cannot tell which one they meant.
     assert.equal(await exists(path.join(root, 'teammates.local.json')), false)
@@ -2910,6 +2952,57 @@ test('--no-fleet=false is refused before it can drop the required arguments', as
     assert.equal(await runCli(['gate', '--no-fleet=false', '--root', root], io), 2)
     assert.match(lines.join('\n'), /unsupported flag spelling/)
     assert.doesNotMatch(lines.join('\n'), /missing required argument/)
+  })
+})
+
+// `--no-fleet <anything>` reads to a human as "solo mode off" and did the exact opposite: any
+// value at all left the flag defined, which is what both consumers tested, so an argv written
+// to KEEP the fileset and ownership checks ran without them.
+test('--no-fleet with a value does not enable solo mode', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    await writeEnforcementManifest(root)
+    for (const value of ['false', '0', 'off', 'true']) {
+      lines.length = 0
+      const code = await runCli(['gate', '--no-fleet', value, '--root', root], io)
+      assert.equal(code, 2, value)
+      const text = lines.join('\n')
+      assert.match(text, /unsupported flag spelling: `--no-fleet /, value)
+      assert.doesNotMatch(text, /enforcement checks are not running/, value)
+      assert.doesNotMatch(text, /"verdict": "PASS"/, value)
+    }
+  })
+})
+
+// The advice printed for a refused spelling must name a form that actually works — and for
+// `--no-fleet` it must not name the one that does the OPPOSITE of what the caller reached for.
+// Someone typing `--no-fleet=false` wants the enforcement checks RUNNING; telling them to
+// "write `--no-fleet <value>`" or "write `--no-fleet` alone" hands them the spelling that
+// switches those checks off.
+test('the refusal advice names a spelling that works, and never one that inverts the intent', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    await writeEnforcementManifest(root)
+    assert.equal(await runCli(['gate', '--no-fleet=false', '--root', root], io), 2)
+    const text = lines.join('\n')
+    assert.match(text, /`--no-fleet` takes no value: omit it entirely to keep the fileset and ownership checks running, or pass it alone to run without them/)
+    assert.doesNotMatch(text, /write `--no-fleet <value>`/)
+
+    // The form the advice names as the safe one — omitting the flag — does run the enforcement
+    // checks, rather than being a spelling that merely exits differently.
+    lines.length = 0
+    await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--root', root], io)
+    assert.doesNotMatch(lines.join('\n'), /enforcement checks are not running/)
+    assert.match(lines.join('\n'), /fileset/)
+  })
+})
+
+// A value-taking flag gets the advice for a value-taking flag, and that advice works verbatim.
+test('the refusal advice for a value-taking flag names the form that succeeds', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    assert.equal(await runCli(['config', 'list', `--root=${root}`], io), 2)
+    assert.match(lines.join('\n'), /`--root=.*` — write `--root <value>`/)
+    assert.doesNotMatch(lines.join('\n'), /takes no value/)
+    lines.length = 0
+    assert.equal(await runCli(['config', 'list', '--root', root], io), 0)
   })
 })
 
