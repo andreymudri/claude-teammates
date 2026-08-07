@@ -224,7 +224,7 @@ text. No live agents needed, so the suite is cheap enough to run on every change
 | Checkpoints | Per phase, gate automated | Autonomy inside a phase, verified boundary between phases. |
 | Gatekeeper | Configurable: command, agent, and MCP checks | Projects differ; a fixed backend would either under- or over-verify. |
 | Orchestration | Hybrid skills + `Workflow` | Determinism where fan-out is wide, interactivity where messaging matters. |
-| Location | `C:\projetos\claude-teammates`, private plugin repo | Matches existing project root convention; installable via `/plugin`. |
+| Location | Standalone plugin repository | Installable via `/plugin` from a marketplace or a local path. |
 
 ## Open items for the implementation plan
 
