@@ -4,31 +4,15 @@
     "default": {
       "fixRounds": 3,
       "checks": [
-        {
-          "name": "test",
-          "kind": "command",
-          "run": "npm test"
-        },
-        {
-          "name": "fileset",
-          "kind": "fileset"
-        },
-        {
-          "name": "ownership",
-          "kind": "ownership"
-        },
+        { "name": "test", "kind": "command", "run": "npm test" },
+        { "name": "fileset", "kind": "fileset" },
+        { "name": "ownership", "kind": "ownership" },
         {
           "name": "review",
           "kind": "agent",
           "agent": "tm-reviewer",
-          "lens": [
-            "correctness",
-            "security",
-            "tests"
-          ],
-          "blockOn": [
-            "high"
-          ]
+          "lens": ["correctness", "security", "tests"],
+          "blockOn": ["high"]
         }
       ]
     }
