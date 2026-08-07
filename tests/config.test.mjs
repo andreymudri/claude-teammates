@@ -523,8 +523,8 @@ test('loadConfig rejects a non-object gate layer by name instead of resolving to
       await writeFile(path.join(root, GATE_FILE), body, 'utf8')
       await assert.rejects(
         () => loadConfig(root),
-        (err) => err instanceof ConfigError && /must contain a JSON object/.test(err.message)
-          && err.message.includes(GATE_FILE),
+        (err) => err instanceof ConfigError
+          && err.message === `${GATE_FILE} must contain a JSON object`,
         `expected a gate layer of ${body} to be rejected`,
       )
     })
@@ -544,24 +544,32 @@ test('loadConfig rejects a misspelled tier in the gate layer rather than dispatc
     await writeJson(root, GATE_FILE, { agents: { implementer: { tier: 'capabel' } } })
     await assert.rejects(
       () => loadConfig(root),
-      (err) => err instanceof ConfigError && err.message.includes(TIERS.join(', ')),
+      // The exact message, not just the class: what makes this a fix rather than a different
+      // rejection is that the tier VALIDATOR is what refused it, naming the valid tiers.
+      (err) => err instanceof ConfigError
+        && err.message === `tier must be one of ${TIERS.join(', ')}`,
     )
   })
 })
 
+// Each case names the message its own validator produces, not merely the shared error class. A
+// blanket `throw new ConfigError('gate agents are not supported')` would reject the effort case
+// for a reason with nothing to do with the effort domain, and a class-only assertion would wave
+// that substitution through — binding each input to its own message is what rules it out.
 test('loadConfig rejects a bad effort, maxParallel or caveman in the gate layer', async () => {
   const bad = [
-    { agents: { integrator: { effort: 'sorta-high' } } },
-    { maxParallel: 0 },
-    { caveman: 'blah' },
+    [{ agents: { integrator: { effort: 'sorta-high' } } },
+      `effort must be one of ${EFFORTS.join(', ')}`],
+    [{ maxParallel: 0 }, 'maxParallel must be an integer >= 1'],
+    [{ caveman: 'blah' }, `caveman must be false or one of ${CAVEMAN_LEVELS.join(', ')}`],
   ]
-  for (const body of bad) {
+  for (const [body, message] of bad) {
     await withTempRoot(async (root) => {
       await writeJson(root, GATE_FILE, body)
       await assert.rejects(
         () => loadConfig(root),
-        (err) => err instanceof ConfigError,
-        `expected ${JSON.stringify(body)} to be rejected in the gate layer`,
+        (err) => err instanceof ConfigError && err.message === message,
+        `expected ${JSON.stringify(body)} to be rejected in the gate layer with: ${message}`,
       )
     })
   }
@@ -646,6 +654,7 @@ test('validateGate returns the manifest it accepts and names the file it rejects
   assert.deepEqual(validateGate({}), {})
   assert.throws(
     () => validateGate([]),
-    (err) => err instanceof ConfigError && err.message.includes(GATE_FILE),
+    (err) => err instanceof ConfigError
+      && err.message === `${GATE_FILE} must contain a JSON object`,
   )
 })
