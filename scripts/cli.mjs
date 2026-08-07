@@ -6,7 +6,7 @@ import { assignPhases } from './phases.mjs'
 import { readState, writeState, claimTask, releaseClaim, readFixRounds, recordFixRound } from './state.mjs'
 import { loadGateConfig, inferGateConfig, checksForPhase, fixRoundsForPhase, previewLinks } from './gate-config.mjs'
 import {
-  loadConfig, readLayer, writeLayer, validateKey, isEnforcementKey, assertSafeKey,
+  loadConfig, readLayer, writeLayer, validateKey, validateLocal, isEnforcementKey, assertSafeKey,
   getKey, setKey, unsetKey, ensureGitignored, ConfigError,
   GATE_FILE, LOCAL_FILE, ROLES,
 } from './config.mjs'
@@ -15,7 +15,7 @@ import { decideFix } from './fix-loop.mjs'
 import { runChecks, aggregateVerdict } from './gate-runner.mjs'
 import { renderDigest } from './digest.mjs'
 import { generatePhaseWorkflow } from './workflow-gen.mjs'
-import { createGit, GitError } from './git.mjs'
+import { createGit, GitError, defaultGitExec } from './git.mjs'
 import { deriveContext } from './gate-runner.mjs'
 
 const USAGE = `usage: cli.mjs <init-run|gate|digest|claim|unclaim|workflow|complete|fix|record-fix-round|config> [options]
@@ -43,7 +43,19 @@ function parseFlags(argv) {
   const positional = []
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i].startsWith('--')) {
-      const name = argv[i].slice(2)
+      const token = argv[i].slice(2)
+      // `--name=value` is the other spelling every CLI accepts, and a caller reaches for it
+      // by habit. Read as a name it produced a flag literally called `local=true`, leaving
+      // `flags.local` undefined — so `config set agents.reviewer.tier capable --local=true`
+      // silently wrote the TRACKED enforcement manifest instead of the gitignored layer the
+      // caller named, with nothing on stdout to say which file it chose. Honoured here rather
+      // than left to redirect a write to a different file than the one asked for.
+      const eq = token.indexOf('=')
+      if (eq !== -1) {
+        flags[token.slice(0, eq)] = token.slice(eq + 1)
+        continue
+      }
+      const name = token
       const next = argv[i + 1]
       if (next === undefined || next.startsWith('--')) {
         flags[name] = true
@@ -319,16 +331,67 @@ async function derive(root, runId, flags) {
   }
 }
 
-// `loadConfig` throws ConfigError on a malformed or over-reaching teammates.local.json, and
-// every command below branches on this CLI's exit code. Resolving through here turns that into
-// the message-and-2 the rest of the CLI already guarantees, instead of a raw stack trace from
-// whichever command happened to read the layer first. `null` means "already reported, exit 2".
+// Everything this CLI can say about a failed config operation, or null for an error that is
+// not one — a real bug must still crash rather than be reported as a config problem.
+//
+// A ConfigError is a stated rejection and carries its own wording. A Node system error is a
+// layer file that exists but cannot be read or written (a directory created in its place, a
+// permission error): left alone it escapes as an unhandled rejection with a raw stack and exit
+// 1, which a skill branching on this CLI's exit code reads as neither a pass nor a stated
+// failure. `syscall` is what distinguishes an fs error from an ordinary Error carrying a
+// `code` property.
+function configFailureMessage(err) {
+  if (err instanceof ConfigError) return err.message
+  if (typeof err?.syscall === 'string') return `could not access the config layers: ${err.message}`
+  return null
+}
+
+// `loadConfig` throws on a malformed or over-reaching teammates.local.json, and every command
+// below branches on this CLI's exit code. Resolving through here turns that into the
+// message-and-2 the rest of the CLI already guarantees, instead of a stack trace from whichever
+// command happened to read the layer first. `null` means "already reported, exit 2".
 async function resolveConfig(root, io) {
   try {
     return (await loadConfig(root)).resolved
   } catch (err) {
-    if (err instanceof ConfigError) { io.out(err.message); return null }
-    throw err
+    const message = configFailureMessage(err)
+    if (message === null) throw err
+    io.out(message)
+    return null
+  }
+}
+
+// Every key this CLI can resolve. `set` gets this check from `validateKey`, which needs a
+// value; `unset` has none to give it, and without an equivalent `config unset totallyBogus`
+// creates the file, gitignores it, reports `wrote …` and exits 0 having removed nothing.
+const CONFIG_KEYS = [
+  'maxParallel',
+  'caveman',
+  ...ROLES.flatMap((role) => [`agents.${role}.tier`, `agents.${role}.effort`]),
+]
+
+// A prefix of a known key is unsettable in its own right: `agents.implementer` names the whole
+// entry, and removing it removes exactly the fields this layer knows about. Anything that is a
+// prefix of nothing is a key no reader consults, whatever it looks like.
+function assertKnownKey(dotted) {
+  if (!CONFIG_KEYS.some((known) => known === dotted || known.startsWith(`${dotted}.`))) {
+    throw new ConfigError(`unknown config key: ${dotted}`)
+  }
+}
+
+// `.gitignore` has no effect on a path git already tracks: the entry is written, the file goes
+// on being committed, and the trust split the "added …" message claims — this layer is
+// untracked, so a teammate cannot change it without leaving the dirty worktree `fileset` and
+// `ownership` detect — silently does not hold. Reported rather than claimed.
+//
+// Any failure means no answer, which is reported as "not tracked": outside a git repository
+// there is nothing to be tracked by, and this must never be the thing that fails a write.
+async function isTracked(root, file) {
+  try {
+    const { code } = await defaultGitExec(['ls-files', '--error-unmatch', '--', file], root)
+    return code === 0
+  } catch {
+    return false
   }
 }
 
@@ -397,6 +460,24 @@ export async function runCli(argv, io = { out: console.log }) {
     // surface, and a parallelism it sets must actually take effect where it is consumed.
     const resolved = await resolveConfig(root, io)
     if (!resolved) return 2
+
+    // A configured implementer tier is an explicit operator decision and outranks inferTier's
+    // guess. Applied HERE, before plan.json is written, for two reasons the in-memory override
+    // in `workflow` cannot serve. First, `fix` escalates from the RECORDED tier: with the
+    // record left inferred, a retry after a failure at a configured `capable` was dispatched
+    // at `mid` — below the tier that just failed. Second, the tier this command prints is the
+    // run's only operator-facing routing report, and it has to name what will be dispatched.
+    // A declared `**Model:**` still wins: it names a task the operator already reasoned about.
+    const roleTier = resolved.agents.implementer.tier
+    if (roleTier) {
+      for (const task of tasks) {
+        if (task.tierSource !== 'declared') {
+          task.tier = roleTier
+          task.tierSource = 'configured'
+        }
+      }
+    }
+
     await writeState(root, runId, 'plan', { runId, totalPhases, tasks })
     // Recorded for reporting only. The gate derives the anchor, the phase, and every
     // verdict from git; nothing here decides anything.
@@ -543,14 +624,25 @@ export async function runCli(argv, io = { out: console.log }) {
       }
     }
 
-    // A configured implementer tier is an explicit operator decision and outranks inferTier's
-    // guess. A per-task `**Model:**` stays authoritative over both: it names a specific task
-    // the operator already reasoned about, which a blanket role setting cannot know anything
-    // about — hence the `tierSource === 'inferred'` guard rather than a blanket overwrite.
+    // `init-run` already applied any configured implementer tier, so this normally changes
+    // nothing. It stays because the config can change between the two commands, and a per-task
+    // `**Model:**` stays authoritative over both — it names a specific task the operator
+    // already reasoned about, which a blanket role setting knows nothing about.
+    //
+    // The result is written back to plan.json rather than kept in memory: `fix` escalates from
+    // the recorded tier, so a dispatch at a tier the record does not carry means a retry can be
+    // sent BELOW the tier that just failed.
     const roleTier = resolved.agents.implementer.tier
-    const phaseTasks = plan.tasks
-      .filter((t) => t.phase === phase)
-      .map((t) => (roleTier && t.tierSource === 'inferred' ? { ...t, tier: roleTier } : t))
+    const phaseTasks = plan.tasks.filter((t) => t.phase === phase)
+    let retier = false
+    for (const task of phaseTasks) {
+      if (roleTier && task.tierSource !== 'declared' && task.tier !== roleTier) {
+        task.tier = roleTier
+        task.tierSource = 'configured'
+        retier = true
+      }
+    }
+    if (retier) await writeState(root, runId, 'plan', plan)
 
     const src = await generatePhaseWorkflow({
       runId,
@@ -871,6 +963,10 @@ export async function runCli(argv, io = { out: console.log }) {
           return 2
         }
         const layer = (await readLayer(root, file)) ?? {}
+        // `readLayer` parses but does not validate. Without this, a local file already
+        // carrying `agents.reviewer` is merged and rewritten at exit 0 by the very command
+        // that refuses to write that key — while every reader of the same file exits 2.
+        if (local) validateLocal(layer)
         if (sub === 'set') {
           if (rawValue === undefined) { io.out('config set needs a value'); return 2 }
           let parsed
@@ -880,20 +976,31 @@ export async function runCli(argv, io = { out: console.log }) {
           try { parsed = JSON.parse(rawValue) } catch { parsed = rawValue }
           setKey(layer, key, validateKey(key, parsed))
         } else {
+          assertKnownKey(key)
           unsetKey(layer, key)
         }
         await writeLayer(root, file, layer)
         io.out(`wrote ${file}`)
-        if (local && await ensureGitignored(root, LOCAL_FILE)) {
-          io.out(`added ${LOCAL_FILE} to .gitignore`)
+        if (local) {
+          const added = await ensureGitignored(root, LOCAL_FILE)
+          if (await isTracked(root, LOCAL_FILE)) {
+            io.out(
+              `${LOCAL_FILE} is tracked by git — the .gitignore entry has no effect on it;`
+              + ` run \`git rm --cached ${LOCAL_FILE}\` to keep this layer out of commits`,
+            )
+          } else if (added) {
+            io.out(`added ${LOCAL_FILE} to .gitignore`)
+          }
         }
         return 0
       }
       io.out('usage: config <list|get|set|unset>')
       return 2
     } catch (err) {
-      if (err instanceof ConfigError) { io.out(err.message); return 2 }
-      throw err
+      const message = configFailureMessage(err)
+      if (message === null) throw err
+      io.out(message)
+      return 2
     }
   }
 

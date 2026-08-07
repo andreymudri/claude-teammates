@@ -2413,16 +2413,18 @@ test('config set agents.reviewer.tier --local is refused as an enforcement key a
   })
 })
 
+// Each rejection is bound to the key it rejected. `/enforcement key/` alone would pass just as
+// happily if the CLI reported some OTHER key as the reason, which is the whole question here.
 test('config set agents.reviewer.effort --local is refused too, and the bare role with it', async () => {
   await withRepo(async ({ root, io, lines }) => {
     assert.equal(
       await runCli(['config', 'set', 'agents.reviewer.effort', 'high', '--local', '--root', root], io),
       2,
     )
-    assert.match(lines.join('\n'), /enforcement key/)
+    assert.match(lines.join('\n'), /^agents\.reviewer\.effort is an enforcement key; it may only be set in teammates\.gate\.json$/m)
     lines.length = 0
     assert.equal(await runCli(['config', 'unset', 'agents.reviewer', '--local', '--root', root], io), 2)
-    assert.match(lines.join('\n'), /enforcement key/)
+    assert.match(lines.join('\n'), /^agents\.reviewer is an enforcement key; it may only be set in teammates\.gate\.json$/m)
     assert.equal(await exists(path.join(root, 'teammates.local.json')), false)
   })
 })
@@ -2449,13 +2451,30 @@ test('config set phases --local is refused and writes nothing', async () => {
   })
 })
 
-// `fixRounds` is not a key this layer knows how to resolve. It is refused by name, with the key
-// in the message, rather than written into a file nothing will ever read.
-test('config set fixRounds --local exits 2 naming the key and writes nothing', async () => {
+// There is no top-level `fixRounds`: the budget lives at `phases.<name>.fixRounds`, and
+// `phases` is enforcement. So a bare `fixRounds` is an UNKNOWN key, not an enforcement one —
+// two rejections that both exit 2 and both contain the key name. The exact message is asserted
+// because that is the only thing that tells them apart, and the difference is not cosmetic: one
+// says "this layer may not decide that", the other says "nothing reads this".
+test('config set fixRounds --local exits 2 as an unknown key and writes nothing', async () => {
   await withRepo(async ({ root, io, lines }) => {
     const code = await runCli(['config', 'set', 'fixRounds', '99', '--local', '--root', root], io)
     assert.equal(code, 2)
-    assert.match(lines.join('\n'), /fixRounds/)
+    assert.match(lines.join('\n'), /^unknown config key: fixRounds$/m)
+    assert.doesNotMatch(lines.join('\n'), /enforcement key/)
+    assert.equal(await exists(path.join(root, 'teammates.local.json')), false)
+  })
+})
+
+// The real verdict-affecting path. The fix-round budget a phase runs under decides how many
+// retries a failing task gets before the run escalates to a human, so it is enforcement
+// wherever it is spelled — and `phases.default.fixRounds` is where it actually lives.
+test('config set phases.default.fixRounds --local is refused as enforcement and writes nothing', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const code = await runCli(['config', 'set', 'phases.default.fixRounds', '99', '--local', '--root', root], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /^phases\.default\.fixRounds is an enforcement key; it may only be set in teammates\.gate\.json$/m)
+    assert.doesNotMatch(lines.join('\n'), /unknown config key/)
     assert.equal(await exists(path.join(root, 'teammates.local.json')), false)
   })
 })
@@ -2490,6 +2509,35 @@ test('config unset and get through a prototype segment exit 2 as well', async ()
     lines.length = 0
     assert.equal(await runCli(['config', 'get', '__proto__', '--root', root], io), 2)
     assert.match(lines.join('\n'), /unsafe config key segment/)
+  })
+})
+
+// The guard's position is the point of it, not its existence: `scripts/config.mjs` re-checks
+// inside every getKey/setKey/unsetKey/validateKey, so a test that only asserts "an unsafe key
+// exits 2" passes with the CLI-level check deleted. What only the CLI-level check buys is that
+// the unsafe key is rejected BEFORE any layer is read, validated or written — so the answer
+// does not depend on what else happens to be wrong with the layer files. Each of the two tests
+// below is RED with the `assertSafeKey(key)` line in the config handler removed.
+test('an unsafe key is rejected before the layer is read, even when the layer is corrupt', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    await writeFile(path.join(root, 'teammates.local.json'), '{', 'utf8')
+    const code = await runCli(['config', 'unset', '__proto__.x', '--local', '--root', root], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /^unsafe config key segment: __proto__$/m)
+    // Reading the layer first would report the corrupt file instead, which tells the caller
+    // nothing about the key they actually typed.
+    assert.doesNotMatch(lines.join('\n'), /is not valid JSON/)
+  })
+})
+
+test('an unsafe key is rejected before the enforcement check that would otherwise claim it', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const code = await runCli(['config', 'set', 'agents.reviewer.__proto__', '1', '--local', '--root', root], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /^unsafe config key segment: __proto__$/m)
+    assert.doesNotMatch(lines.join('\n'), /enforcement key/)
+    assert.equal(({}).x, undefined)
+    assert.equal(await exists(path.join(root, 'teammates.local.json')), false)
   })
 })
 
@@ -2656,6 +2704,219 @@ test('a declared task tier outranks the configured implementer tier', async () =
     )
     assert.match(lines.join('\n'), /m-cheap/)
     assert.doesNotMatch(lines.join('\n'), /m-cap/)
+  })
+})
+
+// `set` gets its key check from validateKey, which needs a value; `unset` has none to give it.
+// Without an equivalent check, `config unset totallyBogus --local` created the file, gitignored
+// it, reported `wrote …` and exited 0 having removed nothing — the opposite answer to the same
+// key's `set`, for the same reason.
+test('config unset refuses an unknown key exactly as config set does', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    assert.equal(await runCli(['config', 'set', 'totallyBogus', '1', '--local', '--root', root], io), 2)
+    assert.match(lines.join('\n'), /^unknown config key: totallyBogus$/m)
+    lines.length = 0
+    assert.equal(await runCli(['config', 'unset', 'totallyBogus', '--local', '--root', root], io), 2)
+    assert.match(lines.join('\n'), /^unknown config key: totallyBogus$/m)
+    assert.doesNotMatch(lines.join('\n'), /wrote/)
+    assert.equal(await exists(path.join(root, 'teammates.local.json')), false)
+  })
+})
+
+// A prefix of a known key names a real subtree of the layer, so unsetting it is meaningful.
+test('config unset accepts a role entry, which is a prefix of known keys', async () => {
+  await withRepo(async ({ root, io }) => {
+    await runCli(['config', 'set', 'agents.implementer.tier', 'capable', '--local', '--root', root], io)
+    assert.equal(await runCli(['config', 'unset', 'agents.implementer', '--local', '--root', root], io), 0)
+    assert.deepEqual(await readLocal(root), { agents: {} })
+  })
+})
+
+// `--local=true` parsed as a flag literally named `local=true`, leaving `flags.local` undefined
+// — so the write silently landed in the TRACKED enforcement manifest instead of the gitignored
+// layer the caller named. A spelling this CLI does not honour must never redirect a write.
+test('--local=true targets the local layer rather than silently writing the manifest', async () => {
+  await withRepo(async ({ root, io }) => {
+    assert.equal(await runCli(['config', 'set', 'maxParallel', '12', '--local=true', '--root', root], io), 0)
+    assert.deepEqual(await readLocal(root), { maxParallel: 12 })
+    assert.equal(await exists(path.join(root, 'teammates.gate.json')), false)
+  })
+})
+
+test('--local=true cannot be used to reach an enforcement key either', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const code = await runCli(['config', 'set', 'agents.reviewer.tier', 'capable', '--local=true', '--root', root], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /^agents\.reviewer\.tier is an enforcement key; it may only be set in teammates\.gate\.json$/m)
+    assert.equal(await exists(path.join(root, 'teammates.local.json')), false)
+    assert.equal(await exists(path.join(root, 'teammates.gate.json')), false)
+  })
+})
+
+test('the = spelling works for a value-taking flag such as --root', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    assert.equal(await runCli(['config', 'list', `--root=${root}`], io), 0)
+    assert.match(lines.join('\n'), /^maxParallel\s+\d+\s+\(default\)$/m)
+  })
+})
+
+// A layer file that exists but cannot be read is a Node system error, not a ConfigError. Left
+// alone it escaped as an unhandled rejection with a raw stack and exit 1, which a skill
+// branching on this exit code reads as neither a pass nor a stated failure.
+test('an unreadable layer file exits 2 with a message from every command that resolves config', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    // A directory where the layer file belongs: readable as a path, never as JSON.
+    await mkdir(path.join(root, 'teammates.local.json'))
+    for (const argv of [
+      ['config', 'list', '--root', root],
+      ['config', 'get', 'maxParallel', '--root', root],
+      ['init-run', planPath, '--run', 'r1', '--root', root],
+      ['workflow', '--run', 'r1', '--phase', '1', '--root', root],
+      ['digest', '--run', 'r1', '--root', root],
+    ]) {
+      lines.length = 0
+      assert.equal(await runCli(argv, io), 2, argv.join(' '))
+      assert.match(lines.join('\n'), /could not access the config layers/, argv.join(' '))
+    }
+  })
+})
+
+// `readLayer` parses but does not validate, so the layer being merged into was never checked.
+// A local file already carrying `agents.reviewer` was therefore merged and rewritten at exit 0
+// by the very command that refuses to write that key — while every reader of it exits 2.
+test('config set validates the local layer it is merging into rather than rewriting it', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const body = JSON.stringify({ agents: { reviewer: { tier: 'capable' } } })
+    await writeFile(path.join(root, 'teammates.local.json'), body, 'utf8')
+    const code = await runCli(['config', 'set', 'caveman', 'full', '--local', '--root', root], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /^agents\.reviewer is an enforcement key; it may only be set in teammates\.gate\.json$/m)
+    // Rewriting it would have laundered the enforcement key into a file the CLI itself wrote.
+    assert.equal(await readFile(path.join(root, 'teammates.local.json'), 'utf8'), body)
+  })
+})
+
+// `.gitignore` has no effect on a path git already tracks. Claiming the entry was added says
+// the layer is untracked — the trust split the whole local/gate divide rests on — when it is
+// not, so the tracked case is reported rather than papered over.
+test('a tracked local layer is reported as tracked instead of claiming a gitignore entry', async () => {
+  await withRepo(async ({ root, io, lines, git: g }) => {
+    await writeFile(path.join(root, 'teammates.local.json'), JSON.stringify({ maxParallel: 3 }), 'utf8')
+    g(['add', 'teammates.local.json'])
+    g(['commit', '--quiet', '-m', 'track the local layer'])
+    assert.equal(await runCli(['config', 'set', 'maxParallel', '12', '--local', '--root', root], io), 0)
+    const text = lines.join('\n')
+    assert.match(text, /wrote teammates\.local\.json/)
+    assert.match(text, /teammates\.local\.json is tracked by git/)
+    assert.match(text, /git rm --cached teammates\.local\.json/)
+    assert.doesNotMatch(text, /added teammates\.local\.json to \.gitignore/)
+  })
+})
+
+// A plan whose first task infers `cheap`: a fenced brief with a single declared file. It is the
+// case that makes the escalation bug visible, because a configured `capable` is two tiers above
+// what inference would have recorded.
+function planWithFencedBrief() {
+  return `### Task 1: A
+
+**Files:**
+- Create: \`a.mjs\`
+
+do this:
+
+\`\`\`js
+const x = 1
+\`\`\`
+
+### Task 2: B
+
+**Files:**
+- Create: \`b.mjs\`
+
+**Depends:** T1
+`
+}
+
+test('init-run records and prints the configured tier, not the inferred one', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const planPath = path.join(root, 'fenced.md')
+    await writeFile(planPath, planWithFencedBrief(), 'utf8')
+    await writeFile(
+      path.join(root, 'teammates.local.json'),
+      JSON.stringify({ agents: { implementer: { tier: 'capable' } } }),
+      'utf8',
+    )
+    assert.equal(await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io), 0)
+    // The printed routing report is the operator's only view of what the run will dispatch,
+    // so it must not name a tier the dispatch will override.
+    assert.match(lines.join('\n'), /phase 1: T1 \(capable, configured\)/)
+    const plan = await readPlan(root, 'r1')
+    assert.equal(plan.tasks.find((t) => t.id === 'T1').tier, 'capable')
+  })
+})
+
+// `fix` escalates from the RECORDED tier. With the configured tier applied only in memory,
+// plan.json kept `cheap`, so a retry after a failure that ran at `capable` was dispatched at
+// `mid` — below the tier that had just failed on the same problem.
+test('a retry escalates from the configured tier, not from the inferred one', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const planPath = path.join(root, 'fenced.md')
+    await writeFile(planPath, planWithFencedBrief(), 'utf8')
+    await writeFile(
+      path.join(root, 'teammates.local.json'),
+      JSON.stringify({ agents: { implementer: { tier: 'capable' } } }),
+      'utf8',
+    )
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const verdictPath = await writeVerdict(root, {
+      verdict: 'FAIL',
+      results: [{ name: 'review', kind: 'agent', status: 'fail', findings: [{ file: 'a.mjs' }] }],
+    })
+    lines.length = 0
+    assert.equal(await runCli(['fix', '--run', 'r1', '--phase', '1', '--verdict', verdictPath, '--root', root], io), 0)
+    const decision = JSON.parse(lines.join('\n'))
+    assert.equal(decision.decision, 'retry')
+    assert.equal(decision.tasks[0].taskId, 'T1')
+    assert.equal(decision.tasks[0].tier, 'capable')
+  })
+})
+
+// The same plan without the configured tier still escalates from what inference recorded, so
+// the test above is pinning the configured tier rather than the top of the tier list.
+test('the same plan with no configured tier escalates from the inferred cheap tier', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const planPath = path.join(root, 'fenced.md')
+    await writeFile(planPath, planWithFencedBrief(), 'utf8')
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    assert.equal((await readPlan(root, 'r1')).tasks.find((t) => t.id === 'T1').tier, 'cheap')
+    const verdictPath = await writeVerdict(root, {
+      verdict: 'FAIL',
+      results: [{ name: 'review', kind: 'agent', status: 'fail', findings: [{ file: 'a.mjs' }] }],
+    })
+    lines.length = 0
+    await runCli(['fix', '--run', 'r1', '--phase', '1', '--verdict', verdictPath, '--root', root], io)
+    assert.equal(JSON.parse(lines.join('\n')).tasks[0].tier, 'mid')
+  })
+})
+
+// Configuring a tier after init-run must reach plan.json too, or `fix` goes on escalating from
+// the tier the run is no longer dispatching at.
+test('workflow persists a tier configured after init-run', async () => {
+  await withRepo(async ({ root, planPath, io }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    assert.equal((await readPlan(root, 'r1')).tasks.find((t) => t.id === 'T1').tier, 'mid')
+    await writeFile(
+      path.join(root, 'teammates.local.json'),
+      JSON.stringify({ agents: { implementer: { tier: 'capable' } } }),
+      'utf8',
+    )
+    assert.equal(await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root], io), 0)
+    const task = (await readPlan(root, 'r1')).tasks.find((t) => t.id === 'T1')
+    assert.equal(task.tier, 'capable')
+    assert.equal(task.tierSource, 'configured')
+    // A task from another phase is untouched by a phase-1 workflow run.
+    assert.equal((await readPlan(root, 'r1')).tasks.find((t) => t.id === 'T2').tierSource, 'inferred')
   })
 })
 
