@@ -2897,7 +2897,7 @@ test('--local=true is refused rather than silently writing the tracked manifest'
     const code = await runCli(['config', 'set', 'maxParallel', '12', '--local=true', '--root', root], io)
     assert.equal(code, 2)
     assert.match(lines.join('\n'), /unsupported flag spelling: `--local=true`/)
-    assert.match(lines.join('\n'), /write `--local <value>`/)
+    assert.match(lines.join('\n'), /`--local` takes no value: write `--local` alone/)
     // Neither layer is written: the point of the refusal is that no file is chosen for the
     // caller when the CLI cannot tell which one they meant.
     assert.equal(await exists(path.join(root, 'teammates.local.json')), false)
@@ -3016,6 +3016,29 @@ test('the space-separated spelling of every flag still works', async () => {
     const code = await runCli(['gate', '--no-fleet', '--root', root], io)
     assert.match(lines.join('\n'), /enforcement checks are not running/)
     assert.equal(code, 0)
+  })
+})
+
+// The `=` spelling was already refused, but the space-separated one was not: `--local` sat
+// outside VALUELESS_FLAGS, so `--local false` consumed `false` as its value and the consumer's
+// `!== undefined` still selected the gitignored layer. Same shape as the `--no-fleet false`
+// regression — the caller writes the negation and gets the affirmative.
+test('--local false is refused rather than selecting the local layer', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    for (const value of ['false', '0', '']) {
+      lines.length = 0
+      const argv = ['config', 'set', 'maxParallel', '12', '--local', value, '--root', root]
+      assert.equal(await runCli(argv, io), 2, JSON.stringify(value))
+      assert.match(lines.join('\n'), /`--local` takes no value: write `--local` alone/, JSON.stringify(value))
+      // Neither layer is written: the refusal lands before the command runs, so the value never
+      // reaches the tracked manifest as a consolation target either.
+      assert.equal(await exists(path.join(root, 'teammates.local.json')), false, JSON.stringify(value))
+      assert.equal(await exists(path.join(root, 'teammates.gate.json')), false, JSON.stringify(value))
+    }
+
+    // The spelling the advice names does select the local layer.
+    assert.equal(await runCli(['config', 'set', 'maxParallel', '12', '--local', '--root', root], io), 0)
+    assert.deepEqual(await readLocal(root), { maxParallel: 12 })
   })
 })
 

@@ -43,7 +43,7 @@ const USAGE = `usage: cli.mjs <init-run|gate|digest|claim|unclaim|workflow|compl
 // presence is the whole signal, so any value written after one is a spelling this CLI cannot
 // act on — see the refusal in parseFlags. Kept as a named set so the advice printed for a
 // rejected spelling can name a form that actually works, per flag.
-const VALUELESS_FLAGS = new Set(['no-fleet'])
+const VALUELESS_FLAGS = new Set(['no-fleet', 'local'])
 
 // What to tell a caller who wrote a spelling this CLI does not take. It must never name a form
 // that fails — and for `--no-fleet` it must never name one that does the OPPOSITE of what the
@@ -1054,7 +1054,10 @@ export async function runCli(argv, io = { out: console.log }) {
   // code, so a validation failure must never surface as a stack trace.
   if (command === 'config') {
     const [sub, key, rawValue] = positional
-    const local = flags.local !== undefined
+    // `=== true`, not `!== undefined`: `--local` is in VALUELESS_FLAGS, so it is the only value
+    // the parser can produce for it, and testing identity keeps `--local false` from reading as
+    // "select the local layer" the way any-defined-value did.
+    const local = flags.local === true
     const file = local ? LOCAL_FILE : GATE_FILE
     try {
       if (sub === 'list') {
