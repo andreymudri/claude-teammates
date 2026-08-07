@@ -1,0 +1,30 @@
+name: test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    # The suite shells out to git constantly — worktrees, merge previews, ownership checks — and
+    # the path and link semantics it depends on differ per platform. A Windows-only or Linux-only
+    # run would miss the class of bug this project has already hit twice: junctions versus
+    # symlinks, and drive-relative paths.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      # No install step: zero runtime and zero dev dependencies, by constraint.
+      - name: Configure git identity
+        # Tests create commits in temporary repositories; git refuses without an identity.
+        run: |
+          git config --global user.email "test@example.com"
+          git config --global user.name "CI"
+      - run: npm test

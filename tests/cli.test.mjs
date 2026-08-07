@@ -1988,19 +1988,60 @@ test('workflow --plan and --base put the base branch in a checkout line and name
 })
 
 test('workflow with a plan carrying Global Constraints puts every constraint in the brief', async () => {
-  await withRepo(async ({ root, planPath, io, lines }) => {
+  await withRepo(async ({ root, planPath, io, lines, git }) => {
     await writeFile(planPath, `${PLAN}
 ## Global Constraints
 
 - Node >= 24.2.0
 - Zero new runtime dependencies
 `, 'utf8')
+    // Committed on the base branch, because that is where the anchor reads it from. A plan
+    // that exists only in the working tree is not the plan the gate will enforce.
+    git(['add', '.'])
+    git(['commit', '--quiet', '-m', 'plan with constraints'])
+    git(['branch', '--force', 'main', 'HEAD'])
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     lines.length = 0
     await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root, '--plan', planPath], io)
     const [prompt] = await captureAgentPrompts(lines.join('\n'))
     assert.ok(prompt.includes('- Node >= 24.2.0'), 'first constraint must reach the brief')
     assert.ok(prompt.includes('- Zero new runtime dependencies'), 'second constraint must reach the brief')
+  })
+})
+
+// The brief is generated from the plan at the anchor, never from the checked-out copy. Both
+// `gate` and `complete` already read it that way, so that a teammate cannot widen its own
+// declared file set by editing the working tree. Reading it from disk here left the two
+// disagreeing: constraints injected into every dispatch would have come from mutable,
+// uncommitted markdown while the gate enforced the committed plan.
+test('workflow reads the plan from the anchor, not the working tree', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git }) => {
+    await writeFile(planPath, `${PLAN}
+## Global Constraints
+
+- committed rule
+`, 'utf8')
+    git(['add', '.'])
+    git(['commit', '--quiet', '-m', 'plan with constraints'])
+    git(['branch', '--force', 'main', 'HEAD'])
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    // Edited after the commit and left uncommitted: this is the text an enforced agent could
+    // put on disk between phases. It must not reach any brief.
+    await writeFile(planPath, `${PLAN}
+## Global Constraints
+
+- committed rule
+- injected from the working tree
+`, 'utf8')
+    lines.length = 0
+    const code = await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root, '--plan', planPath], io)
+    assert.equal(code, 0, lines.join('\n'))
+    const [prompt] = await captureAgentPrompts(lines.join('\n'))
+    assert.ok(prompt.includes('- committed rule'), 'the committed constraint must reach the brief')
+    assert.ok(
+      !prompt.includes('injected from the working tree'),
+      'an uncommitted edit must not reach the brief',
+    )
   })
 })
 
@@ -2172,13 +2213,43 @@ test('parseConstraints joins every continuation line of a bullet wrapped over th
 // as a single sentence. It is dropped instead: losing a malformed rule is recoverable, a
 // constraint that says something neither author wrote is not.
 test('parseConstraints drops an indented bullet the bullet pattern rejects rather than gluing it to the constraint above', async () => {
-  assert.deepEqual(
-    parseConstraints('## Global Constraints\n\n- x\n  - y z\n'),
-    ['x'],
-  )
+  // A bare `-` with no text is the shape the bullet pattern genuinely rejects. It is dropped,
+  // not appended: joining it would fuse two unrelated rules into one sentence that says what
+  // neither author wrote, which a teammate cannot detect. Losing a malformed rule is the only
+  // failure here that cannot silently misinform.
   assert.deepEqual(
     parseConstraints('## Global Constraints\n\n- x\n  -  \n- y\n'),
     ['x', 'y'],
+  )
+})
+
+// A continuation line may legitimately open with a hyphen: `--no-ff` begins the second line of
+// a wrapped rule in this project's own constraints. Excluding every leading hyphen would
+// truncate that rule into a sentence that reads complete, which is the corruption the join
+// exists to prevent, arriving from the other side. Only a bullet-shaped opener — `- `, or a
+// bare `-` — closes the item.
+test('parseConstraints joins a continuation line that opens with a hyphen but is not a bullet', async () => {
+  assert.deepEqual(
+    parseConstraints('## Global Constraints\n\n- use the flag\n  --no-ff always\n'),
+    ['use the flag --no-ff always'],
+  )
+})
+
+// The bullet pattern captures with `[^\n]`, not `.`: `.` does not match U+2028/U+2029 while
+// `\s` does, so a bullet whose text contained one failed the pattern entirely and vanished
+// with no diagnostic — a rule the plan states, reaching no teammate's brief. Written as an
+// escape rather than a raw character so the case is visible in the source and survives any
+// editor or formatter that normalises line separators.
+test('parseConstraints keeps a bullet whose text contains a Unicode line separator', async () => {
+  assert.deepEqual(
+    parseConstraints('## Global Constraints\n\n- keep it\u2028simple\n- and this one\n'),
+    ['keep it\u2028simple', 'and this one'],
+  )
+  // Indented, such a line is a nested bullet like any other: flattened to a standalone
+  // constraint, never glued onto the rule above it.
+  assert.deepEqual(
+    parseConstraints('## Global Constraints\n\n- x\n  - y\u2028z\n'),
+    ['x', 'y\u2028z'],
   )
 })
 

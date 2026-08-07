@@ -134,19 +134,25 @@ export function parseConstraints(markdown) {
   // blank line closes the item, so a following indented paragraph is not swallowed. A
   // nested bullet matches the bullet pattern first and so stays a standalone constraint.
   //
-  // The continuation test excludes any indented line opening with `-`, so a line that looks
-  // like a bullet but that the bullet pattern rejects — an empty `-`, or one whose text is
-  // split by a Unicode line separator, which `.` does not match — is dropped rather than
-  // appended. Joining it would fuse two unrelated rules into a single constraint that reads
-  // as one sentence and says what neither author wrote; a dropped malformed rule is the
-  // lesser failure, and the only one that cannot silently misinform a teammate.
+  // The continuation test excludes an indented line that is itself bullet-shaped (`- ` or a
+  // bare `-`), so a line the bullet pattern rejects is dropped rather than appended. Joining
+  // it would fuse two unrelated rules into a single constraint that reads as one sentence and
+  // says what neither author wrote; a dropped malformed rule is the lesser failure, and the
+  // only one that cannot silently misinform a teammate. The lookahead is `-\s|-$` rather than
+  // a bare `-`, so a continuation that merely *starts* with a hyphen still joins: `--no-ff`
+  // opens a rule's second line in this project's own constraints, and excluding every leading
+  // hyphen would truncate it into a sentence that reads complete.
+  //
+  // Both patterns use `[^\n]` rather than `.`: `.` does not match U+2028/U+2029 while `\s`
+  // does, so a bullet whose text contains one failed the bullet pattern entirely and was
+  // dropped with no diagnostic — a rule the plan states that reaches no teammate.
   let open = false
   for (const line of (next ? rest.slice(0, next.index) : rest).split('\n')) {
-    const bullet = /^\s*-\s+(.*\S)\s*$/.exec(line)
+    const bullet = /^\s*-\s+([^\n]*\S)\s*$/.exec(line)
     if (bullet) {
       items.push(bullet[1])
       open = true
-    } else if (open && /^\s+[^-\s]/.test(line)) {
+    } else if (open && /^\s+(?!-\s|-$)\S/.test(line)) {
       items[items.length - 1] += ` ${line.trim()}`
     } else {
       open = false
@@ -464,15 +470,43 @@ export async function runCli(argv, io = { out: console.log }) {
     const planPath = flags.plan === true ? '' : (flags.plan ?? '')
     const baseBranch = flags.base === true ? '' : (flags.base ?? '')
 
+    // Read from git at the anchor, never from the working tree. `gate` and `complete` both
+    // read the plan with `git show <anchor>:<planPath>` precisely so a teammate cannot widen
+    // its own file set by editing the checked-out copy. Reading it here from disk left the two
+    // disagreeing: the constraints injected into every brief came from mutable, uncommitted
+    // markdown while the gate enforced the committed plan, so a working-tree edit between
+    // phases would hand every teammate instruction text with no record in git.
+    //
+    // The consequence is that an uncommitted plan now fails rather than generating. That is
+    // the honest outcome: a brief must not carry rules the run cannot show a reader.
+    //
     // A --plan pointing at nothing is a mistake worth an exit code. Swallowing the read error
     // and generating a constraint-free brief would hand every teammate in the phase a dispatch
     // missing the very rules the caller asked to carry, with exit 0 and nothing on stdout.
     let planMarkdown = ''
     if (planPath) {
+      const git = createGit({ cwd: root })
+      let anchorSha
       try {
-        planMarkdown = await readFile(planPath, 'utf8')
+        const runBranch = await git.currentBranch()
+        const baseBranch = await resolveBaseBranch(git, flags.base)
+        const runSha = await git.resolveRef(`refs/heads/${runBranch}`)
+        const baseSha = await git.resolveRef(`refs/heads/${baseBranch}`)
+        anchorSha = await git.mergeBase(baseSha, runSha)
+        // `git show <sha>:<path>` takes a repo-relative path and rejects an absolute one, but
+        // --plan is commonly given as absolute (every caller that builds it from a root does).
+        // Normalising here keeps both spellings working; the brief still points at the path the
+        // caller wrote, since that is what a reader of the dispatch will recognise.
+        const relPath = path.isAbsolute(planPath)
+          ? path.relative(root, planPath).split(path.sep).join('/')
+          : planPath
+        planMarkdown = await git.fileAtCommit(anchorSha, relPath)
       } catch (err) {
-        io.out(`--plan ${planPath} could not be read: ${err.message}`)
+        const where = anchorSha ? ` at anchor ${anchorSha}` : ''
+        io.out(
+          `--plan ${planPath} could not be read from git${where}: ${err instanceof GitError ? err.message : err.message}`
+          + ' — the plan must be committed on the base branch, which is where the gate reads it from',
+        )
         return 2
       }
     }

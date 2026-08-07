@@ -1,5 +1,19 @@
 {
   "name": "claude-teammates",
-  "version": "0.1.0",
-  "description": "Fleet orchestration, worktree-isolated parallel execution, automated phase gates, and supervision for Claude Code teammates."
+  "version": "0.1.1",
+  "description": "Fleet orchestration, worktree-isolated parallel execution, automated phase gates, and supervision for Claude Code teammates.",
+  "author": {
+    "name": "Andrey Mudri",
+    "url": "https://github.com/andreymudri"
+  },
+  "homepage": "https://github.com/andreymudri/claude-teammates",
+  "repository": "https://github.com/andreymudri/claude-teammates",
+  "license": "MIT",
+  "keywords": [
+    "orchestration",
+    "parallel-execution",
+    "git-worktree",
+    "code-review",
+    "planning"
+  ]
 }

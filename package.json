@@ -1,9 +1,26 @@
 {
   "name": "claude-teammates",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.1.1",
   "type": "module",
-  "description": "Superpowers-style development process running on Claude Code teammates",
+  "description": "Fleet orchestration for Claude Code: worktree-isolated parallel execution, automated phase gates, and supervision.",
+  "license": "MIT",
+  "author": "Andrey Mudri",
+  "homepage": "https://github.com/andreymudri/claude-teammates#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/andreymudri/claude-teammates.git"
+  },
+  "bugs": {
+    "url": "https://github.com/andreymudri/claude-teammates/issues"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "claude-code-plugin",
+    "agents",
+    "orchestration",
+    "git-worktree"
+  ],
   "engines": {
     "node": ">=24.2.0"
   },
