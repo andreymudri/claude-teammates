@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { defaultMaxParallel } from '../scripts/gate-config.mjs'
+import { defaultMaxParallel, loadGateConfig } from '../scripts/gate-config.mjs'
 import { TIERS } from '../scripts/routing.mjs'
 import {
   GATE_FILE,
@@ -657,4 +657,261 @@ test('validateGate returns the manifest it accepts and names the file it rejects
     (err) => err instanceof ConfigError
       && err.message === `${GATE_FILE} must contain a JSON object`,
   )
+})
+
+// ============================================================================================
+// T11 — enforcement-key shape.
+//
+// T9 checked the ergonomics keys and deliberately left the three enforcement keys unchecked:
+// their presence was permitted, their shape was never examined. All three legs of what that
+// cost were reproduced on the merged tree — `config get lens` said "unknown config key",
+// `config list` never printed it, and checksForPhase silently substituted DEFAULT_LENS — so a
+// manifest carrying `"lens": "performance"` was exit 0 everywhere while enforcing something
+// else entirely.
+//
+// Hand-editing stays the way enforcement policy changes. These tests pin the feedback the
+// documentation already tells operators to rely on, and each asserts its EXACT message: six
+// failure modes now share exit 2, and an assertion that says only "a ConfigError" cannot tell
+// an operator which of them fired.
+// ============================================================================================
+
+const gateShapeError = (message) => (err) =>
+  err instanceof ConfigError && err.message === message
+
+test('validateGate rejects a lens that is not an array, by exact message', () => {
+  assert.throws(
+    () => validateGate({ lens: 'performance' }),
+    gateShapeError('lens must be a non-empty array of strings'),
+  )
+  // The leg the phase 4 review reproduced: before T11 this exact body reached `config get lens`
+  // and came back "unknown config key: lens", sending the operator hunting for a typo in the
+  // key name when the key is right and the value is wrong.
+  assert.throws(
+    () => validateGate({ lens: 'performance' }),
+    (err) => {
+      assert.doesNotMatch(err.message, /unknown config key/)
+      return true
+    },
+  )
+})
+
+test('validateGate rejects an empty lens array, by exact message', () => {
+  // gate-config.mjs substitutes DEFAULT_LENS for an empty array with no report, so this is the
+  // body that silently enforces the default forever. It has to be rejected, not defaulted.
+  assert.throws(
+    () => validateGate({ lens: [] }),
+    gateShapeError('lens must be a non-empty array of strings'),
+  )
+})
+
+test('validateGate rejects a lens array holding a non-string or an empty string', () => {
+  assert.throws(
+    () => validateGate({ lens: ['correctness', 7] }),
+    gateShapeError('lens must be a non-empty array of strings'),
+  )
+  assert.throws(
+    () => validateGate({ lens: ['correctness', ''] }),
+    gateShapeError('lens must be a non-empty array of strings'),
+  )
+  assert.throws(
+    () => validateGate({ lens: [['correctness']] }),
+    gateShapeError('lens must be a non-empty array of strings'),
+  )
+})
+
+test('validateGate rejects phases that is an array, a string or null, by exact message', () => {
+  assert.throws(
+    () => validateGate({ phases: [] }),
+    gateShapeError('phases must be an object keyed by phase name'),
+  )
+  assert.throws(
+    () => validateGate({ phases: 'default' }),
+    gateShapeError('phases must be an object keyed by phase name'),
+  )
+  assert.throws(
+    () => validateGate({ phases: null }),
+    gateShapeError('phases must be an object keyed by phase name'),
+  )
+})
+
+test('validateGate distinguishes a bad phases container from a bad phase entry', () => {
+  // Two messages a few words apart, both exit 2. A test matching only /must be an object/ would
+  // pass against either and pin neither, so each asserts the other is NOT what fired.
+  assert.throws(
+    () => validateGate({ phases: { default: 'checks' } }),
+    gateShapeError('phases.default must be an object'),
+  )
+  assert.throws(
+    () => validateGate({ phases: { default: [] } }),
+    (err) => {
+      assert.equal(err.message, 'phases.default must be an object')
+      assert.doesNotMatch(err.message, /keyed by phase name/)
+      return true
+    },
+  )
+  assert.throws(
+    () => validateGate({ phases: [] }),
+    (err) => {
+      assert.doesNotMatch(err.message, /^phases\./)
+      return true
+    },
+  )
+})
+
+test('validateGate names the offending phase when its checks are not an array', () => {
+  assert.throws(
+    () => validateGate({ phases: { integration: { checks: {} } } }),
+    gateShapeError('phases.integration.checks must be an array'),
+  )
+  assert.throws(
+    () => validateGate({ phases: { default: { checks: 'npm test' } } }),
+    gateShapeError('phases.default.checks must be an array'),
+  )
+})
+
+test('validateGate rejects a negative or non-integer fixRounds, by exact message', () => {
+  assert.throws(
+    () => validateGate({ phases: { default: { fixRounds: -1 } } }),
+    gateShapeError('phases.default.fixRounds must be an integer >= 0'),
+  )
+  assert.throws(
+    () => validateGate({ phases: { default: { fixRounds: 1.5 } } }),
+    gateShapeError('phases.default.fixRounds must be an integer >= 0'),
+  )
+  assert.throws(
+    () => validateGate({ phases: { default: { fixRounds: '2' } } }),
+    gateShapeError('phases.default.fixRounds must be an integer >= 0'),
+  )
+  // Zero is a legitimate budget — "run the gate once, dispatch no fix round" — and
+  // gate-config's own tests pin it, so a truthiness guard here would break a supported config.
+  assert.deepEqual(
+    validateGate({ phases: { default: { fixRounds: 0, checks: [] } } }),
+    { phases: { default: { fixRounds: 0, checks: [] } } },
+  )
+})
+
+test('validateGate rejects a preview that is not an object, by exact message', () => {
+  assert.throws(
+    () => validateGate({ preview: [] }),
+    gateShapeError('preview must be an object'),
+  )
+  assert.throws(
+    () => validateGate({ preview: 'main' }),
+    gateShapeError('preview must be an object'),
+  )
+})
+
+test('validateGate distinguishes a bad preview container from a bad preview.link', () => {
+  assert.throws(
+    () => validateGate({ preview: { link: 'node_modules' } }),
+    (err) => {
+      assert.equal(err.message, 'preview.link must be an array of non-empty strings')
+      assert.doesNotMatch(err.message, /^preview must be an object$/)
+      return true
+    },
+  )
+  assert.throws(
+    () => validateGate({ preview: { link: ['node_modules', ''] } }),
+    gateShapeError('preview.link must be an array of non-empty strings'),
+  )
+  assert.throws(
+    () => validateGate({ preview: { link: ['node_modules', 3] } }),
+    gateShapeError('preview.link must be an array of non-empty strings'),
+  )
+  assert.throws(
+    () => validateGate({ preview: [] }),
+    (err) => {
+      assert.doesNotMatch(err.message, /preview\.link/)
+      return true
+    },
+  )
+})
+
+test('validateGate accepts the shapes the repository and its fixtures actually use', () => {
+  // An empty preview and a preview with no `link` are both legitimate: previewLinks() returns
+  // [] for either, and inferGateConfig emits no preview key at all for a project with no
+  // package. An empty link list is legitimate too — it declares "link nothing", explicitly.
+  const shapes = [
+    { phases: { default: { checks: [] } } },
+    { phases: {} },
+    { phases: { default: { fixRounds: 3, checks: [{ name: 'test', kind: 'command', run: 'npm test' }] } } },
+    { preview: {} },
+    { preview: { base: 'main' } },
+    { preview: { link: [] } },
+    { preview: { link: ['node_modules'] } },
+    { lens: ['correctness'] },
+    { lens: ['correctness', 'security', 'tests'] },
+  ]
+  for (const shape of shapes) {
+    assert.deepEqual(validateGate(shape), shape, `rejected a valid shape: ${JSON.stringify(shape)}`)
+  }
+})
+
+test("this repository's own teammates.gate.json validates", async () => {
+  const own = JSON.parse(
+    await readFile(path.join(import.meta.dirname, '..', GATE_FILE), 'utf8'),
+  )
+  assert.deepEqual(validateGate(own), own)
+  // Its `review` check carries a per-check `lens`. That lives inside a check body, which is
+  // policy this module does not read — only the top-level `lens` is a shape this layer owns.
+  assert.equal(own.lens, undefined)
+})
+
+test('loadConfig reports an enforcement key of the wrong shape from the gate layer', async () => {
+  // The end-to-end feedback channel: `config list` reads through loadConfig, and the docs tell
+  // an operator who hand-edited an enforcement key to verify the edit there.
+  await withTempRoot(async (root) => {
+    await writeJson(root, GATE_FILE, { maxParallel: 2, lens: 'performance' })
+    await assert.rejects(
+      () => loadConfig(root),
+      gateShapeError('lens must be a non-empty array of strings'),
+    )
+  })
+  await withTempRoot(async (root) => {
+    await writeJson(root, GATE_FILE, { phases: { default: { fixRounds: -2 } } })
+    await assert.rejects(
+      () => loadConfig(root),
+      gateShapeError('phases.default.fixRounds must be an integer >= 0'),
+    )
+  })
+})
+
+test('a shape-invalid enforcement key in the local layer still reports the enforcement refusal', async () => {
+  // Deliberate: validateLocal must NOT run the shape validators. An enforcement key has no
+  // business in the gitignored layer whatever its shape, and reporting "lens must be a
+  // non-empty array of strings" would tell the operator to fix the value when the fix is to
+  // move the key. Two exit-2 modes; this pins which one the operator is shown.
+  await withTempRoot(async (root) => {
+    await writeJson(root, LOCAL_FILE, { lens: 'performance' })
+    await assert.rejects(
+      () => loadConfig(root),
+      (err) => {
+        assert.ok(err instanceof ConfigError)
+        assert.equal(err.message, `lens is an enforcement key; it may only be set in ${GATE_FILE}`)
+        assert.doesNotMatch(err.message, /non-empty array/)
+        return true
+      },
+    )
+  })
+  // Same for a well-shaped one: the refusal is about the layer, never about the value.
+  await withTempRoot(async (root) => {
+    await writeJson(root, LOCAL_FILE, { lens: ['correctness'] })
+    await assert.rejects(
+      () => loadConfig(root),
+      gateShapeError(`lens is an enforcement key; it may only be set in ${GATE_FILE}`),
+    )
+  })
+})
+
+test('loadGateConfig is left alone: the gate path still reads a shape-invalid manifest', async () => {
+  // `gate`, `complete` and `fix` read the manifest through loadGateConfig, and the phase gate
+  // itself depends on those three exit codes. Validating there would change them, so T11
+  // tightens loadConfig only. This test guards that boundary: if someone later wires the
+  // validators into loadGateConfig, it fails and the decision gets re-made deliberately rather
+  // than inherited by accident.
+  await withTempRoot(async (root) => {
+    await writeJson(root, GATE_FILE, { lens: 'performance', phases: { default: { checks: [] } } })
+    const config = await loadGateConfig(root)
+    assert.equal(config.lens, 'performance')
+  })
 })

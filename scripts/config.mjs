@@ -54,6 +54,46 @@ const VALIDATORS = {
   },
 }
 
+// Enforcement keys are hand-edited by design, so `config set` never validates them and the
+// operator's only feedback is `config list`. Shape is checked here so that feedback exists;
+// content is not, because a lens name or a check's `run` string is policy, not structure.
+const ENFORCEMENT_VALIDATORS = {
+  lens: (v) => {
+    if (!Array.isArray(v) || v.length === 0 || v.some((l) => typeof l !== 'string' || l === '')) {
+      throw new ConfigError('lens must be a non-empty array of strings')
+    }
+    return v
+  },
+  phases: (v) => {
+    if (v === null || typeof v !== 'object' || Array.isArray(v)) {
+      throw new ConfigError('phases must be an object keyed by phase name')
+    }
+    for (const [name, phase] of Object.entries(v)) {
+      if (phase === null || typeof phase !== 'object' || Array.isArray(phase)) {
+        throw new ConfigError(`phases.${name} must be an object`)
+      }
+      if (phase.checks !== undefined && !Array.isArray(phase.checks)) {
+        throw new ConfigError(`phases.${name}.checks must be an array`)
+      }
+      if (phase.fixRounds !== undefined
+        && (!Number.isInteger(phase.fixRounds) || phase.fixRounds < 0)) {
+        throw new ConfigError(`phases.${name}.fixRounds must be an integer >= 0`)
+      }
+    }
+    return v
+  },
+  preview: (v) => {
+    if (v === null || typeof v !== 'object' || Array.isArray(v)) {
+      throw new ConfigError('preview must be an object')
+    }
+    if (v.link !== undefined
+      && (!Array.isArray(v.link) || v.link.some((e) => typeof e !== 'string' || e === ''))) {
+      throw new ConfigError('preview.link must be an array of non-empty strings')
+    }
+    return v
+  },
+}
+
 export function validateLocal(local) {
   if (local === null || typeof local !== 'object' || Array.isArray(local)) {
     throw new ConfigError(`${LOCAL_FILE} must contain a JSON object`)
@@ -99,7 +139,8 @@ export function validateLocal(local) {
 // The gate file is tracked and reviewable, so a bad value here is an operator typo rather than an
 // attack. It is validated anyway, and for the same reason validateLocal is: a key that silently
 // resolves to a default is a key the operator believes is set. Enforcement keys are permitted
-// here — this is the file they belong in — so only their presence is unchecked, not their shape.
+// here — this is the file they belong in — and their shape is checked too, because they are
+// hand-edited: `config set` refuses them by name, so this is the only layer that can say no.
 export function validateGate(gate) {
   if (gate === null || typeof gate !== 'object' || Array.isArray(gate)) {
     throw new ConfigError(`${GATE_FILE} must contain a JSON object`)
@@ -126,6 +167,12 @@ export function validateGate(gate) {
       if (entry.tier !== undefined) VALIDATORS.tier(entry.tier)
       if (entry.effort !== undefined) VALIDATORS.effort(entry.effort)
     }
+  }
+  // Every entry in ENFORCEMENT_KEYS has a validator, so this lookup cannot come back undefined.
+  // If a future key joins that list without one, this throws a TypeError rather than silently
+  // waving the new key through unchecked — which is the failure direction to prefer.
+  for (const key of ENFORCEMENT_KEYS) {
+    if (gate[key] !== undefined) ENFORCEMENT_VALIDATORS[key](gate[key])
   }
   return gate
 }
