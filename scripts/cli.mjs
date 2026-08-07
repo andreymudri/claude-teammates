@@ -4,16 +4,22 @@ import { fileURLToPath } from 'node:url'
 import { parsePlan } from './plan-parser.mjs'
 import { assignPhases } from './phases.mjs'
 import { readState, writeState, claimTask, releaseClaim, readFixRounds, recordFixRound } from './state.mjs'
-import { loadGateConfig, inferGateConfig, checksForPhase, defaultMaxParallel, fixRoundsForPhase, previewLinks } from './gate-config.mjs'
+import { loadGateConfig, inferGateConfig, checksForPhase, fixRoundsForPhase, previewLinks } from './gate-config.mjs'
+import {
+  loadConfig, readLayer, writeLayer, validateKey, validateLocal, isEnforcementKey, assertSafeKey,
+  getKey, setKey, unsetKey, ensureGitignored, ConfigError,
+  GATE_FILE, LOCAL_FILE, ROLES,
+} from './config.mjs'
+import * as configModule from './config.mjs'
 import { TIERS, inferTier } from './routing.mjs'
 import { decideFix } from './fix-loop.mjs'
 import { runChecks, aggregateVerdict } from './gate-runner.mjs'
 import { renderDigest } from './digest.mjs'
 import { generatePhaseWorkflow } from './workflow-gen.mjs'
-import { createGit, GitError } from './git.mjs'
+import { createGit, GitError, defaultGitExec } from './git.mjs'
 import { deriveContext } from './gate-runner.mjs'
 
-const USAGE = `usage: cli.mjs <init-run|gate|digest|claim|unclaim|workflow|complete|fix|record-fix-round> [options]
+const USAGE = `usage: cli.mjs <init-run|gate|digest|claim|unclaim|workflow|complete|fix|record-fix-round|config> [options]
 
   init-run <planPath> --run <id> [--root <path>]
   gate     --run <id> --plan <path> [--base <branch>] [--root <path>] [--phase <name>] [--no-fleet] [--results <path>]
@@ -23,19 +29,77 @@ const USAGE = `usage: cli.mjs <init-run|gate|digest|claim|unclaim|workflow|compl
   workflow --run <id> --phase <n> [--root <path>] [--models <json>] [--plan <path>] [--base <branch>]
   complete --run <id> --task <id> --plan <path> [--base <branch>] [--root <path>]
   fix      --run <id> --phase <n> --verdict <path> [--root <path>]
-  record-fix-round --run <id> --phase <n> --task <id> [--root <path>]`
+  record-fix-round --run <id> --phase <n> --task <id> [--root <path>]
+  config   list [--root <path>]
+  config   get <key> [--root <path>]
+  config   set <key> <value> [--root <path>] [--local]
+  config   unset <key> [--root <path>] [--local]`
 
 // A flag followed by nothing, or by another flag, is a boolean switch (e.g. --no-fleet)
 // and takes no value. Without this, a boolean flag anywhere but the very last argv
 // position swallows the next flag's name as its own value, and at the very last position
 // reads as `undefined` — either way `flags['no-fleet'] !== undefined` never sees it.
+// Flags that are a switch and nothing else: present or absent, never carrying a value. Their
+// presence is the whole signal, so any value written after one is a spelling this CLI cannot
+// act on — see the refusal in parseFlags. Kept as a named set so the advice printed for a
+// rejected spelling can name a form that actually works, per flag.
+const VALUELESS_FLAGS = new Set(['no-fleet'])
+
+// What to tell a caller who wrote a spelling this CLI does not take. It must never name a form
+// that fails — and for `--no-fleet` it must never name one that does the OPPOSITE of what the
+// caller was reaching for: someone typing `--no-fleet=false` wants the enforcement checks
+// running, and "write `--no-fleet`" would hand them the spelling that switches those checks off.
+function spellingAdvice(name) {
+  if (name === 'no-fleet') {
+    return '`--no-fleet` takes no value: omit it entirely to keep the fileset and ownership'
+      + ' checks running, or pass it alone to run without them'
+  }
+  if (VALUELESS_FLAGS.has(name)) return `\`--${name}\` takes no value: write \`--${name}\` alone`
+  return `write \`--${name} <value>\``
+}
+
 function parseFlags(argv) {
   const flags = {}
   const positional = []
+  // Rejected spellings, reported by the caller before any command runs — never dropped, or the
+  // flag would go missing exactly as it did before.
+  const rejected = []
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i].startsWith('--')) {
-      const name = argv[i].slice(2)
+      const token = argv[i].slice(2)
+      // `--name=value` is a spelling this CLI does not accept, and it is refused rather than
+      // guessed at — in EITHER direction, which is the whole point.
+      //
+      // Read as a flag name (what happened before any of this), `--local=true` produced a flag
+      // literally called `local=true`, leaving `flags.local` undefined, so the write silently
+      // landed in the TRACKED enforcement manifest instead of the gitignored layer the caller
+      // named. Interpreted as a value (what replaced it) is worse: every switch in this CLI is
+      // tested with `!== undefined`, so `--no-fleet=false` READS as negation and DISABLES the
+      // fileset and ownership checks — `=false`, `=0`, `=off` alike — while also dropping
+      // `--run` and `--plan` from REQUIRED. An argv that says "enforcement is not disabled"
+      // would open the entire solo path, which is the one guarantee SECURITY.md makes about a
+      // fleet run.
+      //
+      if (token.includes('=')) {
+        rejected.push({ raw: argv[i], name: token.slice(0, token.indexOf('=')) })
+        continue
+      }
+      const name = token
       const next = argv[i + 1]
+      // A flag in VALUELESS_FLAGS never consumes the token after it, and never carries a value
+      // of its own. `--no-fleet false` reads to a human as "solo mode off" and meant the exact
+      // opposite: any value at all left `flags['no-fleet']` defined, which is what both
+      // consumers tested, so the fileset and ownership checks were skipped by an argv written
+      // to keep them. Refused rather than interpreted, for the same reason `=` is.
+      if (VALUELESS_FLAGS.has(name)) {
+        if (next !== undefined && !next.startsWith('--')) {
+          rejected.push({ raw: `${argv[i]} ${next}`, name })
+          i += 1
+          continue
+        }
+        flags[name] = true
+        continue
+      }
       if (next === undefined || next.startsWith('--')) {
         flags[name] = true
       } else {
@@ -46,7 +110,7 @@ function parseFlags(argv) {
       positional.push(argv[i])
     }
   }
-  return { flags, positional }
+  return { flags, positional, rejected }
 }
 
 async function readPackage(root) {
@@ -68,6 +132,10 @@ const REQUIRED = {
   complete: ['run', 'task', 'plan'],
   fix: ['run', 'phase', 'verdict'],
   'record-fix-round': ['run', 'phase', 'task'],
+  // Recorded explicitly as taking no required flags rather than relying on the `?? []`
+  // fallthrough: a command absent from this map also skips the whole missing-argument
+  // branch, so the omission would read as "not a command" to anyone auditing the table.
+  config: [],
 }
 
 // Commands whose `--phase` names a numeric plan phase, not a manifest phase key. `gate` is
@@ -87,7 +155,11 @@ const NUMERIC_PHASE_COMMANDS = new Set(['workflow', 'fix', 'record-fix-round'])
 // records anything under `--run` — requiring either would only teach a caller to invent a
 // throwaway value to get past this check. Solo drops both from the requirement.
 function missingArgs(command, flags, positional) {
-  const solo = command === 'gate' && flags['no-fleet'] !== undefined
+  // `=== true`, not `!== undefined`: solo mode is entered only by the one spelling that means
+  // it. parseFlags already refuses `--no-fleet <value>` outright, and this is the second half
+  // of the same rule — the check that decides whether the enforcement checks run should test
+  // for the switch being SET, not merely for something having been written after it.
+  const solo = command === 'gate' && flags['no-fleet'] === true
   const requiredList = solo ? [] : (REQUIRED[command] ?? [])
   const missing = requiredList
     .filter((f) => !flags[f] || flags[f] === true)
@@ -106,7 +178,17 @@ function missingArgs(command, flags, positional) {
   // the gate's own `flags.results !== true` guard skips the whole supplied-results block and
   // the run exits 1 on the still-pending checks with nothing on stdout about the dropped
   // flag. Same treatment every value-taking flag gets from the `=== true` rule above.
-  if (command === 'gate' && flags.results === true) missing.push('--results <path>')
+  //
+  // An EMPTY value is the same missing argument in the other spelling — `--results ""` is what
+  // an unset `$RESULTS` templated *quoted* produces, where templated unquoted it produces the
+  // bare `--results` above. Only the bare form was caught, so the quoted one fell through to
+  // the gate's own `if (flags.results)` truthiness test, which skipped the supplied-results
+  // block entirely and exited 1 on the still-pending checks with nothing said about the flag.
+  // Both spellings of one mistake now get one answer, exactly as `--root` already does.
+  if (command === 'gate'
+    && (flags.results === true || (typeof flags.results === 'string' && flags.results.trim() === ''))) {
+    missing.push('--results <path>')
+  }
   return missing
 }
 
@@ -306,9 +388,128 @@ async function derive(root, runId, flags) {
   }
 }
 
+// Everything this CLI can say about a failed config operation, or null for an error that is
+// not one — a real bug must still crash rather than be reported as a config problem.
+//
+// A ConfigError is a stated rejection and carries its own wording. A Node system error is a
+// layer file that exists but cannot be read or written (a directory created in its place, a
+// permission error): left alone it escapes as an unhandled rejection with a raw stack and exit
+// 1, which a skill branching on this CLI's exit code reads as neither a pass nor a stated
+// failure. `syscall` is what distinguishes an fs error from an ordinary Error carrying a
+// `code` property.
+function configFailureMessage(err) {
+  if (err instanceof ConfigError) return err.message
+  if (typeof err?.syscall === 'string') return `could not access the config layers: ${err.message}`
+  return null
+}
+
+// The single reader. `loadConfig` validates the LOCAL layer and, until T9 lands, keeps the
+// tracked one as `(readLayer ?? {})` — so `teammates.gate.json` holding `[]` resolved every key
+// to its default at exit 0 while the same body on the local side exited 2. Both layers are
+// validated here, on the way out, so a reader and a writer cannot disagree about a file and the
+// two layers cannot disagree with each other. Every read path in this module goes through it.
+async function loadValidatedConfig(root) {
+  const config = await loadConfig(root)
+  validateGateLayer(config.gate)
+  return config
+}
+
+// `loadValidatedConfig` throws on a malformed or over-reaching layer, and every command below
+// branches on this CLI's exit code. Resolving through here turns that into the message-and-2
+// the rest of the CLI already guarantees, instead of a stack trace from whichever command
+// happened to read the layer first. `null` means "already reported, exit 2".
+async function resolveConfig(root, io) {
+  try {
+    return (await loadValidatedConfig(root)).resolved
+  } catch (err) {
+    const message = configFailureMessage(err)
+    if (message === null) throw err
+    io.out(message)
+    return null
+  }
+}
+
+// Every key this CLI can resolve, as a single field. `set` gets this check from `validateKey`,
+// which needs a value; `get` and `unset` have none to give it, and without an equivalent
+// `config unset totallyBogus` created the file, gitignored it, reported `wrote …` and exited 0
+// having removed nothing, while `config get agents.implementer` printed `[object Object]`.
+const CONFIG_KEYS = [
+  'maxParallel',
+  'caveman',
+  ...ROLES.flatMap((role) => [`agents.${role}.tier`, `agents.${role}.effort`]),
+]
+
+// `unset` may also name one role's entry — `agents.implementer` is a real subtree of the layer
+// and removing it removes exactly the fields this layer knows about. The bare segment `agents`
+// is NOT in this set, and that is the point: it is a prefix of every role including the
+// reviewer's, `isEnforcementKey('agents')` is false, so `config unset agents --local` walked
+// straight past the enforcement guard and wiped the reviewer's tier and effort along with
+// everyone else's. A key that can reach an enforcement field is not an ergonomics key.
+const UNSETTABLE_KEYS = [...CONFIG_KEYS, ...ROLES.map((role) => `agents.${role}`)]
+
+// One rejection wording for all three subcommands: a key nothing reads is the same answer
+// whether the caller asked to read it, write it or remove it.
+function assertKnownKey(dotted, allowed) {
+  if (!allowed.includes(dotted)) throw new ConfigError(`unknown config key: ${dotted}`)
+}
+
+// Both layers, symmetrically. `readLayer` parses but does not validate, and the `?? {}` that
+// follows it only replaces a NULLISH body — a layer whose whole body is `[]` or `"text"`
+// survives it, `setKey` then writes a property `JSON.stringify` drops (a silent no-op reported
+// as `wrote …`, exit 0) or dies with a raw TypeError. `config list` already exits 2 on both of
+// those bodies, so leaving the write path unchecked had one CLI giving two answers about one
+// file.
+//
+// The gate layer's check is `validateGate` from scripts/config.mjs the moment that export
+// exists: T9 adds it and is merging into this phase alongside this task, but at the commit this
+// branch is based on it is not there, and creating it would mean editing a file outside this
+// task's declared set. Resolved once, here, so this path runs exactly one validator either way
+// — never a local copy competing with T9's stricter one.
+const validateGateLayer = configModule.validateGate ?? ((gate) => {
+  if (gate === null || typeof gate !== 'object' || Array.isArray(gate)) {
+    throw new ConfigError(`${GATE_FILE} must contain a JSON object`)
+  }
+  return gate
+})
+
+// The local layer's own rules (no enforcement keys, no unknown keys) sit ON TOP of the same
+// shape check the gate layer gets — validateLocal already rejects a non-object body itself.
+function validateLayer(file, layer) {
+  return file === LOCAL_FILE ? validateLocal(layer) : validateGateLayer(layer)
+}
+
+// Tells a missing file apart from one whose whole body is `null`; readLayer's default answer is
+// the same `null` for both.
+const ABSENT = Symbol('absent layer')
+
+// `.gitignore` has no effect on a path git already tracks: the entry is written, the file goes
+// on being committed, and the trust split the "added …" message claims — this layer is
+// untracked, so a teammate cannot change it without leaving the dirty worktree `fileset` and
+// `ownership` detect — silently does not hold. Reported rather than claimed.
+//
+// Any failure means no answer, which is reported as "not tracked": outside a git repository
+// there is nothing to be tracked by, and this must never be the thing that fails a write.
+async function isTracked(root, file) {
+  try {
+    const { code } = await defaultGitExec(['ls-files', '--error-unmatch', '--', file], root)
+    return code === 0
+  } catch {
+    return false
+  }
+}
+
 export async function runCli(argv, io = { out: console.log }) {
   const [command, ...rest] = argv
-  const { flags, positional } = parseFlags(rest)
+  const { flags, positional, rejected } = parseFlags(rest)
+  // Refused before EVERYTHING else — before the required-argument check, before any command
+  // body. A rejected spelling must not be able to reach a guard that tests the flag it was
+  // meant to set: `gate --no-fleet=false` has to exit here, not after `missingArgs` has
+  // already decided that a solo run needs neither --run nor --plan.
+  if (rejected.length > 0) {
+    const advice = rejected.map(({ raw, name }) => `\`${raw}\` — ${spellingAdvice(name)}`)
+    io.out(`unsupported flag spelling: ${advice.join('; ')}\n\n${USAGE}`)
+    return 2
+  }
   // An empty or whitespace-only --root must never silently fall through to cwd: `??` only
   // catches `undefined`, so `--root ""` survives to become `repoRoot: ''` downstream, which
   // defeats the realpath-based containment checks in the merge preview (realpath('') rejects,
@@ -364,10 +565,35 @@ export async function runCli(argv, io = { out: console.log }) {
       }
       task.tier = inferTier(task, tasks)
       task.tierSource = 'inferred'
+      // Kept alongside the tier a configured one may replace below. Without it, removing the
+      // configured tier leaves nothing to fall back to, and plan.json keeps a tier the run is
+      // no longer dispatching at — which is the tier `fix` would go on escalating from.
+      task.inferredTier = task.tier
     }
 
     const totalPhases = tasks.reduce((max, t) => Math.max(max, t.phase), 0)
-    const config = await loadGateConfig(root)
+    // The resolved value, not the manifest's: the gitignored local layer is an ergonomics
+    // surface, and a parallelism it sets must actually take effect where it is consumed.
+    const resolved = await resolveConfig(root, io)
+    if (!resolved) return 2
+
+    // A configured implementer tier is an explicit operator decision and outranks inferTier's
+    // guess. Applied HERE, before plan.json is written, for two reasons the in-memory override
+    // in `workflow` cannot serve. First, `fix` escalates from the RECORDED tier: with the
+    // record left inferred, a retry after a failure at a configured `capable` was dispatched
+    // at `mid` — below the tier that just failed. Second, the tier this command prints is the
+    // run's only operator-facing routing report, and it has to name what will be dispatched.
+    // A declared `**Model:**` still wins: it names a task the operator already reasoned about.
+    const roleTier = resolved.agents.implementer.tier
+    if (roleTier) {
+      for (const task of tasks) {
+        if (task.tierSource !== 'declared') {
+          task.tier = roleTier
+          task.tierSource = 'configured'
+        }
+      }
+    }
+
     await writeState(root, runId, 'plan', { runId, totalPhases, tasks })
     // Recorded for reporting only. The gate derives the anchor, the phase, and every
     // verdict from git; nothing here decides anything.
@@ -383,7 +609,7 @@ export async function runCli(argv, io = { out: console.log }) {
       runId,
       phase: previous?.phase ?? 1,
       totalPhases,
-      maxParallel: config?.maxParallel ?? defaultMaxParallel(),
+      maxParallel: resolved.maxParallel,
       tasks: tasks.map((t) => ({ id: t.id, title: t.title, state: 'pending' })),
       ...(previous?.gates ? { gates: previous.gates } : {}),
       ...(previous?.fixRounds ? { fixRounds: previous.fixRounds } : {}),
@@ -404,7 +630,9 @@ export async function runCli(argv, io = { out: console.log }) {
   if (command === 'digest') {
     const status = await readState(root, runId, 'status')
     if (!status) { io.out(`no status for run ${runId}`); return 1 }
-    io.out(renderDigest(status, Date.now()))
+    const resolved = await resolveConfig(root, io)
+    if (!resolved) return 2
+    io.out(renderDigest(status, Date.now(), resolved.caveman))
     return 0
   }
 
@@ -424,7 +652,8 @@ export async function runCli(argv, io = { out: console.log }) {
     const plan = await readState(root, runId, 'plan')
     if (!plan) { io.out(`no plan for run ${runId}`); return 1 }
     const phase = Number(flags.phase)
-    const config = await loadGateConfig(root)
+    const resolved = await resolveConfig(root, io)
+    if (!resolved) return 2
 
     // Concrete model names never enter this repository or teammates.gate.json — they live
     // in the dispatching skill, which passes its own tier map through here. Absent, the
@@ -511,15 +740,48 @@ export async function runCli(argv, io = { out: console.log }) {
       }
     }
 
+    // `init-run` already applied any configured implementer tier, so this normally changes
+    // nothing. It stays because the config can change between the two commands, and a per-task
+    // `**Model:**` stays authoritative over both — it names a specific task the operator
+    // already reasoned about, which a blanket role setting knows nothing about.
+    //
+    // The result is written back to plan.json rather than kept in memory: `fix` escalates from
+    // the recorded tier, so a dispatch at a tier the record does not carry means a retry can be
+    // sent BELOW the tier that just failed.
+    // Reverting matters exactly as much as applying, and for the same reason: gated on
+    // `if (roleTier)` alone, a task stamped `configured` kept that tier forever once the
+    // operator removed the setting — plan.json naming a tier the run no longer dispatches at,
+    // and `fix` escalating from it. `inferredTier` is what init-run keeps for this. A task
+    // whose plan.json predates that record is left alone rather than guessed at.
+    const roleTier = resolved.agents.implementer.tier
+    const phaseTasks = plan.tasks.filter((t) => t.phase === phase)
+    let retier = false
+    for (const task of phaseTasks) {
+      if (task.tierSource === 'declared') continue
+      if (roleTier) {
+        if (task.tier === roleTier && task.tierSource === 'configured') continue
+        task.tier = roleTier
+        task.tierSource = 'configured'
+        retier = true
+      } else if (task.tierSource === 'configured' && task.inferredTier) {
+        task.tier = task.inferredTier
+        task.tierSource = 'inferred'
+        retier = true
+      }
+    }
+    if (retier) await writeState(root, runId, 'plan', plan)
+
     const src = await generatePhaseWorkflow({
       runId,
       phase,
-      tasks: plan.tasks.filter((t) => t.phase === phase),
-      maxParallel: config?.maxParallel ?? defaultMaxParallel(),
+      tasks: phaseTasks,
+      maxParallel: resolved.maxParallel,
       tierModels,
       planPath,
       baseBranch,
       constraints: parseConstraints(planMarkdown),
+      caveman: resolved.caveman,
+      effort: resolved.agents.implementer.effort ?? '',
     })
     io.out(src)
     return 0
@@ -535,7 +797,10 @@ export async function runCli(argv, io = { out: console.log }) {
     }
     const phaseName = flags.phase ?? 'default'
     const all = checksForPhase(config, phaseName)
-    const solo = flags['no-fleet'] !== undefined
+    // `=== true`, matching missingArgs: the two must agree about what counts as solo, or one
+    // of them drops --run and --plan from the requirements while the other still runs the
+    // enforcement checks, or vice versa.
+    const solo = flags['no-fleet'] === true
 
     // --no-fleet is the only way the enforcement checks are skipped, and the caller must
     // say it. Inferring "solo" from missing state let deleting one file record a PASS.
@@ -782,6 +1047,102 @@ export async function runCli(argv, io = { out: console.log }) {
     await writeState(root, runId, 'status', next)
     io.out(`${flags.task} phase ${phase} round ${readFixRounds(next, phase)[flags.task]}`)
     return 0
+  }
+
+  // Reads the subcommand and key from `positional`, targets a layer with `--local`, and maps
+  // every ConfigError to exit 2 with the message on stdout — a skill branches on this exit
+  // code, so a validation failure must never surface as a stack trace.
+  if (command === 'config') {
+    const [sub, key, rawValue] = positional
+    const local = flags.local !== undefined
+    const file = local ? LOCAL_FILE : GATE_FILE
+    try {
+      if (sub === 'list') {
+        const { resolved, sources } = await loadValidatedConfig(root)
+        io.out(`maxParallel  ${resolved.maxParallel}  (${sources.maxParallel})`)
+        io.out(`caveman      ${resolved.caveman}  (${sources.caveman})`)
+        for (const role of ROLES) {
+          const entry = resolved.agents[role]
+          // Provenance is per FIELD, not per role: a role whose tier comes from the tracked
+          // manifest and whose effort comes from the local file must not report one layer for
+          // both. `sources` is keyed as `agents.<role>.<field>` for exactly this reason.
+          io.out(`agents.${role}.tier    ${entry.tier ?? '-'}  (${sources[`agents.${role}.tier`]})`)
+          io.out(`agents.${role}.effort  ${entry.effort ?? '-'}  (${sources[`agents.${role}.effort`]})`)
+        }
+        return 0
+      }
+      if (sub === 'get') {
+        if (!key) { io.out('config get needs a key'); return 2 }
+        // The same two guards, in the same order, as `set` and `unset` below. `getKey` does
+        // re-check the key itself, but only AFTER the layers have been read, and the known-key
+        // check has to come between the two — so the order is stated here rather than inherited
+        // from whichever callee happens to run first. Without the known-key check,
+        // `config get agents.implementer` printed `[object Object]` and exited 0.
+        assertSafeKey(key)
+        assertKnownKey(key, CONFIG_KEYS)
+        const { resolved } = await loadValidatedConfig(root)
+        const value = getKey(resolved, key)
+        if (value === undefined) { io.out(`unset: ${key}`); return 2 }
+        io.out(String(value))
+        return 0
+      }
+      if (sub === 'set' || sub === 'unset') {
+        if (!key) { io.out(`config ${sub} needs a key`); return 2 }
+        // assertSafeKey runs for BOTH set and unset, and before anything reads or writes a
+        // layer. `unset` reaches the same object walk as `set`, so a key guarded on only one
+        // of the two leaves the other as a live path to Object.prototype.
+        assertSafeKey(key)
+        if (local && isEnforcementKey(key)) {
+          io.out(`${key} is an enforcement key; it may only be set in ${GATE_FILE}`)
+          return 2
+        }
+        // ABSENT rather than readLayer's default `null`, which it also returns for a file
+        // whose whole body is `null`. Collapsed together, an absent file and a `null` one
+        // would both become `{}` here — and a `null` body is a layer every READER already
+        // exits 2 on, so writing it into shape would be the same file answering two ways
+        // again, one layer down.
+        const raw = await readLayer(root, file, { missing: ABSENT })
+        const layer = raw === ABSENT ? {} : raw
+        // Whichever layer this is. `readLayer` parses but does not validate, and `?? {}` only
+        // catches a nullish body: a file holding `[]` or `"text"` reached `setKey`, which set
+        // a property `JSON.stringify` then dropped — reported as `wrote …` at exit 0 — or
+        // threw a raw TypeError. Both layers get the check, in the one place that writes them.
+        validateLayer(file, layer)
+        if (sub === 'set') {
+          if (rawValue === undefined) { io.out('config set needs a value'); return 2 }
+          let parsed
+          // JSON first so numbers and `false` arrive as themselves; a bare word that is not
+          // valid JSON is the string the caller typed, so `set agents.implementer.tier capable`
+          // works without shell quoting.
+          try { parsed = JSON.parse(rawValue) } catch { parsed = rawValue }
+          setKey(layer, key, validateKey(key, parsed))
+        } else {
+          assertKnownKey(key, UNSETTABLE_KEYS)
+          unsetKey(layer, key)
+        }
+        await writeLayer(root, file, layer)
+        io.out(`wrote ${file}`)
+        if (local) {
+          const added = await ensureGitignored(root, LOCAL_FILE)
+          if (await isTracked(root, LOCAL_FILE)) {
+            io.out(
+              `${LOCAL_FILE} is tracked by git — the .gitignore entry has no effect on it;`
+              + ` run \`git rm --cached ${LOCAL_FILE}\` to keep this layer out of commits`,
+            )
+          } else if (added) {
+            io.out(`added ${LOCAL_FILE} to .gitignore`)
+          }
+        }
+        return 0
+      }
+      io.out('usage: config <list|get|set|unset>')
+      return 2
+    } catch (err) {
+      const message = configFailureMessage(err)
+      if (message === null) throw err
+      io.out(message)
+      return 2
+    }
   }
 
   io.out(USAGE)

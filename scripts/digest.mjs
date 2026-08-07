@@ -21,9 +21,21 @@ function describe(task, now) {
   return task.title
 }
 
-export function renderDigest(status, now) {
+function describeTerse(task, now) {
+  if (task.state === 'running') {
+    if (typeof task.startedAt !== 'number') return `${task.title}?`
+    return `${task.title}${Math.floor((now - task.startedAt) / 60_000)}m`
+  }
+  if (task.state === 'blocked') return `${task.title}<${task.blockedBy}`
+  return task.title
+}
+
+export function renderDigest(status, now, caveman = false) {
   const { runId, phase, totalPhases, maxParallel, tasks } = status
-  const lines = [`run ${runId} · phase ${phase}/${totalPhases} · ${tasks.length} tasks`]
+  const say = caveman ? describeTerse : describe
+  const lines = [caveman
+    ? `${runId} p${phase}/${totalPhases} n${tasks.length}`
+    : `run ${runId} · phase ${phase}/${totalPhases} · ${tasks.length} tasks`]
 
   const groups = SECTIONS.map(({ state, label }) => ({
     label,
@@ -35,11 +47,13 @@ export function renderDigest(status, now) {
 
   for (const { label, group } of groups) {
     if (group.length === 0) continue
-    const body = group.map((t) => describe(t, now)).join(' ')
-    lines.push(`${label.padEnd(9)} ${String(group.length).padStart(1)}  ${body}`)
+    const body = group.map((t) => say(t, now)).join(' ')
+    lines.push(caveman
+      ? `${label} ${group.length} ${body}`
+      : `${label.padEnd(9)} ${String(group.length).padStart(1)}  ${body}`)
   }
 
-  const running = tasks.filter((t) => t.state === 'running').length
-  lines.push(`idle slots ${Math.max(0, maxParallel - running)}`)
+  const idle = Math.max(0, maxParallel - tasks.filter((t) => t.state === 'running').length)
+  lines.push(caveman ? `idle ${idle}` : `idle slots ${idle}`)
   return lines.join('\n')
 }

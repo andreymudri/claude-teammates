@@ -24,9 +24,24 @@ those you execute:
 - **agent** — dispatch one `tm-reviewer` per lens in parallel over the phase diff, **without a
   `name`**. A named reviewer becomes an addressable teammate that goes idle without emitting its
   result, and the review is lost; unnamed reviewers return normally. Six consecutive named
-  dispatches were lost this way in run `preview` before the pattern was identified. Then take
-  every finding at a `blockOn` severity and dispatch a second reviewer prompted to **refute** it.
-  Only findings that survive refutation block the gate.
+  dispatches were lost this way in run `preview` before the pattern was identified. Each dispatch
+  carries the configured reviewer tier and effort, read with
+  `config get agents.reviewer.tier` and `config get agents.reviewer.effort`. `config get` on an
+  unset key exits 2 with `unset: <key>` — the same exit code every hard config failure uses, but
+  here it is the normal case, not an error. The two keys fall back differently, and treating them
+  alike is how a reviewer ends up judging below its guaranteed tier:
+    - `unset: agents.reviewer.tier` — dispatch at the **fixed reviewer tier, `capable`** (model
+      `opus`). Never omit the model to inherit the session's: in a `mid` session that would have
+      the reviewer grading every `agent` check a full tier below what this skill guarantees. A
+      configured tier replaces `capable`; nothing else does.
+    - `unset: agents.reviewer.effort` — omit the `effort` option, and the dispatch inherits the
+      session's effort. Only effort falls back this way.
+
+  Both come from the tracked manifest only — the reviewer grades the diff, so
+  letting the gitignored layer choose its tier would let the party being judged pick its own
+  judge. Then take every finding at a `blockOn` severity and
+  dispatch a second reviewer prompted to **refute** it. Only findings that survive refutation
+  block the gate.
 - **mcp** — call the declared tool and compare against `passWhen`. If the server is not
   connected and the check is `optional`, record `skip` and say so out loud. A missing optional
   server is never a silent pass.

@@ -159,6 +159,42 @@ test('previewLinks returns [] when link is not an array', () => {
   assert.deepEqual(previewLinks({ preview: { link: 'node_modules' } }), [])
 })
 
+test('checksForPhase keeps an agent check that already has its own lens untouched', () => {
+  const check = { name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: ['tests'] }
+  const config = { lens: ['correctness'], phases: { default: { checks: [check] } } }
+  const [result] = checksForPhase(config, 'default')
+  assert.equal(result, check)
+  assert.deepEqual(result.lens, ['tests'])
+})
+
+test('checksForPhase gives an agent check with no lens the manifest top-level lens', () => {
+  const check = { name: 'review', kind: 'agent', agent: 'tm-reviewer' }
+  const config = { lens: ['correctness'], phases: { default: { checks: [check] } } }
+  const [result] = checksForPhase(config, 'default')
+  assert.deepEqual(result.lens, ['correctness'])
+})
+
+test('checksForPhase falls back to DEFAULT_LENS when neither the check nor the manifest has a lens', () => {
+  const check = { name: 'review', kind: 'agent', agent: 'tm-reviewer' }
+  const config = { phases: { default: { checks: [check] } } }
+  const [result] = checksForPhase(config, 'default')
+  assert.deepEqual(result.lens, ['correctness', 'security', 'tests'])
+})
+
+test('checksForPhase returns a command check unchanged, same object identity', () => {
+  const check = { name: 'test', kind: 'command', run: 'npm test' }
+  const config = { lens: ['correctness'], phases: { default: { checks: [check] } } }
+  const [result] = checksForPhase(config, 'default')
+  assert.equal(result, check)
+})
+
+test('checksForPhase falls back to DEFAULT_LENS when the top-level lens is empty', () => {
+  const check = { name: 'review', kind: 'agent', agent: 'tm-reviewer' }
+  const config = { lens: [], phases: { default: { checks: [check] } } }
+  const [result] = checksForPhase(config, 'default')
+  assert.deepEqual(result.lens, ['correctness', 'security', 'tests'])
+})
+
 test('inferGateConfig emits preview.link with node_modules when given a package', () => {
   const config = inferGateConfig({ scripts: { test: 'node --test' } })
   assert.deepEqual(config.preview, { link: ['node_modules'] })

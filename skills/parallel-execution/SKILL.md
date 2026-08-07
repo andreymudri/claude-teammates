@@ -53,10 +53,27 @@ Every task in `plan.json` carries a `tier`, either declared in the plan or infer
     capable  -> opus
 
 An omitted model inherits the session's, which is usually the most expensive tier, and that
-cost multiplies across every teammate in a phase. Set it explicitly on every dispatch.
+cost multiplies across every teammate in a phase. Set it explicitly on every dispatch — task
+dispatches and role dispatches alike. There is no dispatch that legitimately omits its model.
 
 Role dispatches are fixed and not read from the plan: `tm-integrator` runs at `mid`,
 `tm-reviewer` at `capable`. Review is the last line of defence before integration.
+
+The `tm-integrator` dispatch carries the configured integrator tier and effort, read with
+`config get agents.integrator.tier` and `config get agents.integrator.effort`. `config get` on
+an unset key exits 2 with `unset: <key>` — the same exit code every hard config failure uses,
+but here it is the normal case, not an error. Tier and effort fall back differently:
+
+- `unset: agents.integrator.tier` — dispatch at the **fixed integrator tier, `mid`** (model
+  `sonnet`). Do not omit the model to inherit the session's; the fixed role tier is the
+  fallback. A configured tier replaces `mid`. The same shape holds for `tm-reviewer`, whose
+  fixed tier is `capable` — see `phase-gate`.
+- `unset: agents.integrator.effort` — omit the `effort` option, and the dispatch inherits the
+  session's effort. Effort is the only option that falls back by omission.
+
+These two keys are ergonomics, not enforcement, unlike the reviewer's tier and effort: the
+integrator merges branches, it does not judge a check, so either layer may set them and the
+gitignored `teammates.local.json` is the normal place to.
 
 When generating a Workflow, pass the same map through so the generated dispatches carry
 concrete models:
