@@ -1,0 +1,398 @@
+// Test helper: a small structural model of a markdown contract document, plus assertions that
+// operate on that structure instead of on regexes over the whole body.
+//
+// WHY THIS EXISTS
+// ---------------
+// The assertions in `agents.test.mjs` and `skill-contracts.test.mjs` pin what the agent contracts
+// and skills *say*, because agents act on that prose. Three rounds of those assertions converged
+// on a shape that fails in both directions at once:
+//
+//   * `assert.match(body, /A[\s\S]{0,150}B/)` — a character-bounded window between two phrases.
+//     The window is wide enough to host a whole sentence, so text inserted between A and B that
+//     cancels A still matches, and the suite stays green while the contract now says the opposite.
+//   * `assert.doesNotMatch(gap, /optional|skip|fine|supported|.../)` — a fixed vocabulary of
+//     negations. It catches the phrasing whoever wrote it thought of, and nothing else.
+//   * Both break on a reflow, a sentence split, or a backtick change that preserves meaning,
+//     because the window is measured in characters of raw markdown.
+//
+// This module replaces the window with structure: headings -> sections, sections -> blocks
+// (paragraph, list item, fenced/indented code), prose blocks -> statements (sentences). An
+// assertion can then say "in the section titled X, the paragraph introducing this command block
+// states Y, and the only statements in that section about Z are the ones listed" instead of
+// "these tokens appear within 150 characters of each other".
+//
+// WHAT THE ASSERTIONS CAN DETECT
+// ------------------------------
+//  1. Insertion between a claim and its consequence. `then:` requires the two statements to be
+//     *adjacent statements of the same block*. Adjacency is counted in statements, not
+//     characters, so any inserted sentence — of any wording, negating or not — breaks it.
+//  2. Insertion anywhere in the section that is *about the pinned subject*. `subject:` is a
+//     inventory lock, not a denylist: every statement in the section that mentions the subject
+//     must be the claim itself or one of the explicitly listed `allow` patterns. A new sentence
+//     about that subject fails whatever it says, so no vocabulary of negations is involved.
+//  3. Insertion anywhere in the section that cancels a neighbouring instruction *by reference*
+//     rather than by naming it ("This rule is obsolete; do it.", "Ignore the step above."). Such
+//     a sentence has a nearby instruction as its grammatical subject; a contract section should
+//     not contain meta-prose about its own rules, so any of them fails. See BACK_REFERENCE.
+//  4. Outright inversion of a claim, because `claim:` must match inside a single statement.
+//     Polarity is bound by the sentence boundary; it cannot be satisfied by "never" in one
+//     sentence and the asserted verb phrase in another.
+//
+// WHAT THEY CANNOT DETECT — read this before trusting a green run
+// ---------------------------------------------------------------
+//  * Contradiction in general. That is a semantic problem and this module does not solve it.
+//    A sentence that negates a claim while (a) not naming the pinned subject and (b) not using a
+//    recognised back-reference passes. "You may proceed without it." next to a detach requirement
+//    is exactly that case: it names nothing and refers to nothing this module recognises.
+//  * Back-references outside BACK_REFERENCE. That list is a lexicon and shares the weakness of
+//    every lexicon. It is a second, independent net under the subject lock — not a guarantee.
+//  * Anything in a *different* section. Scope is one section (heading plus its subsections). A
+//    contradiction placed under another heading is out of scope by construction.
+//  * Anything inside a code block. Screens run over prose statements only; code is asserted
+//    against explicitly, never scanned for contradictions.
+//  * Meaning. `subject:` proves a sentence about the subject was *reviewed by a human writing the
+//    test*, not that it agrees with the claim. Adding a pattern to `allow` waives the check for
+//    that sentence, and that is the intended cost of adding prose about a pinned subject.
+//
+// Zero dependencies; Node built-ins only, no markdown library.
+
+import assert from 'node:assert/strict'
+
+// ---------------------------------------------------------------------------
+// Normalization
+// ---------------------------------------------------------------------------
+
+// Meaning-preserving surface changes must not move an assertion: line wrapping, run of spaces,
+// backtick decoration around a term (`merge` check -> merge check), emphasis markers, and smart
+// quotes are all stripped before anything is matched.
+export function normalize(text) {
+  return text
+    .replace(/[‘’]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/`+/g, '')
+    .replace(/\*\*|\*|__/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+// Split normalized prose into statements (sentences). The split is deliberately conservative: a
+// terminator ends a statement only when it is followed by whitespace and then something that
+// looks like the start of a new sentence. That keeps `cli.mjs status`, `.teammates/`, `a ..
+// escape` and `...design.md lists what` in one piece. Over-splitting would let an assertion pass
+// on half a sentence; under-splitting only makes a statement longer, which is the safe direction
+// — a claim that spans an under-split boundary simply has to be written as one longer pattern.
+export function statementsOf(normalizedText) {
+  const out = []
+  let start = 0
+  const re = /[.!?]+(?=\s)/g
+  let m
+  while ((m = re.exec(normalizedText))) {
+    const end = m.index + m[0].length
+    const next = normalizedText.slice(end).trimStart()[0] ?? ''
+    if (!(next === '' || /[A-Z0-9"(]/.test(next))) continue
+    const chunk = normalizedText.slice(start, end).trim()
+    if (chunk) out.push(chunk)
+    start = end
+  }
+  const tail = normalizedText.slice(start).trim()
+  if (tail) out.push(tail)
+  return out
+}
+
+// ---------------------------------------------------------------------------
+// Frontmatter
+// ---------------------------------------------------------------------------
+
+export function splitFrontmatter(text, label = 'document') {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)
+  assert.ok(match, `${label} has no frontmatter`)
+  const fields = Object.fromEntries(
+    match[1]
+      .split(/\r?\n/)
+      .filter((l) => l.includes(':'))
+      .map((l) => [l.slice(0, l.indexOf(':')).trim(), l.slice(l.indexOf(':') + 1).trim()]),
+  )
+  return { fields, body: text.slice(match[0].length) }
+}
+
+// ---------------------------------------------------------------------------
+// Block parsing
+// ---------------------------------------------------------------------------
+
+const FENCE = /^\s*(```+|~~~+)/
+const HEADING = /^(#{1,6})\s+(.*)$/
+const LIST_MARKER = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/
+
+function block(kind, lines, extra = {}) {
+  const raw = lines.join('\n')
+  return { kind, raw, text: normalize(raw), ...extra }
+}
+
+// Parse into a flat, ordered list of blocks. Indented code blocks are recognised the CommonMark
+// way (four spaces, preceded by a blank line, not continuing a list item), because these
+// documents use them for every command example.
+export function parseBlocks(source) {
+  const lines = source.replace(/\r\n?/g, '\n').split('\n')
+  const blocks = []
+  let i = 0
+  let afterBlank = true
+
+  while (i < lines.length) {
+    const line = lines[i]
+
+    if (line.trim() === '') {
+      i++
+      afterBlank = true
+      continue
+    }
+
+    const fence = FENCE.exec(line)
+    if (fence) {
+      const marker = fence[1]
+      const body = []
+      i++
+      while (i < lines.length && !lines[i].trimStart().startsWith(marker)) body.push(lines[i++])
+      if (i < lines.length) i++
+      blocks.push(block('code', body, { code: body.join('\n') }))
+      afterBlank = false
+      continue
+    }
+
+    const heading = HEADING.exec(line)
+    if (heading) {
+      blocks.push(block('heading', [heading[2]], { level: heading[1].length }))
+      i++
+      afterBlank = false
+      continue
+    }
+
+    if (afterBlank && /^ {4,}\S/.test(line)) {
+      const body = []
+      while (i < lines.length && (lines[i].trim() === '' || /^ {4,}/.test(lines[i]))) {
+        if (lines[i].trim() === '' && !/^ {4,}\S/.test(lines[i + 1] ?? '')) break
+        body.push(lines[i++])
+      }
+      const dedented = body.map((l) => l.replace(/^ {4}/, ''))
+      blocks.push(block('code', dedented, { code: dedented.join('\n') }))
+      afterBlank = false
+      continue
+    }
+
+    const item = LIST_MARKER.exec(line)
+    if (item) {
+      const indent = item[1].length
+      const body = [item[3]]
+      i++
+      while (i < lines.length && lines[i].trim() !== '') {
+        const nested = LIST_MARKER.exec(lines[i])
+        if (nested && nested[1].length <= indent) break
+        if (HEADING.test(lines[i])) break
+        body.push(lines[i++].trim())
+      }
+      blocks.push(block('list-item', body, { indent }))
+      afterBlank = false
+      continue
+    }
+
+    const body = []
+    while (i < lines.length && lines[i].trim() !== '') {
+      if (HEADING.test(lines[i]) || FENCE.test(lines[i]) || LIST_MARKER.test(lines[i])) break
+      body.push(lines[i++].trim())
+    }
+    if (body.length) blocks.push(block('paragraph', body))
+    else i++
+    afterBlank = false
+  }
+
+  return blocks
+}
+
+// ---------------------------------------------------------------------------
+// Sections
+// ---------------------------------------------------------------------------
+
+function makeSection(title, level, blocks, label) {
+  const prose = blocks.filter((b) => b.kind === 'paragraph' || b.kind === 'list-item')
+  const statements = []
+  for (const b of prose) {
+    for (const text of statementsOf(b.text)) statements.push({ text, block: b })
+  }
+  return {
+    label: `${label} § ${title || '(preamble)'}`,
+    title,
+    level,
+    blocks,
+    prose,
+    statements,
+    code: blocks.filter((b) => b.kind === 'code'),
+    text: blocks.map((b) => b.text).join(' '),
+  }
+}
+
+export function parseDoc(source, label = 'document') {
+  const blocks = parseBlocks(source)
+  const sections = []
+  const preambleEnd = blocks.findIndex((b) => b.kind === 'heading')
+  sections.push(
+    makeSection('', 0, preambleEnd === -1 ? blocks : blocks.slice(0, preambleEnd), label),
+  )
+  for (let i = 0; i < blocks.length; i++) {
+    if (blocks[i].kind !== 'heading') continue
+    const level = blocks[i].level
+    let end = i + 1
+    while (end < blocks.length && !(blocks[end].kind === 'heading' && blocks[end].level <= level)) end++
+    sections.push(makeSection(blocks[i].text, level, blocks.slice(i + 1, end), label))
+  }
+
+  const doc = {
+    label,
+    blocks,
+    sections,
+    text: blocks.map((b) => b.text).join(' '),
+    statements: sections[0].statements.concat(
+      ...sections.slice(1).map((s) => s.statements),
+    ),
+    section(matcher) {
+      const hits = sections.filter((s) =>
+        matcher instanceof RegExp
+          ? matcher.test(s.title)
+          : s.title.toLowerCase().includes(String(matcher).toLowerCase()),
+      )
+      assert.equal(
+        hits.length,
+        1,
+        `${label}: expected exactly one section matching ${matcher}, found ${hits.length}` +
+          (hits.length > 1 ? ` (${hits.map((h) => h.title).join(' | ')})` : ''),
+      )
+      return hits[0]
+    },
+  }
+  return doc
+}
+
+// ---------------------------------------------------------------------------
+// Screens
+// ---------------------------------------------------------------------------
+
+// A sentence whose subject is a neighbouring instruction rather than a named thing. Such prose
+// can annul the rule beside it without repeating a single one of its words, which is precisely
+// the hole a subject-scoped inventory cannot see. This is a lexicon and therefore not exhaustive;
+// it is a second net, not a guarantee. See the header for what it misses.
+const BACK_REFERENCE =
+  /\b(this|that|these|those|the (above|preceding|previous|foregoing|earlier|following|last))\s+(\w+\s+){0,2}(rule|rules|note|notes|requirement|requirements|prohibition|restriction|constraint|instruction|instructions|guidance|guideline|warning|caveat|advice|directive|policy|mandate|step above|paragraph|sentence|clause)\b/i
+
+export function backReferences(scope) {
+  return scope.statements.filter((s) => BACK_REFERENCE.test(s.text))
+}
+
+function show(statements) {
+  return statements.map((s) => `\n    - ${s.text}`).join('')
+}
+
+// ---------------------------------------------------------------------------
+// Assertions
+// ---------------------------------------------------------------------------
+
+// Match a single statement. Because the unit is one sentence, an assertion cannot be satisfied by
+// tokens drawn from two different sentences, which is how an inverted claim used to sneak past a
+// whole-body regex.
+export function findStatement(scope, pattern) {
+  return scope.statements.find((s) => pattern.test(s.text)) ?? null
+}
+
+export function assertStatement(scope, pattern, message) {
+  const hit = findStatement(scope, pattern)
+  assert.ok(hit, `${message}\n  ${scope.label}: no single statement matches ${pattern}`)
+  return hit
+}
+
+export function assertNoStatement(scope, pattern, message) {
+  const hit = findStatement(scope, pattern)
+  assert.ok(!hit, `${message}\n  ${scope.label}: statement matches ${pattern}:\n    - ${hit?.text}`)
+}
+
+export function assertCode(scope, pattern, message) {
+  const hit = scope.code.find((b) => pattern.test(b.code))
+  assert.ok(hit, `${message}\n  ${scope.label}: no code block matches ${pattern}`)
+  return hit
+}
+
+/**
+ * Assert a claim structurally.
+ *
+ *   claim      RegExp — must match inside one statement of the section.
+ *   then       RegExp — the *next* statement of the same block must match it. Adjacency is
+ *              counted in statements, so any sentence inserted between them fails, whatever it
+ *              says. This is the replacement for `[\s\S]{0,150}`.
+ *   introduces RegExp — the block immediately following the claim's block must be a code block
+ *              matching it. This is the "the paragraph introducing the command block" case.
+ *   subject    RegExp — inventory lock. Every statement in the section matching it must be the
+ *              claim or one of `allow`. Detects an inserted sentence about the subject regardless
+ *              of wording; does not judge whether that sentence agrees with the claim.
+ *   allow      RegExp[] — other statements permitted to mention the subject.
+ *   forbid     RegExp[] — statements that must not appear anywhere in the section.
+ *
+ * Returns the matched claim statement.
+ */
+export function assertClaim(scope, spec) {
+  const { claim, then, introduces, subject, allow = [], forbid = [], label = '' } = spec
+  const where = label ? `${label}: ` : ''
+
+  const hit = assertStatement(scope, claim, `${where}claim not stated in one sentence`)
+  let consequence = null
+
+  if (then) {
+    const inBlock = statementsOf(hit.block.text)
+    const at = inBlock.indexOf(hit.text)
+    const next = inBlock[at + 1]
+    assert.ok(
+      next !== undefined && then.test(next),
+      `${where}the statement after the claim must match ${then}, ` +
+        `but the next statement in the same block is ${next === undefined ? '(none)' : JSON.stringify(next)}. ` +
+        'A sentence inserted between the claim and its consequence breaks this on purpose.',
+    )
+    consequence = next
+  }
+
+  if (introduces) {
+    const at = scope.blocks.indexOf(hit.block)
+    const after = scope.blocks[at + 1]
+    assert.ok(
+      after && after.kind === 'code' && introduces.test(after.code),
+      `${where}the block introduced by the claim must be a code block matching ${introduces}, ` +
+        `but the next block is ${after ? `${after.kind}: ${JSON.stringify(after.text.slice(0, 80))}` : '(none)'}`,
+    )
+  }
+
+  if (subject) {
+    // The claim and the consequence bound to it by `then` are already asserted; everything else
+    // in the section that speaks about the subject has to be named in `allow`.
+    const strays = scope.statements.filter(
+      (s) =>
+        subject.test(s.text) &&
+        s.text !== hit.text &&
+        s.text !== consequence &&
+        !allow.some((a) => a.test(s.text)),
+    )
+    assert.equal(
+      strays.length,
+      0,
+      `${where}unreviewed statement(s) about ${subject} in ${scope.label}.${show(strays)}\n` +
+        '  Every sentence in this section about the pinned subject must be the claim itself or ' +
+        'listed in `allow`. If the new sentence is legitimate, add it to `allow` — that is a ' +
+        'deliberate review step, not a formality.',
+    )
+  }
+
+  for (const pattern of forbid) assertNoStatement(scope, pattern, `${where}forbidden statement present`)
+
+  const meta = backReferences(scope)
+  assert.equal(
+    meta.length,
+    0,
+    `${where}${scope.label} contains prose whose subject is a neighbouring instruction rather ` +
+      `than a named thing, which can annul it without repeating any of its words:${show(meta)}`,
+  )
+
+  return hit
+}
