@@ -16,7 +16,7 @@ function jsString(value) {
     .replace(/\r/g, '\\r')}'`
 }
 
-const MARKER = /__(?:META|TASKS|PLAN_PATH|BASE_BRANCH|CONSTRAINTS)__/g
+const MARKER = /__(?:META|TASKS|PLAN_PATH|BASE_BRANCH|CONSTRAINTS|CAVEMAN|EFFORT)__/g
 
 // Serializes a plain JS value (string/number/boolean/null/array/object) as a JS
 // literal with unquoted identifier keys and single-quoted strings, matching the
@@ -43,7 +43,7 @@ function jsLiteral(value, indent = '') {
 
 export async function generatePhaseWorkflow({
   runId, phase, tasks, maxParallel, tierModels,
-  planPath = '', baseBranch = '', constraints = [],
+  planPath = '', baseBranch = '', constraints = [], caveman = false, effort = '',
 }) {
   if (!tasks || tasks.length === 0) throw new Error(`no tasks for phase ${phase}`)
 
@@ -68,6 +68,12 @@ export async function generatePhaseWorkflow({
     __PLAN_PATH__: () => jsLiteral(planPath),
     __BASE_BRANCH__: () => jsLiteral(baseBranch),
     __CONSTRAINTS__: () => jsLiteral(constraints),
+    // A caveman level is a string when set and literally `false` when not, so the template's
+    // `CAVEMAN ? briefTerse : brief` selects on the flag without an empty string masquerading
+    // as a level. Both go through jsLiteral, so a caller-supplied value is quoted and escaped
+    // exactly like every other string that reaches the generated source.
+    __CAVEMAN__: () => (caveman ? jsLiteral(caveman) : 'false'),
+    __EFFORT__: () => jsLiteral(effort),
   }
 
   // One global pass over the template, not a chain of per-marker replacements. A chain

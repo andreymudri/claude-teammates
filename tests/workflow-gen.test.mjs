@@ -481,6 +481,111 @@ test('the dispatch names a real agent type and keeps worktree isolation', async 
   }
 })
 
+test('with caveman omitted the full brief and a false CAVEMAN marker are emitted', async () => {
+  const src = await generatePhaseWorkflow({
+    runId: 'r1',
+    phase: 1,
+    tasks: [{ id: 'T1', title: 'auth middleware', files: ['src/auth.ts'], phase: 1 }],
+    maxParallel: 2,
+    baseBranch: 'main',
+  })
+  assert.ok(src.includes('const CAVEMAN = false'), 'an omitted caveman level must render as false, not a string')
+  const [prompt] = await captureAgentPrompts(src)
+  assert.ok(
+    prompt.includes('BASELINE. Then bootstrap the worktree, before writing anything, in this order:'),
+    'the default brief must stay byte-identical to the full wording',
+  )
+  assert.ok(
+    prompt.includes('A fresh worktree starts with none of that in place, and a failure caused by a missing'),
+    'the default brief must keep the full baseline rationale',
+  )
+  assert.ok(!prompt.includes('STYLE.'), 'no style section without a caveman level')
+})
+
+test('a caveman brief keeps every load-bearing instruction verbatim', async () => {
+  // Compressing a brief is compressing a specification. The gate enforces the file set and the
+  // checkout, so those sentences are the last thing that may be shortened away.
+  const src = await generatePhaseWorkflow({
+    runId: 'r1',
+    phase: 1,
+    tasks: [{ id: 'T1', title: 'auth middleware', files: ['src/auth.ts'], phase: 1 }],
+    maxParallel: 2,
+    baseBranch: 'main',
+    planPath: 'docs/plans/p.md',
+    constraints: ['Node >= 24.2.0'],
+    caveman: 'full',
+  })
+  const [prompt] = await captureAgentPrompts(src)
+  for (const required of [
+    'MANDATORY FIRST STEP',
+    'git checkout -B teammates/r1/T1 main',
+    'git log --oneline -1',
+    'Report status "blocked"',
+    'FILES. You may create or modify ONLY these files:',
+    'Touching any other file fails the phase gate.',
+    'GLOBAL CONSTRAINTS:',
+    '- Node >= 24.2.0',
+    'PLAN. Read docs/plans/p.md',
+  ]) {
+    assert.ok(prompt.includes(required), `caveman brief dropped a load-bearing line: ${required}`)
+  }
+  assert.ok(prompt.includes('caveman:caveman'), 'the caveman brief must name the skill it asks for')
+  assert.ok(prompt.includes('level full'), 'the caveman brief must name the configured level')
+  assert.ok(
+    prompt.includes('is not a blocker'),
+    'a missing caveman skill must be explicitly non-blocking',
+  )
+  assert.ok(!prompt.includes('undefined'), 'the caveman brief must not contain undefined')
+})
+
+test('a caveman brief without a base branch still refuses to invent a start point', async () => {
+  const src = await generatePhaseWorkflow({ runId: 'r1', phase: 1, tasks, maxParallel: 2, caveman: 'ultra' })
+  const prompts = await captureAgentPrompts(src)
+  for (const prompt of prompts) {
+    for (const line of prompt.split('\n')) {
+      assert.ok(!/^\s*git checkout -B/.test(line), `no runnable checkout without a base: ${line}`)
+    }
+    assert.ok(prompt.includes('No base branch was supplied'), 'the no-base wording must survive compression')
+    assert.ok(prompt.includes('UNVERIFIED'), 'the unverified flag must survive compression')
+  }
+})
+
+test('effort is absent from the dispatch options unless configured', async () => {
+  const src = await generatePhaseWorkflow({ runId: 'r1', phase: 1, tasks, maxParallel: 2 })
+  const captured = await captureAgentOptions(src)
+  assert.equal(captured.length, 2)
+  for (const options of captured) {
+    assert.ok(!('effort' in options), 'agent() options must not carry an effort key when none is configured')
+  }
+})
+
+test('a configured effort reaches the agent() dispatch', async () => {
+  const src = await generatePhaseWorkflow({ runId: 'r1', phase: 1, tasks, maxParallel: 2, effort: 'high' })
+  assert.ok(src.includes("const EFFORT = 'high'"), 'effort must reach the generated source')
+  const captured = await captureAgentOptions(src)
+  for (const options of captured) assert.equal(options.effort, 'high')
+})
+
+test('a caveman level containing a quote is escaped rather than breaking the source', async () => {
+  const src = await generatePhaseWorkflow({
+    runId: 'r1',
+    phase: 1,
+    tasks,
+    maxParallel: 2,
+    caveman: "full' + (globalThis.PWNED = 1) + '",
+    effort: "high' + (globalThis.PWNED = 1) + '",
+  })
+  const body = src.replace(/^export const meta = /m, 'const meta = ')
+  assert.doesNotThrow(() => new Function(`return (async () => { ${body} })`))
+  try {
+    const captured = await captureAgentOptions(src)
+    assert.equal(globalThis.PWNED, undefined, 'a quoted caveman level must not execute')
+    assert.equal(captured[0].effort, "high' + (globalThis.PWNED = 1) + '", 'effort must round-trip as inert text')
+  } finally {
+    delete globalThis.PWNED
+  }
+})
+
 test('the generated source parses as a real module', async () => {
   const src = await generatePhaseWorkflow({
     runId: 'r1',
