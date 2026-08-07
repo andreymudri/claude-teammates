@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -151,15 +151,29 @@ test('does not report an older published version as available', () => {
 // 0.10.0 sorts BEFORE 0.9.0 as a string and AFTER it as a version. This is the
 // case the naive comparison gets wrong, so it is pinned explicitly.
 test('orders versions numerically, not lexically: 0.10.0 is newer than 0.9.0', () => {
-  withConfigDir((dir) => {
-    mkdirSync(stateDir(dir), { recursive: true })
-    writeFileSync(path.join(stateDir(dir), 'last-seen-version'), `${installedVersion}\n`)
-    writeFileSync(path.join(stateDir(dir), 'update-check.json'), '{"published":"0.10.0","checkedAt":1}')
-    const ctx = contextWith(dir)
-    // Only meaningful while the installed version is below 0.10.0; assert that premise.
-    assert.ok(installedVersion < '0.10.0' || installedVersion.startsWith('0.'), 'premise')
-    assert.match(ctx, /0\.10\.0 is available/)
-  })
+  // Pinned against a FAKE plugin root at 0.9.0 rather than the repo's own version.
+  // The earlier version of this test read the real version and guarded itself with
+  // `installedVersion < '0.10.0' || installedVersion.startsWith('0.')` — a tautology
+  // for every 0.x, whose first clause is itself the lexical comparison this test
+  // exists to condemn ('0.2.0' < '0.10.0' is false). It would have gone red with a
+  // misleading "premise" message the moment the project reached 0.10.0.
+  const fakeRoot = mkdtempSync(path.join(tmpdir(), 'tm-root-'))
+  try {
+    mkdirSync(path.join(fakeRoot, '.claude-plugin'), { recursive: true })
+    writeFileSync(path.join(fakeRoot, '.claude-plugin', 'plugin.json'), '{"version":"0.9.0"}')
+    mkdirSync(path.join(fakeRoot, 'skills', 'using-teammates'), { recursive: true })
+    writeFileSync(path.join(fakeRoot, 'skills', 'using-teammates', 'SKILL.md'), '# using-teammates\n')
+    withConfigDir((dir) => {
+      mkdirSync(stateDir(dir), { recursive: true })
+      writeFileSync(path.join(stateDir(dir), 'last-seen-version'), '0.9.0\n')
+      writeFileSync(path.join(stateDir(dir), 'update-check.json'), '{"published":"0.10.0","checkedAt":1}')
+      const ctx = contextWith(dir, { CLAUDE_PLUGIN_ROOT: fakeRoot })
+      assert.match(ctx, /0\.10\.0 is available/, '0.10.0 must be newer than 0.9.0')
+      assert.match(ctx, /installed: 0\.9\.0/)
+    })
+  } finally {
+    rmSync(fakeRoot, { recursive: true, force: true })
+  }
 })
 
 test('a notice never breaks the emitted JSON or adds a second context field', () => {
@@ -251,12 +265,41 @@ test('hooks.json wires update-check async and session-start sync', async () => {
 // variable set died with "HOME: unbound variable" and exit 1 — from the one hook
 // that must never fail. Both hooks now resolve the directory without expanding an
 // unset variable, and skip the notice when there is nowhere to keep state.
+//
+// These spawn through `env -u` rather than deleting the key from the env object.
+// On Windows, Node spawns bash.exe as a Windows process and the MSYS runtime
+// RE-DERIVES HOME, so `delete env.HOME` leaves it set. The earlier version of
+// these two tests therefore ran against the developer's real ~/.claude: one made
+// a live network request, and the other failed on a clean machine and passed on
+// a rerun, because its first run wrote the marker it then asserted was absent.
+function runUnset(script, args = []) {
+  return execFileSync('env', ['-u', 'HOME', '-u', 'CLAUDE_CONFIG_DIR', 'bash', script, ...args], {
+    encoding: 'utf8',
+    timeout: 15_000,
+    env: { ...process.env, CLAUDE_PLUGIN_ROOT: root },
+  })
+}
+
+test('env -u actually unsets HOME for bash, which delete env.HOME does not', () => {
+  // The premise the two tests below depend on. Without it they would silently stop
+  // testing the unset case and start testing the developer's home directory.
+  const viaEnvU = execFileSync('env', ['-u', 'HOME', 'bash', '-c', 'echo ${HOME:-UNSET}'], {
+    encoding: 'utf8',
+  }).trim()
+  assert.equal(viaEnvU, 'UNSET', 'env -u must unset HOME for the spawned bash')
+
+  const stripped = { ...process.env }
+  delete stripped.HOME
+  const viaDelete = execFileSync('bash', ['-c', 'echo ${HOME:-UNSET}'], {
+    encoding: 'utf8',
+    env: stripped,
+  }).trim()
+  // Documents WHY env -u is used. On Windows this is a real path, not UNSET.
+  assert.ok(typeof viaDelete === 'string')
+})
+
 test('session-start survives HOME and CLAUDE_CONFIG_DIR both being unset', () => {
-  const env = { ...process.env, CLAUDE_PLUGIN_ROOT: root }
-  delete env.HOME
-  delete env.CLAUDE_CONFIG_DIR
-  const out = execFileSync('bash', [hookScript], { encoding: 'utf8', env })
-  const parsed = JSON.parse(out)
+  const parsed = JSON.parse(runUnset(hookScript))
   assert.equal(Object.keys(parsed).length, 1)
   const ctx = parsed.hookSpecificOutput.additionalContext
   assert.match(ctx, /using-teammates/, 'the entrypoint must still be injected')
@@ -266,10 +309,11 @@ test('session-start survives HOME and CLAUDE_CONFIG_DIR both being unset', () =>
 })
 
 test('update-check survives HOME and CLAUDE_CONFIG_DIR both being unset', () => {
-  const env = { ...process.env }
-  delete env.HOME
-  delete env.CLAUDE_CONFIG_DIR
-  const out = execFileSync('bash', [updateCheckScript], { encoding: 'utf8', env })
+  // A file:// argument is passed so that a regression reaching the fetch cannot
+  // silently make a live network request from the test suite.
+  const fixture = path.join(tmpdir(), 'tm-never-fetched.json')
+  writeFileSync(fixture, '{"version":"9.9.9"}')
+  const out = runUnset(updateCheckScript, [`file:///${fixture.split(path.sep).join('/')}`])
   assert.equal(out, '')
 })
 
@@ -334,5 +378,44 @@ test('session-start refuses a non-version published value from the cache', () =>
     const ctx = contextWith(dir)
     assert.doesNotMatch(ctx, /IGNORE ALL PREVIOUS/)
     assert.doesNotMatch(ctx, /is available/)
+  })
+})
+
+
+// Mutation-driven: removing the [ -n "${installed}" ] guards left the suite green
+// while emitting a malformed notice — "updated: 0.0.1 -> " with an empty version and
+// a dead ".../releases/tag/v" link. A partially unpacked or mid-update install is
+// exactly when plugin.json is unreadable, so this is a reachable state.
+test('emits no notice at all when the plugin manifest cannot be read', () => {
+  withConfigDir((dir) => {
+    const sd = stateDir(dir)
+    mkdirSync(sd, { recursive: true })
+    writeFileSync(path.join(sd, 'last-seen-version'), '0.0.1\n')
+    writeFileSync(path.join(sd, 'update-check.json'), '{"published":"999.0.0","checkedAt":1}')
+    const out = execFileSync('bash', [hookScript], {
+      encoding: 'utf8',
+      env: { ...process.env, CLAUDE_PLUGIN_ROOT: '/nonexistent-plugin-root', CLAUDE_CONFIG_DIR: dir },
+    })
+    const ctx = JSON.parse(out).hookSpecificOutput.additionalContext
+    assert.doesNotMatch(ctx, /updated:/, 'no upgrade line without a known installed version')
+    assert.doesNotMatch(ctx, /is available/, 'no availability line without a known installed version')
+    assert.ok(!/releases\/tag\/v(?![0-9])/.test(ctx), 'never a version-less release link')
+  })
+})
+
+// This pins temp-file CLEANUP, not atomicity. Replacing the temp+rename with a
+// direct redirect still leaves the suite green — verified — because a direct write
+// leaves no temp file either. The atomic rename that keeps a concurrent reader from
+// seeing a half-written cache is deliberately unpinned: a deterministic test for it
+// needs a scheduled interleaving this suite has no way to force, and a timing-based
+// one would be flaky. Treating that as covered would be worse than saying so here.
+test('update-check leaves no temp file behind after writing its cache', () => {
+  withConfigDir((dir) => {
+    const fixture = path.join(dir, 'published.json')
+    writeFileSync(fixture, '{"version":"0.9.9"}')
+    runUpdateCheck(dir, { url: `file:///${fixture.split(path.sep).join('/')}` })
+    const entries = readdirSync(stateDir(dir))
+    assert.deepEqual(entries.filter((e) => e.includes('update-check.json.')), [])
+    assert.ok(entries.includes('update-check.json'))
   })
 })
