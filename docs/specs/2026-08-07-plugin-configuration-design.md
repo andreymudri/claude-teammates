@@ -58,6 +58,31 @@ change silently. Therefore the split between the two files is by trust class, no
 This preserves tamper-evidence exactly as documented. No existing claim in `SECURITY.md` needs
 rewording.
 
+### Correction, after the phase 1 security review
+
+The classification above was applied wrongly to one key, and the error is recorded here rather
+than quietly fixed, because the reasoning is the point.
+
+`agents.<role>.tier` and `agents.<role>.effort` were placed in the ergonomics layer on the
+grounds that they configure *how* work is done, not *what passes*. That is true for
+`implementer` and `integrator`. It is false for `reviewer`: the reviewer **is** the check for
+every `agent`-kind entry in the manifest, so its tier and effort decide how good the judge is.
+
+The concrete path: a teammate writes `teammates.local.json` during its own task — permitted, since
+running a teammate's code is arbitrary execution — setting `agents.reviewer.tier` to `cheap` and
+`effort` to `low`. The file is gitignored, so neither `fileset` nor `ownership` sees it. The next
+gate then grades that teammate's own diff with a deliberately weakened reviewer. This does not
+force a PASS, but it raises the odds of a missed high finding, and it does so invisibly.
+
+`agents.reviewer.tier` and `agents.reviewer.effort` are therefore **enforcement keys**, tracked
+manifest only, rejected by name in the local layer. `agents.implementer.*` and
+`agents.integrator.*` remain ergonomics: neither agent judges anything.
+
+Two implementation defects in the same area were found by the same review and are fixed in
+Task 8: `setKey`/`unsetKey` walked into `Object.prototype` for a key beginning `__proto__`, and
+`validateLocal` allowlisted only the top level, so arbitrary sub-keys under `agents.<role>` —
+including `checks` and `fixRounds` — passed validation.
+
 ## Design
 
 ### Layer 1 — `teammates.gate.json` (tracked, enforcement)
@@ -81,7 +106,9 @@ Allowlisted keys, and nothing else:
 | `agents.<role>.tier` | `"cheap" \| "mid" \| "capable"` | unset — routing infers per task |
 | `agents.<role>.effort` | `"low" \| "medium" \| "high" \| "xhigh" \| "max"` | unset — inherits session |
 
-`<role>` is one of `implementer`, `reviewer`, `integrator`.
+`<role>` is one of `implementer` or `integrator` in this layer. **`agents.reviewer.*` is an
+enforcement key and belongs to the tracked manifest only** — see the correction recorded in the
+threat model below.
 
 `caveman` reuses the vocabulary of the `caveman:caveman` skill rather than inventing levels, so
 the value passed through to a teammate means there what it means here.
