@@ -18,6 +18,20 @@ export const ENFORCEMENT_KEYS = ['phases', 'lens', 'preview']
 
 export class ConfigError extends Error {}
 
+// A dotted key is caller-supplied. These three segments reach Object.prototype rather than the
+// config object, so a write through them silently no-ops the file and pollutes every object in
+// the process instead. Rejected by name at the boundary rather than defended against per walk.
+const UNSAFE_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype'])
+
+export function assertSafeKey(dotted) {
+  for (const segment of String(dotted).split('.')) {
+    if (UNSAFE_SEGMENTS.has(segment)) {
+      throw new ConfigError(`unsafe config key segment: ${segment}`)
+    }
+  }
+  return dotted
+}
+
 const VALIDATORS = {
   maxParallel: (v) => {
     if (!Number.isInteger(v) || v < 1) throw new ConfigError('maxParallel must be an integer >= 1')
@@ -62,27 +76,47 @@ export function validateLocal(local) {
     }
     for (const [role, entry] of Object.entries(local.agents)) {
       if (!ROLES.includes(role)) throw new ConfigError(`unknown agent role: ${role}`)
-      if (entry?.tier !== undefined) VALIDATORS.tier(entry.tier)
-      if (entry?.effort !== undefined) VALIDATORS.effort(entry.effort)
+      if (role === 'reviewer') {
+        throw new ConfigError(
+          `agents.reviewer is an enforcement key; it may only be set in ${GATE_FILE}`,
+        )
+      }
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw new ConfigError(`agents.${role} must be an object`)
+      }
+      for (const field of Object.keys(entry)) {
+        if (field !== 'tier' && field !== 'effort') {
+          throw new ConfigError(`unknown key in ${LOCAL_FILE}: agents.${role}.${field}`)
+        }
+      }
+      if (entry.tier !== undefined) VALIDATORS.tier(entry.tier)
+      if (entry.effort !== undefined) VALIDATORS.effort(entry.effort)
     }
   }
   return local
 }
 
-export async function readLayer(root, file) {
+// A layer file whose whole body is `null` parses to the same value this returns for a missing
+// file. Callers that must tell the two apart pass their own `missing` sentinel; the default
+// stays `null` so "absent" reads naturally everywhere else.
+export async function readLayer(root, file, { missing = null } = {}) {
   try {
     return JSON.parse(await readFile(path.join(root, file), 'utf8'))
   } catch (err) {
-    if (err.code === 'ENOENT') return null
+    if (err.code === 'ENOENT') return missing
     if (err instanceof SyntaxError) throw new ConfigError(`${file} is not valid JSON: ${err.message}`)
     throw err
   }
 }
 
+const MISSING = Symbol('missing layer')
+
 export async function loadConfig(root) {
   const gate = (await readLayer(root, GATE_FILE)) ?? {}
-  const local = await readLayer(root, LOCAL_FILE)
-  if (local) validateLocal(local)
+  // Only an absent file skips validation. A present file holding `false`, `0`, `""` or `null` is
+  // a malformed layer, and guarding on truthiness would silently ignore it instead of saying so.
+  const raw = await readLayer(root, LOCAL_FILE, { missing: MISSING })
+  const local = raw === MISSING ? null : validateLocal(raw)
 
   const sources = {}
   const pick = (key, fallback) => {
@@ -92,13 +126,18 @@ export async function loadConfig(root) {
     return fallback
   }
 
+  // Provenance is per field, not per role: a gate-file tier alongside a local-file effort has two
+  // different sources, and a local `{"agents":{"reviewer":{}}}` names no field at all.
   const agents = {}
   for (const role of ROLES) {
-    const merged = { ...(gate.agents?.[role] ?? {}), ...(local?.agents?.[role] ?? {}) }
-    if (local?.agents?.[role]) sources[`agents.${role}`] = LOCAL_FILE
-    else if (gate.agents?.[role]) sources[`agents.${role}`] = GATE_FILE
-    else sources[`agents.${role}`] = 'default'
-    agents[role] = merged
+    const gateEntry = gate.agents?.[role] ?? {}
+    const localEntry = local?.agents?.[role] ?? {}
+    agents[role] = { ...gateEntry, ...localEntry }
+    for (const field of ['tier', 'effort']) {
+      if (localEntry[field] !== undefined) sources[`agents.${role}.${field}`] = LOCAL_FILE
+      else if (gateEntry[field] !== undefined) sources[`agents.${role}.${field}`] = GATE_FILE
+      else sources[`agents.${role}.${field}`] = 'default'
+    }
   }
 
   return {
@@ -112,16 +151,23 @@ export async function loadConfig(root) {
   }
 }
 
+// `config get <key>` hands this a raw user key, so it needs the same boundary as its siblings:
+// without it `config get constructor` prints the Object function instead of raising.
 export function getKey(obj, dotted) {
+  assertSafeKey(dotted)
   return dotted.split('.').reduce((acc, part) => (acc == null ? acc : acc[part]), obj)
 }
 
+// Every descent below tests own-ness, never mere reachability: an inherited branch belongs to
+// some other object, and writing through it mutates that object while leaving this one empty.
 export function setKey(obj, dotted, value) {
+  assertSafeKey(dotted)
   const parts = dotted.split('.')
   const last = parts.pop()
   let cursor = obj
   for (const part of parts) {
-    if (cursor[part] === null || typeof cursor[part] !== 'object' || Array.isArray(cursor[part])) {
+    const next = Object.hasOwn(cursor, part) ? cursor[part] : undefined
+    if (next === null || typeof next !== 'object' || Array.isArray(next)) {
       cursor[part] = {}
     }
     cursor = cursor[part]
@@ -131,18 +177,23 @@ export function setKey(obj, dotted, value) {
 }
 
 export function unsetKey(obj, dotted) {
+  assertSafeKey(dotted)
   const parts = dotted.split('.')
   const last = parts.pop()
   let cursor = obj
   for (const part of parts) {
-    if (cursor?.[part] === undefined) return obj
-    cursor = cursor[part]
+    if (cursor === null || typeof cursor !== 'object' || !Object.hasOwn(cursor, part)) return obj
+    const next = cursor[part]
+    if (next === null || typeof next !== 'object') return obj
+    cursor = next
   }
+  if (!Object.hasOwn(cursor, last)) return obj
   delete cursor[last]
   return obj
 }
 
 export function validateKey(dotted, value) {
+  assertSafeKey(dotted)
   if (dotted === 'maxParallel') return VALIDATORS.maxParallel(value)
   if (dotted === 'caveman') return VALIDATORS.caveman(value)
   const agentMatch = /^agents\.([a-z]+)\.(tier|effort)$/.exec(dotted)
@@ -155,7 +206,15 @@ export function validateKey(dotted, value) {
 }
 
 export function isEnforcementKey(dotted) {
-  return ENFORCEMENT_KEYS.includes(dotted.split('.')[0])
+  const parts = String(dotted).split('.')
+  if (parts.some((part) => ENFORCEMENT_KEYS.includes(part))) return true
+  // The reviewer judges `agent`-kind checks, so its tier and effort decide how good the judge
+  // is. That makes them enforcement, not ergonomics, however much they look like the other two
+  // roles: a teammate that could set them from the gitignored layer would be choosing the
+  // reviewer that grades its own diff, leaving no fileset or ownership evidence behind.
+  // Anchored on the role, not the field: `agents.reviewer` with no field names the same
+  // enforcement surface, and a caller that only tested the two field paths would wave it through.
+  return /^agents\.reviewer(\..*)?$/.test(dotted)
 }
 
 export async function writeLayer(root, file, obj) {
