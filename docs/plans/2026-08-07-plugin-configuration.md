@@ -509,7 +509,7 @@ export async function generatePhaseWorkflow({
 
 ```js
 import {
-  loadConfig, readLayer, writeLayer, validateKey, isEnforcementKey,
+  loadConfig, readLayer, writeLayer, validateKey, isEnforcementKey, assertSafeKey,
   getKey, setKey, unsetKey, ensureGitignored, ConfigError,
   GATE_FILE, LOCAL_FILE, ROLES,
 } from './config.mjs'
@@ -585,8 +585,11 @@ import {
         io.out(`caveman      ${resolved.caveman}  (${sources.caveman})`)
         for (const role of ROLES) {
           const entry = resolved.agents[role]
-          io.out(`agents.${role}.tier    ${entry.tier ?? '-'}  (${sources[`agents.${role}`]})`)
-          io.out(`agents.${role}.effort  ${entry.effort ?? '-'}  (${sources[`agents.${role}`]})`)
+          // Provenance is per FIELD, not per role: a role whose tier comes from the tracked
+          // manifest and whose effort comes from the local file must not report one layer for
+          // both. T8 keys `sources` as `agents.<role>.<field>` for exactly this reason.
+          io.out(`agents.${role}.tier    ${entry.tier ?? '-'}  (${sources[`agents.${role}.tier`]})`)
+          io.out(`agents.${role}.effort  ${entry.effort ?? '-'}  (${sources[`agents.${role}.effort`]})`)
         }
         return 0
       }
@@ -600,6 +603,10 @@ import {
       }
       if (sub === 'set' || sub === 'unset') {
         if (!key) { io.out(`config ${sub} needs a key`); return 2 }
+        // assertSafeKey runs for BOTH set and unset, and before anything reads or writes a
+        // layer. `unset` reaches the same `setKey`-family walk as `set`, so a key guarded on
+        // only one of the two leaves the other as a live path to Object.prototype.
+        assertSafeKey(key)
         if (local && isEnforcementKey(key)) {
           io.out(`${key} is an enforcement key; it may only be set in ${GATE_FILE}`)
           return 2
@@ -700,7 +707,9 @@ node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" config set <key> <value> --root <proj
 - [ ] **Step 7:** In `skills/phase-gate/SKILL.md`, where the `agent` check dispatch is described,
   add that each `tm-reviewer` dispatch carries the configured reviewer tier and effort, read from
   `config get agents.reviewer.tier` and `config get agents.reviewer.effort`, and that an unset
-  value means the dispatch omits the option and inherits the session's.
+  value means the dispatch omits the option and inherits the session's. State in the same place
+  that these two come from the tracked manifest only — the reviewer grades the diff, so allowing
+  the gitignored layer to choose its tier would let the party being judged pick its own judge.
 
 - [ ] **Step 8:** In `skills/parallel-execution/SKILL.md`, add the same two sentences for the
   `tm-integrator` dispatch, reading `agents.integrator.tier` and `agents.integrator.effort`.
@@ -731,9 +740,11 @@ node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" config set <key> <value> --root <proj
 
 - [ ] **Step 4:** In `SECURITY.md`, under the "known and documented" list, add an entry recording
   that `teammates.local.json` is gitignored and therefore agent-writable, and that this buys
-  nothing: it carries only `maxParallel`, `caveman` and per-role tier/effort, and the CLI rejects
-  an enforcement key in it by name. A report that "the local config can be edited" now has a
-  written answer.
+  nothing: it carries only `maxParallel`, `caveman`, and tier/effort for the **implementer and
+  integrator**. Say explicitly that `agents.reviewer.tier` and `agents.reviewer.effort` are
+  enforcement keys rejected in that file by name, because the reviewer produces the verdict for
+  `agent`-kind checks. A report that "the local config can be edited" now has a written answer,
+  and the one genuinely dangerous key is named rather than left for a reader to notice.
 
 - [ ] **Step 5:** In `NOTICE.md`, list `teammates-config` among the original skills, matching how
   `writing-plans` and `using-teammates` are listed.
@@ -747,3 +758,145 @@ node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" config set <key> <value> --root <proj
   `teammates.local.json` makes `config list` exit 2 naming `phases` as an enforcement key, so the
   file is rejected loudly rather than ignored quietly. A silently-ignored override is the failure
   mode that would let an operator believe the gate was reconfigured when it was not.
+
+- [ ] **Step 8:** Add a third test to `tests/adversarial.test.mjs`: a `teammates.local.json`
+  declaring `agents.reviewer.tier` is rejected by name. The reviewer judges `agent`-kind checks,
+  so a local-layer reviewer tier would let the party being judged downgrade its own judge from a
+  file that leaves no `fileset` or `ownership` evidence.
+
+---
+
+### Task 8: harden the config layer against prototype pollution and verdict-affecting keys
+
+**Files:**
+- Modify: `scripts/config.mjs`
+- Test: `tests/config.test.mjs`
+
+**Depends:** T1
+
+**Model:** capable
+
+Phase 1 review found four defects in the code Task 1 was given, all confirmed by running the
+committed module. Task 1 implemented that code faithfully; the defects are in the specification,
+not the implementation. Fix them before `cli.mjs` exposes any of it to a user-supplied key.
+
+- [ ] **Step 1:** Add the unsafe-segment vocabulary and guard to `scripts/config.mjs`. Verified
+  on the committed branch: `setKey({}, '__proto__.polluted', 'PWNED')` writes zero own keys to
+  the target and leaves `({}).polluted === 'PWNED'` process-wide, because `obj['__proto__']` is a
+  plain object and the existing guard only replaces a segment that is null, non-object, or an
+  array. `'constructor.prototype.x'` is blocked today only because `typeof Object === 'function'`
+  happens to fail that same test — luck, not a guard.
+
+```js
+// A dotted key is caller-supplied. These three segments reach Object.prototype rather than the
+// config object, so a write through them silently no-ops the file and pollutes every object in
+// the process instead. Rejected by name at the boundary rather than defended against per walk.
+const UNSAFE_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype'])
+
+export function assertSafeKey(dotted) {
+  for (const segment of String(dotted).split('.')) {
+    if (UNSAFE_SEGMENTS.has(segment)) {
+      throw new ConfigError(`unsafe config key segment: ${segment}`)
+    }
+  }
+  return dotted
+}
+```
+
+- [ ] **Step 2:** Call `assertSafeKey` first in `setKey`, `unsetKey` and `validateKey`, so the
+  guard holds no matter which entry point a caller reaches, and the exported helpers are safe on
+  their own rather than relying on every caller to check first.
+
+- [ ] **Step 3:** Make `isEnforcementKey` test **every** segment, not just the first. Verified:
+  `isEnforcementKey('__proto__.phases')` returns `false` today, which is what turns the pollution
+  from a crash into a policy bypass.
+
+```js
+export function isEnforcementKey(dotted) {
+  const parts = String(dotted).split('.')
+  if (parts.some((part) => ENFORCEMENT_KEYS.includes(part))) return true
+  // The reviewer judges `agent`-kind checks, so its tier and effort decide how good the judge
+  // is. That makes them enforcement, not ergonomics, however much they look like the other two
+  // roles: a teammate that could set them from the gitignored layer would be choosing the
+  // reviewer that grades its own diff, leaving no fileset or ownership evidence behind.
+  return /^agents\.reviewer\.(tier|effort)$/.test(dotted)
+}
+```
+
+- [ ] **Step 4:** Enumerate `agents.<role>` sub-keys in `validateLocal`. Verified: a local file
+  containing `{"agents":{"reviewer":{"tier":"cheap","effort":"low","checks":[],"fixRounds":0}}}`
+  is accepted today and every one of those keys survives into `resolved.agents.reviewer`, which
+  contradicts the design's "allowlisted keys, and nothing else". Reject `reviewer` outright in
+  the local layer, and reject any sub-key that is not `tier` or `effort`:
+
+```js
+    for (const [role, entry] of Object.entries(local.agents)) {
+      if (!ROLES.includes(role)) throw new ConfigError(`unknown agent role: ${role}`)
+      if (role === 'reviewer') {
+        throw new ConfigError(
+          `agents.reviewer is an enforcement key; it may only be set in ${GATE_FILE}`,
+        )
+      }
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw new ConfigError(`agents.${role} must be an object`)
+      }
+      for (const field of Object.keys(entry)) {
+        if (field !== 'tier' && field !== 'effort') {
+          throw new ConfigError(`unknown key in ${LOCAL_FILE}: agents.${role}.${field}`)
+        }
+      }
+      if (entry.tier !== undefined) VALIDATORS.tier(entry.tier)
+      if (entry.effort !== undefined) VALIDATORS.effort(entry.effort)
+    }
+```
+
+- [ ] **Step 5:** Fix `unsetKey`'s null crash. The guard `cursor?.[part] === undefined` lets
+  `null` through, so `unsetKey({preview: null}, 'preview.link')` reaches `delete null['link']`
+  and throws a raw TypeError. `config unset` does not call `validateKey` and reads the layer raw,
+  so a manifest with `"preview": null` produces a stack trace instead of a clean exit 2:
+
+```js
+export function unsetKey(obj, dotted) {
+  assertSafeKey(dotted)
+  const parts = dotted.split('.')
+  const last = parts.pop()
+  let cursor = obj
+  for (const part of parts) {
+    const next = cursor?.[part]
+    if (next === null || typeof next !== 'object') return obj
+    cursor = next
+  }
+  delete cursor[last]
+  return obj
+}
+```
+
+- [ ] **Step 6:** Record provenance per **field** rather than per role in `loadConfig`. Today a
+  single `sources['agents.' + role]` covers both fields, so a gate-file `tier` plus a local-file
+  `effort` reports the local file as the source of the tier as well — and a local
+  `{"agents":{"reviewer":{}}}` is truthy, attributing every field to the local layer. The values
+  are already correct; only the provenance the feature exists to display is wrong:
+
+```js
+  const agents = {}
+  for (const role of ROLES) {
+    const gateEntry = gate.agents?.[role] ?? {}
+    const localEntry = local?.agents?.[role] ?? {}
+    agents[role] = { ...gateEntry, ...localEntry }
+    for (const field of ['tier', 'effort']) {
+      if (localEntry[field] !== undefined) sources[`agents.${role}.${field}`] = LOCAL_FILE
+      else if (gateEntry[field] !== undefined) sources[`agents.${role}.${field}`] = GATE_FILE
+      else sources[`agents.${role}.${field}`] = 'default'
+    }
+  }
+```
+
+- [ ] **Step 7:** Add tests to `tests/config.test.mjs` for every fix above:
+  `setKey({}, '__proto__.polluted', 'x')` throws and `({}).polluted` stays `undefined` afterwards;
+  the same for `unsetKey` and `validateKey`, and for the `constructor` and `prototype` segments;
+  `isEnforcementKey('__proto__.phases')` and `isEnforcementKey('agents.reviewer.tier')` are both
+  `true`; `validateLocal` rejects `agents.reviewer` by name; `validateLocal` rejects
+  `agents.implementer.checks` naming that path; `unsetKey({preview: null}, 'preview.link')`
+  returns without throwing; and provenance is per field — with `tier` in the gate layer and
+  `effort` in the local layer, `sources['agents.implementer.tier']` is the gate file while
+  `sources['agents.implementer.effort']` is the local file.
