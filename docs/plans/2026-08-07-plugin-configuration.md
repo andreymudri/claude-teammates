@@ -4,7 +4,7 @@ Implements `docs/specs/2026-08-07-plugin-configuration-design.md`.
 
 ## Global Constraints
 
-- Node >= 20
+- Node >= 24.2.0
 - Zero new runtime dependencies
 - ESM only, `.mjs` for scripts, no TypeScript
 - Commit messages: single-line, commitlint style, English
