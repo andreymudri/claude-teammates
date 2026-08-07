@@ -1,8 +1,9 @@
 // Static preamble for generated phase workflows. The generator replaces the TASKS
 // marker below with a JSON array of { id, title, files, branch, model? }, the META
-// marker with the meta literal, and the PLAN_PATH / BASE_BRANCH / CONSTRAINTS markers
-// with plain JS literals. An input the caller omitted renders as '' or [], so the
-// corresponding section of the brief disappears rather than naming a missing value.
+// marker with the meta literal, and the PLAN_PATH / BASE_BRANCH / CONSTRAINTS /
+// CAVEMAN / EFFORT markers with plain JS literals. An input the caller omitted renders
+// as '', [] or false, so the corresponding section of the brief disappears rather than
+// naming a missing value.
 __META__
 
 const TASKS = __TASKS__
@@ -10,6 +11,8 @@ const TASKS = __TASKS__
 const PLAN_PATH = __PLAN_PATH__
 const BASE_BRANCH = __BASE_BRANCH__
 const CONSTRAINTS = __CONSTRAINTS__
+const CAVEMAN = __CAVEMAN__
+const EFFORT = __EFFORT__
 
 const RESULT_SCHEMA = {
   type: 'object',
@@ -70,11 +73,46 @@ const brief = (t) => [
   'Commit your work on ' + t.branch + ' and return the structured result.',
 ].filter((line) => line !== '').join('\n')
 
+// The compressed variant reuses checkoutSteps(t) verbatim and compresses only the connective
+// prose. The MANDATORY FIRST STEP block, the checkout commands, the BASELINE steps, the FILES
+// list and the constraints all survive unchanged: a brief is the task specification, and
+// compressing a specification drops the wording the gate then enforces.
+const briefTerse = (t) => [
+  'You are tm-implementer. Task ' + t.id + ': ' + t.title + '.',
+  '',
+  ...checkoutSteps(t),
+  '',
+  'BASELINE. Before writing anything, in order:',
+  '1. Install the project\'s dependencies as the project requires.',
+  '2. Copy over any untracked config the project needs (for example .env).',
+  '3. Run the project\'s test command once and confirm it is green.',
+  'Fresh worktree has none of that. Missing dep looks exactly like RED test; gate cannot tell',
+  'them apart. Report status "blocked" only if baseline cannot be made green.',
+  '',
+  PLAN_PATH ? 'PLAN. Read ' + PLAN_PATH + ' and implement the section titled "Task '
+    + t.id.replace(/^T/, '') + ':" — every numbered step, in order. The plan is the spec.' : '',
+  '',
+  'FILES. You may create or modify ONLY these files: ' + t.files.join(', ') + '.',
+  'Touching any other file fails the phase gate.',
+  '',
+  CONSTRAINTS.length ? 'GLOBAL CONSTRAINTS:' : '',
+  ...CONSTRAINTS.map((c) => '- ' + c),
+  '',
+  'STYLE. Write summary and blockers caveman-terse: drop articles and filler, keep every',
+  'technical term, file path and error string exact. If skill caveman:caveman is available,',
+  'use it at level ' + CAVEMAN + '. If not available, apply the style directly — its absence',
+  'is not a blocker.',
+  '',
+  'Commit your work on ' + t.branch + ' and return the structured result.',
+].filter((line) => line !== '').join('\n')
+
+const compose = CAVEMAN ? briefTerse : brief
+
 phase('Implement')
 
 const results = await parallel(TASKS.map((t) => () =>
   agent(
-    brief(t),
+    compose(t),
     {
       label: t.id,
       phase: 'Implement',
@@ -82,6 +120,7 @@ const results = await parallel(TASKS.map((t) => () =>
       isolation: 'worktree',
       agentType: 'claude-teammates:tm-implementer',
       ...(t.model ? { model: t.model } : {}),
+      ...(EFFORT ? { effort: EFFORT } : {}),
     },
   ).then((r) => (r === null ? null : { taskId: t.id, ...r }))
 ))
