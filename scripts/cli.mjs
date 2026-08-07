@@ -4,7 +4,12 @@ import { fileURLToPath } from 'node:url'
 import { parsePlan } from './plan-parser.mjs'
 import { assignPhases } from './phases.mjs'
 import { readState, writeState, claimTask, releaseClaim, readFixRounds, recordFixRound } from './state.mjs'
-import { loadGateConfig, inferGateConfig, checksForPhase, defaultMaxParallel, fixRoundsForPhase, previewLinks } from './gate-config.mjs'
+import { loadGateConfig, inferGateConfig, checksForPhase, fixRoundsForPhase, previewLinks } from './gate-config.mjs'
+import {
+  loadConfig, readLayer, writeLayer, validateKey, isEnforcementKey, assertSafeKey,
+  getKey, setKey, unsetKey, ensureGitignored, ConfigError,
+  GATE_FILE, LOCAL_FILE, ROLES,
+} from './config.mjs'
 import { TIERS, inferTier } from './routing.mjs'
 import { decideFix } from './fix-loop.mjs'
 import { runChecks, aggregateVerdict } from './gate-runner.mjs'
@@ -13,7 +18,7 @@ import { generatePhaseWorkflow } from './workflow-gen.mjs'
 import { createGit, GitError } from './git.mjs'
 import { deriveContext } from './gate-runner.mjs'
 
-const USAGE = `usage: cli.mjs <init-run|gate|digest|claim|unclaim|workflow|complete|fix|record-fix-round> [options]
+const USAGE = `usage: cli.mjs <init-run|gate|digest|claim|unclaim|workflow|complete|fix|record-fix-round|config> [options]
 
   init-run <planPath> --run <id> [--root <path>]
   gate     --run <id> --plan <path> [--base <branch>] [--root <path>] [--phase <name>] [--no-fleet] [--results <path>]
@@ -23,7 +28,11 @@ const USAGE = `usage: cli.mjs <init-run|gate|digest|claim|unclaim|workflow|compl
   workflow --run <id> --phase <n> [--root <path>] [--models <json>] [--plan <path>] [--base <branch>]
   complete --run <id> --task <id> --plan <path> [--base <branch>] [--root <path>]
   fix      --run <id> --phase <n> --verdict <path> [--root <path>]
-  record-fix-round --run <id> --phase <n> --task <id> [--root <path>]`
+  record-fix-round --run <id> --phase <n> --task <id> [--root <path>]
+  config   list [--root <path>]
+  config   get <key> [--root <path>]
+  config   set <key> <value> [--root <path>] [--local]
+  config   unset <key> [--root <path>] [--local]`
 
 // A flag followed by nothing, or by another flag, is a boolean switch (e.g. --no-fleet)
 // and takes no value. Without this, a boolean flag anywhere but the very last argv
@@ -68,6 +77,10 @@ const REQUIRED = {
   complete: ['run', 'task', 'plan'],
   fix: ['run', 'phase', 'verdict'],
   'record-fix-round': ['run', 'phase', 'task'],
+  // Recorded explicitly as taking no required flags rather than relying on the `?? []`
+  // fallthrough: a command absent from this map also skips the whole missing-argument
+  // branch, so the omission would read as "not a command" to anyone auditing the table.
+  config: [],
 }
 
 // Commands whose `--phase` names a numeric plan phase, not a manifest phase key. `gate` is
@@ -306,6 +319,19 @@ async function derive(root, runId, flags) {
   }
 }
 
+// `loadConfig` throws ConfigError on a malformed or over-reaching teammates.local.json, and
+// every command below branches on this CLI's exit code. Resolving through here turns that into
+// the message-and-2 the rest of the CLI already guarantees, instead of a raw stack trace from
+// whichever command happened to read the layer first. `null` means "already reported, exit 2".
+async function resolveConfig(root, io) {
+  try {
+    return (await loadConfig(root)).resolved
+  } catch (err) {
+    if (err instanceof ConfigError) { io.out(err.message); return null }
+    throw err
+  }
+}
+
 export async function runCli(argv, io = { out: console.log }) {
   const [command, ...rest] = argv
   const { flags, positional } = parseFlags(rest)
@@ -367,7 +393,10 @@ export async function runCli(argv, io = { out: console.log }) {
     }
 
     const totalPhases = tasks.reduce((max, t) => Math.max(max, t.phase), 0)
-    const config = await loadGateConfig(root)
+    // The resolved value, not the manifest's: the gitignored local layer is an ergonomics
+    // surface, and a parallelism it sets must actually take effect where it is consumed.
+    const resolved = await resolveConfig(root, io)
+    if (!resolved) return 2
     await writeState(root, runId, 'plan', { runId, totalPhases, tasks })
     // Recorded for reporting only. The gate derives the anchor, the phase, and every
     // verdict from git; nothing here decides anything.
@@ -383,7 +412,7 @@ export async function runCli(argv, io = { out: console.log }) {
       runId,
       phase: previous?.phase ?? 1,
       totalPhases,
-      maxParallel: config?.maxParallel ?? defaultMaxParallel(),
+      maxParallel: resolved.maxParallel,
       tasks: tasks.map((t) => ({ id: t.id, title: t.title, state: 'pending' })),
       ...(previous?.gates ? { gates: previous.gates } : {}),
       ...(previous?.fixRounds ? { fixRounds: previous.fixRounds } : {}),
@@ -404,7 +433,9 @@ export async function runCli(argv, io = { out: console.log }) {
   if (command === 'digest') {
     const status = await readState(root, runId, 'status')
     if (!status) { io.out(`no status for run ${runId}`); return 1 }
-    io.out(renderDigest(status, Date.now()))
+    const resolved = await resolveConfig(root, io)
+    if (!resolved) return 2
+    io.out(renderDigest(status, Date.now(), resolved.caveman))
     return 0
   }
 
@@ -424,7 +455,8 @@ export async function runCli(argv, io = { out: console.log }) {
     const plan = await readState(root, runId, 'plan')
     if (!plan) { io.out(`no plan for run ${runId}`); return 1 }
     const phase = Number(flags.phase)
-    const config = await loadGateConfig(root)
+    const resolved = await resolveConfig(root, io)
+    if (!resolved) return 2
 
     // Concrete model names never enter this repository or teammates.gate.json — they live
     // in the dispatching skill, which passes its own tier map through here. Absent, the
@@ -511,15 +543,26 @@ export async function runCli(argv, io = { out: console.log }) {
       }
     }
 
+    // A configured implementer tier is an explicit operator decision and outranks inferTier's
+    // guess. A per-task `**Model:**` stays authoritative over both: it names a specific task
+    // the operator already reasoned about, which a blanket role setting cannot know anything
+    // about — hence the `tierSource === 'inferred'` guard rather than a blanket overwrite.
+    const roleTier = resolved.agents.implementer.tier
+    const phaseTasks = plan.tasks
+      .filter((t) => t.phase === phase)
+      .map((t) => (roleTier && t.tierSource === 'inferred' ? { ...t, tier: roleTier } : t))
+
     const src = await generatePhaseWorkflow({
       runId,
       phase,
-      tasks: plan.tasks.filter((t) => t.phase === phase),
-      maxParallel: config?.maxParallel ?? defaultMaxParallel(),
+      tasks: phaseTasks,
+      maxParallel: resolved.maxParallel,
       tierModels,
       planPath,
       baseBranch,
       constraints: parseConstraints(planMarkdown),
+      caveman: resolved.caveman,
+      effort: resolved.agents.implementer.effort ?? '',
     })
     io.out(src)
     return 0
@@ -782,6 +825,76 @@ export async function runCli(argv, io = { out: console.log }) {
     await writeState(root, runId, 'status', next)
     io.out(`${flags.task} phase ${phase} round ${readFixRounds(next, phase)[flags.task]}`)
     return 0
+  }
+
+  // Reads the subcommand and key from `positional`, targets a layer with `--local`, and maps
+  // every ConfigError to exit 2 with the message on stdout — a skill branches on this exit
+  // code, so a validation failure must never surface as a stack trace.
+  if (command === 'config') {
+    const [sub, key, rawValue] = positional
+    const local = flags.local !== undefined
+    const file = local ? LOCAL_FILE : GATE_FILE
+    try {
+      if (sub === 'list') {
+        const { resolved, sources } = await loadConfig(root)
+        io.out(`maxParallel  ${resolved.maxParallel}  (${sources.maxParallel})`)
+        io.out(`caveman      ${resolved.caveman}  (${sources.caveman})`)
+        for (const role of ROLES) {
+          const entry = resolved.agents[role]
+          // Provenance is per FIELD, not per role: a role whose tier comes from the tracked
+          // manifest and whose effort comes from the local file must not report one layer for
+          // both. `sources` is keyed as `agents.<role>.<field>` for exactly this reason.
+          io.out(`agents.${role}.tier    ${entry.tier ?? '-'}  (${sources[`agents.${role}.tier`]})`)
+          io.out(`agents.${role}.effort  ${entry.effort ?? '-'}  (${sources[`agents.${role}.effort`]})`)
+        }
+        return 0
+      }
+      if (sub === 'get') {
+        if (!key) { io.out('config get needs a key'); return 2 }
+        const { resolved } = await loadConfig(root)
+        // `getKey` throws ConfigError on an unsafe key, and this try maps that to exit 2 —
+        // no second guard here, or `config get constructor` would report two different things
+        // depending on which one fired first.
+        const value = getKey(resolved, key)
+        if (value === undefined) { io.out(`unset: ${key}`); return 2 }
+        io.out(String(value))
+        return 0
+      }
+      if (sub === 'set' || sub === 'unset') {
+        if (!key) { io.out(`config ${sub} needs a key`); return 2 }
+        // assertSafeKey runs for BOTH set and unset, and before anything reads or writes a
+        // layer. `unset` reaches the same object walk as `set`, so a key guarded on only one
+        // of the two leaves the other as a live path to Object.prototype.
+        assertSafeKey(key)
+        if (local && isEnforcementKey(key)) {
+          io.out(`${key} is an enforcement key; it may only be set in ${GATE_FILE}`)
+          return 2
+        }
+        const layer = (await readLayer(root, file)) ?? {}
+        if (sub === 'set') {
+          if (rawValue === undefined) { io.out('config set needs a value'); return 2 }
+          let parsed
+          // JSON first so numbers and `false` arrive as themselves; a bare word that is not
+          // valid JSON is the string the caller typed, so `set agents.implementer.tier capable`
+          // works without shell quoting.
+          try { parsed = JSON.parse(rawValue) } catch { parsed = rawValue }
+          setKey(layer, key, validateKey(key, parsed))
+        } else {
+          unsetKey(layer, key)
+        }
+        await writeLayer(root, file, layer)
+        io.out(`wrote ${file}`)
+        if (local && await ensureGitignored(root, LOCAL_FILE)) {
+          io.out(`added ${LOCAL_FILE} to .gitignore`)
+        }
+        return 0
+      }
+      io.out('usage: config <list|get|set|unset>')
+      return 2
+    } catch (err) {
+      if (err instanceof ConfigError) { io.out(err.message); return 2 }
+      throw err
+    }
   }
 
   io.out(USAGE)

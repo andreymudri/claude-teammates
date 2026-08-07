@@ -2271,3 +2271,400 @@ test('parseConstraints returns [] for a section of prose with no bullets', async
     [],
   )
 })
+
+// --- Task 5: the `config` subcommand, and the config layers reaching the commands that consume them.
+
+async function readLocal(root) {
+  return JSON.parse(await readFile(path.join(root, 'teammates.local.json'), 'utf8'))
+}
+
+async function readGateFile(root) {
+  return JSON.parse(await readFile(path.join(root, 'teammates.gate.json'), 'utf8'))
+}
+
+async function exists(file) {
+  try {
+    await readFile(file, 'utf8')
+    return true
+  } catch {
+    return false
+  }
+}
+
+test('usage lists the config subcommand and its four forms', async () => {
+  await withRepo(async ({ io, lines }) => {
+    assert.equal(await runCli(['nope'], io), 2)
+    const text = lines.join('\n')
+    assert.match(text, /\|config>/)
+    assert.match(text, /config\s+list \[--root <path>\]/)
+    assert.match(text, /config\s+get <key>/)
+    assert.match(text, /config\s+set <key> <value>.*--local/)
+    assert.match(text, /config\s+unset <key>.*--local/)
+  })
+})
+
+test('config list prints every resolved field with the layer it came from', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const code = await runCli(['config', 'list', '--root', root], io)
+    assert.equal(code, 0)
+    const text = lines.join('\n')
+    assert.match(text, /^maxParallel\s+\d+\s+\(default\)$/m)
+    assert.match(text, /^caveman\s+false\s+\(default\)$/m)
+    for (const role of ['implementer', 'reviewer', 'integrator']) {
+      assert.match(text, new RegExp(`^agents\\.${role}\\.tier\\s+-\\s+\\(default\\)$`, 'm'))
+      assert.match(text, new RegExp(`^agents\\.${role}\\.effort\\s+-\\s+\\(default\\)$`, 'm'))
+    }
+  })
+})
+
+// Provenance is per FIELD. A role whose tier is pinned in the tracked manifest and whose effort
+// comes from the gitignored file must not report one layer for both — an operator reading the
+// list has to be able to tell which of the two they can change without leaving evidence.
+test('config list reports the source per field, not per role', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    await writeFile(
+      path.join(root, 'teammates.gate.json'),
+      JSON.stringify({ agents: { implementer: { tier: 'capable' } }, phases: { default: { checks: [] } } }),
+      'utf8',
+    )
+    await writeFile(
+      path.join(root, 'teammates.local.json'),
+      JSON.stringify({ agents: { implementer: { effort: 'high' } } }),
+      'utf8',
+    )
+    assert.equal(await runCli(['config', 'list', '--root', root], io), 0)
+    const text = lines.join('\n')
+    assert.match(text, /^agents\.implementer\.tier\s+capable\s+\(teammates\.gate\.json\)$/m)
+    assert.match(text, /^agents\.implementer\.effort\s+high\s+\(teammates\.local\.json\)$/m)
+  })
+})
+
+test('config set --local writes the local layer and gitignores it, reporting both', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const code = await runCli(['config', 'set', 'maxParallel', '12', '--local', '--root', root], io)
+    assert.equal(code, 0)
+    assert.deepEqual(await readLocal(root), { maxParallel: 12 })
+    const text = lines.join('\n')
+    assert.match(text, /wrote teammates\.local\.json/)
+    assert.match(text, /added teammates\.local\.json to \.gitignore/)
+    const ignore = await readFile(path.join(root, '.gitignore'), 'utf8')
+    assert.equal(ignore.split(/\r?\n/).filter((l) => l.trim() === 'teammates.local.json').length, 1)
+  })
+})
+
+test('a second config set does not append a duplicate gitignore line', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    await runCli(['config', 'set', 'maxParallel', '12', '--local', '--root', root], io)
+    lines.length = 0
+    assert.equal(await runCli(['config', 'set', 'caveman', 'full', '--local', '--root', root], io), 0)
+    assert.doesNotMatch(lines.join('\n'), /added teammates\.local\.json/)
+    const ignore = await readFile(path.join(root, '.gitignore'), 'utf8')
+    assert.equal(ignore.split(/\r?\n/).filter((l) => l.trim() === 'teammates.local.json').length, 1)
+    assert.deepEqual(await readLocal(root), { maxParallel: 12, caveman: 'full' })
+  })
+})
+
+// A bare word that is not valid JSON is the string the caller typed, so `capable` needs no shell
+// quoting; `12` and `false` still arrive as a number and a boolean rather than as their spelling.
+test('config set parses a JSON value first and falls back to the literal string', async () => {
+  await withRepo(async ({ root, io }) => {
+    assert.equal(await runCli(['config', 'set', 'caveman', 'false', '--local', '--root', root], io), 0)
+    assert.equal(
+      await runCli(['config', 'set', 'agents.implementer.tier', 'capable', '--local', '--root', root], io),
+      0,
+    )
+    assert.deepEqual(await readLocal(root), { caveman: false, agents: { implementer: { tier: 'capable' } } })
+  })
+})
+
+test('config set then get round-trips a role tier', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    assert.equal(
+      await runCli(['config', 'set', 'agents.implementer.tier', 'capable', '--local', '--root', root], io),
+      0,
+    )
+    lines.length = 0
+    assert.equal(await runCli(['config', 'get', 'agents.implementer.tier', '--root', root], io), 0)
+    assert.equal(lines.join('\n'), 'capable')
+  })
+})
+
+test('config unset removes a key from the layer it targets', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    await runCli(['config', 'set', 'maxParallel', '12', '--local', '--root', root], io)
+    await runCli(['config', 'set', 'agents.implementer.tier', 'capable', '--local', '--root', root], io)
+    lines.length = 0
+    assert.equal(await runCli(['config', 'unset', 'agents.implementer.tier', '--local', '--root', root], io), 0)
+    assert.deepEqual(await readLocal(root), { maxParallel: 12, agents: { implementer: {} } })
+  })
+})
+
+// The reviewer produces the verdict for `agent`-kind gate checks. Letting the gitignored layer
+// choose its tier would let a teammate pick the reviewer that grades its own diff, and leave no
+// dirty worktree for `fileset` or `ownership` to notice. The tracked manifest is the only place
+// it may be set — this is the security property the whole config layer exists to preserve.
+test('config set agents.reviewer.tier --local is refused as an enforcement key and writes nothing', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const code = await runCli(['config', 'set', 'agents.reviewer.tier', 'capable', '--local', '--root', root], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /agents\.reviewer\.tier is an enforcement key/)
+    assert.match(lines.join('\n'), /teammates\.gate\.json/)
+    assert.equal(await exists(path.join(root, 'teammates.local.json')), false)
+  })
+})
+
+test('config set agents.reviewer.effort --local is refused too, and the bare role with it', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    assert.equal(
+      await runCli(['config', 'set', 'agents.reviewer.effort', 'high', '--local', '--root', root], io),
+      2,
+    )
+    assert.match(lines.join('\n'), /enforcement key/)
+    lines.length = 0
+    assert.equal(await runCli(['config', 'unset', 'agents.reviewer', '--local', '--root', root], io), 2)
+    assert.match(lines.join('\n'), /enforcement key/)
+    assert.equal(await exists(path.join(root, 'teammates.local.json')), false)
+  })
+})
+
+test('the same reviewer tier succeeds against the tracked manifest', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const code = await runCli(['config', 'set', 'agents.reviewer.tier', 'capable', '--root', root], io)
+    assert.equal(code, 0)
+    assert.match(lines.join('\n'), /wrote teammates\.gate\.json/)
+    assert.deepEqual((await readGateFile(root)).agents, { reviewer: { tier: 'capable' } })
+    // Writing the tracked manifest must not gitignore anything: it is tracked on purpose.
+    const ignore = await readFile(path.join(root, '.gitignore'), 'utf8')
+    assert.doesNotMatch(ignore, /teammates\.local\.json/)
+  })
+})
+
+// `phases` decides which checks run at all, so it is enforcement wherever it appears.
+test('config set phases --local is refused and writes nothing', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const code = await runCli(['config', 'set', 'phases', '{}', '--local', '--root', root], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /phases is an enforcement key/)
+    assert.equal(await exists(path.join(root, 'teammates.local.json')), false)
+  })
+})
+
+// `fixRounds` is not a key this layer knows how to resolve. It is refused by name, with the key
+// in the message, rather than written into a file nothing will ever read.
+test('config set fixRounds --local exits 2 naming the key and writes nothing', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const code = await runCli(['config', 'set', 'fixRounds', '99', '--local', '--root', root], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /fixRounds/)
+    assert.equal(await exists(path.join(root, 'teammates.local.json')), false)
+  })
+})
+
+test('config set rejects a tier outside the vocabulary and lists the valid ones', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const code = await runCli(['config', 'set', 'agents.implementer.tier', 'nonsense', '--local', '--root', root], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /tier must be one of cheap, mid, capable/)
+    assert.equal(await exists(path.join(root, 'teammates.local.json')), false)
+  })
+})
+
+// A dotted key is caller input. `__proto__` reaches Object.prototype rather than the config
+// object, so a write through it pollutes every object in the process instead of the file. It is
+// rejected by name, on `set` and `unset` alike, before any layer is read or written.
+test('config set through __proto__ exits 2 and pollutes nothing', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const code = await runCli(['config', 'set', '__proto__.maxParallel', '1', '--root', root], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /unsafe config key segment/)
+    assert.equal(({}).maxParallel, undefined)
+    assert.equal(await exists(path.join(root, 'teammates.gate.json')), false)
+  })
+})
+
+test('config unset and get through a prototype segment exit 2 as well', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    assert.equal(await runCli(['config', 'unset', 'constructor.prototype.x', '--local', '--root', root], io), 2)
+    assert.match(lines.join('\n'), /unsafe config key segment/)
+    assert.equal(await exists(path.join(root, 'teammates.local.json')), false)
+    lines.length = 0
+    assert.equal(await runCli(['config', 'get', '__proto__', '--root', root], io), 2)
+    assert.match(lines.join('\n'), /unsafe config key segment/)
+  })
+})
+
+test('config get on an unset key exits 2', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const code = await runCli(['config', 'get', 'agents.implementer.tier', '--root', root], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /unset: agents\.implementer\.tier/)
+  })
+})
+
+test('config get, set and unset without their arguments exit 2 with a message', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    assert.equal(await runCli(['config', 'get', '--root', root], io), 2)
+    assert.match(lines.join('\n'), /config get needs a key/)
+    lines.length = 0
+    assert.equal(await runCli(['config', 'set', '--root', root], io), 2)
+    assert.match(lines.join('\n'), /config set needs a key/)
+    lines.length = 0
+    assert.equal(await runCli(['config', 'unset', '--root', root], io), 2)
+    assert.match(lines.join('\n'), /config unset needs a key/)
+    lines.length = 0
+    assert.equal(await runCli(['config', 'set', 'maxParallel', '--root', root], io), 2)
+    assert.match(lines.join('\n'), /config set needs a value/)
+  })
+})
+
+test('an unknown config subcommand exits 2 with the usage line', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const code = await runCli(['config', 'bogus', '--root', root], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /usage: config <list\|get\|set\|unset>/)
+  })
+})
+
+// A skill branches on this exit code, so a malformed layer must arrive as a message and 2 —
+// never as a SyntaxError stack out of JSON.parse.
+test('a corrupt teammates.local.json exits 2 with a message rather than a stack', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    await writeFile(path.join(root, 'teammates.local.json'), '{', 'utf8')
+    const code = await runCli(['config', 'list', '--root', root], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /teammates\.local\.json is not valid JSON/)
+    assert.doesNotMatch(lines.join('\n'), /at JSON\.parse/)
+  })
+})
+
+// Every command that resolves config reads the same gitignored layer, so a malformed one must
+// not reach an operator as a stack trace from whichever command happened to read it first.
+test('a corrupt teammates.local.json exits 2 from init-run, workflow and digest too', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.local.json'), '{', 'utf8')
+    for (const argv of [
+      ['init-run', planPath, '--run', 'r1', '--root', root],
+      ['workflow', '--run', 'r1', '--phase', '1', '--root', root],
+      ['digest', '--run', 'r1', '--root', root],
+    ]) {
+      lines.length = 0
+      assert.equal(await runCli(argv, io), 2, argv[0])
+      assert.match(lines.join('\n'), /teammates\.local\.json is not valid JSON/)
+    }
+  })
+})
+
+// The local layer is refused wholesale when it carries an enforcement key, not just when the
+// CLI is the one writing it — a hand-edited file must not buy what `config set` refuses.
+test('a local layer carrying an enforcement key exits 2 rather than resolving', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    await writeFile(
+      path.join(root, 'teammates.local.json'),
+      JSON.stringify({ agents: { reviewer: { tier: 'capable' } } }),
+      'utf8',
+    )
+    const code = await runCli(['config', 'list', '--root', root], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /agents\.reviewer is an enforcement key/)
+  })
+})
+
+test('init-run and workflow take maxParallel from the local layer over the manifest', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await writeFile(
+      path.join(root, 'teammates.gate.json'),
+      JSON.stringify({ maxParallel: 2, phases: { default: { checks: [] } } }),
+      'utf8',
+    )
+    await writeFile(path.join(root, 'teammates.local.json'), JSON.stringify({ maxParallel: 5 }), 'utf8')
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    assert.equal((await readStatus(root, 'r1')).maxParallel, 5)
+    lines.length = 0
+    await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.match(lines.join('\n'), /max 5 parallel/)
+  })
+})
+
+test('workflow renders a caveman brief when the local layer configures one', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await writeFile(path.join(root, 'teammates.local.json'), JSON.stringify({ caveman: 'full' }), 'utf8')
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    assert.equal(await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root], io), 0)
+    const src = lines.join('\n')
+    assert.match(src, /CAVEMAN = 'full'/)
+    // Compressed or not, the instructions that make a brief safe are still there verbatim.
+    assert.match(src, /MANDATORY FIRST STEP/)
+  })
+})
+
+test('a configured implementer effort reaches the generated dispatch', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await writeFile(
+      path.join(root, 'teammates.local.json'),
+      JSON.stringify({ agents: { implementer: { effort: 'high' } } }),
+      'utf8',
+    )
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    assert.equal(await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root], io), 0)
+    const src = lines.join('\n')
+    assert.match(src, /const EFFORT = 'high'/)
+    // And it is spread into the dispatch options rather than merely declared.
+    assert.match(src, /EFFORT \? \{ effort: EFFORT \}/)
+  })
+})
+
+// A configured role tier is an explicit operator decision and outranks inferTier's guess.
+test('a configured implementer tier overrides an inferred one in the workflow dispatch', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await writeFile(
+      path.join(root, 'teammates.local.json'),
+      JSON.stringify({ agents: { implementer: { tier: 'capable' } } }),
+      'utf8',
+    )
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const models = JSON.stringify({ mid: 'm-mid', capable: 'm-cap' })
+    assert.equal(
+      await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root, '--models', models], io),
+      0,
+    )
+    assert.match(lines.join('\n'), /m-cap/)
+    assert.doesNotMatch(lines.join('\n'), /m-mid/)
+  })
+})
+
+// A per-task `**Model:**` names a task the operator already reasoned about, so it stays
+// authoritative over a blanket role tier.
+test('a declared task tier outranks the configured implementer tier', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const planPath = path.join(root, 'declared.md')
+    await writeFile(planPath, planWithModel('cheap'), 'utf8')
+    await writeFile(
+      path.join(root, 'teammates.local.json'),
+      JSON.stringify({ agents: { implementer: { tier: 'capable' } } }),
+      'utf8',
+    )
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const models = JSON.stringify({ cheap: 'm-cheap', capable: 'm-cap' })
+    assert.equal(
+      await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root, '--models', models], io),
+      0,
+    )
+    assert.match(lines.join('\n'), /m-cheap/)
+    assert.doesNotMatch(lines.join('\n'), /m-cap/)
+  })
+})
+
+test('digest renders terse when the local layer configures caveman', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await writeFile(path.join(root, 'teammates.local.json'), JSON.stringify({ caveman: 'full' }), 'utf8')
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    assert.equal(await runCli(['digest', '--run', 'r1', '--root', root], io), 0)
+    assert.match(lines.join('\n'), /^r1 p1\/2 n2/)
+  })
+})
