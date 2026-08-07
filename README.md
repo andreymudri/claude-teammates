@@ -48,7 +48,9 @@ published one and reports a newer one on a later session. It runs at most once e
 The check is a single `GET` to `raw.githubusercontent.com` for this repository's published
 `.claude-plugin/plugin.json`, with a five-second timeout. It sends nothing about you, your machine,
 or your project beyond the request itself, and it runs in a hook declared `"async": true`, so it
-never delays a session. If it fails — offline, proxied, no `curl` — it exits silently.
+never delays a session. If it fails — offline, proxied, no `curl` — it exits silently, and the
+24-hour limit still applies: the attempt is stamped before it is made, so a machine that can never
+reach GitHub does not retry on every session.
 
 Turn it off with:
 

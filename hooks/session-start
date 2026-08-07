@@ -50,12 +50,27 @@ CACHE_FILE="${STATE_DIR}/update-check.json"
 read_json_string() {
     # $1 = file, $2 = key. Flat string fields only; bash has no JSON parser, and
     # both files this reads are written by this plugin rather than by a user.
-    [ -r "$1" ] || return 1
+    #
+    # `-f`, not `-r`: a FIFO is readable, and reading one blocks forever. This hook
+    # is declared "async": false, so a blocked read here hangs session start with no
+    # timeout — the worst failure this script has.
+    [ -f "$1" ] || return 1
     grep -o "\"$2\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$1" 2>/dev/null \
       | head -n 1 | sed 's/.*"\([^"]*\)"$/\1/'
 }
 
+# Digits and dots only. update-check applies the same filter on write, but this file
+# lives in the user's config directory and is re-validated on read rather than
+# trusted: a value carrying markup would otherwise land verbatim in session context.
+version_or_empty() {
+    case "${1:-}" in
+        ''|*[!0-9.]*) printf '' ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
 installed=$(read_json_string "${PLUGIN_ROOT}/.claude-plugin/plugin.json" version || true)
+installed=$(version_or_empty "${installed}")
 notice=""
 
 # No state directory means no marker and no cache, so the notice cannot be
@@ -66,7 +81,7 @@ notice=""
 # per version — the marker is written as soon as the notice is built.
 if [ -n "${installed}" ]; then
     seen=""
-    [ -r "${SEEN_FILE}" ] && seen=$(head -n 1 "${SEEN_FILE}" 2>/dev/null)
+    [ -f "${SEEN_FILE}" ] && seen=$(head -n 1 "${SEEN_FILE}" 2>/dev/null)
     if [ "${seen}" != "${installed}" ]; then
         if [ -n "${seen}" ]; then
             notice="claude-teammates updated: ${seen} -> ${installed}"
@@ -74,13 +89,24 @@ if [ -n "${installed}" ]; then
             notice="claude-teammates ${installed} is active"
         fi
         notice="${notice}"$'\n'"Release notes: https://github.com/andreymudri/claude-teammates/releases/tag/v${installed}"
-        mkdir -p "${STATE_DIR}" 2>/dev/null && printf '%s\n' "${installed}" > "${SEEN_FILE}" 2>/dev/null
+        # Written via a temp file and renamed, for two reasons. A plain redirect onto
+        # a FIFO blocks forever with no reader, which would hang this blocking hook —
+        # the `-f` guard above stops the READ, but the write needs its own defence.
+        # And the rename is atomic, so a concurrent session cannot observe a
+        # half-written marker and repeat the notice.
+        if mkdir -p "${STATE_DIR}" 2>/dev/null; then
+            seen_tmp="${SEEN_FILE}.$$"
+            if printf '%s\n' "${installed}" > "${seen_tmp}" 2>/dev/null; then
+                mv -f "${seen_tmp}" "${SEEN_FILE}" 2>/dev/null || rm -f "${seen_tmp}" 2>/dev/null
+            fi
+        fi
     fi
 fi
 
 # Case 2: the async check found a newer published version. Reported one session
 # after the check that discovered it, because that check never blocks this hook.
 published=$(read_json_string "${CACHE_FILE}" published || true)
+published=$(version_or_empty "${published}")
 if [ -n "${published}" ] && [ -n "${installed}" ] && [ "${published}" != "${installed}" ]; then
     # sort -V is what keeps 0.10.0 from being read as older than 0.9.0. Where it is
     # unavailable the comparison yields nothing and no notice is emitted: silence is
