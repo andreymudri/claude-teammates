@@ -29,6 +29,99 @@ else
     session_context=$(escape_for_json "$warning")
 fi
 
+# Update notice. Reads two local files and makes no network call — the fetch lives
+# in hooks/update-check, which is declared "async": true and emits nothing. Every
+# branch here is optional and non-fatal: a missing file means no notice, never an
+# error, because a broken notice must not cost anyone their session.
+# Resolved without expanding an unset variable. `${CLAUDE_CONFIG_DIR:-${HOME}/.claude}`
+# looks safe but is not: under `set -u` the default branch still expands ${HOME},
+# so a session with neither variable set died with "HOME: unbound variable" and a
+# non-zero exit — from the hook that must never fail. With neither set there is
+# nowhere to keep state, so the notice is skipped rather than guessed at.
+STATE_DIR=""
+if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+    STATE_DIR="${CLAUDE_CONFIG_DIR}/claude-teammates"
+elif [ -n "${HOME:-}" ]; then
+    STATE_DIR="${HOME}/.claude/claude-teammates"
+fi
+SEEN_FILE="${STATE_DIR}/last-seen-version"
+CACHE_FILE="${STATE_DIR}/update-check.json"
+
+read_json_string() {
+    # $1 = file, $2 = key. Flat string fields only; bash has no JSON parser, and
+    # both files this reads are written by this plugin rather than by a user.
+    #
+    # `-f`, not `-r`: a FIFO is readable, and reading one blocks forever. This hook
+    # is declared "async": false, so a blocked read here hangs session start with no
+    # timeout — the worst failure this script has.
+    [ -f "$1" ] || return 1
+    grep -o "\"$2\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$1" 2>/dev/null \
+      | head -n 1 | sed 's/.*"\([^"]*\)"$/\1/'
+}
+
+# Digits and dots only. update-check applies the same filter on write, but this file
+# lives in the user's config directory and is re-validated on read rather than
+# trusted: a value carrying markup would otherwise land verbatim in session context.
+version_or_empty() {
+    case "${1:-}" in
+        ''|*[!0-9.]*) printf '' ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+installed=$(read_json_string "${PLUGIN_ROOT}/.claude-plugin/plugin.json" version || true)
+installed=$(version_or_empty "${installed}")
+notice=""
+
+# No state directory means no marker and no cache, so the notice cannot be
+# once-only and would repeat every session. Skip it entirely instead.
+[ -n "${STATE_DIR}" ] || installed=""
+
+# Case 1: the installed version changed since this machine last saw it. Fires once
+# per version — the marker is written as soon as the notice is built.
+if [ -n "${installed}" ]; then
+    seen=""
+    [ -f "${SEEN_FILE}" ] && seen=$(head -n 1 "${SEEN_FILE}" 2>/dev/null)
+    if [ "${seen}" != "${installed}" ]; then
+        if [ -n "${seen}" ]; then
+            notice="claude-teammates updated: ${seen} -> ${installed}"
+        else
+            notice="claude-teammates ${installed} is active"
+        fi
+        notice="${notice}"$'\n'"Release notes: https://github.com/andreymudri/claude-teammates/releases/tag/v${installed}"
+        # Written via a temp file and renamed, for two reasons. A plain redirect onto
+        # a FIFO blocks forever with no reader, which would hang this blocking hook —
+        # the `-f` guard above stops the READ, but the write needs its own defence.
+        # And the rename is atomic, so a concurrent session cannot observe a
+        # half-written marker and repeat the notice.
+        if mkdir -p "${STATE_DIR}" 2>/dev/null; then
+            seen_tmp="${SEEN_FILE}.$$"
+            if printf '%s\n' "${installed}" > "${seen_tmp}" 2>/dev/null; then
+                mv -f "${seen_tmp}" "${SEEN_FILE}" 2>/dev/null || rm -f "${seen_tmp}" 2>/dev/null
+            fi
+        fi
+    fi
+fi
+
+# Case 2: the async check found a newer published version. Reported one session
+# after the check that discovered it, because that check never blocks this hook.
+published=$(read_json_string "${CACHE_FILE}" published || true)
+published=$(version_or_empty "${published}")
+if [ -n "${published}" ] && [ -n "${installed}" ] && [ "${published}" != "${installed}" ]; then
+    # sort -V is what keeps 0.10.0 from being read as older than 0.9.0. Where it is
+    # unavailable the comparison yields nothing and no notice is emitted: silence is
+    # the right failure mode for a notification.
+    newest=$(printf '%s\n%s\n' "${installed}" "${published}" | sort -V 2>/dev/null | tail -n 1)
+    if [ "${newest}" = "${published}" ]; then
+        [ -n "${notice}" ] && notice="${notice}"$'\n'
+        notice="${notice}claude-teammates ${published} is available (installed: ${installed}). Run /plugin update claude-teammates"
+    fi
+fi
+
+if [ -n "${notice}" ]; then
+    session_context="${session_context}\n\n$(escape_for_json "${notice}")"
+fi
+
 # Output context injection as JSON.
 # Cursor hooks expect additional_context (snake_case).
 # Claude Code hooks expect hookSpecificOutput.additionalContext (nested).

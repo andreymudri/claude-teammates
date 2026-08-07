@@ -47,6 +47,40 @@ So the following are **known and documented**, not vulnerabilities:
   PASS is the verdict boundary above, so a way across that boundary is worth reporting.
 - Anything requiring write access to a shared ref, which is outside the model.
 
+## The one outbound request
+
+This plugin makes exactly one network request, and only for update notices. It is described here
+rather than in the list above because it is not a teammate capability — it runs on your machine at
+session start, whether or not a fleet is running.
+
+`hooks/update-check` issues a single `GET` to
+`https://raw.githubusercontent.com/andreymudri/claude-teammates/master/.claude-plugin/plugin.json`,
+with `curl -fsS --max-time 5`, at most once every 24 hours. It sends nothing beyond the request:
+no identifiers, no project path, no telemetry. On any failure — offline, proxied, no `curl`, a
+non-200, a malformed body — it exits 0 silently and writes nothing.
+
+Set `CLAUDE_TEAMMATES_UPDATE_CHECK=0` to disable it. The opt-out is checked before the throttle and
+before the request, so a disabled install makes no request at all rather than making one and
+discarding the result. The 24-hour limit is stamped *before* each attempt rather than after a
+successful one, so a check that fails — offline, proxied — is rate-limited exactly like one that
+succeeds.
+
+The URL is overridable only by command-line argument, never by environment variable, and nothing
+passes one except the test suite. An environment override would let a cloned repository's `.envrc`
+or devcontainer configuration retarget the check at a host of its choosing on every session.
+
+The hook is declared `"async": true` in `hooks/hooks.json` and emits no output. It writes only
+`${CLAUDE_CONFIG_DIR:-~/.claude}/claude-teammates/update-check.json`, which `hooks/session-start`
+reads on a later session. That file's only effect is a string printed into session context:
+
+- It is not read by `gate`, `complete` or `fix`, so nothing in it can reach a verdict.
+- The version is filtered to digits and dots on write **and again on read**. Filtering only on
+  write would trust a file that lives in the user's own config directory; re-validating on read is
+  what actually stops a hand-crafted value carrying markup into session context.
+- `hooks/session-start` makes no network request of its own. It reads two local files, both guarded
+  with `-f` rather than `-r` and written by rename rather than redirect — a FIFO left at either
+  path would otherwise block that hook forever, and it is the hook that blocks session start.
+
 ## What is worth reporting
 
 - A way to get a **PASS on a phase whose content is not explained by a task branch or the base** —

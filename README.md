@@ -34,6 +34,35 @@ edits then take effect on the next session without a push:
     /plugin marketplace add /path/to/claude-teammates
     /plugin install claude-teammates
 
+### Update notices
+
+Claude Code updates plugins in the background and says nothing, so a new version usually arrives
+silently. This plugin tells you two things instead.
+
+**Which version you are on.** The first session after the installed version changes, the plugin
+reports the change and links its release notes. Once per version, then silent. No network.
+
+**Whether a newer one is published.** A background check compares the installed version against the
+published one and reports a newer one on a later session. It runs at most once every 24 hours.
+
+The check is a single `GET` to `raw.githubusercontent.com` for this repository's published
+`.claude-plugin/plugin.json`, with a five-second timeout. It sends nothing about you, your machine,
+or your project beyond the request itself, and it runs in a hook declared `"async": true`, so it
+never delays a session. If it fails — offline, proxied, no `curl` — it exits silently, and the
+24-hour limit still applies: the attempt is stamped before it is made, so a machine that can never
+reach GitHub does not retry on every session.
+
+Turn it off with:
+
+    CLAUDE_TEAMMATES_UPDATE_CHECK=0
+
+Both notices keep their state in `${CLAUDE_CONFIG_DIR:-~/.claude}/claude-teammates/`: the version
+you last saw, and the cached result of the last check. Deleting that directory re-shows the current
+version's notice once.
+
+Because the check writes a cache the *next* session reads, a newly published version is reported
+one session after the check that found it. That is the cost of never blocking session start.
+
 ## Getting started
 
 Say what you want built. The `using-teammates` skill routes you: an unclear idea goes to
