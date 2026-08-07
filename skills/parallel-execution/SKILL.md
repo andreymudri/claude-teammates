@@ -58,6 +58,13 @@ cost multiplies across every teammate in a phase. Set it explicitly on every dis
 Role dispatches are fixed and not read from the plan: `tm-integrator` runs at `mid`,
 `tm-reviewer` at `capable`. Review is the last line of defence before integration.
 
+The `tm-integrator` dispatch carries the configured integrator tier and effort, read with
+`config get agents.integrator.tier` and `config get agents.integrator.effort`; an unset value
+means the dispatch omits the option and inherits the session's. Unlike the reviewer's tier and
+effort, these are ergonomics, not enforcement: the integrator merges branches, it does not judge
+a check, so either layer may set them and the gitignored `teammates.local.json` is the normal
+place to.
+
 When generating a Workflow, pass the same map through so the generated dispatches carry
 concrete models:
 
