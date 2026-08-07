@@ -28,8 +28,16 @@ those you execute:
   carries the configured reviewer tier and effort, read with
   `config get agents.reviewer.tier` and `config get agents.reviewer.effort`. `config get` on an
   unset key exits 2 with `unset: <key>` — the same exit code every hard config failure uses, but
-  here it is the normal case, not an error: it means the dispatch omits the option and inherits
-  the session's. Both come from the tracked manifest only — the reviewer grades the diff, so
+  here it is the normal case, not an error. The two keys fall back differently, and treating them
+  alike is how a reviewer ends up judging below its guaranteed tier:
+    - `unset: agents.reviewer.tier` — dispatch at the **fixed reviewer tier, `capable`** (model
+      `opus`). Never omit the model to inherit the session's: in a `mid` session that would have
+      the reviewer grading every `agent` check a full tier below what this skill guarantees. A
+      configured tier replaces `capable`; nothing else does.
+    - `unset: agents.reviewer.effort` — omit the `effort` option, and the dispatch inherits the
+      session's effort. Only effort falls back this way.
+
+  Both come from the tracked manifest only — the reviewer grades the diff, so
   letting the gitignored layer choose its tier would let the party being judged pick its own
   judge. Then take every finding at a `blockOn` severity and
   dispatch a second reviewer prompted to **refute** it. Only findings that survive refutation
