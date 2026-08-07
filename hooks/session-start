@@ -118,6 +118,38 @@ if [ -n "${published}" ] && [ -n "${installed}" ] && [ "${published}" != "${inst
     fi
 fi
 
+# Install self-check. Enabled is not the same as working: `enabledPlugins` being true
+# is why this hook runs at all, so the plugin cannot detect its own disabled state —
+# if it were off, nothing here would execute. What it CAN detect is an install that is
+# present but unusable, which is the failure an operator actually hits: a partial
+# unpack, a half-finished update, or a missing node.
+#
+# Filesystem stats and one `command -v`, no subprocess beyond that: this runs in the
+# hook that blocks session start.
+missing=""
+add_missing() { missing="${missing}${missing:+, }$1"; }
+
+[ -f "${PLUGIN_ROOT}/scripts/cli.mjs" ] || add_missing "scripts/cli.mjs"
+command -v node >/dev/null 2>&1 || add_missing "node not on PATH"
+
+skill_count=$(find "${PLUGIN_ROOT}/skills" -maxdepth 2 -name 'SKILL.md' 2>/dev/null | wc -l | tr -d '[:space:]')
+agent_count=$(find "${PLUGIN_ROOT}/agents" -maxdepth 1 -name 'tm-*.md' 2>/dev/null | wc -l | tr -d '[:space:]')
+[ "${skill_count:-0}" -gt 0 ] 2>/dev/null || add_missing "skills/"
+[ "${agent_count:-0}" -gt 0 ] 2>/dev/null || add_missing "agents/tm-*.md"
+
+if [ -n "${missing}" ]; then
+    # Repeated every session, not once: a broken install stays broken, and the
+    # operator needs the message on the session where they hit the failure — not
+    # only on the one where the version happened to change.
+    broken="WARNING: claude-teammates is installed but NOT fully working. Missing: ${missing}."
+    broken="${broken}"$'\n'"Fleet commands and phase gates will fail. Reinstall with /plugin install claude-teammates, or check the plugin directory at ${PLUGIN_ROOT}."
+    session_context="${session_context}\n\n$(escape_for_json "${broken}")"
+elif [ -n "${notice}" ]; then
+    # Only alongside a version notice: on a healthy install this is reassurance, and
+    # reassurance repeated every session is noise.
+    notice="${notice}"$'\n'"ready: ${skill_count} skills, ${agent_count} agents, cli ok"
+fi
+
 if [ -n "${notice}" ]; then
     session_context="${session_context}\n\n$(escape_for_json "${notice}")"
 fi

@@ -419,3 +419,111 @@ test('update-check leaves no temp file behind after writing its cache', () => {
     assert.ok(entries.includes('update-check.json'))
   })
 })
+
+// --- install self-check -------------------------------------------------
+//
+// Enabled is not the same as working. `enabledPlugins` being true is why this hook
+// runs at all, so the plugin cannot detect its own disabled state. What it can
+// detect is an install that is present but unusable.
+
+// Builds a plugin root that is missing whichever parts the caller names.
+function fakePluginRoot({ cli = true, agents = true, skills = true } = {}) {
+  const dir = mkdtempSync(path.join(tmpdir(), "tm-inst-"))
+  mkdirSync(path.join(dir, ".claude-plugin"), { recursive: true })
+  writeFileSync(path.join(dir, ".claude-plugin", "plugin.json"), JSON.stringify({ version: "0.9.0" }))
+  mkdirSync(path.join(dir, "skills", "using-teammates"), { recursive: true })
+  writeFileSync(path.join(dir, "skills", "using-teammates", "SKILL.md"), "# using-teammates" + "\n")
+  if (skills) {
+    mkdirSync(path.join(dir, "skills", "phase-gate"), { recursive: true })
+    writeFileSync(path.join(dir, "skills", "phase-gate", "SKILL.md"), "# phase-gate" + "\n")
+  }
+  if (cli) {
+    mkdirSync(path.join(dir, "scripts"), { recursive: true })
+    writeFileSync(path.join(dir, "scripts", "cli.mjs"), "// cli" + "\n")
+  }
+  if (agents) {
+    mkdirSync(path.join(dir, "agents"), { recursive: true })
+    writeFileSync(path.join(dir, "agents", "tm-implementer.md"), "# tm-implementer" + "\n")
+  }
+  return dir
+}
+
+test("a healthy install reports what it found, alongside the version notice", () => {
+  const pluginRoot = fakePluginRoot()
+  try {
+    withConfigDir((dir) => {
+      const ctx = contextWith(dir, { CLAUDE_PLUGIN_ROOT: pluginRoot })
+      assert.ok(/ready: [0-9]+ skills, [0-9]+ agents, cli ok/.test(ctx))
+      assert.doesNotMatch(ctx, /NOT fully working/)
+    })
+  } finally {
+    rmSync(pluginRoot, { recursive: true, force: true })
+  }
+})
+
+test("the readiness line does not repeat once the version notice has fired", () => {
+  const pluginRoot = fakePluginRoot()
+  try {
+    withConfigDir((dir) => {
+      contextWith(dir, { CLAUDE_PLUGIN_ROOT: pluginRoot })
+      const second = contextWith(dir, { CLAUDE_PLUGIN_ROOT: pluginRoot })
+      assert.doesNotMatch(second, /ready:/, "reassurance every session is noise")
+    })
+  } finally {
+    rmSync(pluginRoot, { recursive: true, force: true })
+  }
+})
+
+test("a missing cli.mjs is named, not merely implied", () => {
+  const pluginRoot = fakePluginRoot({ cli: false })
+  try {
+    withConfigDir((dir) => {
+      const ctx = contextWith(dir, { CLAUDE_PLUGIN_ROOT: pluginRoot })
+      assert.match(ctx, /NOT fully working/)
+      assert.ok(ctx.includes(String.raw`scripts/cli.mjs`))
+      assert.doesNotMatch(ctx, /ready:/)
+    })
+  } finally {
+    rmSync(pluginRoot, { recursive: true, force: true })
+  }
+})
+
+test("missing agents are named", () => {
+  const pluginRoot = fakePluginRoot({ agents: false })
+  try {
+    withConfigDir((dir) => {
+      const ctx = contextWith(dir, { CLAUDE_PLUGIN_ROOT: pluginRoot })
+      assert.match(ctx, /NOT fully working/)
+      assert.match(ctx, /agents/)
+    })
+  } finally {
+    rmSync(pluginRoot, { recursive: true, force: true })
+  }
+})
+
+// A broken install stays broken. The operator needs the warning on the session where
+// they hit the failure, not only on the one where the version happened to change.
+test("a broken install warns on every session, not once per version", () => {
+  const pluginRoot = fakePluginRoot({ cli: false })
+  try {
+    withConfigDir((dir) => {
+      for (const _ of [1, 2, 3]) {
+        assert.match(contextWith(dir, { CLAUDE_PLUGIN_ROOT: pluginRoot }), /NOT fully working/)
+      }
+    })
+  } finally {
+    rmSync(pluginRoot, { recursive: true, force: true })
+  }
+})
+
+test("a broken install still exits 0 with exactly one valid context field", () => {
+  const pluginRoot = fakePluginRoot({ cli: false, agents: false })
+  try {
+    withConfigDir((dir) => {
+      // contextWith asserts the single-field property and would throw on bad JSON.
+      assert.match(contextWith(dir, { CLAUDE_PLUGIN_ROOT: pluginRoot }), /NOT fully working/)
+    })
+  } finally {
+    rmSync(pluginRoot, { recursive: true, force: true })
+  }
+})

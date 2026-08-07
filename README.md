@@ -39,8 +39,20 @@ edits then take effect on the next session without a push:
 Claude Code updates plugins in the background and says nothing, so a new version usually arrives
 silently. This plugin tells you two things instead.
 
-**Which version you are on.** The first session after the installed version changes, the plugin
-reports the change and links its release notes. Once per version, then silent. No network.
+**Which version you are on, and whether the install actually works.** The first session after the
+installed version changes, the plugin reports the change, links its release notes, and confirms
+what it found — `ready: 14 skills, 3 agents, cli ok`. Once per version, then silent. No network.
+
+If parts are missing it says so instead, naming them, and repeats that **every** session until
+fixed:
+
+    WARNING: claude-teammates is installed but NOT fully working. Missing: scripts/cli.mjs.
+    Fleet commands and phase gates will fail. Reinstall with /plugin install claude-teammates.
+
+Note what this cannot tell you: whether the plugin is *enabled*. Claude Code only runs a plugin's
+hooks when `enabledPlugins` has it turned on, so if it were off, nothing here would run to report
+it. The check covers the failure you can actually hit with it on — a partial unpack, an interrupted
+update, a missing `node`.
 
 **Whether a newer one is published.** A background check compares the installed version against the
 published one and reports a newer one on a later session. It runs at most once every 24 hours.
