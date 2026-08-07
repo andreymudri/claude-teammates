@@ -29,6 +29,59 @@ else
     session_context=$(escape_for_json "$warning")
 fi
 
+# Update notice. Reads two local files and makes no network call — the fetch lives
+# in hooks/update-check, which is declared "async": true and emits nothing. Every
+# branch here is optional and non-fatal: a missing file means no notice, never an
+# error, because a broken notice must not cost anyone their session.
+STATE_DIR="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}/claude-teammates"
+SEEN_FILE="${STATE_DIR}/last-seen-version"
+CACHE_FILE="${STATE_DIR}/update-check.json"
+
+read_json_string() {
+    # $1 = file, $2 = key. Flat string fields only; bash has no JSON parser, and
+    # both files this reads are written by this plugin rather than by a user.
+    [ -r "$1" ] || return 1
+    grep -o "\"$2\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$1" 2>/dev/null \
+      | head -n 1 | sed 's/.*"\([^"]*\)"$/\1/'
+}
+
+installed=$(read_json_string "${PLUGIN_ROOT}/.claude-plugin/plugin.json" version || true)
+notice=""
+
+# Case 1: the installed version changed since this machine last saw it. Fires once
+# per version — the marker is written as soon as the notice is built.
+if [ -n "${installed}" ]; then
+    seen=""
+    [ -r "${SEEN_FILE}" ] && seen=$(head -n 1 "${SEEN_FILE}" 2>/dev/null)
+    if [ "${seen}" != "${installed}" ]; then
+        if [ -n "${seen}" ]; then
+            notice="claude-teammates updated: ${seen} -> ${installed}"
+        else
+            notice="claude-teammates ${installed} is active"
+        fi
+        notice="${notice}"$'\n'"Release notes: https://github.com/andreymudri/claude-teammates/releases/tag/v${installed}"
+        mkdir -p "${STATE_DIR}" 2>/dev/null && printf '%s\n' "${installed}" > "${SEEN_FILE}" 2>/dev/null
+    fi
+fi
+
+# Case 2: the async check found a newer published version. Reported one session
+# after the check that discovered it, because that check never blocks this hook.
+published=$(read_json_string "${CACHE_FILE}" published || true)
+if [ -n "${published}" ] && [ -n "${installed}" ] && [ "${published}" != "${installed}" ]; then
+    # sort -V is what keeps 0.10.0 from being read as older than 0.9.0. Where it is
+    # unavailable the comparison yields nothing and no notice is emitted: silence is
+    # the right failure mode for a notification.
+    newest=$(printf '%s\n%s\n' "${installed}" "${published}" | sort -V 2>/dev/null | tail -n 1)
+    if [ "${newest}" = "${published}" ]; then
+        [ -n "${notice}" ] && notice="${notice}"$'\n'
+        notice="${notice}claude-teammates ${published} is available (installed: ${installed}). Run /plugin update claude-teammates"
+    fi
+fi
+
+if [ -n "${notice}" ]; then
+    session_context="${session_context}\n\n$(escape_for_json "${notice}")"
+fi
+
 # Output context injection as JSON.
 # Cursor hooks expect additional_context (snake_case).
 # Claude Code hooks expect hookSpecificOutput.additionalContext (nested).

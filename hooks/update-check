@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Async SessionStart hook: checks whether a newer claude-teammates is published.
+#
+# Emits NOTHING. It writes a cache file that hooks/session-start reads on a later
+# session. Keeping the network call out of the emitting hook is the whole point:
+# session-start is declared "async": false and blocks, so a fetch there would add
+# latency to every session and fail visibly when offline.
+#
+# The consequence is deliberate: a newly published version is reported one session
+# AFTER the check that discovered it. That is the price of never blocking.
+
+set -uo pipefail
+
+STATE_DIR="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}/claude-teammates"
+CACHE="${STATE_DIR}/update-check.json"
+THROTTLE_SECONDS=86400
+RAW_URL="${CLAUDE_TEAMMATES_UPDATE_URL:-https://raw.githubusercontent.com/andreymudri/claude-teammates/master/.claude-plugin/plugin.json}"
+
+# Opt-out is checked first, before anything else: a disabled install makes no
+# request at all, rather than making one and discarding the result.
+case "${CLAUDE_TEAMMATES_UPDATE_CHECK:-1}" in
+  0|false|no|off) exit 0 ;;
+esac
+
+now=$(date +%s 2>/dev/null) || exit 0
+
+# Throttle on the cache file's age. `stat` differs between GNU and BSD, so try
+# both spellings; an unreadable mtime is treated as stale rather than fatal.
+if [ -f "${CACHE}" ]; then
+  mtime=$(stat -c %Y "${CACHE}" 2>/dev/null || stat -f %m "${CACHE}" 2>/dev/null || echo 0)
+  if [ "${mtime}" -gt 0 ] 2>/dev/null && [ $((now - mtime)) -lt "${THROTTLE_SECONDS}" ]; then
+    exit 0
+  fi
+fi
+
+command -v curl >/dev/null 2>&1 || exit 0
+body=$(curl -fsS --max-time 5 "${RAW_URL}" 2>/dev/null) || exit 0
+[ -n "${body}" ] || exit 0
+
+# Extracted with grep/sed rather than a JSON parser — bash has none, and the field
+# is a flat string. The domain check below is what makes that safe: a redirect to
+# an HTML error page, or any value carrying markup, is rejected rather than cached.
+published=$(printf '%s' "${body}" \
+  | grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' \
+  | head -n 1 \
+  | sed 's/.*"\([^"]*\)"$/\1/')
+case "${published}" in
+  ''|*[!0-9.]*) exit 0 ;;
+esac
+
+# Written atomically: session-start may read this concurrently, and a half-written
+# file must never be observable. The file is touched on every completed check, not
+# only on a new version, so the throttle also covers checks that found nothing.
+mkdir -p "${STATE_DIR}" 2>/dev/null || exit 0
+tmp="${CACHE}.$$"
+printf '{"published":"%s","checkedAt":%s}\n' "${published}" "${now}" > "${tmp}" 2>/dev/null || exit 0
+mv -f "${tmp}" "${CACHE}" 2>/dev/null || rm -f "${tmp}" 2>/dev/null
+
+exit 0
