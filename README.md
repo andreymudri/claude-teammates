@@ -131,12 +131,29 @@ accept `phases`, `lens` or `preview` in either file — including without `--loc
     $ node scripts/cli.mjs config set lens correctness
     unknown config key: lens        # exit 2
 
-That is deliberate, not a gap. Enforcement policy is edited **by hand** in
-`teammates.gate.json` so it lands as a reviewable diff rather than as a CLI mutation that leaves
-nothing to read. The consequence is that a hand edit gets none of `config set`'s validation, so
-run `config list` afterwards: it re-reads and validates both layers and exits 2 with a message if
-the file is no longer valid JSON or an ergonomics key is malformed. The enforcement keys' own
-content is exercised by the next `gate` run.
+That is deliberate, not a gap. Enforcement policy is edited **by hand** in `teammates.gate.json`
+so it lands as a reviewable diff rather than as a CLI mutation that leaves nothing to read.
+
+**Check a hand edit with `config list`.** It re-reads and validates both layers and exits 2 with
+a message on a file that is no longer valid JSON, a malformed ergonomics key, or a badly *shaped*
+enforcement key:
+
+    $ node scripts/cli.mjs config list          # teammates.gate.json holds "lens": "performance"
+    lens must be a non-empty array of strings   # exit 2
+
+**`config list` checks shape, not content, and the difference bites.** A `lens` of `["nonsense"]`
+is a well-shaped array of strings, so it is accepted and printed at exit 0. Whether those lens
+names mean anything to a reviewer is only exercised when the next `gate` dispatches one — the same
+is true of a check's `run` string or a `preview.link` path. Shape is structure and the CLI can see
+it; content is policy and only a real run can.
+
+**Do not reach for `config get` here.** It rejects every enforcement key by name, in either file,
+and that rejection says nothing about the manifest:
+
+    $ node scripts/cli.mjs config get lens
+    unknown config key: lens                    # exit 2
+
+`config list` is the verification step; `config get` is for the ergonomics keys in the table above.
 
 `list` reads both layers; `set` and `unset` write the tracked manifest unless you pass `--local`.
 
