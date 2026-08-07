@@ -163,7 +163,7 @@ export async function loadConfig(root) {
 }
 ```
 
-- [ ] **Step 6:** Add dotted-path accessors. `config set agents.reviewer.tier capable` needs both:
+- [ ] **Step 6:** Add dotted-path accessors. `config set agents.implementer.tier capable` needs both:
 
 ```js
 export function getKey(obj, dotted) {
@@ -621,7 +621,7 @@ import {
           if (rawValue === undefined) { io.out('config set needs a value'); return 2 }
           let parsed
           // JSON first so numbers and `false` arrive as themselves; a bare word that is not
-          // valid JSON is the string the caller typed, so `set agents.reviewer.tier capable`
+          // valid JSON is the string the caller typed, so `set agents.implementer.tier capable`
           // works without shell quoting.
           try { parsed = JSON.parse(rawValue) } catch { parsed = rawValue }
           setKey(layer, key, validateKey(key, parsed))
@@ -651,9 +651,13 @@ import {
   source column; `config set maxParallel 12 --local` writes `teammates.local.json`, appends it to
   `.gitignore`, and reports both; a second `set` does not append a duplicate `.gitignore` line;
   `config set fixRounds 99 --local` exits 2 naming `fixRounds` as an enforcement key and writes
-  nothing; `config set agents.reviewer.tier nonsense --local` exits 2 listing the valid tiers;
-  `config set agents.reviewer.tier capable --local` then `config get agents.reviewer.tier` prints
-  `capable`; `config get` on an unset key exits 2; `config bogus` exits 2 with the usage line;
+  nothing; `config set agents.implementer.tier nonsense --local` exits 2 listing the valid tiers;
+  `config set agents.implementer.tier capable --local` then `config get agents.implementer.tier`
+  prints `capable`; **`config set agents.reviewer.tier capable --local` exits 2 naming
+  `agents.reviewer.tier` as an enforcement key and writes nothing**, while the same set without
+  `--local` succeeds against `teammates.gate.json`; `config set __proto__.maxParallel 1` exits 2
+  with a message matching `/unsafe config key segment/` and leaves `({}).maxParallel` undefined;
+  `config get` on an unset key exits 2; `config bogus` exits 2 with the usage line;
   `workflow` with `caveman: 'full'` in the local layer emits a workflow whose brief still
   contains `MANDATORY FIRST STEP`; and a corrupt `teammates.local.json` exits 2 with a message
   rather than a `SyntaxError` stack.
