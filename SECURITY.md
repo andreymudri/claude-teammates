@@ -20,6 +20,31 @@ So the following are **known and documented**, not vulnerabilities:
   read from that file.
 - A teammate writing `.teammates/` state. No check reads it when deciding a verdict; the worst it
   buys is wasted fix rounds, not a false PASS.
+- A teammate writing `teammates.local.json`. That file is gitignored, so a teammate can write it
+  during its own task and `git status` stays clean: neither `fileset` nor `ownership` will ever
+  see it. Read the next two paragraphs as the actual boundary rather than as a reassurance.
+
+  **It cannot change a verdict.** `gate`, `complete` and `fix` read the tracked manifest through
+  `loadGateConfig` and never the merged config, so no key in the local layer reaches a check, a
+  check's `blockOn`, the lens, the merge preview, or the fix-round budget. Every key that could
+  is rejected there by name: `phases`, `lens`, `preview`, and — read this one specifically —
+  **`agents.reviewer.tier` and `agents.reviewer.effort`**. The reviewer produces the verdict for
+  every `agent`-kind check, so its tier and effort decide how good the judge is; allowing them in
+  the gitignored layer would let a teammate weaken the reviewer grading its own diff. Those live
+  only in the tracked `teammates.gate.json`.
+
+  **It can still influence how later work is dispatched, and that influence leaves no evidence.**
+  A teammate that writes `{"agents":{"implementer":{"tier":"cheap","effort":"low"}},"caveman":"ultra"}`
+  keeps `git status --porcelain` empty and nonetheless sets every later implementer's tier and
+  effort, gets that downgraded tier stamped into `plan.json` as `configured` so `fix` escalates
+  from it on retry, and rewrites every later dispatch brief through `caveman`. That is real
+  influence over the run — worse work, dispatched more cheaply, briefed more tersely — bounded
+  only by the fact that the gate still grades the result at full strength from the tracked
+  manifest. It is accepted for the same reason arbitrary execution is: a teammate that can run
+  code can write this file. Note that setting the same keys in the tracked manifest does not
+  close this — the local layer is resolved *over* the gate layer for every ergonomics key, which
+  is what makes it a local override. The only thing standing between that influence and a false
+  PASS is the verdict boundary above, so a way across that boundary is worth reporting.
 - Anything requiring write access to a shared ref, which is outside the model.
 
 ## What is worth reporting
