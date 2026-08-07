@@ -11,7 +11,17 @@
 
 set -uo pipefail
 
-STATE_DIR="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}/claude-teammates"
+# Resolved without expanding an unset variable: under `set -u`, the default branch
+# of `${CLAUDE_CONFIG_DIR:-${HOME}/.claude}` still expands ${HOME} and dies when it
+# is unset. With neither set there is nowhere to cache a result, so there is no
+# point making the request.
+if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+  STATE_DIR="${CLAUDE_CONFIG_DIR}/claude-teammates"
+elif [ -n "${HOME:-}" ]; then
+  STATE_DIR="${HOME}/.claude/claude-teammates"
+else
+  exit 0
+fi
 CACHE="${STATE_DIR}/update-check.json"
 THROTTLE_SECONDS=86400
 RAW_URL="${CLAUDE_TEAMMATES_UPDATE_URL:-https://raw.githubusercontent.com/andreymudri/claude-teammates/master/.claude-plugin/plugin.json}"

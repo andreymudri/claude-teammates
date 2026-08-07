@@ -241,3 +241,43 @@ test('hooks.json wires update-check async and session-start sync', async () => {
   assert.equal(sync.async, false)
   assert.equal(async.async, true)
 })
+
+// Regression: `${CLAUDE_CONFIG_DIR:-${HOME}/.claude}` looks safe but is not. Under
+// `set -u` the default branch still expands ${HOME}, so a session with neither
+// variable set died with "HOME: unbound variable" and exit 1 — from the one hook
+// that must never fail. Both hooks now resolve the directory without expanding an
+// unset variable, and skip the notice when there is nowhere to keep state.
+test('session-start survives HOME and CLAUDE_CONFIG_DIR both being unset', () => {
+  const env = { ...process.env, CLAUDE_PLUGIN_ROOT: root }
+  delete env.HOME
+  delete env.CLAUDE_CONFIG_DIR
+  const out = execFileSync('bash', [hookScript], { encoding: 'utf8', env })
+  const parsed = JSON.parse(out)
+  assert.equal(Object.keys(parsed).length, 1)
+  const ctx = parsed.hookSpecificOutput.additionalContext
+  assert.match(ctx, /using-teammates/, 'the entrypoint must still be injected')
+  // With no state directory the notice cannot be once-only, so it is suppressed
+  // rather than repeated every session.
+  assert.doesNotMatch(ctx, /is active|updated:|is available/)
+})
+
+test('update-check survives HOME and CLAUDE_CONFIG_DIR both being unset', () => {
+  const env = { ...process.env }
+  delete env.HOME
+  delete env.CLAUDE_CONFIG_DIR
+  const out = execFileSync('bash', [updateCheckScript], { encoding: 'utf8', env })
+  assert.equal(out, '')
+})
+
+test('both hooks tolerate a config dir containing a space', () => {
+  const base = mkdtempSync(path.join(tmpdir(), 'tm-sp-'))
+  const dir = path.join(base, 'has space')
+  mkdirSync(dir, { recursive: true })
+  try {
+    const ctx = contextWith(dir)
+    assert.match(ctx, /is active/)
+    assert.ok(existsSync(path.join(dir, 'claude-teammates', 'last-seen-version')))
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
+})

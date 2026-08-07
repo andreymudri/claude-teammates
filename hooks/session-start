@@ -33,7 +33,17 @@ fi
 # in hooks/update-check, which is declared "async": true and emits nothing. Every
 # branch here is optional and non-fatal: a missing file means no notice, never an
 # error, because a broken notice must not cost anyone their session.
-STATE_DIR="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}/claude-teammates"
+# Resolved without expanding an unset variable. `${CLAUDE_CONFIG_DIR:-${HOME}/.claude}`
+# looks safe but is not: under `set -u` the default branch still expands ${HOME},
+# so a session with neither variable set died with "HOME: unbound variable" and a
+# non-zero exit — from the hook that must never fail. With neither set there is
+# nowhere to keep state, so the notice is skipped rather than guessed at.
+STATE_DIR=""
+if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+    STATE_DIR="${CLAUDE_CONFIG_DIR}/claude-teammates"
+elif [ -n "${HOME:-}" ]; then
+    STATE_DIR="${HOME}/.claude/claude-teammates"
+fi
 SEEN_FILE="${STATE_DIR}/last-seen-version"
 CACHE_FILE="${STATE_DIR}/update-check.json"
 
@@ -47,6 +57,10 @@ read_json_string() {
 
 installed=$(read_json_string "${PLUGIN_ROOT}/.claude-plugin/plugin.json" version || true)
 notice=""
+
+# No state directory means no marker and no cache, so the notice cannot be
+# once-only and would repeat every session. Skip it entirely instead.
+[ -n "${STATE_DIR}" ] || installed=""
 
 # Case 1: the installed version changed since this machine last saw it. Fires once
 # per version — the marker is written as soon as the notice is built.
