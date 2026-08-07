@@ -43,8 +43,11 @@ Both paths support adding teammates at any moment:
 
 Two separate limits apply — do not conflate them:
 
-- **`maxParallel`** from the gate manifest (default `min(8, cores-2)`) is this plugin's own
-  fleet size. You choose it and may change it between phases.
+- **`maxParallel`** (default `min(8, cores-2)`) is this plugin's own fleet size. It is an
+  **ergonomics** key: settable in either layer, but `teammates.local.json` (gitignored,
+  machine-local) is the normal place for it — fleet size depends on the machine, so it does not
+  belong committed. Change it through `config set maxParallel <n> --local`, never by hand; see
+  `teammates-config`. You may change it between phases.
 - **`min(16, cores-2)`** is the Workflow tool's built-in per-workflow concurrency cap. It is
   not ours to set. Excess items queue rather than fail.
 
