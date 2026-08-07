@@ -134,19 +134,25 @@ export function parseConstraints(markdown) {
   // blank line closes the item, so a following indented paragraph is not swallowed. A
   // nested bullet matches the bullet pattern first and so stays a standalone constraint.
   //
-  // The continuation test excludes any indented line opening with `-`, so a line that looks
-  // like a bullet but that the bullet pattern rejects — an empty `-`, or one whose text is
-  // split by a Unicode line separator, which `.` does not match — is dropped rather than
-  // appended. Joining it would fuse two unrelated rules into a single constraint that reads
-  // as one sentence and says what neither author wrote; a dropped malformed rule is the
-  // lesser failure, and the only one that cannot silently misinform a teammate.
+  // The continuation test excludes an indented line that is itself bullet-shaped (`- ` or a
+  // bare `-`), so a line the bullet pattern rejects is dropped rather than appended. Joining
+  // it would fuse two unrelated rules into a single constraint that reads as one sentence and
+  // says what neither author wrote; a dropped malformed rule is the lesser failure, and the
+  // only one that cannot silently misinform a teammate. The lookahead is `-\s|-$` rather than
+  // a bare `-`, so a continuation that merely *starts* with a hyphen still joins: `--no-ff`
+  // opens a rule's second line in this project's own constraints, and excluding every leading
+  // hyphen would truncate it into a sentence that reads complete.
+  //
+  // Both patterns use `[^\n]` rather than `.`: `.` does not match U+2028/U+2029 while `\s`
+  // does, so a bullet whose text contains one failed the bullet pattern entirely and was
+  // dropped with no diagnostic — a rule the plan states that reaches no teammate.
   let open = false
   for (const line of (next ? rest.slice(0, next.index) : rest).split('\n')) {
-    const bullet = /^\s*-\s+(.*\S)\s*$/.exec(line)
+    const bullet = /^\s*-\s+([^\n]*\S)\s*$/.exec(line)
     if (bullet) {
       items.push(bullet[1])
       open = true
-    } else if (open && /^\s+[^-\s]/.test(line)) {
+    } else if (open && /^\s+(?!-\s|-$)\S/.test(line)) {
       items[items.length - 1] += ` ${line.trim()}`
     } else {
       open = false
