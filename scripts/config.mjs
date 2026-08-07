@@ -96,6 +96,40 @@ export function validateLocal(local) {
   return local
 }
 
+// The gate file is tracked and reviewable, so a bad value here is an operator typo rather than an
+// attack. It is validated anyway, and for the same reason validateLocal is: a key that silently
+// resolves to a default is a key the operator believes is set. Enforcement keys are permitted
+// here — this is the file they belong in — so only their presence is unchecked, not their shape.
+export function validateGate(gate) {
+  if (gate === null || typeof gate !== 'object' || Array.isArray(gate)) {
+    throw new ConfigError(`${GATE_FILE} must contain a JSON object`)
+  }
+  if (gate.maxParallel !== undefined) VALIDATORS.maxParallel(gate.maxParallel)
+  if (gate.caveman !== undefined) VALIDATORS.caveman(gate.caveman)
+  if (gate.agents !== undefined) {
+    if (gate.agents === null || typeof gate.agents !== 'object' || Array.isArray(gate.agents)) {
+      throw new ConfigError('agents must be an object keyed by role')
+    }
+    for (const [role, entry] of Object.entries(gate.agents)) {
+      if (!ROLES.includes(role)) throw new ConfigError(`unknown agent role: ${role}`)
+      // Note the deliberate difference from validateLocal: `agents.reviewer` is permitted here.
+      // The reviewer's tier and effort are enforcement keys, and this is the file enforcement
+      // keys live in. Rejecting the role in this layer would leave no way to configure it at all.
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw new ConfigError(`agents.${role} must be an object`)
+      }
+      for (const field of Object.keys(entry)) {
+        if (field !== 'tier' && field !== 'effort') {
+          throw new ConfigError(`unknown key in ${GATE_FILE}: agents.${role}.${field}`)
+        }
+      }
+      if (entry.tier !== undefined) VALIDATORS.tier(entry.tier)
+      if (entry.effort !== undefined) VALIDATORS.effort(entry.effort)
+    }
+  }
+  return gate
+}
+
 // A layer file whose whole body is `null` parses to the same value this returns for a missing
 // file. Callers that must tell the two apart pass their own `missing` sentinel; the default
 // stays `null` so "absent" reads naturally everywhere else.
@@ -112,9 +146,12 @@ export async function readLayer(root, file, { missing = null } = {}) {
 const MISSING = Symbol('missing layer')
 
 export async function loadConfig(root) {
-  const gate = (await readLayer(root, GATE_FILE)) ?? {}
-  // Only an absent file skips validation. A present file holding `false`, `0`, `""` or `null` is
-  // a malformed layer, and guarding on truthiness would silently ignore it instead of saying so.
+  // Only an absent file skips validation, in either layer. A present file holding `false`, `0`,
+  // `""` or `null` is a malformed layer, and guarding on truthiness would silently ignore it
+  // instead of saying so. An absent gate file still resolves to defaults with no error — that is
+  // the ordinary case for a project with no manifest, which `gate` reports on its own terms.
+  const gateRaw = await readLayer(root, GATE_FILE, { missing: MISSING })
+  const gate = gateRaw === MISSING ? {} : validateGate(gateRaw)
   const raw = await readLayer(root, LOCAL_FILE, { missing: MISSING })
   const local = raw === MISSING ? null : validateLocal(raw)
 

@@ -14,6 +14,7 @@ import {
   ENFORCEMENT_KEYS,
   ConfigError,
   validateLocal,
+  validateGate,
   readLayer,
   writeLayer,
   loadConfig,
@@ -512,4 +513,148 @@ test('loadConfig does not attribute a field to a local layer that only names the
     assert.equal(sources['agents.integrator.tier'], GATE_FILE)
     assert.equal(sources['agents.integrator.effort'], GATE_FILE)
   })
+})
+
+// --- Task 9: the tracked gate layer is validated as strictly as the local one ---
+
+test('loadConfig rejects a non-object gate layer by name instead of resolving to defaults', async () => {
+  for (const body of ['[]', '"text"', 'false', '0', '""', 'null']) {
+    await withTempRoot(async (root) => {
+      await writeFile(path.join(root, GATE_FILE), body, 'utf8')
+      await assert.rejects(
+        () => loadConfig(root),
+        (err) => err instanceof ConfigError
+          && err.message === `${GATE_FILE} must contain a JSON object`,
+        `expected a gate layer of ${body} to be rejected`,
+      )
+    })
+  }
+})
+
+test('loadConfig still treats an absent gate layer as absent, not as a bad one', async () => {
+  await withTempRoot(async (root) => {
+    const { resolved, sources } = await loadConfig(root)
+    assert.equal(resolved.maxParallel, defaultMaxParallel())
+    assert.equal(sources.maxParallel, 'default')
+  })
+})
+
+test('loadConfig rejects a misspelled tier in the gate layer rather than dispatching no model', async () => {
+  await withTempRoot(async (root) => {
+    await writeJson(root, GATE_FILE, { agents: { implementer: { tier: 'capabel' } } })
+    await assert.rejects(
+      () => loadConfig(root),
+      // The exact message, not just the class: what makes this a fix rather than a different
+      // rejection is that the tier VALIDATOR is what refused it, naming the valid tiers.
+      (err) => err instanceof ConfigError
+        && err.message === `tier must be one of ${TIERS.join(', ')}`,
+    )
+  })
+})
+
+// Each case names the message its own validator produces, not merely the shared error class. A
+// blanket `throw new ConfigError('gate agents are not supported')` would reject the effort case
+// for a reason with nothing to do with the effort domain, and a class-only assertion would wave
+// that substitution through — binding each input to its own message is what rules it out.
+test('loadConfig rejects a bad effort, maxParallel or caveman in the gate layer', async () => {
+  const bad = [
+    [{ agents: { integrator: { effort: 'sorta-high' } } },
+      `effort must be one of ${EFFORTS.join(', ')}`],
+    [{ maxParallel: 0 }, 'maxParallel must be an integer >= 1'],
+    [{ caveman: 'blah' }, `caveman must be false or one of ${CAVEMAN_LEVELS.join(', ')}`],
+  ]
+  for (const [body, message] of bad) {
+    await withTempRoot(async (root) => {
+      await writeJson(root, GATE_FILE, body)
+      await assert.rejects(
+        () => loadConfig(root),
+        (err) => err instanceof ConfigError && err.message === message,
+        `expected ${JSON.stringify(body)} to be rejected in the gate layer with: ${message}`,
+      )
+    })
+  }
+})
+
+test('loadConfig rejects an unknown agent role and a malformed agents block in the gate layer', async () => {
+  await withTempRoot(async (root) => {
+    await writeJson(root, GATE_FILE, { agents: { auditor: { tier: 'capable' } } })
+    await assert.rejects(
+      () => loadConfig(root),
+      (err) => err instanceof ConfigError && /unknown agent role: auditor/.test(err.message),
+    )
+  })
+  await withTempRoot(async (root) => {
+    await writeJson(root, GATE_FILE, { agents: [] })
+    await assert.rejects(
+      () => loadConfig(root),
+      (err) => err instanceof ConfigError
+        && /agents must be an object keyed by role/.test(err.message),
+    )
+  })
+  await withTempRoot(async (root) => {
+    await writeJson(root, GATE_FILE, { agents: { implementer: 'capable' } })
+    await assert.rejects(
+      () => loadConfig(root),
+      (err) => err instanceof ConfigError && /agents\.implementer must be an object/.test(err.message),
+    )
+  })
+})
+
+test('loadConfig rejects an unknown sub-key under an agent role in the gate layer by full path', async () => {
+  await withTempRoot(async (root) => {
+    await writeJson(root, GATE_FILE, { agents: { implementer: { model: 'some-model' } } })
+    await assert.rejects(
+      () => loadConfig(root),
+      (err) => err instanceof ConfigError
+        && err.message.includes('agents.implementer.model')
+        && err.message.includes(GATE_FILE),
+    )
+  })
+})
+
+// The one asymmetry that is deliberate. The reviewer grades a teammate's own diff, so the
+// gitignored layer must not choose it — but the tracked manifest is exactly where that choice
+// belongs. Rejecting the role in both layers would leave no way to configure it at all.
+test('agents.reviewer is accepted in the gate layer and still rejected in the local layer', async () => {
+  await withTempRoot(async (root) => {
+    await writeJson(root, GATE_FILE, { agents: { reviewer: { tier: 'capable', effort: 'high' } } })
+    const { resolved, sources } = await loadConfig(root)
+    assert.deepEqual(resolved.agents.reviewer, { tier: 'capable', effort: 'high' })
+    assert.equal(sources['agents.reviewer.tier'], GATE_FILE)
+    assert.equal(sources['agents.reviewer.effort'], GATE_FILE)
+  })
+  await withTempRoot(async (root) => {
+    await writeJson(root, LOCAL_FILE, { agents: { reviewer: { tier: 'capable' } } })
+    await assert.rejects(
+      () => loadConfig(root),
+      (err) => err instanceof ConfigError
+        && /agents\.reviewer is an enforcement key/.test(err.message)
+        && err.message.includes(GATE_FILE),
+    )
+  })
+})
+
+test('the enforcement keys are accepted in the gate layer untouched', async () => {
+  await withTempRoot(async (root) => {
+    const manifest = {
+      phases: { default: { checks: [{ kind: 'command', run: 'npm test' }] } },
+      lens: ['security', 'correctness'],
+      preview: { base: 'main' },
+      maxParallel: 5,
+    }
+    await writeJson(root, GATE_FILE, manifest)
+    const { gate, resolved } = await loadConfig(root)
+    assert.deepEqual(gate, manifest)
+    assert.equal(resolved.maxParallel, 5)
+  })
+})
+
+test('validateGate returns the manifest it accepts and names the file it rejects', () => {
+  assert.deepEqual(validateGate({ phases: {} }), { phases: {} })
+  assert.deepEqual(validateGate({}), {})
+  assert.throws(
+    () => validateGate([]),
+    (err) => err instanceof ConfigError
+      && err.message === `${GATE_FILE} must contain a JSON object`,
+  )
 })
