@@ -2723,8 +2723,8 @@ test('config unset refuses an unknown key exactly as config set does', async () 
   })
 })
 
-// A prefix of a known key names a real subtree of the layer, so unsetting it is meaningful.
-test('config unset accepts a role entry, which is a prefix of known keys', async () => {
+// One role's entry is a real subtree of the layer, so unsetting it is meaningful.
+test('config unset accepts a single role entry', async () => {
   await withRepo(async ({ root, io }) => {
     await runCli(['config', 'set', 'agents.implementer.tier', 'capable', '--local', '--root', root], io)
     assert.equal(await runCli(['config', 'unset', 'agents.implementer', '--local', '--root', root], io), 0)
@@ -2732,31 +2732,197 @@ test('config unset accepts a role entry, which is a prefix of known keys', async
   })
 })
 
-// `--local=true` parsed as a flag literally named `local=true`, leaving `flags.local` undefined
-// — so the write silently landed in the TRACKED enforcement manifest instead of the gitignored
-// layer the caller named. A spelling this CLI does not honour must never redirect a write.
-test('--local=true targets the local layer rather than silently writing the manifest', async () => {
-  await withRepo(async ({ root, io }) => {
-    assert.equal(await runCli(['config', 'set', 'maxParallel', '12', '--local=true', '--root', root], io), 0)
-    assert.deepEqual(await readLocal(root), { maxParallel: 12 })
-    assert.equal(await exists(path.join(root, 'teammates.gate.json')), false)
+// The bare segment `agents` is a prefix of EVERY role including the reviewer's, and
+// `isEnforcementKey('agents')` is false — so a prefix rule that accepted it walked straight
+// past the enforcement guard and wiped the reviewer's tier and effort with everyone else's. A
+// key that can reach an enforcement field is not an ergonomics key, whatever it is spelled.
+test('config unset agents is refused rather than wiping the reviewer entry with the rest', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const body = JSON.stringify({ agents: { implementer: { tier: 'capable' } } })
+    await writeFile(path.join(root, 'teammates.local.json'), body, 'utf8')
+    const code = await runCli(['config', 'unset', 'agents', '--local', '--root', root], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /^unknown config key: agents$/m)
+    assert.equal(await readFile(path.join(root, 'teammates.local.json'), 'utf8'), body)
   })
 })
 
-test('--local=true cannot be used to reach an enforcement key either', async () => {
+// `get` narrows the same way `set` and `unset` do. It printed `[object Object]` at exit 0 for a
+// group key, which a caller reading a scalar cannot act on and cannot detect.
+test('config get refuses a key that names a group rather than a field', async () => {
   await withRepo(async ({ root, io, lines }) => {
-    const code = await runCli(['config', 'set', 'agents.reviewer.tier', 'capable', '--local=true', '--root', root], io)
+    await runCli(['config', 'set', 'agents.implementer.tier', 'capable', '--local', '--root', root], io)
+    lines.length = 0
+    assert.equal(await runCli(['config', 'get', 'agents.implementer', '--root', root], io), 2)
+    assert.match(lines.join('\n'), /^unknown config key: agents\.implementer$/m)
+    assert.doesNotMatch(lines.join('\n'), /object Object/)
+    lines.length = 0
+    assert.equal(await runCli(['config', 'get', 'agents', '--root', root], io), 2)
+    assert.match(lines.join('\n'), /^unknown config key: agents$/m)
+  })
+})
+
+// Both layers, both bodies, one answer per file. `readLayer` parses without validating and the
+// `?? {}` after it only catches a nullish body, so a layer holding `[]` reached setKey, which
+// set a property JSON.stringify then dropped: `wrote …` at exit 0 with the file unchanged. A
+// body of `"text"` died with a raw TypeError stack at exit 1. Meanwhile `config list` exited 2
+// on both — one CLI giving two answers about one file.
+test('a malformed layer body is refused by the write path, symmetrically for both layers', async () => {
+  for (const [file, flagArgs] of [['teammates.gate.json', []], ['teammates.local.json', ['--local']]]) {
+    for (const body of ['[]', '"text"', '3', 'null']) {
+      // eslint-disable-next-line no-await-in-loop
+      await withRepo(async ({ root, io, lines }) => {
+        await writeFile(path.join(root, file), body, 'utf8')
+        const where = `${file} body ${body}`
+        const code = await runCli(['config', 'set', 'maxParallel', '4', ...flagArgs, '--root', root], io)
+        assert.equal(code, 2, where)
+        assert.match(lines.join('\n'), new RegExp(`^${file.replace('.', '\\.')} must contain a JSON object$`, 'm'), where)
+        // Not a stack, and not a silent rewrite of the file it refused.
+        assert.doesNotMatch(lines.join('\n'), /TypeError/, where)
+        assert.doesNotMatch(lines.join('\n'), /wrote/, where)
+        assert.equal(await readFile(path.join(root, file), 'utf8'), body, where)
+      })
+    }
+  }
+})
+
+// The read path gets the same treatment as the write path, for the same layer. A gate file
+// holding `[]` resolved every key to its default at exit 0 — the tracked, authoritative file
+// silently ignored — while the identical body in the local layer exited 2.
+test('a malformed gate layer is refused by every command that resolves config', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), '[]', 'utf8')
+    for (const argv of [
+      ['config', 'list', '--root', root],
+      ['config', 'get', 'maxParallel', '--root', root],
+      ['init-run', planPath, '--run', 'r1', '--root', root],
+      ['workflow', '--run', 'r1', '--phase', '1', '--root', root],
+      ['digest', '--run', 'r1', '--root', root],
+    ]) {
+      lines.length = 0
+      assert.equal(await runCli(argv, io), 2, argv.join(' '))
+      assert.match(lines.join('\n'), /^teammates\.gate\.json must contain a JSON object$/m, argv.join(' '))
+    }
+  })
+})
+
+// `--results ""` is what an unset variable templated *quoted* produces, where templated
+// unquoted it produces the bare `--results` that was already caught. One mistake, two
+// spellings: the empty one used to skip the supplied-results block silently and exit 1 on the
+// still-pending checks with nothing on stdout about the flag it dropped.
+test('gate treats an empty --results as the missing argument the bare flag already was', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    await writeEnforcementManifest(root)
+    for (const value of ['', '   ']) {
+      lines.length = 0
+      const code = await runCli(['gate', '--no-fleet', '--results', value, '--root', root], io)
+      assert.equal(code, 2, JSON.stringify(value))
+      assert.match(lines.join('\n'), /missing required argument: --results <path>/, JSON.stringify(value))
+    }
+  })
+})
+
+// `config list` and `config set` must agree about the same file. This is the assertion that
+// pins the two halves together rather than testing each in isolation.
+test('config list and config set give the same answer about a malformed gate layer', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    await writeFile(path.join(root, 'teammates.gate.json'), '[]', 'utf8')
+    assert.equal(await runCli(['config', 'list', '--root', root], io), 2)
+    const fromList = lines.join('\n')
+    lines.length = 0
+    assert.equal(await runCli(['config', 'set', 'maxParallel', '4', '--root', root], io), 2)
+    assert.equal(lines.join('\n'), fromList)
+  })
+})
+
+// `unset` reads and rewrites the same layer, so it gets the same check as `set`.
+test('config unset refuses a malformed layer as well', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    await writeFile(path.join(root, 'teammates.local.json'), '[]', 'utf8')
+    assert.equal(await runCli(['config', 'unset', 'maxParallel', '--local', '--root', root], io), 2)
+    assert.match(lines.join('\n'), /^teammates\.local\.json must contain a JSON object$/m)
+    assert.equal(await readFile(path.join(root, 'teammates.local.json'), 'utf8'), '[]')
+  })
+})
+
+// `--local=true` parsed as a flag literally named `local=true`, leaving `flags.local` undefined
+// — so the write silently landed in the TRACKED enforcement manifest instead of the gitignored
+// layer the caller named. The spelling is refused rather than interpreted: see the --no-fleet
+// tests below for why guessing at it is worse than not accepting it.
+test('--local=true is refused rather than silently writing the tracked manifest', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const code = await runCli(['config', 'set', 'maxParallel', '12', '--local=true', '--root', root], io)
     assert.equal(code, 2)
-    assert.match(lines.join('\n'), /^agents\.reviewer\.tier is an enforcement key; it may only be set in teammates\.gate\.json$/m)
+    assert.match(lines.join('\n'), /unsupported flag spelling: `--local=true`/)
+    assert.match(lines.join('\n'), /write `--local <value>`, or `--local` alone for a switch/)
+    // Neither layer is written: the point of the refusal is that no file is chosen for the
+    // caller when the CLI cannot tell which one they meant.
     assert.equal(await exists(path.join(root, 'teammates.local.json')), false)
     assert.equal(await exists(path.join(root, 'teammates.gate.json')), false)
   })
 })
 
-test('the = spelling works for a value-taking flag such as --root', async () => {
+test('--local=false does not enable the local layer either', async () => {
   await withRepo(async ({ root, io, lines }) => {
-    assert.equal(await runCli(['config', 'list', `--root=${root}`], io), 0)
-    assert.match(lines.join('\n'), /^maxParallel\s+\d+\s+\(default\)$/m)
+    assert.equal(await runCli(['config', 'set', 'maxParallel', '12', '--local=false', '--root', root], io), 2)
+    assert.match(lines.join('\n'), /unsupported flag spelling/)
+    assert.equal(await exists(path.join(root, 'teammates.local.json')), false)
+    assert.equal(await exists(path.join(root, 'teammates.gate.json')), false)
+  })
+})
+
+test('the = spelling is refused for a value-taking flag such as --root too', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    // One rule for every flag. An allowlist of "switches" would be a second table to keep in
+    // step with the first, and the next value-less flag added would fall out of it silently.
+    assert.equal(await runCli(['config', 'list', `--root=${root}`], io), 2)
+    assert.match(lines.join('\n'), /unsupported flag spelling/)
+  })
+})
+
+// The reason the `=` form is refused outright rather than interpreted. Every switch in this CLI
+// is tested with `!== undefined`, so an interpreted `--no-fleet=false` READS as negation and
+// TURNS OFF the fileset and ownership checks — while also dropping --run and --plan from the
+// required set, opening the whole solo path from an argv that says enforcement is not disabled.
+// There is no interpretation of that string that is safe to guess.
+test('--no-fleet=false cannot disable the enforcement checks', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    await writeEnforcementManifest(root)
+    for (const spelling of ['--no-fleet=false', '--no-fleet=0', '--no-fleet=', '--no-fleet=off']) {
+      lines.length = 0
+      const code = await runCli(['gate', spelling, '--root', root], io)
+      assert.equal(code, 2, spelling)
+      const text = lines.join('\n')
+      assert.match(text, /unsupported flag spelling/, spelling)
+      // The two things the solo path would have produced, neither of which may appear.
+      assert.doesNotMatch(text, /enforcement checks are not running/, spelling)
+      assert.doesNotMatch(text, /"verdict": "PASS"/, spelling)
+    }
+  })
+})
+
+// Refused before the required-argument check, not after it: `--no-fleet` drops --run and --plan
+// from REQUIRED, so a rejection that ran later would already have accepted an argv that names
+// neither. At the base commit this argv exited 2 for the missing arguments, and it still must.
+test('--no-fleet=false is refused before it can drop the required arguments', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    assert.equal(await runCli(['gate', '--no-fleet=false', '--root', root], io), 2)
+    assert.match(lines.join('\n'), /unsupported flag spelling/)
+    assert.doesNotMatch(lines.join('\n'), /missing required argument/)
+  })
+})
+
+// The spelling this CLI does take is untouched by the refusal.
+test('the space-separated spelling of every flag still works', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    await writeEnforcementManifest(root)
+    assert.equal(await runCli(['config', 'set', 'maxParallel', '12', '--local', '--root', root], io), 0)
+    assert.deepEqual(await readLocal(root), { maxParallel: 12 })
+    lines.length = 0
+    const code = await runCli(['gate', '--no-fleet', '--root', root], io)
+    assert.match(lines.join('\n'), /enforcement checks are not running/)
+    assert.equal(code, 0)
   })
 })
 
@@ -2917,6 +3083,65 @@ test('workflow persists a tier configured after init-run', async () => {
     assert.equal(task.tierSource, 'configured')
     // A task from another phase is untouched by a phase-1 workflow run.
     assert.equal((await readPlan(root, 'r1')).tasks.find((t) => t.id === 'T2').tierSource, 'inferred')
+  })
+})
+
+// Applying a configured tier and reverting one are the same guarantee from two sides: plan.json
+// must name the tier the run is actually dispatching at, because that is the tier `fix`
+// escalates from. Gated on `if (roleTier)` alone, a task stamped `configured` kept the stale
+// tier forever once the operator removed the setting, and only re-running init-run cleared it.
+test('removing the configured tier reverts plan.json to the inferred tier', async () => {
+  await withRepo(async ({ root, planPath, io }) => {
+    const localFile = path.join(root, 'teammates.local.json')
+    await writeFile(localFile, JSON.stringify({ agents: { implementer: { tier: 'cheap' } } }), 'utf8')
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const configured = (await readPlan(root, 'r1')).tasks.find((t) => t.id === 'T1')
+    assert.equal(configured.tier, 'cheap')
+    assert.equal(configured.tierSource, 'configured')
+    assert.equal(configured.inferredTier, 'mid')
+
+    await rm(localFile)
+    assert.equal(await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root], io), 0)
+    const reverted = (await readPlan(root, 'r1')).tasks.find((t) => t.id === 'T1')
+    assert.equal(reverted.tier, 'mid')
+    assert.equal(reverted.tierSource, 'inferred')
+  })
+})
+
+// And the revert reaches the decision that consumes it, not just the file.
+test('a retry after the configured tier is removed escalates from the inferred tier', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    const localFile = path.join(root, 'teammates.local.json')
+    await writeFile(localFile, JSON.stringify({ agents: { implementer: { tier: 'cheap' } } }), 'utf8')
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await rm(localFile)
+    await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root], io)
+    const verdictPath = await writeVerdict(root, {
+      verdict: 'FAIL',
+      results: [{ name: 'review', kind: 'agent', status: 'fail', findings: [{ file: 'a.mjs' }] }],
+    })
+    lines.length = 0
+    await runCli(['fix', '--run', 'r1', '--phase', '1', '--verdict', verdictPath, '--root', root], io)
+    // Escalated from the restored `mid`, not from the withdrawn `cheap`.
+    assert.equal(JSON.parse(lines.join('\n')).tasks[0].tier, 'capable')
+  })
+})
+
+// A declared tier is never re-tiered in either direction, so it has no inferredTier to revert
+// to and must not acquire one.
+test('a declared tier is untouched by configuring and then removing a role tier', async () => {
+  await withRepo(async ({ root, io }) => {
+    const planPath = path.join(root, 'declared.md')
+    await writeFile(planPath, planWithModel('cheap'), 'utf8')
+    const localFile = path.join(root, 'teammates.local.json')
+    await writeFile(localFile, JSON.stringify({ agents: { implementer: { tier: 'capable' } } }), 'utf8')
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await rm(localFile)
+    await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root], io)
+    const task = (await readPlan(root, 'r1')).tasks.find((t) => t.id === 'T1')
+    assert.equal(task.tier, 'cheap')
+    assert.equal(task.tierSource, 'declared')
+    assert.equal(task.inferredTier, undefined)
   })
 })
 
