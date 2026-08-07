@@ -37,7 +37,7 @@ test('each skill has a name matching its folder and a description starting with 
 
 test('every cli subcommand referenced by a skill actually exists', async () => {
   const cli = await readFile(new URL('../scripts/cli.mjs', import.meta.url), 'utf8')
-  const known = ['init-run', 'gate', 'digest', 'claim', 'unclaim', 'workflow']
+  const known = ['init-run', 'gate', 'digest', 'claim', 'unclaim', 'workflow', 'config']
   for (const name of await allSkills()) {
     const { body } = await skill(name)
     for (const m of body.matchAll(/cli\.mjs["']?\s+([a-z-]+)/g)) {
