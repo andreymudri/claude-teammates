@@ -999,3 +999,40 @@ export function validateGate(gate) {
   the gate layer and still rejected in the local layer, pinning the asymmetry that is intentional;
   an unknown sub-key under `agents.<role>` in the gate file raises naming the full path; and the
   enforcement keys `phases`, `lens` and `preview` are accepted in the gate file untouched.
+
+---
+
+### Task 10: route the entrypoint to the new config skill
+
+**Files:**
+- Modify: `skills/using-teammates/SKILL.md`
+
+**Depends:** T5
+
+**Model:** cheap
+
+`tests/skill-entrypoint.test.mjs:8` ("routes to every skill that exists") reads every directory
+under `skills/`, excludes `using-teammates` itself, and asserts the entrypoint body mentions each
+remaining folder name. Task 6 creates `skills/teammates-config/`, so that assertion fails the
+moment T6 merges, and no task in this plan owns `skills/using-teammates/SKILL.md`. T6 reported the
+gap rather than reaching outside its declared file set, which is the correct behaviour and is why
+this task exists.
+
+Running this alongside T6 is safe. The sibling assertion at `:18` ("every skill the routing table
+names actually exists") only checks candidates matching
+`^(brainstorming|writing-|executing-|test-driven|systematic-|receiving-|finishing-|fleet-|parallel-|phase-|using-)`,
+and `teammates-config` matches none of those prefixes — so naming the skill before its folder
+exists trips nothing, and both assertions hold once the two branches merge.
+
+- [ ] **Step 1:** Add a row to the routing table in `skills/using-teammates/SKILL.md`, in the same
+  `| Situation | Skill |` format as the rows already there, placed after the `fleet-lifecycle` row
+  so the fleet-operation entries stay together:
+
+```markdown
+| Changing how the fleet runs — parallelism, model tier or effort per role, caveman output | `teammates-config` |
+```
+
+- [ ] **Step 2:** Do not restate the two-file split or the enforcement-key rules here. The
+  entrypoint routes; `teammates-config` explains. A second copy of that rule in a second file is a
+  second thing to keep true, and this run has already been bitten twice by prose that drifted from
+  the code it described.
