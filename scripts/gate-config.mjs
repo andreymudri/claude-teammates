@@ -5,6 +5,7 @@ import path from 'node:path'
 const MANIFEST = 'teammates.gate.json'
 const INFERRED_ORDER = ['typecheck', 'lint', 'test', 'build']
 const DEFAULT_FIX_ROUNDS = 2
+const DEFAULT_LENS = ['correctness', 'security', 'tests']
 
 export function defaultMaxParallel() {
   return Math.max(1, Math.min(8, availableParallelism() - 2))
@@ -32,12 +33,12 @@ export function inferGateConfig(pkg) {
     name: 'review',
     kind: 'agent',
     agent: 'tm-reviewer',
-    lens: ['correctness', 'security', 'tests'],
     blockOn: ['high'],
   })
 
   const config = {
     maxParallel: defaultMaxParallel(),
+    lens: DEFAULT_LENS,
     phases: { default: { fixRounds: DEFAULT_FIX_ROUNDS, checks } },
   }
   // Inference happens only while a manifest is being created — `gate` exits 3 and prints this
@@ -57,7 +58,13 @@ export function previewLinks(config) {
 
 export function checksForPhase(config, phaseName) {
   const phases = config?.phases ?? {}
-  return phases[phaseName]?.checks ?? phases.default?.checks ?? []
+  const checks = phases[phaseName]?.checks ?? phases.default?.checks ?? []
+  const fallback = Array.isArray(config?.lens) && config.lens.length ? config.lens : DEFAULT_LENS
+  return checks.map((check) => (
+    check?.kind === 'agent' && !Array.isArray(check.lens)
+      ? { ...check, lens: fallback }
+      : check
+  ))
 }
 
 // A fix-round budget is only meaningful as a non-negative whole number: the loop
