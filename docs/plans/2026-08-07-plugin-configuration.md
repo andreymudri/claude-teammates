@@ -1036,3 +1036,111 @@ exists trips nothing, and both assertions hold once the two branches merge.
   entrypoint routes; `teammates-config` explains. A second copy of that rule in a second file is a
   second thing to keep true, and this run has already been bitten twice by prose that drifted from
   the code it described.
+
+---
+
+### Task 11: validate enforcement-key shape in the gate layer
+
+**Files:**
+- Modify: `scripts/config.mjs`
+- Test: `tests/config.test.mjs`
+
+**Depends:** T9
+
+**Model:** capable
+
+T9 made `validateGate` check the shape of the body and the domain of every ergonomics key, but it
+deliberately left enforcement keys unchecked — only their *presence* was permitted, not their shape.
+The phase 4 review found what that costs, and all three legs were reproduced:
+
+    config get lens                        -> unknown config key: lens        exit 2
+    config list  (lens = "performance")    -> exit 0, lens not shown at all
+    checksForPhase(lens = "performance")   -> silently dispatches ["correctness","security","tests"]
+
+A shape-invalid enforcement key is caught by no layer: not `config set` (which rejects the key
+name), not `config list` (which never reads it), and not the gate (`scripts/gate-config.mjs:62`
+requires a non-empty array and substitutes `DEFAULT_LENS` otherwise, with no report). An operator
+who hand-edits a project lens sees exit 0 everywhere and silently gets the default lenses forever.
+
+Hand-editing remains the way enforcement policy is changed — that stays deliberate. This task makes
+the hand edit *checkable*, which is what the documentation already tells operators to do.
+
+- [ ] **Step 1:** Add shape validators for the three enforcement keys to `scripts/config.mjs`,
+  beside the existing `VALIDATORS`. They check shape only, never policy: what a lens *means* is not
+  this module's business, but "a non-empty array of strings" is.
+
+```js
+// Enforcement keys are hand-edited by design, so `config set` never validates them and the
+// operator's only feedback is `config list`. Shape is checked here so that feedback exists;
+// content is not, because a lens name or a check's `run` string is policy, not structure.
+const ENFORCEMENT_VALIDATORS = {
+  lens: (v) => {
+    if (!Array.isArray(v) || v.length === 0 || v.some((l) => typeof l !== 'string' || l === '')) {
+      throw new ConfigError('lens must be a non-empty array of strings')
+    }
+    return v
+  },
+  phases: (v) => {
+    if (v === null || typeof v !== 'object' || Array.isArray(v)) {
+      throw new ConfigError('phases must be an object keyed by phase name')
+    }
+    for (const [name, phase] of Object.entries(v)) {
+      if (phase === null || typeof phase !== 'object' || Array.isArray(phase)) {
+        throw new ConfigError(`phases.${name} must be an object`)
+      }
+      if (phase.checks !== undefined && !Array.isArray(phase.checks)) {
+        throw new ConfigError(`phases.${name}.checks must be an array`)
+      }
+      if (phase.fixRounds !== undefined
+        && (!Number.isInteger(phase.fixRounds) || phase.fixRounds < 0)) {
+        throw new ConfigError(`phases.${name}.fixRounds must be an integer >= 0`)
+      }
+    }
+    return v
+  },
+  preview: (v) => {
+    if (v === null || typeof v !== 'object' || Array.isArray(v)) {
+      throw new ConfigError('preview must be an object')
+    }
+    if (v.link !== undefined
+      && (!Array.isArray(v.link) || v.link.some((e) => typeof e !== 'string' || e === ''))) {
+      throw new ConfigError('preview.link must be an array of non-empty strings')
+    }
+    return v
+  },
+}
+```
+
+- [ ] **Step 2:** Call them from `validateGate`, after the ergonomics checks it already runs:
+
+```js
+  for (const key of ENFORCEMENT_KEYS) {
+    if (gate[key] !== undefined) ENFORCEMENT_VALIDATORS[key](gate[key])
+  }
+```
+
+  `ENFORCEMENT_KEYS` is `['phases', 'lens', 'preview']` and every entry now has a validator, so the
+  lookup cannot come back undefined. If a future key is added to that list without one, this throws
+  a TypeError rather than silently skipping — which is the failure direction to prefer.
+
+- [ ] **Step 3:** Do NOT call these from `validateLocal`. An enforcement key in the local layer is
+  already rejected by name, and reaching a shape check there would report the wrong problem.
+
+- [ ] **Step 4:** Do NOT touch `loadGateConfig`. `gate`, `complete` and `fix` read the manifest
+  through it, and adding validation there would change the exit-code behaviour of the three commands
+  the phase gate depends on. This task tightens `loadConfig` only — the path `config list` uses,
+  which is the feedback channel the documentation points operators at.
+
+- [ ] **Step 5:** Add tests to `tests/config.test.mjs`, each asserting its own exact message so the
+  six exit-2 failure modes stay distinguishable: `lens` as a string, an empty array, and an array
+  containing a non-string or an empty string; `phases` as an array and as a string; a phase entry
+  that is not an object; `phases.<name>.checks` not an array; a negative and a non-integer
+  `fixRounds`; `preview` as an array; `preview.link` not an array and containing an empty string.
+  Also assert the valid shapes still load untouched — a manifest carrying only `phases`, and this
+  repository's own `teammates.gate.json`, must both validate.
+
+- [ ] **Step 6:** Confirm no existing fixture breaks. `tests/cli.test.mjs`, `tests/gate-config.test.mjs`,
+  `tests/adversarial.test.mjs` and `tests/self-gate.test.mjs` all write `teammates.gate.json`
+  bodies that now flow through these validators via `loadConfig`. Grep them and run the full suite;
+  if any fixture uses a shape this task rejects, report it in `blockers` rather than loosening the
+  validator or editing a test outside this task's file set.
