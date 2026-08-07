@@ -301,10 +301,19 @@ test('with no base branch the brief emits no checkout command and says the start
     // Second: any occurrence anywhere — mid-sentence prose included — that hands the teammate a
     // start point the template invented. A line-anchored check alone misses
     // `... run: git checkout -B <branch> origin/main and proceed.`, which is just as runnable.
-    // The template's own negative mention closes the branch name with a quote and supplies no
-    // start point, so it is not matched.
+    //
+    // The branch may be bare or quoted, and the start point must look like a ref. An earlier
+    // form excluded quotes from the branch class, which let `git checkout -B "<branch>" main`
+    // through: the class could not cross the closing quote, so the following `\s+` never
+    // matched. Quoting a branch is the template's own house style in prose, so that was the
+    // likelier reintroduction, not the unlikelier one.
+    //
+    // Requiring a ref-shaped start point is what keeps the template's own negative mention
+    // unmatched. There, the quote opens before `git`, so the branch token ends `T1"` and
+    // neither the bare nor the quoted alternative can complete — and the word that follows is
+    // prose, not a ref. Matching any non-space token instead would flag that sentence.
     assert.ok(
-      !/git checkout -B\s+[^\s"']+\s+[^\s"']/.test(prompt),
+      !/git checkout -B\s+(?:"[^"]+"|'[^']+'|[^\s"']+)\s+[A-Za-z0-9._/-]+/.test(prompt),
       'no checkout may supply a start point the template invented',
     )
     assert.ok(!prompt.includes('git checkout -B teammates/r1/T1 HEAD'), 'must not substitute HEAD for a base')
