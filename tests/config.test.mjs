@@ -22,6 +22,7 @@ import {
   unsetKey,
   validateKey,
   isEnforcementKey,
+  assertSafeKey,
   ensureGitignored,
 } from '../scripts/config.mjs'
 
@@ -81,13 +82,15 @@ test('loadConfig exposes the raw gate manifest alongside the resolved view', asy
 
 test('loadConfig merges agent entries per role and names the winning layer', async () => {
   await withTempRoot(async (root) => {
-    await writeJson(root, GATE_FILE, { agents: { reviewer: { tier: 'mid', effort: 'low' } } })
-    await writeJson(root, LOCAL_FILE, { agents: { reviewer: { tier: 'capable' } } })
+    await writeJson(root, GATE_FILE, { agents: { implementer: { tier: 'mid', effort: 'low' } } })
+    await writeJson(root, LOCAL_FILE, { agents: { implementer: { tier: 'capable' } } })
     const { resolved, sources } = await loadConfig(root)
-    assert.deepEqual(resolved.agents.reviewer, { tier: 'capable', effort: 'low' })
-    assert.equal(sources['agents.reviewer'], LOCAL_FILE)
+    assert.deepEqual(resolved.agents.implementer, { tier: 'capable', effort: 'low' })
+    assert.equal(sources['agents.implementer.tier'], LOCAL_FILE)
+    assert.equal(sources['agents.implementer.effort'], GATE_FILE)
     assert.deepEqual(resolved.agents.integrator, {})
-    assert.equal(sources['agents.integrator'], 'default')
+    assert.equal(sources['agents.integrator.tier'], 'default')
+    assert.equal(sources['agents.integrator.effort'], 'default')
   })
 })
 
@@ -96,7 +99,8 @@ test('loadConfig reports the gate layer as the source of an agent entry it alone
     await writeJson(root, GATE_FILE, { agents: { implementer: { effort: 'high' } } })
     const { resolved, sources } = await loadConfig(root)
     assert.deepEqual(resolved.agents.implementer, { effort: 'high' })
-    assert.equal(sources['agents.implementer'], GATE_FILE)
+    assert.equal(sources['agents.implementer.effort'], GATE_FILE)
+    assert.equal(sources['agents.implementer.tier'], 'default')
   })
 })
 
@@ -144,7 +148,7 @@ test('validateLocal rejects a non-object local layer', () => {
 })
 
 test('validateLocal accepts a well-formed local layer unchanged', () => {
-  const local = { maxParallel: 6, caveman: 'full', agents: { reviewer: { tier: 'mid' } } }
+  const local = { maxParallel: 6, caveman: 'full', agents: { implementer: { tier: 'mid' } } }
   assert.equal(validateLocal(local), local)
 })
 
@@ -153,8 +157,8 @@ test('validateLocal rejects an unknown agent role and a bad agent field', () => 
     () => validateLocal({ agents: { nobody: { tier: 'mid' } } }),
     (err) => err instanceof ConfigError && err.message.includes('nobody'),
   )
-  assert.throws(() => validateLocal({ agents: { reviewer: { tier: 'nonsense' } } }), ConfigError)
-  assert.throws(() => validateLocal({ agents: { reviewer: { effort: 'nonsense' } } }), ConfigError)
+  assert.throws(() => validateLocal({ agents: { implementer: { tier: 'nonsense' } } }), ConfigError)
+  assert.throws(() => validateLocal({ agents: { implementer: { effort: 'nonsense' } } }), ConfigError)
   assert.throws(() => validateLocal({ agents: [] }), ConfigError)
 })
 
@@ -213,7 +217,7 @@ test('isEnforcementKey matches an enforcement root, dotted or bare', () => {
   assert.equal(isEnforcementKey('lens'), true)
   assert.equal(isEnforcementKey('preview.branch'), true)
   assert.equal(isEnforcementKey('maxParallel'), false)
-  assert.equal(isEnforcementKey('agents.reviewer.tier'), false)
+  assert.equal(isEnforcementKey('agents.implementer.tier'), false)
 })
 
 test('getKey reads a dotted path and returns undefined for a missing branch', () => {
@@ -296,5 +300,133 @@ test('ensureGitignored recognises an existing entry with surrounding whitespace'
   await withTempRoot(async (root) => {
     await writeFile(path.join(root, '.gitignore'), `node_modules\r\n  ${LOCAL_FILE}  \r\n`, 'utf8')
     assert.equal(await ensureGitignored(root, LOCAL_FILE), false)
+  })
+})
+
+test('assertSafeKey rejects every prototype-reaching segment by name', () => {
+  for (const dotted of [
+    '__proto__',
+    '__proto__.polluted',
+    'agents.__proto__.tier',
+    'constructor',
+    'constructor.prototype.polluted',
+    'agents.reviewer.prototype',
+  ]) {
+    assert.throws(
+      () => assertSafeKey(dotted),
+      (err) => err instanceof ConfigError && /unsafe/.test(err.message),
+      `expected ${dotted} to be rejected`,
+    )
+  }
+})
+
+test('assertSafeKey returns a safe key unchanged', () => {
+  assert.equal(assertSafeKey('agents.reviewer.tier'), 'agents.reviewer.tier')
+  assert.equal(assertSafeKey('maxParallel'), 'maxParallel')
+})
+
+test('setKey refuses a prototype-polluting path and leaves Object.prototype clean', () => {
+  const target = {}
+  assert.throws(() => setKey(target, '__proto__.pollutedBySetKey', 'PWNED'), ConfigError)
+  assert.throws(
+    () => setKey(target, 'constructor.prototype.pollutedBySetKey', 'PWNED'),
+    ConfigError,
+  )
+  assert.throws(() => setKey(target, 'agents.__proto__.tier', 'PWNED'), ConfigError)
+  assert.deepEqual(Object.keys(target), [])
+  assert.equal({}.pollutedBySetKey, undefined)
+  assert.equal(Object.prototype.pollutedBySetKey, undefined)
+})
+
+test('unsetKey refuses a prototype-reaching path rather than walking it', () => {
+  const target = { agents: { reviewer: { tier: 'mid' } } }
+  assert.throws(() => unsetKey(target, '__proto__.toString'), ConfigError)
+  assert.throws(() => unsetKey(target, 'constructor.prototype.toString'), ConfigError)
+  assert.throws(() => unsetKey(target, 'agents.__proto__.tier'), ConfigError)
+  assert.equal(typeof {}.toString, 'function')
+  assert.deepEqual(target, { agents: { reviewer: { tier: 'mid' } } })
+})
+
+test('validateKey refuses a prototype-reaching path before matching a known key', () => {
+  assert.throws(() => validateKey('__proto__.maxParallel', 4), ConfigError)
+  assert.throws(() => validateKey('agents.__proto__.tier', 'mid'), ConfigError)
+  assert.throws(() => validateKey('constructor.prototype.caveman', 'full'), ConfigError)
+  assert.equal({}.maxParallel, undefined)
+})
+
+test('isEnforcementKey tests every segment, not only the first', () => {
+  assert.equal(isEnforcementKey('__proto__.phases'), true)
+  assert.equal(isEnforcementKey('a.b.lens'), true)
+  assert.equal(isEnforcementKey('agents.reviewer.preview'), true)
+})
+
+test('isEnforcementKey treats the reviewer tier and effort as enforcement', () => {
+  assert.equal(isEnforcementKey('agents.reviewer.tier'), true)
+  assert.equal(isEnforcementKey('agents.reviewer.effort'), true)
+  assert.equal(isEnforcementKey('agents.implementer.tier'), false)
+  assert.equal(isEnforcementKey('agents.implementer.effort'), false)
+  assert.equal(isEnforcementKey('agents.integrator.tier'), false)
+  assert.equal(isEnforcementKey('agents.integrator.effort'), false)
+})
+
+test('validateLocal rejects agents.reviewer by name and points at the gate file', () => {
+  assert.throws(
+    () => validateLocal({ agents: { reviewer: { tier: 'cheap' } } }),
+    (err) => err instanceof ConfigError && err.message.includes('agents.reviewer')
+      && err.message.includes(GATE_FILE),
+  )
+  assert.throws(() => validateLocal({ agents: { reviewer: {} } }), ConfigError)
+})
+
+test('validateLocal rejects an agent sub-key outside tier and effort, naming the path', () => {
+  assert.throws(
+    () => validateLocal({ agents: { implementer: { checks: [] } } }),
+    (err) => err instanceof ConfigError && err.message.includes('agents.implementer.checks')
+      && err.message.includes(LOCAL_FILE),
+  )
+  assert.throws(
+    () => validateLocal({ agents: { integrator: { fixRounds: 0 } } }),
+    (err) => err instanceof ConfigError && err.message.includes('agents.integrator.fixRounds'),
+  )
+})
+
+test('validateLocal rejects a non-object agent entry by role', () => {
+  for (const bad of [null, [], 'mid', 3]) {
+    assert.throws(
+      () => validateLocal({ agents: { implementer: bad } }),
+      (err) => err instanceof ConfigError && err.message.includes('agents.implementer'),
+    )
+  }
+})
+
+test('unsetKey walks past a null branch without throwing', () => {
+  const obj = { preview: null }
+  assert.equal(unsetKey(obj, 'preview.link'), obj)
+  assert.deepEqual(obj, { preview: null })
+  const scalar = { preview: 'text' }
+  assert.equal(unsetKey(scalar, 'preview.link'), scalar)
+  assert.deepEqual(scalar, { preview: 'text' })
+})
+
+test('loadConfig records agent provenance per field, not per role', async () => {
+  await withTempRoot(async (root) => {
+    await writeJson(root, GATE_FILE, { agents: { implementer: { tier: 'mid' } } })
+    await writeJson(root, LOCAL_FILE, { agents: { implementer: { effort: 'high' } } })
+    const { resolved, sources } = await loadConfig(root)
+    assert.deepEqual(resolved.agents.implementer, { tier: 'mid', effort: 'high' })
+    assert.equal(sources['agents.implementer.tier'], GATE_FILE)
+    assert.equal(sources['agents.implementer.effort'], LOCAL_FILE)
+    assert.equal(sources['agents.integrator.tier'], 'default')
+    assert.equal(sources['agents.integrator.effort'], 'default')
+  })
+})
+
+test('loadConfig does not attribute a field to a local layer that only names the role', async () => {
+  await withTempRoot(async (root) => {
+    await writeJson(root, GATE_FILE, { agents: { integrator: { tier: 'cheap', effort: 'low' } } })
+    await writeJson(root, LOCAL_FILE, { agents: { integrator: {} } })
+    const { sources } = await loadConfig(root)
+    assert.equal(sources['agents.integrator.tier'], GATE_FILE)
+    assert.equal(sources['agents.integrator.effort'], GATE_FILE)
   })
 })
