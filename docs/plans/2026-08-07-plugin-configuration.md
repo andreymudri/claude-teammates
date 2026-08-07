@@ -503,7 +503,12 @@ export async function generatePhaseWorkflow({
 - Modify: `scripts/cli.mjs`
 - Test: `tests/cli.test.mjs`
 
-**Depends:** T1, T2, T3, T4
+**Depends:** T1, T2, T3, T4, T8
+
+The dependency on T8 is on a symbol, not a convention: Step 1 imports `assertSafeKey` and Step 7
+calls it, and T8 is what creates it. Run in parallel with T8 the import would resolve against a
+`scripts/config.mjs` that has no such export, and every test in the file would fail for a reason
+that has nothing to do with this task.
 
 - [ ] **Step 1:** Import the new module in `scripts/cli.mjs`:
 
