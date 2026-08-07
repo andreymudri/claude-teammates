@@ -715,14 +715,24 @@ node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" config set <key> <value> --root <proj
 
 - [ ] **Step 7:** In `skills/phase-gate/SKILL.md`, where the `agent` check dispatch is described,
   add that each `tm-reviewer` dispatch carries the configured reviewer tier and effort, read from
-  `config get agents.reviewer.tier` and `config get agents.reviewer.effort`, and that an unset
-  value means the dispatch omits the option and inherits the session's. State in the same place
-  that these two come from the tracked manifest only — the reviewer grades the diff, so allowing
-  the gitignored layer to choose its tier would let the party being judged pick its own judge.
+  `config get agents.reviewer.tier` and `config get agents.reviewer.effort`, and that the two keys
+  fall back **differently** when unset: an unset `tier` falls back to the fixed role tier
+  `capable`, never to the session's; only an unset `effort` falls back by omitting the option.
+  State in the same place that these two come from the tracked manifest only — the reviewer
+  grades the diff, so allowing the gitignored layer to choose its tier would let the party being
+  judged pick its own judge.
 
-- [ ] **Step 8:** In `skills/parallel-execution/SKILL.md`, add the same two sentences for the
-  `tm-integrator` dispatch, reading `agents.integrator.tier` and `agents.integrator.effort`.
-  Without this the config would claim to set an integrator tier that nothing ever reads.
+- [ ] **Step 8:** In `skills/parallel-execution/SKILL.md`, add the same for the `tm-integrator`
+  dispatch, reading `agents.integrator.tier` and `agents.integrator.effort`, with the fixed
+  integrator tier `mid` as the unset-`tier` fallback. Without this the config would claim to set
+  an integrator tier that nothing ever reads.
+
+> **Superseded (steps 7-8).** As originally written, both steps said an unset tier meant the
+> dispatch omits the option and inherits the session's. The final completion review found that
+> wrong — it puts `tm-reviewer` at the session model, so a `mid` session grades every `agent`
+> gate check a full tier below the guaranteed `capable`. Corrected before merge in
+> `skills/phase-gate/SKILL.md` and `skills/parallel-execution/SKILL.md`; the text above now
+> matches what shipped. Those two skills are the authority — read them, not this plan.
 
 ---
 

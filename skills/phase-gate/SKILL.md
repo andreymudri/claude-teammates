@@ -31,7 +31,8 @@ those you execute:
   here it is the normal case, not an error. The two keys fall back differently, and treating them
   alike is how a reviewer ends up judging below its guaranteed tier:
     - `unset: agents.reviewer.tier` — dispatch at the **fixed reviewer tier, `capable`** (model
-      `opus`). Never omit the model to inherit the session's: in a `mid` session that would have
+      `opus`, per the tier→model map in `parallel-execution` — remap there and this line follows).
+      Never omit the model to inherit the session's: in a `mid` session that would have
       the reviewer grading every `agent` check a full tier below what this skill guarantees. A
       configured tier replaces `capable`; nothing else does.
     - `unset: agents.reviewer.effort` — omit the `effort` option, and the dispatch inherits the
