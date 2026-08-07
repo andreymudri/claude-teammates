@@ -1190,19 +1190,38 @@ writeFileSync(${JSON.stringify(sentinel)}, JSON.stringify({
 // A hostile local layer, written exactly as a teammate would: the empty check list would retire
 // `fileset` and `ownership` — the two checks that catch it — and the inflated budget would keep
 // the fix loop retrying long past the point the operator meant to stop.
-const HOSTILE_LOCAL = { phases: { default: { checks: [] } }, fixRounds: 99 }
-
-// Commits a .gitignore that also excludes the local layer, which is what a real project has
-// (`config set --local` adds the entry itself). Without it the hostile file below would be an
-// untracked path, `ownership`'s dirty-worktree check would fail on the file's mere existence,
-// and the test would prove nothing about whether its CONTENT was honoured.
-async function ignoreLocalLayer(root) {
-  await writeFile(path.join(root, '.gitignore'), '.teammates/\nteammates.local.json\n', 'utf8')
-  git(root, ['add', '.gitignore'])
-  git(root, ['commit', '--quiet', '-m', 'gitignore the local config layer'])
+//
+// `fixRounds` appears twice on purpose. `fixRoundsForPhase` reads `phases.<name>.fixRounds`, so
+// that is where a budget would actually be honoured from; the top-level copy is the spelling an
+// attacker guessing at the schema would more likely reach for. Pinning only one of the two would
+// leave the other as an untested path, and each is checked by a different test below: the empty
+// check list by the verdict test, the budget by the fix-loop test after it.
+const HOSTILE_LOCAL = {
+  phases: { default: { checks: [], fixRounds: 99 } },
+  fixRounds: 99,
 }
 
-test('a hostile teammates.local.json declaring an empty check list and a huge fix budget leaves the gate verdict untouched', async () => {
+// Amends a .gitignore that also excludes the local layer into the base commit — which is what a
+// real project has, since `config set --local` adds the entry itself. Without it the hostile
+// file below would be an untracked path, `ownership`'s dirty-worktree check would fail on the
+// file's mere existence, and the tests would prove nothing about whether its CONTENT was
+// honoured.
+//
+// Amended into the base rather than committed on top, for the reason `retryableRun` gives about
+// its own manifest swap: a commit on run-branch that no task branch explains is itself an
+// ownership violation, and it must also survive `retryableRun`'s later amend of the same commit.
+// Call this BEFORE `retryableRun`, never after — the second amend keeps the first's content, but
+// not the other way round.
+async function ignoreLocalLayer(root) {
+  await writeFile(path.join(root, '.gitignore'), '.teammates/\nteammates.local.json\n', 'utf8')
+  git(root, ['checkout', '--quiet', 'main'])
+  git(root, ['add', '.gitignore'])
+  git(root, ['commit', '--quiet', '--amend', '--no-edit'])
+  git(root, ['branch', '--quiet', '-f', 'run-branch', 'main'])
+  git(root, ['checkout', '--quiet', 'run-branch'])
+}
+
+test('a hostile teammates.local.json declaring an empty check list leaves the gate verdict untouched', async () => {
   await withRepo(async (root) => {
     await ignoreLocalLayer(root)
     await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
@@ -1235,6 +1254,42 @@ test('a hostile teammates.local.json declaring an empty check list and a huge fi
     assert.equal(parsed.results.find((r) => r.name === 'fileset').status, 'fail')
     assert.ok(parsed.results.some((r) => r.name === 'ownership'))
     assert.match(after.out, /stray\.mjs/)
+  })
+})
+
+test('the same hostile file cannot extend the fix-round budget the tracked manifest sets', async () => {
+  await withRepo(async (root) => {
+    // The other half of HOSTILE_LOCAL. The verdict test above says nothing about `fixRounds` —
+    // its assertions are all about the gate result, which the budget does not touch — so
+    // without this test a `fixRoundsForPhase` that merged the gitignored layer would pass the
+    // whole suite while handing a teammate 99 retries it was never granted.
+    await ignoreLocalLayer(root)
+    await retryableRun(root)
+    await writeFile(path.join(root, 'teammates.local.json'), JSON.stringify(HOSTILE_LOCAL), 'utf8')
+    // Still invisible to git, exactly as in the verdict test.
+    assert.equal(git(root, ['status', '--porcelain']).trim(), '')
+
+    const verdictPath = await gateVerdict(root)
+    // The tracked manifest grants RETRYABLE_BUDGET rounds and the hostile file asks for 99, so
+    // every round below must be granted and the one after it refused. Walked through the real
+    // `fix` and `record-fix-round` subcommands rather than by reading a number back, because the
+    // budget only means anything at the point the loop stops.
+    for (let round = 1; round <= RETRYABLE_BUDGET; round += 1) {
+      const granted = JSON.parse((await runCliOn(root, ['fix', '--run', 'r1', '--phase', '1', '--verdict', verdictPath])).out)
+      assert.equal(granted.decision, 'retry')
+      assert.equal(granted.tasks[0].taskId, 'T1')
+      assert.equal(granted.tasks[0].round, round)
+      const recorded = await runCliOn(root, ['record-fix-round', '--run', 'r1', '--phase', '1', '--task', 'T1'])
+      assert.equal(recorded.code, 0)
+    }
+
+    const exhausted = JSON.parse((await runCliOn(root, ['fix', '--run', 'r1', '--phase', '1', '--verdict', verdictPath])).out)
+    // `budget-exhausted` by name, not merely `escalate`: a `fix` that read the local layer's
+    // `phases.default` would find an empty check list and no manifest budget there, and could
+    // escalate for a quite different reason while looking identical at this assertion's altitude.
+    assert.equal(exhausted.decision, 'escalate')
+    assert.equal(exhausted.reason, 'budget-exhausted')
+    assert.deepEqual(exhausted.tasks, [])
   })
 })
 

@@ -103,33 +103,61 @@ and nothing else:
 
 | Key | Domain | Default |
 |---|---|---|
-| `maxParallel` | integer >= 1 | `min(8, cores - 2)` |
+| `maxParallel` | integer >= 1 | `max(1, min(8, cores - 2))` |
 | `caveman` | `false \| "lite" \| "full" \| "ultra"` | `false` |
-| `agents.<role>.tier` | `"cheap" \| "mid" \| "capable"` | unset — routing infers per task |
-| `agents.<role>.effort` | `"low" \| "medium" \| "high" \| "xhigh" \| "max"` | unset — inherits session |
+| `agents.<role>.tier` | `"cheap" \| "mid" \| "capable"` | unset — see below |
+| `agents.<role>.effort` | `"low" \| "medium" \| "high" \| "xhigh" \| "max"` | unset — inherits the session's |
 
 `<role>` is `implementer` or `integrator` in the local file; `reviewer` is accepted only in the
 tracked manifest. An unknown key, or an enforcement key in the local file, is a hard error naming
 the key — a setting that was silently dropped is a setting you believe took effect.
 
-Both files are read through the same four subcommands. Writes target the tracked manifest unless
-you pass `--local`:
+An unset tier resolves differently per role, so "default" is not one answer. The **implementer**
+tier is inferred per task by `init-run` from the plan; a configured value overrides that
+inference for every task. The **reviewer** and **integrator** are not in the plan and are not
+inferred: the dispatching skill fixes them at `capable` and `mid`, and a configured tier replaces
+that fixed choice.
+
+### The four subcommands manage ergonomics, not enforcement
 
     node scripts/cli.mjs config list
     node scripts/cli.mjs config get maxParallel
     node scripts/cli.mjs config set <key> <value> [--local]
     node scripts/cli.mjs config unset <key> [--local]
 
+`get`, `set` and `unset` accept only the four ergonomics keys in the table above. They do **not**
+accept `phases`, `lens` or `preview` in either file — including without `--local`:
+
+    $ node scripts/cli.mjs config set lens correctness
+    unknown config key: lens        # exit 2
+
+That is deliberate, not a gap. Enforcement policy is edited **by hand** in
+`teammates.gate.json` so it lands as a reviewable diff rather than as a CLI mutation that leaves
+nothing to read. The consequence is that a hand edit gets none of `config set`'s validation, so
+run `config list` afterwards: it re-reads and validates both layers and exits 2 with a message if
+the file is no longer valid JSON or an ergonomics key is malformed. The enforcement keys' own
+content is exercised by the next `gate` run.
+
+`list` reads both layers; `set` and `unset` write the tracked manifest unless you pass `--local`.
+
 Worked example — raise the fan-out on a large machine without committing that choice:
 
     $ node scripts/cli.mjs config set maxParallel 12 --local
     wrote teammates.local.json
-    added teammates.local.json to .gitignore
 
     $ node scripts/cli.mjs config list
     maxParallel  12  (teammates.local.json)
     caveman      false  (default)
-    ...
+    agents.implementer.tier    -  (default)
+    agents.implementer.effort  -  (default)
+    agents.reviewer.tier    -  (default)
+    agents.reviewer.effort  -  (default)
+    agents.integrator.tier    -  (default)
+    agents.integrator.effort  -  (default)
+
+In a project whose `.gitignore` does not yet exclude the file, `config set --local` adds the
+entry and reports `added teammates.local.json to .gitignore` on a second line. This repository
+already carries that entry, so the transcript above is what you get here.
 
 `config list` prints the layer each value came from, so a value you did not expect can be traced
 to the file that set it.
