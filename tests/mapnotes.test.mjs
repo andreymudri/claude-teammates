@@ -53,6 +53,31 @@ test('the prompt omits the directory sentence when there are none', () => {
   assert.doesNotMatch(mapNotesPrompt({ runId: 'r1', sha: 'a', notesPath: 'p' }), /largest directories/)
 })
 
+test('a header that is not at the start of the text is not accepted as provenance', () => {
+  const header = mapNotesHeader({ runId: 'r1', sha: 'old111' })
+  const text = `# Map\n\nSome prose\n\n${header}\n`
+  assert.equal(readMapNotesHeader(text), null)
+  assert.match(mapNotesStale(text, { runId: 'r1', sha: 'new222' }), /no teammates-map header/)
+})
+
+test('a header quoted inside the body, not as the real first line, is not accepted', () => {
+  const header = mapNotesHeader({ runId: 'r1', sha: 'old111' })
+  const text = `# Map\n\nExample header format: ${header}\n`
+  assert.equal(readMapNotesHeader(text), null)
+})
+
+test('leading whitespace before a real header at the start is still accepted', () => {
+  const header = mapNotesHeader({ runId: 'r1', sha: 'abc123' })
+  const text = `\n\n  ${header}\nbody\n`
+  assert.deepEqual(readMapNotesHeader(text), { runId: 'r1', sha: 'abc123' })
+  assert.equal(mapNotesStale(text, { runId: 'r1', sha: 'abc123' }), null)
+})
+
+test('the prompt confines the agent to writing only the map file', () => {
+  const prompt = mapNotesPrompt({ runId: 'r1', sha: 'abc123', notesPath: '.teammates/r1/map.md' })
+  assert.match(prompt, /do not modify any\s+file other than the map you are writing/)
+})
+
 test('non-hex shas like UNKNOWN are accepted and reported in mismatch messages', () => {
   const text = mapNotesHeader({ runId: 'r1', sha: 'UNKNOWN' })
   assert.equal(text, '<!-- teammates-map run=r1 sha=UNKNOWN -->')
