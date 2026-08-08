@@ -285,6 +285,53 @@ test('runFilesetCheck fails naming a stray path', async () => {
 // the run tip with no work on it. `filesetViolations` of an empty change list is empty, so the
 // check used to pass, the task merged as a no-op, and the returned `status: done` was believed.
 // An existing branch that contributes nothing is a failure, not a clean pass.
+// Wiring for the side-door rule: the branch is an ancestor of the base but not of the run
+// branch. isAncestor is asked exactly that pair of questions, and a merge into the base with no
+// gate PASS is a fail, not a pass carrying a note.
+test('runOwnershipCheck fails a task branch merged into the base branch but not the run branch', async () => {
+  const git = fakeGit({
+    branchExists: async () => true,
+    commitsBetween: async () => [],
+    isAncestor: async (sha, target) => sha === `refs/heads/${T1_BRANCH}-sha` && target === 'baseSha1',
+    resolveRef: async (ref) => {
+      if (ref === 'refs/heads/run') return 'runSha1'
+      if (ref === 'refs/heads/main') return 'baseSha1'
+      return `${ref}-sha`
+    },
+  })
+  const check = { name: 'ownership', kind: 'ownership' }
+  const ctx = {
+    git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH,
+    anchorSha: 'anchorSha1', runSha: 'runSha1', tasks: [T1_TASK],
+  }
+  const res = await runOwnershipCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.match(res.output, new RegExp(T1_BRANCH))
+  assert.match(res.output, /main/)
+})
+
+test('runOwnershipCheck passes a task branch that is an ancestor of both the base and the run branch', async () => {
+  const git = fakeGit({
+    branchExists: async () => true,
+    commitsBetween: async () => [],
+    // Landed the ordinary way: the run branch carries it, and the run branch has since landed
+    // on the base. Ancestor of both, and no violation.
+    isAncestor: async () => true,
+    resolveRef: async (ref) => {
+      if (ref === 'refs/heads/run') return 'runSha1'
+      if (ref === 'refs/heads/main') return 'baseSha1'
+      return `${ref}-sha`
+    },
+  })
+  const check = { name: 'ownership', kind: 'ownership' }
+  const ctx = {
+    git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH,
+    anchorSha: 'anchorSha1', runSha: 'runSha1', tasks: [T1_TASK],
+  }
+  const res = await runOwnershipCheck(check, ctx)
+  assert.equal(res.status, 'pass')
+})
+
 test('runFilesetCheck fails when a task branch contributes no file changes', async () => {
   const git = fakeGit({
     branchExists: async () => true,

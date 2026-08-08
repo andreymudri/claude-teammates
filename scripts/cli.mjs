@@ -284,6 +284,12 @@ const SUPPLIABLE_KINDS = new Set(['agent', 'mcp'])
 // The same vocabulary aggregateVerdict recognises, minus `pending` — supplying "still
 // pending" says nothing, and anything outside the set is an error rather than a pass.
 const SUPPLIED_STATUSES = new Set(['pass', 'fail', 'skip'])
+// Provenance, not authority: `response` is the reviewer's returned result, `file` is one
+// recovered from the findings file it wrote before idling without returning. The distinction
+// exists nowhere else — a recovered review and a returned one produce identical verdicts — so
+// without carrying it here, "this lens was paid for twice / was nearly lost" is unrecorded.
+// Unset means `response`, because that is the ordinary path.
+const SUPPLIED_SOURCES = new Set(['response', 'file'])
 
 // `--results` is caller input for one run, never persisted authority. A result for a computed
 // check would be a way to hand the gate a passing `fileset`, so those are rejected outright.
@@ -312,6 +318,9 @@ function validateSuppliedResults(supplied, checks) {
     if (!check) return `--results names a check not in this phase's manifest: ${JSON.stringify(r?.name)}`
     if (!SUPPLIABLE_KINDS.has(check.kind)) return `--results may not supply a ${check.kind} check: ${check.name}`
     if (!SUPPLIED_STATUSES.has(r.status)) return `--results carries an unrecognized status for ${check.name}: ${JSON.stringify(r.status)}`
+    if (r.source !== undefined && !SUPPLIED_SOURCES.has(r.source)) {
+      return `--results carries an unrecognized source for ${check.name}: ${JSON.stringify(r.source)} (expected "response" or "file")`
+    }
   }
   return null
 }
@@ -351,6 +360,10 @@ export function mergeSuppliedResults(rawResults, supplied) {
       output: s.output ?? '',
       optional: r.optional,
       findings: s.findings ?? [],
+      // Provenance travels with the result into the recorded verdict. It is deliberately not
+      // read by aggregateVerdict: a review recovered from a file is worth exactly as much as
+      // one that was returned — the file is written by the reviewer either way.
+      source: s.source ?? 'response',
     }
   })
 }

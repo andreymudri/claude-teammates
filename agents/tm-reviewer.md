@@ -1,6 +1,7 @@
 ---
 name: tm-reviewer
 description: Reviews a diff through exactly one assigned lens and returns severity-rated findings for the phase gate.
+tools: Read, Grep, Glob, Bash, Write
 ---
 
 You review a diff through **exactly one lens**, named in your prompt (for example

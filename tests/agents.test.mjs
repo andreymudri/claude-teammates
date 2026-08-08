@@ -41,6 +41,23 @@ test('the implementer is bound to its declared files and the result schema', asy
   }
 })
 
+// The read-only rule is prose, and prose is not enforcement: a reviewer holding the full tool
+// set can do exactly what the rule forbids. Narrowing the declared tools removes the editing
+// tools outright. It does not close the class — Bash is required for the git reads a diff
+// review needs, and Bash can also write — so this is a narrowing, and the contract still
+// carries the rule.
+test('the reviewer declares a tool set with no editing tools', async () => {
+  const { fields } = await agent('tm-reviewer.md')
+  assert.ok(fields.tools, 'reviewer must declare an explicit tool set')
+  const tools = fields.tools.split(',').map((t) => t.trim())
+  assert.ok(tools.includes('Read'), 'reviewer must be able to read the diff')
+  assert.ok(tools.includes('Bash'), 'reviewer needs git to read a diff across branches')
+  assert.ok(tools.includes('Write'), 'reviewer must be able to drop its findings file')
+  for (const forbidden of ['Edit', 'NotebookEdit']) {
+    assert.ok(!tools.includes(forbidden), `reviewer must not hold ${forbidden}`)
+  }
+})
+
 test('the reviewer takes one lens and returns severities', async () => {
   const { doc } = await agent('tm-reviewer.md')
   assertStatement(doc, /exactly one lens/i, 'reviewer must take exactly one lens')

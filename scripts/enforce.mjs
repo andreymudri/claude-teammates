@@ -79,7 +79,19 @@ export function derivePhase({ tasks = [], integratedPhases = [] } = {}) {
 // status.json and any teammate could reset it, which turned a direct write to the run
 // branch into an accepted one. It now asks the question git can answer: is every commit on
 // the run branch since the anchor accounted for by this run's task branches?
-export function ownershipViolations({ runBranch, taskBranches = [], unexplainedCommits = [], dirty = false } = {}) {
+// `sideDoorBranches` are this run's task branches that are ancestors of the BASE branch without
+// being ancestors of the run branch. That is a route into the base this design has no legitimate
+// use for: a task branch reaches the base by riding the run branch, which lands as a whole after
+// a recorded PASS. Anything else — a reviewer octopus-merging task branches into master, a
+// teammate merging its own work "to be helpful" — puts integrated content in front of users with
+// no gate verdict behind it, and every check here otherwise looks only at the run branch, so it
+// used to be accepted with a note.
+//
+// It needs no base sha recorded at run start, which is what makes it trustworthy: the question
+// is asked of git about two refs that exist right now, so there is no stored state for the
+// enforced party to rewrite. It cannot say WHEN the branch reached the base, only that it is
+// there by a route the run branch does not explain.
+export function ownershipViolations({ runBranch, baseBranch, taskBranches = [], sideDoorBranches = [], unexplainedCommits = [], dirty = false } = {}) {
   const violations = []
   if (!runBranch) {
     violations.push('no run branch was supplied — the gate cannot establish what it is protecting')
@@ -89,6 +101,9 @@ export function ownershipViolations({ runBranch, taskBranches = [], unexplainedC
     if (normalizeBranchRef(branch) === normalizeBranchRef(runBranch)) {
       violations.push(`task branch ${branch} is the run branch; only tm-integrator writes there`)
     }
+  }
+  for (const branch of sideDoorBranches) {
+    violations.push(`task branch ${branch} is an ancestor of base branch ${baseBranch ?? '(unknown)'} but not of run branch ${runBranch} — this run's work reached the base by some route other than the run branch, so it is integrated with no gate verdict behind it`)
   }
   for (const sha of unexplainedCommits) {
     violations.push(`commit ${sha} on ${runBranch} is reachable from no task branch of this run and from no ancestor of the base branch — either it is a direct write, or the integrator merged without --no-ff and destroyed the ancestry this check reads`)

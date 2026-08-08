@@ -114,6 +114,38 @@ test('derivePhase sorts its input rather than trusting task order', () => {
 
 // --- ownershipViolations -----------------------------------------------------------------
 
+// The gate protects the run branch, so work merged straight into the BASE branch — the shape of
+// the fixloop incident, where a reviewer octopus-merged seven task branches into master with no
+// gate PASS and no integrator — was accepted with a note. It needs no stored run-start base sha
+// to catch: this run's work is supposed to reach the base by riding the run branch, so a task
+// branch that is an ancestor of the base but not of the run branch got there by a side door.
+test('a task branch that reached the base branch without the run branch is a violation', () => {
+  const v = ownershipViolations({
+    runBranch: 'run',
+    baseBranch: 'master',
+    taskBranches: ['teammates/r1/T1'],
+    sideDoorBranches: ['teammates/r1/T1'],
+    unexplainedCommits: [],
+    dirty: false,
+  })
+  assert.equal(v.length, 1)
+  assert.match(v[0], /teammates\/r1\/T1/)
+  assert.match(v[0], /master/)
+  assert.match(v[0], /run/)
+})
+
+test('a task branch on neither the base nor the run branch is not a side-door violation', () => {
+  const v = ownershipViolations({
+    runBranch: 'run',
+    baseBranch: 'master',
+    taskBranches: ['teammates/r1/T1'],
+    sideDoorBranches: [],
+    unexplainedCommits: [],
+    dirty: false,
+  })
+  assert.deepEqual(v, [])
+})
+
 test('no unexplained commits and no alias collisions is clean', () => {
   const v = ownershipViolations({
     runBranch: 'main', taskBranches: ['teammates/r1/T1'], unexplainedCommits: [], dirty: false,

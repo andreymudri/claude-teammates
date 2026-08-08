@@ -396,8 +396,24 @@ export async function runOwnershipCheck(check, ctx = {}) {
       if (!explained) unexplained.push(sha)
     }
 
+    // Asked of every task branch of the run, not just the current phase's: a branch merged
+    // into the base by a side door is a violation whenever it is noticed, and an earlier
+    // phase's branch is exactly the one most likely to have been "helpfully" landed already.
+    // Skipped entirely when the base could not be resolved — the same tolerance the
+    // base-ancestry clause above applies, for the same reason.
+    const sideDoor = []
+    if (baseSha) {
+      for (let i = 0; i < shas.length; i += 1) {
+        if (await git.isAncestor(shas[i], baseSha) && !(await git.isAncestor(shas[i], runSha))) {
+          sideDoor.push(branches[i])
+        }
+      }
+    }
+
     const violations = ownershipViolations({
       runBranch,
+      baseBranch,
+      sideDoorBranches: sideDoor,
       taskBranches: branches,
       unexplainedCommits: unexplained,
       dirty: await git.isDirty(),

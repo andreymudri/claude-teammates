@@ -1552,6 +1552,43 @@ test('--results pointing at malformed JSON, or at JSON without a results array, 
 // suppliable kind can currently produce a non-pending result through `runChecks` — `agent`
 // and `mcp` have no runner, so the gate always leaves them pending. The guard exists for the
 // moment one of them does run: a supplied result must never overwrite a computed one.
+// A review recovered from the reviewer's findings file — because the reviewer idled without
+// returning — is a different fact from one the reviewer handed back, and until now it survived
+// nowhere: `--results` carried no way to say it, so the recorded verdict could not tell the two
+// apart. `source` is provenance only; it never affects the verdict.
+test('mergeSuppliedResults carries the provenance of a supplied result', () => {
+  const raw = [{ name: 'review', kind: 'agent', status: 'pending', output: '', optional: false }]
+  const merged = mergeSuppliedResults(raw, [
+    { name: 'review', kind: 'agent', status: 'pass', findings: [], source: 'file' },
+  ])
+  assert.equal(merged[0].source, 'file')
+})
+
+test('mergeSuppliedResults defaults provenance to the returned response', () => {
+  const raw = [{ name: 'review', kind: 'agent', status: 'pending', output: '', optional: false }]
+  const merged = mergeSuppliedResults(raw, [{ name: 'review', kind: 'agent', status: 'pass' }])
+  assert.equal(merged[0].source, 'response')
+})
+
+test('gate rejects a supplied result whose provenance is not one of the two it knows', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const config = { phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } } }
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(config), 'utf8')
+    const results = path.join(root, 'results.json')
+    await writeFile(results, JSON.stringify({
+      results: [{ name: 'review', kind: 'agent', status: 'pass', source: 'trust me' }],
+    }), 'utf8')
+    lines.length = 0
+    const code = await runCli(
+      ['gate', '--run', 'r1', '--plan', 'plan.md', '--no-fleet', '--root', root, '--results', results],
+      io,
+    )
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /source/)
+  })
+})
+
 test('mergeSuppliedResults leaves a check that already ran untouched', async () => {
   const raw = [
     { name: 'review', kind: 'agent', status: 'pass', output: 'computed', optional: false },

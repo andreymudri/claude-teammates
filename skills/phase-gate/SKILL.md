@@ -67,6 +67,9 @@ Then hand those results back and let the CLI recompute:
     node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" gate --run <runId> --plan <planPath> --root <project root> --results <path>
 
 The file is `{ "results": [ { "name": "review", "kind": "agent", "status": "pass", "findings": [] } ] }`.
+Add `"source": "file"` to an entry recovered from a reviewer's findings file rather than from
+its returned response; unset means `response`. It is provenance only — the verdict is identical
+either way — and anything but those two values is rejected.
 Only `agent` and `mcp` checks may be supplied; a `command`, `fileset`, or `ownership` entry is
 rejected, because those are computed and supplying one would be a way to hand the gate a passing
 enforcement check. The verdict is recomputed from the merged set, so a recorded PASS is always
@@ -167,6 +170,13 @@ own tests, and running a teammate's code is arbitrary execution, so a determined
 do anything the user can — including fast-forwarding the run branch to make a phase look
 integrated. `docs/specs/2026-08-05-tamper-evident-enforcement-design.md` lists what is out of
 scope; `tests/adversarial.test.mjs` pins each limit with a test.
+
+`ownership` also fails a task branch that is an ancestor of the **base** branch but not of the
+run branch. This run's work reaches the base by riding the run branch, which lands as a whole
+after a PASS; any other route puts integrated content in front of users with no gate verdict
+behind it — a reviewer merging task branches into `master`, a teammate landing its own work.
+The question is asked of the two refs as they stand, so there is no recorded base sha for the
+enforced party to rewrite; the cost is that it says the branch is there, not when it arrived.
 
 Skipped only when the caller passes `--no-fleet`. Missing state is a failure, never a skip.
 
