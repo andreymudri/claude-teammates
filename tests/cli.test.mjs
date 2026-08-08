@@ -474,6 +474,58 @@ test('preview-check says plainly when a manifest declares no links at all', asyn
   })
 })
 
+test('plan-drift reports nothing when the working-tree plan matches the anchor', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const code = await runCli(['plan-drift', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    assert.equal(code, 0)
+    assert.match(lines.join('\n'), /no drift/i)
+  })
+})
+
+// The plan is edited in the working tree and NOT committed — which is exactly the state the two
+// real incidents were found in, and the state the gate's plan hash can only report as "changed".
+test('plan-drift names the task and the fields that changed since the anchor', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const original = await readFile(planPath, 'utf8')
+    await writeFile(planPath, original.replace('- Create: `a.mjs`', '- Create: `a.mjs`\n- Create: `late.mjs`'), 'utf8')
+    lines.length = 0
+    const code = await runCli(['plan-drift', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    assert.match(out, /T1/)
+    assert.match(out, /late\.mjs/)
+    // Not integrated, so the amendment still reaches the work: reported, exit 0.
+    assert.match(out, /still effective/i)
+    assert.equal(code, 0)
+  })
+})
+
+// Drift against an already-integrated phase is the one that costs: exit 1, so a caller can
+// branch on it the way it branches on the gate.
+test('plan-drift exits 1 when the drift lands on an integrated phase', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    // Integrate phase 1 for real: T1's branch carries a file change and is merged into the run
+    // branch, which is how deriveContext decides a phase is integrated.
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--no-ff', '--quiet', '-m', 'integrate T1', 'teammates/r1/T1'])
+    const original = await readFile(planPath, 'utf8')
+    await writeFile(planPath, original.replace('- Create: `a.mjs`', '- Create: `rewritten.mjs`'), 'utf8')
+    lines.length = 0
+    const code = await runCli(['plan-drift', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    assert.match(out, /too late/i)
+    assert.match(out, /correct it in the dispatch/i)
+    assert.equal(code, 1)
+  })
+})
+
 test('gate reports a JSON verdict when a manifest exists', async () => {
   await withRepo(async ({ root, planPath, io, lines }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)

@@ -22,14 +22,16 @@ import { resolveTaskBranch } from './enforce.mjs'
 import { tmpdir } from 'node:os'
 import { stat } from 'node:fs/promises'
 import { validateLinkPaths } from './preview-links.mjs'
+import { planDrift, renderDrift } from './plan-drift.mjs'
 import { generatePhaseWorkflow } from './workflow-gen.mjs'
 import { createGit, GitError, defaultGitExec } from './git.mjs'
 import { deriveContext } from './gate-runner.mjs'
 
-const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|config> [options]
+const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|config> [options]
 
   init-run <planPath> --run <id> [--root <path>]
   doctor   --run <id> --plan <path> [--base <branch>] [--run-branch <name>] [--root <path>]
+  plan-drift --run <id> --plan <path> [--base <branch>] [--root <path>]
   preview-check [--root <path>]
   review-dispatch --run <id> [--phase <name>] [--models <json>] [--root <path>]
   collect-reviews --run <id> [--phase <name>] [--root <path>]
@@ -148,6 +150,7 @@ const REQUIRED = {
   'review-dispatch': ['run'],
   // No required flags: it reads the manifest and the working tree, and belongs to no run.
   'preview-check': [],
+  'plan-drift': ['run', 'plan'],
   digest: ['run'],
   claim: ['run', 'task', 'by'],
   unclaim: ['run', 'task'],
@@ -927,6 +930,38 @@ export async function runCli(argv, io = { out: console.log }) {
     // 1 on problems, mirroring the gate, so a caller can branch on the exit code. It is still
     // a report: nothing is recorded, and no verdict is issued or implied.
     return report.problems.length === 0 ? 0 : 1
+  }
+
+  if (command === 'plan-drift') {
+    let ctx
+    try {
+      // The same derive `gate` uses: the anchored plan is read with `git show <anchor>:<path>`,
+      // and the phases come from branch ancestry. Reading it any other way would compare the
+      // working tree against something other than what the gate actually enforces.
+      ctx = await derive(root, runId, flags)
+    } catch (err) {
+      io.out(`cannot read the anchored plan: ${err.message}`)
+      return 2
+    }
+
+    let currentTasks
+    try {
+      currentTasks = assignPhases(parsePlan(await readFile(path.resolve(root, flags.plan), 'utf8')))
+    } catch (err) {
+      io.out(`cannot read the working-tree plan at ${flags.plan}: ${err.message}`)
+      return 2
+    }
+
+    const report = planDrift({
+      anchored: ctx.tasks,
+      current: currentTasks,
+      integratedPhases: ctx.integratedPhases,
+    })
+    io.out(renderDrift(report))
+    // 1 only for drift against an integrated phase. Amending a task nobody has implemented is
+    // how a plan is meant to evolve mid-run, and exiting 1 for it would train a caller to
+    // ignore the exit code for the case that actually costs something.
+    return report.tooLate.length > 0 ? 1 : 0
   }
 
   if (command === 'preview-check') {

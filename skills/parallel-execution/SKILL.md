@@ -37,6 +37,16 @@ Wait on completion notifications. Do not poll in a loop.
 Append every result to `status.json`. A teammate that returned nothing is `orphaned`, not
 `done` — offer to respawn it.
 
+Before dispatching a later phase, check whether the plan still describes the tree:
+
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" plan-drift --run <runId> --plan <planPath> --root <project root>
+
+It compares the working-tree plan against the plan at the anchor and separates drift that still
+reaches the work from drift on an already-integrated phase, which exits 1. A later task's brief
+that describes interfaces earlier fix rounds replaced, or acceptance criteria still demanding
+behaviour a security fix removed, both surface here — and both are corrected in the dispatch, not
+only in the plan, because a dispatch already sent carries the old text.
+
 A returned `done` is a claim, not evidence. Check it against git before believing it:
 
     node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" doctor --run <runId> --plan <planPath> --root <project root>
