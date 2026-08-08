@@ -53,6 +53,15 @@ those you execute:
   absent file is a clean lens — a missing result is never an empty findings array, and the
   check stays `pending`, which the CLI scores as FAIL.
 
+  To rebuild the results file from those drops rather than by hand:
+
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" collect-reviews --run <runId> --root <project root> [--phase <name>]
+
+  It prints a `--results` file with `source: "file"`, applying the manifest's own `blockOn`. It
+  exits 4 and prints nothing usable while any lens has no file, or when a file exists and does
+  not parse — respawn those lenses instead. A file for a lens this phase did not dispatch is
+  reported and ignored, never merged.
+
   Both come from the tracked manifest only — the reviewer grades the diff, so
   letting the gitignored layer choose its tier would let the party being judged pick its own
   judge. Then take every finding at a `blockOn` severity and

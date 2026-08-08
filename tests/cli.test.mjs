@@ -253,6 +253,77 @@ test('doctor still reports when the main worktree sits on the base branch', asyn
   })
 })
 
+async function writeReviewFile(root, runId, name, body) {
+  await mkdir(path.join(root, '.teammates', runId, 'reviews'), { recursive: true })
+  await writeFile(path.join(root, '.teammates', runId, 'reviews', name), JSON.stringify(body), 'utf8')
+}
+
+test('collect-reviews turns the reviewers’ findings files into a gate results file', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const config = {
+      lens: ['correctness', 'security'],
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', blockOn: ['high'] }] } },
+    }
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(config), 'utf8')
+    await writeReviewFile(root, 'r1', '1-correctness.json', { findings: [] })
+    await writeReviewFile(root, 'r1', '1-security.json', {
+      findings: [{ severity: 'high', file: 'a.mjs', line: 2, summary: 's', failureScenario: 'f' }],
+    })
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 0)
+    const parsed = JSON.parse(lines.join('\n'))
+    assert.equal(parsed.results[0].status, 'fail')
+    assert.equal(parsed.results[0].source, 'file')
+    assert.equal(parsed.results[0].findings[0].lens, 'security')
+  })
+})
+
+// The whole point of the fallback: a lens whose reviewer died leaves no file, and that must not
+// collapse into a passing review. Exit 4 — "cannot verify", the code `complete` already uses for
+// this shape of answer — rather than printing a results file the caller would feed to the gate.
+test('collect-reviews refuses to emit a results file while a lens is missing', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const config = {
+      lens: ['correctness', 'security'],
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+    }
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(config), 'utf8')
+    await writeReviewFile(root, 'r1', '1-correctness.json', { findings: [] })
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 4)
+    const out = lines.join('\n')
+    assert.match(out, /security/)
+    assert.doesNotMatch(out, /"status": "pass"/)
+  })
+})
+
+test('collect-reviews reports a findings file that is not readable JSON instead of skipping it', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const config = {
+      lens: ['correctness'],
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+    }
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(config), 'utf8')
+    await mkdir(path.join(root, '.teammates', 'r1', 'reviews'), { recursive: true })
+    await writeFile(path.join(root, '.teammates', 'r1', 'reviews', '1-correctness.json'), '{ not json', 'utf8')
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 4)
+    assert.match(lines.join('\n'), /1-correctness\.json/)
+  })
+})
+
+test('collect-reviews needs a manifest to know which lenses were dispatched', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 4)
+    assert.match(lines.join('\n'), /manifest/)
+  })
+})
+
 test('gate reports a JSON verdict when a manifest exists', async () => {
   await withRepo(async ({ root, planPath, io, lines }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)

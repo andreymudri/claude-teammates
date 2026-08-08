@@ -3,7 +3,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parsePlan } from './plan-parser.mjs'
 import { assignPhases } from './phases.mjs'
-import { readState, writeState, claimTask, releaseClaim, readFixRounds, recordFixRound } from './state.mjs'
+import { readState, writeState, claimTask, releaseClaim, readFixRounds, recordFixRound, runDir } from './state.mjs'
 import { inferGateConfig, checksForPhase, fixRoundsForPhase, previewLinks } from './gate-config.mjs'
 import {
   loadConfig, readLayer, writeLayer, validateKey, validateLocal, isEnforcementKey, assertSafeKey,
@@ -16,14 +16,16 @@ import { decideFix } from './fix-loop.mjs'
 import { runChecks, aggregateVerdict } from './gate-runner.mjs'
 import { renderDigest } from './digest.mjs'
 import { collectDoctorReport, renderDoctor } from './doctor.mjs'
+import { collectReviewResults, reviewFileName } from './reviews.mjs'
 import { generatePhaseWorkflow } from './workflow-gen.mjs'
 import { createGit, GitError, defaultGitExec } from './git.mjs'
 import { deriveContext } from './gate-runner.mjs'
 
-const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflow|complete|fix|record-fix-round|config> [options]
+const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflow|complete|fix|record-fix-round|collect-reviews|config> [options]
 
   init-run <planPath> --run <id> [--root <path>]
   doctor   --run <id> --plan <path> [--base <branch>] [--run-branch <name>] [--root <path>]
+  collect-reviews --run <id> [--phase <name>] [--root <path>]
   gate     --run <id> --plan <path> [--base <branch>] [--root <path>] [--phase <name>] [--no-fleet] [--results <path>]
   digest   --run <id> [--root <path>]
   claim    --run <id> --task <id> --by <teammate> [--root <path>]
@@ -133,6 +135,9 @@ const REQUIRED = {
   'init-run': ['run'],
   gate: ['run', 'plan'],
   doctor: ['run', 'plan'],
+  // `--phase` is the manifest phase key, not a plan phase number, so it stays out of
+  // NUMERIC_PHASE_COMMANDS and defaults to `default` exactly as `gate`'s does.
+  'collect-reviews': ['run'],
   digest: ['run'],
   claim: ['run', 'task', 'by'],
   unclaim: ['run', 'task'],
@@ -900,6 +905,71 @@ export async function runCli(argv, io = { out: console.log }) {
     // 1 on problems, mirroring the gate, so a caller can branch on the exit code. It is still
     // a report: nothing is recorded, and no verdict is issued or implied.
     return report.problems.length === 0 ? 0 : 1
+  }
+
+  if (command === 'collect-reviews') {
+    const config = await resolveGateConfig(root, io)
+    if (config === GATE_CONFIG_REJECTED) return 2
+    // 4, matching `complete`: this cannot verify what it was asked about. Inferring a manifest
+    // here would invent the lens list, which is the one thing this command must not guess —
+    // the lens list is what decides whether a review is complete.
+    if (!config) { io.out('no gate manifest — cannot tell which lenses were dispatched'); return 4 }
+
+    const phaseName = flags.phase ?? 'default'
+    const checks = checksForPhase(config, phaseName)
+    const agentChecks = checks.filter((c) => c.kind === 'agent')
+    if (agentChecks.length !== 1) {
+      io.out(`this phase declares ${agentChecks.length} agent checks; collect-reviews handles exactly one`)
+      return 4
+    }
+    const check = agentChecks[0]
+
+    const dir = path.join(runDir(root, runId), 'reviews')
+    const files = []
+    const unreadable = []
+    for (const lens of check.lens) {
+      let name
+      try {
+        name = reviewFileName(phaseName, lens)
+      } catch (err) {
+        io.out(err.message)
+        return 4
+      }
+      try {
+        const parsed = JSON.parse(await readFile(path.join(dir, name), 'utf8'))
+        // A reviewer returns an array of findings; the file it writes may carry that array
+        // directly or wrap it. Both are accepted, and anything else is unreadable rather than
+        // an empty review — the distinction this whole command exists to preserve.
+        const found = Array.isArray(parsed) ? parsed : parsed?.findings
+        if (!Array.isArray(found)) { unreadable.push(name); continue }
+        files.push({ lens, findings: found })
+      } catch (err) {
+        // ENOENT is a missing lens, reported below by name. Anything else is a file that
+        // exists and cannot be trusted, which must never be read as "no findings".
+        if (err.code !== 'ENOENT') unreadable.push(name)
+      }
+    }
+
+    if (unreadable.length > 0) {
+      io.out(`unreadable findings file(s): ${unreadable.join(', ')} — a file that exists and cannot be parsed is not an empty review`)
+      return 4
+    }
+
+    const collected = collectReviewResults({
+      checkName: check.name,
+      lenses: check.lens,
+      files,
+      blockOn: check.blockOn ?? ['high'],
+    })
+    if (collected.unexpected.length > 0) {
+      io.out(`ignored findings file(s) for lens(es) this phase did not dispatch: ${collected.unexpected.join(', ')}`)
+    }
+    if (collected.missing.length > 0) {
+      io.out(`no findings file for lens(es): ${collected.missing.join(', ')} — those reviews are lost, not empty; respawn them rather than recording a pass`)
+      return 4
+    }
+    io.out(JSON.stringify({ results: collected.results }, null, 2))
+    return 0
   }
 
   if (command === 'gate') {

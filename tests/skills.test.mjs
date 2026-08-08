@@ -37,7 +37,13 @@ test('each skill has a name matching its folder and a description starting with 
 
 test('every cli subcommand referenced by a skill actually exists', async () => {
   const cli = await readFile(new URL('../scripts/cli.mjs', import.meta.url), 'utf8')
-  const known = ['init-run', 'gate', 'digest', 'claim', 'unclaim', 'workflow', 'config']
+  // Derived from the CLI's own usage line, not restated here. A hand-kept allowlist fails in
+  // the useless direction: it rejects a subcommand the CLI really does implement, so adding one
+  // means editing a list in a test that has no opinion about it, and the assertion below —
+  // "cli.mjs implements what the skill calls" — is the one actually carrying the weight.
+  const usage = /usage: cli\.mjs <([a-z|-]+)>/.exec(cli)
+  assert.ok(usage, 'cli.mjs must declare its subcommands in a usage line')
+  const known = usage[1].split('|')
   for (const name of await allSkills()) {
     const { body } = await skill(name)
     for (const m of body.matchAll(/cli\.mjs["']?\s+([a-z-]+)/g)) {
