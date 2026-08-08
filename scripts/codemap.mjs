@@ -112,10 +112,14 @@ export function hotPairs(coupling, { top = 15, minSupport = DEFAULT_MIN_SUPPORT 
   const out = []
   for (const key of coupling.pairs.keys()) {
     const [a, b] = key.split('\0')
-    if ((coupling.support.get(a) ?? 0) < minSupport && (coupling.support.get(b) ?? 0) < minSupport) continue
     const ab = confidence(coupling, a, b)
     const ba = confidence(coupling, b, a)
     const [file, other, score] = ab >= ba ? [a, b, ab] : [b, a, ba]
+    // The floor applies to the endpoint whose confidence is being reported, same as
+    // neighboursOf: it only trusts a file's own coupling once that file itself has enough
+    // history. Checking either endpoint let a one-commit file report 100% confidence just
+    // because it happened to pair with something well-established.
+    if ((coupling.support.get(file) ?? 0) < minSupport) continue
     out.push({ file, other, confidence: score })
   }
   return out.sort((x, y) => y.confidence - x.confidence || x.file.localeCompare(y.file)).slice(0, top)

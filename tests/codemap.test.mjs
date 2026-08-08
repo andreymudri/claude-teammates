@@ -58,12 +58,75 @@ test('a neighbour coupled to two declared files keeps its strongest score, never
   const c = buildCoupling(HISTORY)
   const out = neighboursOf(c, ['src/order.ts', 'test/order.spec.ts'], { minSupport: 1 })
   const controller = out.find((n) => n.path === 'src/order.controller.ts')
-  assert.ok(controller.confidence <= 1)
+  // From src/order.ts the controller is 2/3; from test/order.spec.ts it is only 1/2. The
+  // strongest of the two must win, so the pinned value is 2/3 — keeping the weakest instead
+  // would report 1/2, and summing them would report something above 1.
+  assert.equal(controller.confidence, 2 / 3)
 })
 
+// Three candidates with clearly different confidences: 0.75, 0.5 and 0.25 against the same
+// declared file. Only asserting a length leaves the sort direction unpinned — reversing it
+// still returns one result when top is 1.
+const RANK_HISTORY = [
+  ['rank/a.ts', 'rank/x.ts', 'rank/y.ts', 'rank/z.ts'],
+  ['rank/a.ts', 'rank/x.ts', 'rank/y.ts'],
+  ['rank/a.ts', 'rank/x.ts'],
+  ['rank/a.ts'],
+]
+
 test('neighbours are ranked by confidence and capped by top', () => {
-  const c = buildCoupling(HISTORY)
-  assert.equal(neighboursOf(c, ['src/order.ts'], { top: 1, minSupport: 1 }).length, 1)
+  const c = buildCoupling(RANK_HISTORY)
+  const out = neighboursOf(c, ['rank/a.ts'], { top: 3, minSupport: 1 })
+  assert.deepEqual(out.map((n) => n.path), ['rank/x.ts', 'rank/y.ts', 'rank/z.ts'])
+  assert.equal(neighboursOf(c, ['rank/a.ts'], { top: 1, minSupport: 1 }).length, 1)
+})
+
+// No other test omits its thresholds, so the module's documented defaults were never actually
+// exercised — every option could drift silently as long as callers kept passing explicit values.
+
+test('a commit larger than the default cap is excluded when maxCommitFiles is not passed', () => {
+  const big = Array.from({ length: 41 }, (_, i) => `default/f${i}.ts`)
+  const c = buildCoupling([big, ['default/a.ts', 'default/b.ts']])
+  assert.equal(c.usedCommits, 1)
+  assert.equal(c.support.get('default/f0.ts'), undefined)
+})
+
+test('a file with support 2 contributes no neighbours when minSupport is not passed', () => {
+  const c = buildCoupling([
+    ['default/lonely.ts', 'default/friend.ts'],
+    ['default/lonely.ts', 'default/friend.ts'],
+  ])
+  assert.deepEqual(neighboursOf(c, ['default/lonely.ts']), [])
+})
+
+test('neighboursOf returns at most five neighbours when top is not passed', () => {
+  const commits = Array.from({ length: 6 }, (_, i) => ['default/hub.ts', `default/n${i}.ts`])
+  const c = buildCoupling(commits)
+  const out = neighboursOf(c, ['default/hub.ts'])
+  assert.equal(out.length, 5)
+})
+
+test('hotPairs excludes a pair below the default support floor when minSupport is not passed', () => {
+  const c = buildCoupling([
+    ['default/solo.ts', 'default/partner.ts'],
+    ['default/solo.ts', 'default/partner.ts'],
+  ])
+  assert.deepEqual(hotPairs(c), [])
+})
+
+// hotPairs and neighboursOf claim to never disagree about what counts. neighboursOf only
+// trusts a file's own coupling once that file itself clears the support floor; a `&&` version
+// of hotPairs's floor admits a pair as soon as EITHER endpoint clears it, so a file seen in a
+// single commit can still top the list at 100% confidence just by pairing with something
+// well-established.
+test('hotPairs admits a pair only when the reported file itself clears the floor', () => {
+  const c = buildCoupling([
+    ['default/popular.ts', 'default/once.ts'],
+    ['default/popular.ts', 'default/other1.ts'],
+    ['default/popular.ts', 'default/other2.ts'],
+  ])
+  const pairs = hotPairs(c, { minSupport: 3 })
+  assert.deepEqual(pairs, [])
 })
 
 test('inventory rolls files up by directory, largest first', () => {
