@@ -598,12 +598,60 @@ test('a task with neighbours renders a blast radius naming each file and its per
     tasks: [{ id: 'T1', title: 'a', files: ['src/a.ts'] }],
     neighbours: { T1: [{ path: 'src/b.ts', confidence: 0.82 }] },
   })
-  assert.match(src, /BLAST RADIUS/)
+  // Static source text: the blastRadius function definition (and its literal 'BLAST RADIUS'
+  // string) is always present in the generated module regardless of neighbours, so this only
+  // pins that the neighbour's path made it into the TASKS literal, never that the section
+  // renders. The rendering claim is asserted below via captureAgentPrompts.
   assert.match(src, /src\/b\.ts/)
   const [prompt] = await captureAgentPrompts(src)
   assert.match(prompt, /BLAST RADIUS/)
   assert.match(prompt, /82%/)
   assert.match(prompt, /src\/b\.ts/)
+})
+
+// A task with several neighbours must show every one, not just the first. Rendering only
+// t.neighbours[0] would leave this test's earlier single-neighbour sibling green, since that
+// one only ever supplies one entry — the mutation is only visible with more than one.
+test('a task with several neighbours renders every one, not just the first', async () => {
+  const src = await generatePhaseWorkflow({
+    runId: 'r1', phase: 1, maxParallel: 2,
+    tasks: [{ id: 'T1', title: 'a', files: ['src/a.ts'] }],
+    neighbours: {
+      T1: [
+        { path: 'src/b.ts', confidence: 0.9 },
+        { path: 'src/c.ts', confidence: 0.6 },
+        { path: 'src/d.ts', confidence: 0.3 },
+      ],
+    },
+  })
+  const [prompt] = await captureAgentPrompts(src)
+  assert.match(prompt, /90%\s+src\/b\.ts/)
+  assert.match(prompt, /60%\s+src\/c\.ts/)
+  assert.match(prompt, /30%\s+src\/d\.ts/)
+})
+
+// neighbours is keyed by task id, so each task in a multi-task phase must see only its own
+// entry. Resolving neighbours by position (e.g. the first value in the map) rather than by
+// the task's own id would hand every teammate the first task's coupled files instead of its
+// own — a real hazard once a phase has more than one task, which every other blast-radius
+// test above avoids by using a single-task phase.
+test('in a multi-task phase, each brief names only its own task neighbours', async () => {
+  const src = await generatePhaseWorkflow({
+    runId: 'r1', phase: 1, maxParallel: 2,
+    tasks: [
+      { id: 'T1', title: 'a', files: ['src/a.ts'] },
+      { id: 'T2', title: 'b', files: ['src/x.ts'] },
+    ],
+    neighbours: {
+      T1: [{ path: 'src/a-neighbour.ts', confidence: 0.7 }],
+      T2: [{ path: 'src/x-neighbour.ts', confidence: 0.4 }],
+    },
+  })
+  const [promptT1, promptT2] = await captureAgentPrompts(src)
+  assert.match(promptT1, /src\/a-neighbour\.ts/)
+  assert.doesNotMatch(promptT1, /src\/x-neighbour\.ts/)
+  assert.match(promptT2, /src\/x-neighbour\.ts/)
+  assert.doesNotMatch(promptT2, /src\/a-neighbour\.ts/)
 })
 
 test('a task with no neighbours renders no blast radius section', async () => {
