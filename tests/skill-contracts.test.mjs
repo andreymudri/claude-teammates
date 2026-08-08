@@ -450,3 +450,107 @@ test('phase-gate states reviewers are dispatched without a name and a named one 
     forbid: [/dispatch one tm-reviewer per lens[^.]*with a name/i],
   })
 })
+
+test('parallel-execution states the blast radius is context, not an enforced file set', async () => {
+  const { doc } = await skill('parallel-execution')
+  const section = doc.section('The map')
+  // The no-edit rule needs its own inventory lock: as a bare assertStatement it stayed green
+  // while a later sentence in the same section granted the permission back ("when the task
+  // requires it, a teammate should go ahead and edit those files too"). Locking on `edit` makes
+  // any second sentence in this section about editing a reviewed decision.
+  assertClaim(section, {
+    label: 'blast radius files are not editable',
+    claim: /they are outside the file set, so the teammate may not edit them/i,
+    subject: /\bedit(s|ed|ing)?\b/i,
+  })
+  assertClaim(section, {
+    label: 'coupling is correlation, not enforcement',
+    claim: /^Coupling is correlation in history, not a dependency\b/i,
+    then: /Nothing enforces it and no gate reads it/i,
+    // The subject must name what is being claimed about, not repeat the `then` pattern — a
+    // subject copied from `then` can only ever match the statement `then` already exempts, so it
+    // locks nothing and deleting it changes no outcome.
+    subject: /coupling|blast radius/i,
+    allow: [
+      /^Every generated brief carries a blast radius/i,
+      /^Coupling for a brief is computed over a fixed window/i,
+      /^A brief with no blast radius section usually means new files/i,
+    ],
+  })
+})
+
+test('parallel-execution states the coupling window is bounded, not the whole history', async () => {
+  const { doc } = await skill('parallel-execution')
+  const section = doc.section('The map')
+  // Correction to the plan: the brief's window is not a default and not settable — the workflow
+  // path hardcodes 500 and `--commits` reaches only the standalone `map` command. Two contiguous
+  // patterns, no `.*` between the halves of either claim: a character gap is exactly the hole
+  // md-contract.mjs exists to close, and a single sentence spanning it can keep both anchor
+  // phrases while cancelling the claim in between.
+  assertStatement(
+    section,
+    /Coupling for a brief is computed over a fixed window of the last 500 commits, which the workflow path hardcodes and no flag changes/i,
+    'the skill must state the brief window is fixed at 500 commits, not a settable default',
+  )
+  assertStatement(
+    section,
+    /--commits sets the window for the standalone map command only, and workflow --commits is swallowed without complaint/i,
+    'the skill must confine --commits to the map command and say workflow silently ignores it',
+  )
+  // The support floor, not an empty repository, is the ordinary reason a brief has no section.
+  assertStatement(
+    section,
+    /a declared file needs at least three commits of its own history before coupling counts it/i,
+    'the skill must name the support floor so a section-less brief does not read as a broken dispatch',
+  )
+})
+
+test('fleet-lifecycle states who writes the map notes and that nothing enforced reads them', async () => {
+  const { doc } = await skill('fleet-lifecycle')
+  const section = doc.section('Map notes')
+  assertStatement(
+    section,
+    /a teammate never writes this file, and nothing enforced ever reads it/i,
+    'the skill must keep map notes out of both the write path and the enforcement path',
+  )
+})
+
+test('fleet-lifecycle states the Explore prompt filters directory names before they render', async () => {
+  const { doc } = await skill('fleet-lifecycle')
+  const section = doc.section('Map notes')
+  // Correction to the plan: the Explore prompt is handed to an agent with Bash and no gate, so
+  // the skill has to say the directory names it carries are filtered, not merely listed. The
+  // claim is anchored end-to-end AND subject-locked: an unanchored substring stayed green while
+  // the same sentence trailed off into "…but the filter is advisory and the raw names are used
+  // when it returns nothing".
+  assertClaim(section, {
+    label: 'carried directory names are filtered',
+    claim: /^The directory names that prompt carries are filtered — anything that is not a plain path segment is dropped — because that prompt is handed to an agent that has Bash and is gated by nothing\.$/i,
+    subject: /filter(s|ed|ing)?\b|directory names/i,
+  })
+})
+
+test('fleet-lifecycle claims only what map-notes verifies, and names every exit code', async () => {
+  const { doc } = await skill('fleet-lifecycle')
+  const section = doc.section('Map notes')
+  // mapNotesStale compares a header the writing agent was TOLD to copy against HEAD. Nothing
+  // observes which tree that agent read and nothing detects a later edit, so exit 0 is evidence
+  // of provenance, not proof — the same tamper-evident/tamper-proof distinction SECURITY.md and
+  // phase-gate keep elsewhere.
+  assertClaim(section, {
+    label: 'exit 0 is provenance, not proof',
+    claim: /^Exit 0 means the stored notes declare the commit the repository is on; the header is a string the writing agent was told to copy, so this is tamper-evident provenance and not proof/i,
+    subject: /\bexit 0\b/i,
+  })
+  // An orchestrator branching on `code === 4` alone reads the exit-2 git failure as "current".
+  assertStatement(
+    section,
+    /^Exit 4 means there are none, they carry no header at all, they name a different commit, they were written for a different run, or the file could not be read/i,
+    'the skill must name every condition that produces exit 4, not only the missing-notes case',
+  )
+  assertClaim(section, {
+    label: 'exit 2 is unknown, not current',
+    claim: /^Exit 2 means git could not be read, so no comparison happened at all — read that as unknown, never as current\.$/i,
+    subject: /\bexit 2\b/i,
+  })
+})
