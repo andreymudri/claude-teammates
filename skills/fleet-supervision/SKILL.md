@@ -11,6 +11,19 @@ description: Use when checking what a running fleet is doing - renders the diges
 
 Show that block as-is. It is deliberately compact; do not expand it into prose.
 
+## What the repository says
+
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" doctor --run <runId> --plan <planPath> --root <project root>
+
+The digest renders `status.json`, which the teammates being supervised write; `doctor` asks git
+instead. It reports the main worktree's branch and any dirty paths, every worktree and who holds
+it, and per task the branch tip and what it actually contributes from its own fork point. Exit 1
+means it found problems, all named — a branch with no changes (the work landed on another ref), a
+worktree inside the repository, a branch that reached the base branch without the run branch.
+
+Run it after a teammate returns and before a gate. It decides nothing and records nothing: a
+teammate is `done` on the strength of this report and the gate, never on its own say-so.
+
 ## Event-driven, not polling
 
 Background teammates notify on completion — react to those notifications. The only timer is a

@@ -37,6 +37,16 @@ Wait on completion notifications. Do not poll in a loop.
 Append every result to `status.json`. A teammate that returned nothing is `orphaned`, not
 `done` — offer to respawn it.
 
+A returned `done` is a claim, not evidence. Check it against git before believing it:
+
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" doctor --run <runId> --plan <planPath> --root <project root>
+
+A teammate that skipped its `checkout -B` commits on the harness's own branch and leaves
+`teammates/<runId>/<taskId>` pointing at the run tip with nothing on it: the returned `branch`
+names a real ref, the task merges as a no-op, and `fileset` sees no stray path because it sees no
+path at all. `doctor` reports that branch as contributing nothing, along with anything else that
+moved in the repository while the phase ran.
+
 ## 4. Gate, then integrate
 
 Run `phase-gate`. Only on PASS, dispatch `tm-integrator` to merge the teammate branches in
