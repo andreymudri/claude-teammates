@@ -23,14 +23,16 @@ import { tmpdir } from 'node:os'
 import { stat } from 'node:fs/promises'
 import { validateLinkPaths } from './preview-links.mjs'
 import { planDrift, renderDrift } from './plan-drift.mjs'
+import { summarizeRun, renderRunSummary } from './finish.mjs'
 import { generatePhaseWorkflow } from './workflow-gen.mjs'
 import { createGit, GitError, defaultGitExec } from './git.mjs'
 import { deriveContext } from './gate-runner.mjs'
 
-const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|config> [options]
+const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|config> [options]
 
   init-run <planPath> --run <id> [--root <path>]
   doctor   --run <id> --plan <path> [--base <branch>] [--run-branch <name>] [--root <path>]
+  finish   --run <id> --plan <path> [--base <branch>] [--root <path>]
   plan-drift --run <id> --plan <path> [--base <branch>] [--root <path>]
   preview-check [--root <path>]
   review-dispatch --run <id> [--phase <name>] [--models <json>] [--root <path>]
@@ -151,6 +153,7 @@ const REQUIRED = {
   // No required flags: it reads the manifest and the working tree, and belongs to no run.
   'preview-check': [],
   'plan-drift': ['run', 'plan'],
+  finish: ['run', 'plan'],
   digest: ['run'],
   claim: ['run', 'task', 'by'],
   unclaim: ['run', 'task'],
@@ -930,6 +933,45 @@ export async function runCli(argv, io = { out: console.log }) {
     // 1 on problems, mirroring the gate, so a caller can branch on the exit code. It is still
     // a report: nothing is recorded, and no verdict is issued or implied.
     return report.problems.length === 0 ? 0 : 1
+  }
+
+  if (command === 'finish') {
+    const config = await resolveGateConfig(root, io)
+    if (config === GATE_CONFIG_REJECTED) return 2
+    if (!config) { io.out(`no ${GATE_FILE} — there is nothing to verify a phase against`); return 4 }
+
+    let ctx
+    try {
+      ctx = { cwd: root, previewLink: previewLinks(config), ...(await derive(root, runId, flags)) }
+    } catch (err) {
+      io.out(`cannot verify the run: ${err.message}`)
+      return 4
+    }
+
+    // Phases come from the plan at the anchor, not from `status.gates`. The recorded keys are
+    // written by the agents being enforced, so a phase deleted from that file would simply not
+    // be verified — the check would report on whatever remained and call the run finished.
+    const phases = [...new Set((ctx.tasks ?? []).map((t) => t.phase))].sort((a, b) => a - b)
+
+    const phaseResults = []
+    for (const phase of phases) {
+      // Every phase is computed as if it were current. `deriveContext` sets `currentPhase` to
+      // the first UN-integrated phase, which is the right answer for a gate deciding whether to
+      // advance and the wrong one here: an already-integrated phase would otherwise be skipped
+      // by `fileset`, and skipping is what "verify the whole run" must never do.
+      const phaseCtx = { ...ctx, currentPhase: phase }
+      const checks = checksForPhase(config, String(phase))
+      const results = await runChecks(checks, phaseCtx)
+      phaseResults.push({ phase, verdict: aggregateVerdict(results) })
+    }
+
+    io.out(renderRunSummary(runId, phaseResults))
+    const summary = summarizeRun(phaseResults)
+    if (summary.complete) return 0
+    // 1 for a phase that was verified and failed; 4 for one that was never verified at all.
+    // Same split the output makes, so a caller branching on the code and a human reading the
+    // table reach the same conclusion.
+    return summary.failedPhases.length > 0 ? 1 : 4
   }
 
   if (command === 'plan-drift') {

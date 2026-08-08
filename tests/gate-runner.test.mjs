@@ -332,6 +332,26 @@ test('runOwnershipCheck passes a task branch that is an ancestor of both the bas
   assert.equal(res.status, 'pass')
 })
 
+// A branch that is ALREADY an ancestor of the run branch has landed: merge-base(run, branch) is
+// the branch's own tip, so its diff is vacuously empty for a reason that has nothing to do with
+// whether work was done. Reported as a violation, that turns every re-verification of an
+// integrated phase — which is exactly what `finish` does — into a false failure. The emptiness
+// rule is about work that never reached the conventional ref, and that question is only
+// meaningful before the branch is merged.
+test('runFilesetCheck does not report an already-integrated branch as contributing nothing', async () => {
+  const git = fakeGit({
+    branchExists: async () => true,
+    changedFiles: async () => [],
+    // Landed: on the run branch, and past the anchor rather than sitting at it.
+    isAncestor: async (_sha, target) => target === 'runSha1',
+  })
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = { git, runId: RUN_ID, runSha: 'runSha1', anchorSha: 'anchorSha1', tasks: [T1_TASK], currentPhase: 1, phaseError: null }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'pass')
+  assert.deepEqual(res.branchShas, { [T1_BRANCH]: `refs/heads/${T1_BRANCH}-sha` })
+})
+
 test('runFilesetCheck fails when a task branch contributes no file changes', async () => {
   const git = fakeGit({
     branchExists: async () => true,

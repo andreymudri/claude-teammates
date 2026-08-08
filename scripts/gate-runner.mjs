@@ -158,7 +158,7 @@ function scopedPhaseTasks(ctx) {
 }
 
 export async function runFilesetCheck(check, ctx = {}) {
-  const { git, runId, runSha, currentPhase, phaseError } = ctx
+  const { git, runId, runSha, anchorSha, currentPhase, phaseError } = ctx
   if (!git) return checkResult(check, 'fail', 'fileset check has no git access')
   if (phaseError) return checkResult(check, 'fail', phaseError)
   if (currentPhase == null) {
@@ -224,7 +224,22 @@ export async function runFilesetCheck(check, ctx = {}) {
       // branch is resolved by convention precisely so the enforced party cannot redirect the
       // check; emptiness is what that redirection looks like from here.
       if (changed.length === 0) {
-        problems.push(`${task.id}: branch ${branch} contributes no file changes past its fork point ${forkPoint} — the work is not on the conventional ref, and merging this task would be a no-op`)
+        // Only meaningful BEFORE the branch lands. Once it is on the run branch,
+        // merge-base(run, branch) is the branch's own tip, so the diff is empty however much
+        // work the branch carried — re-verifying an integrated phase (what `finish` does) would
+        // otherwise fail every one of them. What the branch contributed after integration is
+        // `ownership`'s question, and it asks it of every commit on the run branch, every run.
+        //
+        // "On the run branch" is not enough on its own: the anchor and every commit before it
+        // are ancestors of the run branch too, so a branch parked at the anchor — a teammate
+        // that committed on the harness's own branch and left the conventional ref where it
+        // started — would read as integrated and escape the very check this is. A landed branch
+        // carries commits PAST the anchor, so it is not an ancestor of the anchor; a stale or
+        // phantom one is.
+        const landed = await git.isAncestor(sha, runSha) && !(await git.isAncestor(sha, anchorSha))
+        if (!landed) {
+          problems.push(`${task.id}: branch ${branch} contributes no file changes past its fork point ${forkPoint} — the work is not on the conventional ref, and merging this task would be a no-op`)
+        }
         continue
       }
       const violations = filesetViolations(changed, task.files)

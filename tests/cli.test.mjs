@@ -526,6 +526,81 @@ test('plan-drift exits 1 when the drift lands on an integrated phase', async () 
   })
 })
 
+// End-to-end, against a real repository: three phases, all three integrated, a manifest whose
+// only checks are computed ones. Every verdict comes from git at the moment finish runs.
+test('finish recomputes a verdict for every phase and passes when they all hold', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'fileset', kind: 'fileset' }, { name: 'ownership', kind: 'ownership' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    for (const [id, file] of [['T1', 'a.mjs'], ['T2', 'b.mjs']]) {
+      g(['checkout', '--quiet', '-b', `teammates/r1/${id}`])
+      await writeFile(path.join(root, file), 'export const x = 1\n', 'utf8')
+      g(['add', file])
+      g(['commit', '--quiet', '-m', `${id} work`])
+      g(['checkout', '--quiet', 'run-branch'])
+      g(['merge', '--no-ff', '--quiet', '-m', `integrate ${id}`, `teammates/r1/${id}`])
+    }
+    lines.length = 0
+    const code = await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    assert.match(out, /phase 1/)
+    assert.match(out, /phase 2/)
+    assert.match(out, /recomputed/i)
+    assert.equal(code, 0)
+  })
+})
+
+// A phase whose checks were never computed must not read as finished. Exit 4 — "cannot verify",
+// the code `complete` already uses — keeps it distinct from a phase that genuinely failed.
+test('finish exits 4 when a phase carries a check nobody ran', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      lens: ['correctness'],
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    const code = await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    assert.match(out, /pending: review/)
+    assert.match(out, /not a check that passed/)
+    assert.equal(code, 4)
+  })
+})
+
+// A branch that contributes nothing fails `fileset`, and finish must surface that per phase
+// rather than only for whichever phase the gate happens to consider current.
+test('finish exits 1 and names the phase whose computed check fails', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'fileset', kind: 'fileset' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    // T1 does real work and lands. T2's branch is created off the base with nothing on it —
+    // the stale-base shape: the ref exists, it is not on the run branch, and it contributes
+    // nothing, so merging it would be a no-op.
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--no-ff', '--quiet', '-m', 'integrate T1', 'teammates/r1/T1'])
+    g(['branch', 'teammates/r1/T2', 'main'])
+    lines.length = 0
+    const code = await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    assert.match(lines.join('\n'), /failing check: 2/)
+    assert.equal(code, 1)
+  })
+})
+
 test('gate reports a JSON verdict when a manifest exists', async () => {
   await withRepo(async ({ root, planPath, io, lines }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
