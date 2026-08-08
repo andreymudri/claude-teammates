@@ -164,6 +164,38 @@ test('gate with no manifest prints the inferred config for confirmation', async 
   })
 })
 
+// Inference sets `preview.link` only when a package.json exists, so a Python, Rust or Go adopter
+// gets a manifest with no preview field, links nothing into the merge preview, and every command
+// check fails on a tree that is fine. JSON carries no comment, and an empty link list teaches
+// nothing, so the guidance goes beside the manifest — printed only where it is needed.
+test('gate inference without a package.json says how to provision the merge preview', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    await rm(path.join(root, 'package.json'))
+    const code = await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--no-fleet', '--root', root], io)
+    assert.equal(code, 3)
+    const out = lines.join('\n')
+    assert.match(out, /inferred gate manifest/)
+    assert.match(out, /tracked files only/i)
+    assert.match(out, /"preview": \{ "link"/)
+    // The inferred manifest itself must stay a manifest: no preview field is invented for a
+    // project whose build inputs the CLI cannot name — and above all not `node_modules`, which
+    // a non-Node repo does not have and whose link would fail the merge check.
+    assert.doesNotMatch(out, /"link": \[\s*\]/)
+    assert.doesNotMatch(out, /node_modules/)
+  })
+})
+
+test('gate inference with a package.json links node_modules and prints no provisioning note', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    await writeFile(path.join(root, 'package.json'), JSON.stringify({ scripts: { test: 'node --test' } }), 'utf8')
+    const code = await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--no-fleet', '--root', root], io)
+    assert.equal(code, 3)
+    const out = lines.join('\n')
+    assert.match(out, /"node_modules"/)
+    assert.doesNotMatch(out, /tracked files only/i)
+  })
+})
+
 test('gate reports a JSON verdict when a manifest exists', async () => {
   await withRepo(async ({ root, planPath, io, lines }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)

@@ -113,11 +113,16 @@ function parseFlags(argv) {
   return { flags, positional, rejected }
 }
 
+// `null`, not `{}`, when there is no package.json: `inferGateConfig` distinguishes "a Node
+// project with no scripts" from "not a Node project" by the truthiness of this value, and only
+// the first should get `preview.link: ["node_modules"]`. Returning an empty object made every
+// repo look like a Node one, so a Python or Rust project's inferred manifest named a directory
+// it does not have — which then fails the `merge` check on a missing link target.
 async function readPackage(root) {
   try {
     return JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'))
   } catch (err) {
-    if (err.code === 'ENOENT') return {}
+    if (err.code === 'ENOENT') return null
     throw err
   }
 }
@@ -841,9 +846,22 @@ export async function runCli(argv, io = { out: console.log }) {
     let config = await resolveGateConfig(root, io)
     if (config === GATE_CONFIG_REJECTED) return 2
     if (!config) {
-      config = inferGateConfig(await readPackage(root))
+      const pkg = await readPackage(root)
+      config = inferGateConfig(pkg)
       io.out('inferred gate manifest — review, then save as teammates.gate.json:')
       io.out(JSON.stringify(config, null, 2))
+      // `preview.link` is inferred only for a Node project, because `node_modules` is the one
+      // build input this CLI can name without guessing. Every other ecosystem gets a manifest
+      // with no preview field at all, links nothing into the merge preview — which holds
+      // tracked content only — and fails every command check on a tree that is fine. The
+      // manifest cannot carry the warning (JSON has no comment, and an empty link list means
+      // "link nothing", which is both wrong as advice and indistinguishable from a considered
+      // choice), so it is printed beside it, and only where it applies.
+      if (!pkg) {
+        io.out('')
+        io.out('no package.json: the merge preview is built with `git worktree add`, which materializes tracked files only. If this project\'s test runner is itself a dependency — a virtualenv, `target/`, `vendor/` — name those directories or the gate will fail every command check on a tree that is fine:')
+        io.out('    "preview": { "link": ["<dir>", "..."] }')
+      }
       return 3
     }
     const phaseName = flags.phase ?? 'default'
