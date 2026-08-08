@@ -48,6 +48,21 @@ const checkoutSteps = (t) => (BASE_BRANCH ? [
   'Every file you read before that checkout has stale content and must be re-read after it.',
 ])
 
+// Files that have historically changed alongside this task's declared set. They are OUTSIDE the
+// set, so the teammate may not edit them — the point is the opposite: they are what its change
+// is most likely to break without touching. Rendered only when the generator supplied any, so a
+// repository with no history, or a task whose files are new, shows no section rather than an
+// empty one.
+const blastRadius = (t) => (t.neighbours && t.neighbours.length ? [
+  'BLAST RADIUS. These files are not yours and you may not edit them. They have changed together',
+  'with your files in the past, so they are where your change is most likely to break something:',
+  ...t.neighbours.map((n) => '  ' + Math.round(n.confidence * 100) + '%  ' + n.path),
+  'This is a statistic about history, not a dependency list: it can be wrong in both directions.',
+  'Read the ones that look relevant. If your task cannot be done without editing one, that is a',
+  'file-set problem — report status "blocked" naming it rather than editing it.',
+  '',
+] : [])
+
 const brief = (t) => [
   'You are tm-implementer for task ' + t.id + ': ' + t.title + '.',
   '',
@@ -67,6 +82,7 @@ const brief = (t) => [
   'FILES. You may create or modify ONLY these files: ' + t.files.join(', ') + '.',
   'Touching any other file fails the phase gate.',
   '',
+  ...blastRadius(t),
   CONSTRAINTS.length ? 'GLOBAL CONSTRAINTS:' : '',
   ...CONSTRAINTS.map((c) => '- ' + c),
   '',
@@ -95,6 +111,7 @@ const briefTerse = (t) => [
   'FILES. You may create or modify ONLY these files: ' + t.files.join(', ') + '.',
   'Touching any other file fails the phase gate.',
   '',
+  ...blastRadius(t),
   CONSTRAINTS.length ? 'GLOBAL CONSTRAINTS:' : '',
   ...CONSTRAINTS.map((c) => '- ' + c),
   '',

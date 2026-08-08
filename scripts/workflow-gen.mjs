@@ -43,7 +43,7 @@ function jsLiteral(value, indent = '') {
 
 export async function generatePhaseWorkflow({
   runId, phase, tasks, maxParallel, tierModels,
-  planPath = '', baseBranch = '', constraints = [], caveman = false, effort = '',
+  planPath = '', baseBranch = '', constraints = [], caveman = false, effort = '', neighbours = {},
 }) {
   if (!tasks || tasks.length === 0) throw new Error(`no tasks for phase ${phase}`)
 
@@ -58,7 +58,9 @@ export async function generatePhaseWorkflow({
   const slim = tasks.map(({ id, title, files, tier }) => {
     const model = tierModels?.[tier]
     const base = { id, title, files, branch: `teammates/${runId}/${id}` }
-    return model ? { ...base, model } : base
+    const near = neighbours?.[id]
+    const withNear = Array.isArray(near) && near.length > 0 ? { ...base, neighbours: near } : base
+    return model ? { ...withNear, model } : withNear
   })
   const template = await readFile(TEMPLATE, 'utf8')
 
