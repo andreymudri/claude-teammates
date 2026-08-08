@@ -18,6 +18,20 @@ state that still exists unless you pass `--force`. It reconstructs **no** gate h
 is evidence that checks ran, and git carries branches, not evidence. Every phase of a rebuilt run
 has to be gated again before anything is reported done.
 
+## Map notes
+
+For what a target project's modules are *for* — the part git statistics cannot supply — a run may
+carry `.teammates/<runId>/map.md`, written by an Explore agent:
+
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" map-notes --run <runId> --root <project root>
+
+Exit 0 means the stored notes describe the commit the repository is on. Exit 4 means there are
+none, or they describe a different commit, and it prints the exact prompt to dispatch — the notes
+name the sha they were written at, so a reader can always tell. Dispatch that agent yourself: a
+teammate never writes this file, and nothing enforced ever reads it. The directory names that
+prompt carries are filtered — anything that is not a plain path segment is dropped — because that
+prompt is handed to an agent that has Bash and is gated by nothing.
+
 ## Operations
 
 **add `<role>` [n]** — spawn `n` background agents of that role (`tm-implementer` by

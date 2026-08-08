@@ -179,6 +179,24 @@ If a teammate needs a fix round, resume the same teammate first — it still has
 context. Only fall back to a fresh implementer on that task if resuming stalls; note in
 `status.json` that the task restarted.
 
+## The map
+
+Every generated brief carries a **blast radius**: the files that have historically changed
+alongside the task's declared set. They are outside the file set, so the teammate may not edit
+them — they are what its change is most likely to break without touching. It is computed from
+`git log` at dispatch time and stored nowhere, so it cannot go stale; a repository with no
+history simply produces no section. Coupling is computed over a bounded window — the last 500
+commits by default, settable with `--commits` — so a repository with more history than that is
+answered from a window, not the whole log.
+
+Ask the same question yourself for any file set:
+
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" map --files <a,b> --root <project root>
+
+Coupling is correlation in history, not a dependency: a source and its test, a caller and its
+callee, and two files one person kept tidy all look alike to it. Nothing enforces it and no gate
+reads it — a map that could fail a phase would be a map worth gaming.
+
 ## Worktree mechanics
 
 Each teammate works in its own git worktree — `isolation: 'worktree'` creates one per

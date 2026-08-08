@@ -450,3 +450,53 @@ test('phase-gate states reviewers are dispatched without a name and a named one 
     forbid: [/dispatch one tm-reviewer per lens[^.]*with a name/i],
   })
 })
+
+test('parallel-execution states the blast radius is context, not an enforced file set', async () => {
+  const { doc } = await skill('parallel-execution')
+  const section = doc.section('The map')
+  assertStatement(
+    section,
+    /they are outside the file set, so the teammate may not edit them/i,
+    'the skill must not let a blast radius read as permission to edit those files',
+  )
+  assertClaim(section, {
+    label: 'coupling is correlation, not enforcement',
+    claim: /^Coupling is correlation in history, not a dependency\b/i,
+    then: /Nothing enforces it and no gate reads it/i,
+    subject: /enforces it and no gate reads it/i,
+  })
+})
+
+test('parallel-execution states the coupling window is bounded, not the whole history', async () => {
+  const { doc } = await skill('parallel-execution')
+  const section = doc.section('The map')
+  // Correction to the plan: the window default (500 commits, settable with --commits) has to be
+  // stated so the map cannot be read as having examined the whole log.
+  assertStatement(
+    section,
+    /Coupling is computed over a bounded window.*last 500 commits by default, settable with --commits/i,
+    'the skill must state the coupling window is bounded, not exhaustive',
+  )
+})
+
+test('fleet-lifecycle states who writes the map notes and that nothing enforced reads them', async () => {
+  const { doc } = await skill('fleet-lifecycle')
+  const section = doc.section('Map notes')
+  assertStatement(
+    section,
+    /a teammate never writes this file, and nothing enforced ever reads it/i,
+    'the skill must keep map notes out of both the write path and the enforcement path',
+  )
+})
+
+test('fleet-lifecycle states the Explore prompt filters directory names before they render', async () => {
+  const { doc } = await skill('fleet-lifecycle')
+  const section = doc.section('Map notes')
+  // Correction to the plan: the Explore prompt is handed to an agent with Bash and no gate, so
+  // the skill has to say the directory names it carries are filtered, not merely listed.
+  assertStatement(
+    section,
+    /directory names that prompt carries are filtered — anything that is not a plain path segment is dropped/i,
+    'the skill must state that carried directory names are filtered, because the prompt goes to an ungated Bash-capable agent',
+  )
+})
