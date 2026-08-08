@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { parsePlan } from './plan-parser.mjs'
 import { assignPhases } from './phases.mjs'
 import { readState, writeState, claimTask, releaseClaim, readFixRounds, recordFixRound } from './state.mjs'
-import { loadGateConfig, inferGateConfig, checksForPhase, fixRoundsForPhase, previewLinks } from './gate-config.mjs'
+import { inferGateConfig, checksForPhase, fixRoundsForPhase, previewLinks } from './gate-config.mjs'
 import {
   loadConfig, readLayer, writeLayer, validateKey, validateLocal, isEnforcementKey, assertSafeKey,
   getKey, setKey, unsetKey, ensureGitignored, ConfigError,
@@ -429,6 +429,34 @@ async function resolveConfig(root, io) {
   }
 }
 
+// `gate`, `complete` and `fix` read the manifest through `loadGateConfig`, which parses and does
+// not validate — a third reader alongside `loadConfig` and the write path, covered by neither
+// validator. It fails CLOSED (a body of `[]` yields zero checks and `aggregateVerdict` returns
+// FAIL on its `verified.length > 0` guard), so this was never a hole. It was a diagnostics one:
+// the operator saw a failing gate and nothing naming the file, and `{"phases":{"default":
+// {"checks":"nope"}}}` crashed with a TypeError whose stdout is not the JSON a skill parses.
+//
+// Validated here, at the consumer, rather than inside `loadGateConfig` — that function is also
+// the plain reader `self-gate` and the gate-config tests use, and the tripwire test in
+// tests/config.test.mjs pins it staying that way. Read through `readLayer` so a manifest that is
+// not valid JSON is a ConfigError like everywhere else, instead of a SyntaxError escaping raw.
+const GATE_CONFIG_REJECTED = Symbol('gate manifest rejected')
+
+async function resolveGateConfig(root, io) {
+  try {
+    const raw = await readLayer(root, GATE_FILE, { missing: ABSENT })
+    // `null` means no manifest, which each of the three callers answers on its own terms —
+    // `gate` infers one and exits 3, `complete` refuses at 4, `fix` falls back to defaults.
+    // Only a manifest that is PRESENT and broken is this function's business.
+    return raw === ABSENT ? null : validateGateLayer(raw)
+  } catch (err) {
+    const message = configFailureMessage(err)
+    if (message === null) throw err
+    io.out(message)
+    return GATE_CONFIG_REJECTED
+  }
+}
+
 // Every key this CLI can resolve, as a single field. `set` gets this check from `validateKey`,
 // which needs a value; `get` and `unset` have none to give it, and without an equivalent
 // `config unset totallyBogus` created the file, gitignored it, reported `wrote …` and exited 0
@@ -810,7 +838,8 @@ export async function runCli(argv, io = { out: console.log }) {
   }
 
   if (command === 'gate') {
-    let config = await loadGateConfig(root)
+    let config = await resolveGateConfig(root, io)
+    if (config === GATE_CONFIG_REJECTED) return 2
     if (!config) {
       config = inferGateConfig(await readPackage(root))
       io.out('inferred gate manifest — review, then save as teammates.gate.json:')
@@ -930,7 +959,10 @@ export async function runCli(argv, io = { out: console.log }) {
   }
 
   if (command === 'complete') {
-    const config = await loadGateConfig(root)
+    const config = await resolveGateConfig(root, io)
+    // 2, not 4: a broken manifest is a config failure like every other one in this CLI, and
+    // `cannot verify completion` would send a teammate looking at its own branch instead.
+    if (config === GATE_CONFIG_REJECTED) return 2
     if (!config) { io.out('no gate manifest — cannot verify completion'); return 4 }
 
     let ctx
@@ -1022,7 +1054,12 @@ export async function runCli(argv, io = { out: console.log }) {
       return 2
     }
 
-    const config = (await loadGateConfig(root)) ?? {}
+    const gateConfig = await resolveGateConfig(root, io)
+    if (gateConfig === GATE_CONFIG_REJECTED) return 2
+    // A broken manifest must not reach here as `{}`: the fix budget would silently become the
+    // default, which is the outcome an operator reading `budget-exhausted` cannot tell from a
+    // budget they actually set.
+    const config = gateConfig ?? {}
     // decideFix attributes findings to the tasks that declared the cited files, so it must
     // see only the failing phase's tasks — a file declared by a later phase's task is not
     // this phase's to retry.

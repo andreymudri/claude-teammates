@@ -11,10 +11,17 @@ Phases run autonomously end to end. The boundary is where verification happens.
 
     node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" gate --run <runId> --root <project root> [--phase <name>]
 
-Exit codes: `0` PASS, `1` FAIL, `3` no manifest (an inferred one was printed).
+Exit codes: `0` PASS, `1` FAIL, `2` the manifest is broken, `3` no manifest (an inferred one
+was printed).
 
 On exit 3, show the user the inferred manifest, get confirmation, and save it as
 `teammates.gate.json`. Never invent checks silently.
+
+Exit 2 is not a verdict — nothing was judged. `teammates.gate.json` is present and malformed,
+and the message names the file and what is wrong with it. Show that message and stop; do not
+re-run the gate, and never save an inferred manifest over the broken one, which would discard
+the checks the operator meant to fix. `complete` and `fix` read the same manifest and exit 2
+the same way.
 
 ## Finish the pending checks
 

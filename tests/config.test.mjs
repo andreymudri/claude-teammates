@@ -957,12 +957,15 @@ test('a shape-invalid enforcement key in the local layer still reports the enfor
   })
 })
 
-test('loadGateConfig is left alone: the gate path still reads a shape-invalid manifest', async () => {
-  // `gate`, `complete` and `fix` read the manifest through loadGateConfig, and the phase gate
-  // itself depends on those three exit codes. Validating there would change them, so T11
-  // tightens loadConfig only. This test guards that boundary: if someone later wires the
-  // validators into loadGateConfig, it fails and the decision gets re-made deliberately rather
-  // than inherited by accident.
+test('loadGateConfig is left alone: it is still the plain reader', async () => {
+  // The decision this tripwire was set to force has since been re-made, deliberately: `gate`,
+  // `complete` and `fix` now validate the manifest and exit 2 naming the file (see the
+  // manifest tests in tests/cli.test.mjs). The validation lives at the CONSUMER, in
+  // scripts/cli.mjs, not in here — `loadGateConfig` is also the plain reader `self-gate` and
+  // tests/gate-config.test.mjs use to read a manifest as written, and those callers want the
+  // bytes, not a verdict on them. So the boundary this test guards still stands, for a reason
+  // that has changed: wiring the validators in here would now duplicate a check the three
+  // commands already run, in a function whose other callers do not want it.
   await withTempRoot(async (root) => {
     await writeJson(root, GATE_FILE, { lens: 'performance', phases: { default: { checks: [] } } })
     const config = await loadGateConfig(root)

@@ -310,6 +310,79 @@ test('gate with a plan path absent at the anchor exits 1 with a derive error rat
   })
 })
 
+// `gate`, `complete` and `fix` read the manifest through a path neither validator covered. It
+// failed CLOSED — a body of `[]` yields zero checks and the verdict is FAIL — so nothing passed
+// that should not have. What the operator got was a failing gate and no word about their
+// manifest, and one variant was worse: a non-array `checks` died with a TypeError, so stdout
+// was not the JSON the phase-gate skill parses.
+const BROKEN_MANIFESTS = [
+  { body: '[]', message: /^teammates\.gate\.json must contain a JSON object$/m },
+  { body: '"nope"', message: /^teammates\.gate\.json must contain a JSON object$/m },
+  { body: 'null', message: /^teammates\.gate\.json must contain a JSON object$/m },
+  { body: '{ not json', message: /^teammates\.gate\.json is not valid JSON/m },
+  {
+    // The TypeError variant, by name.
+    body: JSON.stringify({ phases: { default: { checks: 'nope' } } }),
+    message: /^phases\.default\.checks must be an array$/m,
+  },
+  {
+    body: JSON.stringify({ lens: 'correctness', phases: { default: { checks: [] } } }),
+    message: /^lens must be a non-empty array of strings$/m,
+  },
+]
+
+test('gate exits 2 naming the manifest instead of returning a verdict about it', async () => {
+  for (const { body, message } of BROKEN_MANIFESTS) {
+    await withRepo(async ({ root, planPath, io, lines }) => {
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      await writeFile(path.join(root, 'teammates.gate.json'), body, 'utf8')
+      lines.length = 0
+      assert.equal(await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--root', root], io), 2, body)
+      assert.match(lines.join('\n'), message, body)
+      // Not a verdict. Exit 1 with a FAIL body would have the operator reading the checks for
+      // a cause that is not there, and 3 would have them saving an inferred manifest over the
+      // broken one they meant to fix.
+      assert.doesNotMatch(lines.join('\n'), /"verdict"/, body)
+      assert.doesNotMatch(lines.join('\n'), /inferred gate manifest/, body)
+    })
+  }
+})
+
+test('complete and fix exit 2 on the same broken manifest', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), '[]', 'utf8')
+    lines.length = 0
+    assert.equal(await runCli(['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--root', root], io), 2)
+    // 2, not the 4 an absent manifest gets: `cannot verify completion` reads as a verdict about
+    // the teammate's own branch, and it is the repo's config that is broken.
+    assert.match(lines.join('\n'), /^teammates\.gate\.json must contain a JSON object$/m)
+    assert.doesNotMatch(lines.join('\n'), /cannot verify completion/)
+
+    const verdictPath = path.join(root, 'verdict.json')
+    await writeFile(verdictPath, JSON.stringify({ verdict: 'FAIL', phase: 1, results: [] }), 'utf8')
+    lines.length = 0
+    assert.equal(await runCli(['fix', '--run', 'r1', '--phase', '1', '--verdict', verdictPath, '--root', root], io), 2)
+    assert.match(lines.join('\n'), /^teammates\.gate\.json must contain a JSON object$/m)
+    // `fix` used to read the same file as `?? {}`, so a broken manifest silently became the
+    // DEFAULT fix budget — indistinguishable, from the outside, from a budget that was set.
+    assert.doesNotMatch(lines.join('\n'), /"decision"/)
+  })
+})
+
+// The absent manifest is not the broken one, and each command still answers it its own way.
+test('an absent manifest keeps its own exit code in all three commands', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    assert.equal(await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--root', root], io), 3)
+    assert.match(lines.join('\n'), /inferred gate manifest/)
+    lines.length = 0
+    assert.equal(await runCli(['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--root', root], io), 4)
+    assert.match(lines.join('\n'), /no gate manifest — cannot verify completion/)
+  })
+})
+
 test('complete exits 4 when the recomputed gate fails', async () => {
   await withRepo(async ({ root, planPath, io, lines }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
