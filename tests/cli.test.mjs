@@ -4013,3 +4013,141 @@ test('digest renders terse when the local layer configures caveman', async () =>
     assert.match(lines.join('\n'), /^r1 p1\/2 n2/)
   })
 })
+
+test('map prints the inventory and the coupled pairs of the repository', async () => {
+  await withRepo(async ({ root, io, lines, git: g }) => {
+    await writeFile(path.join(root, 'x.mjs'), 'export const x = 1\n', 'utf8')
+    await writeFile(path.join(root, 'x.test.mjs'), 'export const t = 1\n', 'utf8')
+    g(['add', '.'])
+    g(['commit', '--quiet', '-m', 'pair'])
+    lines.length = 0
+    const code = await runCli(['map', '--root', root], io)
+    assert.equal(code, 0)
+    assert.match(lines.join('\n'), /tracked files/)
+  })
+})
+
+test('map --files answers the blast radius question for one file set', async () => {
+  await withRepo(async ({ root, io, lines, git: g }) => {
+    for (let i = 0; i < 4; i += 1) {
+      await writeFile(path.join(root, 'x.mjs'), `export const x = ${i}\n`, 'utf8')
+      await writeFile(path.join(root, 'x.test.mjs'), `export const t = ${i}\n`, 'utf8')
+      g(['add', '.'])
+      g(['commit', '--quiet', '-m', `round ${i}`])
+    }
+    lines.length = 0
+    const code = await runCli(['map', '--files', 'x.mjs', '--root', root], io)
+    assert.equal(code, 0)
+    assert.match(lines.join('\n'), /x\.test\.mjs/)
+    assert.doesNotMatch(lines.join('\n'), /^\s*\d+%\s+x\.mjs$/m)
+  })
+})
+
+test('map --files says so plainly when a file has no coupling history', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    lines.length = 0
+    const code = await runCli(['map', '--files', 'nothing.mjs', '--root', root], io)
+    assert.equal(code, 0)
+    assert.match(lines.join('\n'), /no coupled files/)
+  })
+})
+
+test('map rejects a non-numeric commit window rather than reading the whole history', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    lines.length = 0
+    assert.equal(await runCli(['map', '--commits', 'lots', '--root', root], io), 2)
+    assert.match(lines.join('\n'), /positive whole number/)
+  })
+})
+
+// --top is validated exactly as --commits is. `Number('lots')` is NaN and `slice(0, NaN)`
+// silently yields nothing, so an unvalidated flag would answer "no coupled files found" for a
+// typo — the same sentence a file with genuinely no history gets, and no way to tell them apart.
+test('map rejects a non-numeric --top rather than silently reporting nothing', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    lines.length = 0
+    assert.equal(await runCli(['map', '--files', 'x.mjs', '--top', 'lots', '--root', root], io), 2)
+    assert.match(lines.join('\n'), /positive whole number/)
+  })
+})
+
+test('map rejects a non-positive --top', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    lines.length = 0
+    assert.equal(await runCli(['map', '--files', 'x.mjs', '--top', '0', '--root', root], io), 2)
+    assert.match(lines.join('\n'), /positive whole number/)
+  })
+})
+
+test('map --top caps how many neighbours are reported', async () => {
+  await withRepo(async ({ root, io, lines, git: g }) => {
+    for (let i = 0; i < 4; i += 1) {
+      for (const name of ['x.mjs', 'x.test.mjs', 'x.docs.mjs']) {
+        await writeFile(path.join(root, name), `export const v = ${i}\n`, 'utf8')
+      }
+      g(['add', '.'])
+      g(['commit', '--quiet', '-m', `round ${i}`])
+    }
+    lines.length = 0
+    assert.equal(await runCli(['map', '--files', 'x.mjs', '--top', '1', '--root', root], io), 0)
+    assert.equal(lines.filter((l) => /%/.test(l)).length, 1)
+  })
+})
+
+test('map-notes exits 4 with the Explore prompt when no notes exist', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const code = await runCli(['map-notes', '--run', 'r1', '--root', root], io)
+    assert.equal(code, 4)
+    assert.match(lines.join('\n'), /no map notes/)
+    assert.match(lines.join('\n'), /teammates-map run=r1 sha=[0-9a-f]+/)
+  })
+})
+
+test('map-notes accepts notes written at the current commit', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const sha = g(['rev-parse', 'HEAD']).trim()
+    await writeFile(
+      path.join(root, '.teammates', 'r1', 'map.md'),
+      `<!-- teammates-map run=r1 sha=${sha} -->\n\n# Map\n`,
+      'utf8',
+    )
+    lines.length = 0
+    const code = await runCli(['map-notes', '--run', 'r1', '--root', root], io)
+    assert.equal(code, 0)
+    assert.match(lines.join('\n'), /current map notes/)
+  })
+})
+
+test('map-notes reports notes describing an older commit as stale', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(
+      path.join(root, '.teammates', 'r1', 'map.md'),
+      '<!-- teammates-map run=r1 sha=0000000 -->\n\n# Map\n',
+      'utf8',
+    )
+    lines.length = 0
+    const code = await runCli(['map-notes', '--run', 'r1', '--root', root], io)
+    assert.equal(code, 4)
+    assert.match(lines.join('\n'), /describe commit 0000000/)
+  })
+})
+
+test('workflow puts a blast radius in the brief when the history supports one', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    for (let i = 0; i < 4; i += 1) {
+      await writeFile(path.join(root, 'a.mjs'), `export const a = ${i}\n`, 'utf8')
+      await writeFile(path.join(root, 'a.helper.mjs'), `export const h = ${i}\n`, 'utf8')
+      g(['add', '.'])
+      g(['commit', '--quiet', '-m', `round ${i}`])
+    }
+    lines.length = 0
+    await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.match(lines.join('\n'), /BLAST RADIUS/)
+    assert.match(lines.join('\n'), /a\.helper\.mjs/)
+  })
+})

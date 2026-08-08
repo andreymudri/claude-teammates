@@ -28,15 +28,19 @@ import { selectPrunableWorktrees, renderPrunePlan } from './prune.mjs'
 import { rebuildRunState } from './rebuild.mjs'
 import { generatePhaseWorkflow } from './workflow-gen.mjs'
 import { createGit, GitError, defaultGitExec } from './git.mjs'
+import { buildCoupling, neighboursOf, inventory, hotPairs, renderMap } from './codemap.mjs'
+import { mapNotesStale, mapNotesPrompt } from './mapnotes.mjs'
 import { deriveContext } from './gate-runner.mjs'
 
-const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|config> [options]
+const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|config> [options]
 
   init-run <planPath> --run <id> [--root <path>]
   doctor   --run <id> --plan <path> [--base <branch>] [--run-branch <name>] [--root <path>]
   finish   --run <id> --plan <path> [--base <branch>] [--root <path>]
   prune-run --run <id> --plan <path> [--base <branch>] [--yes] [--root <path>]
   rebuild-state --run <id> --plan <path> [--base <branch>] [--force] [--root <path>]
+  map      [--files <a,b>] [--commits <n>] [--top <n>] [--root <path>]
+  map-notes --run <id> [--root <path>]
   plan-drift --run <id> --plan <path> [--base <branch>] [--root <path>]
   preview-check [--root <path>]
   review-dispatch --run <id> [--phase <name>] [--models <json>] [--root <path>]
@@ -160,6 +164,10 @@ const REQUIRED = {
   finish: ['run', 'plan'],
   'prune-run': ['run', 'plan'],
   'rebuild-state': ['run', 'plan'],
+  // Belongs to no run: it reads git history and the working tree, and answers a question about
+  // the repository rather than about a fleet.
+  map: [],
+  'map-notes': ['run'],
   digest: ['run'],
   claim: ['run', 'task', 'by'],
   unclaim: ['run', 'task'],
@@ -881,10 +889,27 @@ export async function runCli(argv, io = { out: console.log }) {
     }
     if (retier) await writeState(root, runId, 'plan', plan)
 
+    // Coupling is recomputed here rather than read from anywhere: it is a statistic about the
+    // repository as it stands, and a stored one would be a second source of truth about a number
+    // nobody can check. A failure to read history is not a failure to dispatch — a brief without
+    // a blast radius is the brief this command emitted until now, so it degrades to that and says so.
+    const neighbours = {}
+    try {
+      const coupling = buildCoupling(await createGit({ cwd: root }).commitFileSets({ limit: 500 }))
+      for (const task of phaseTasks) {
+        const near = neighboursOf(coupling, task.files ?? [], { top: 5 })
+        if (near.length > 0) neighbours[task.id] = near
+      }
+    } catch (err) {
+      if (!(err instanceof GitError)) throw err
+      io.out(`could not compute the blast radius (${err.message}); briefs will carry no coupling section`)
+    }
+
     const src = await generatePhaseWorkflow({
       runId,
       phase,
       tasks: phaseTasks,
+      neighbours,
       maxParallel: resolved.maxParallel,
       tierModels,
       planPath,
@@ -1121,6 +1146,89 @@ export async function runCli(argv, io = { out: console.log }) {
     // how a plan is meant to evolve mid-run, and exiting 1 for it would train a caller to
     // ignore the exit code for the case that actually costs something.
     return report.tooLate.length > 0 ? 1 : 0
+  }
+
+  if (command === 'map') {
+    const git = createGit({ cwd: root })
+    // Both windows are validated the same way and for the same reason: `Number('lots')` is NaN,
+    // and NaN reaching either `--max-count` or `slice` produces a plausible-looking answer to a
+    // question nobody asked. A typo must exit, never quietly change the result.
+    const limit = flags.commits === undefined ? 500 : Number(flags.commits)
+    if (!Number.isInteger(limit) || limit <= 0) {
+      io.out('--commits takes a positive whole number of commits to read')
+      return 2
+    }
+    const top = flags.top === undefined ? 5 : Number(flags.top)
+    if (!Number.isInteger(top) || top <= 0) {
+      io.out('--top takes a positive whole number of files to report')
+      return 2
+    }
+    let sets
+    let paths
+    try {
+      sets = await git.commitFileSets({ limit })
+      paths = await git.listFiles()
+    } catch (err) {
+      if (!(err instanceof GitError)) throw err
+      io.out(`cannot read the repository: ${err.message}`)
+      return 2
+    }
+    const coupling = buildCoupling(sets)
+
+    // A file set turns this from an overview into the one question an implementer has: what does
+    // my change put at risk. Answered for the whole set at once, because that is what a task holds.
+    if (typeof flags.files === 'string' && flags.files.trim() !== '') {
+      const files = flags.files.split(',').map((f) => f.trim()).filter(Boolean)
+      const near = neighboursOf(coupling, files, { top })
+      if (near.length === 0) {
+        io.out(`no coupled files found for ${files.join(', ')} in the last ${limit} commits — new files, or a shallow history`)
+        return 0
+      }
+      for (const n of near) io.out(`${String(Math.round(n.confidence * 100)).padStart(3)}%  ${n.path}`)
+      return 0
+    }
+
+    io.out(renderMap({ inventory: inventory(paths), hotPairs: hotPairs(coupling), usedCommits: coupling.usedCommits }))
+    return 0
+  }
+
+  if (command === 'map-notes') {
+    const git = createGit({ cwd: root })
+    const notesPath = path.join(runDir(root, runId), 'map.md')
+    let sha
+    try {
+      sha = await git.headSha()
+    } catch (err) {
+      if (!(err instanceof GitError)) throw err
+      io.out(`cannot read the repository: ${err.message}`)
+      return 2
+    }
+
+    let text = null
+    try {
+      text = await readFile(notesPath, 'utf8')
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err
+    }
+
+    const stale = mapNotesStale(text, { runId, sha })
+    if (!stale) { io.out(`current map notes: ${notesPath}`); return 0 }
+
+    // 4, matching `complete` and `collect-reviews`: this cannot verify what it was asked about.
+    // The prompt is printed so the caller dispatches an Explore agent rather than writing prose
+    // itself — and a teammate never writes this file.
+    io.out(stale)
+    io.out('')
+    io.out('dispatch an Explore agent with exactly this prompt:')
+    io.out('')
+    let topDirectories = []
+    try {
+      topDirectories = inventory(await git.listFiles(), { top: 8 }).rows.map((r) => r.dir)
+    } catch (err) {
+      if (!(err instanceof GitError)) throw err
+    }
+    io.out(mapNotesPrompt({ runId, sha, notesPath, topDirectories }))
+    return 4
   }
 
   if (command === 'preview-check') {
