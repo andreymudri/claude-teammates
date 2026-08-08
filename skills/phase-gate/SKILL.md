@@ -28,7 +28,16 @@ the same way.
 The CLI runs `command` checks itself and returns `agent` and `mcp` checks as `pending` —
 those you execute:
 
-- **agent** — dispatch one `tm-reviewer` per lens in parallel over the phase diff, **without a
+- **agent** — generate the dispatches rather than assembling them by hand:
+
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" review-dispatch --run <runId> --root <project root> [--phase <name>] [--models <json>]
+
+  It prints one reviewer per lens with the tier, effort, findings path, scratch worktree and
+  prompt already resolved, and exits 4 rather than emitting a dispatch when the phase has no
+  task branch to review. Every rule below is what it encodes; they are stated here because a
+  dispatch assembled by hand still has to follow them.
+
+  Dispatch one `tm-reviewer` per lens in parallel over the phase diff, **without a
   `name`**. A named reviewer becomes an addressable teammate that goes idle without emitting its
   result, and the review is lost; unnamed reviewers return normally. Six consecutive named
   dispatches were lost this way in run `preview` before the pattern was identified. Each dispatch

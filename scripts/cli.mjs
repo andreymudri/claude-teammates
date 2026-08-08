@@ -17,14 +17,18 @@ import { runChecks, aggregateVerdict } from './gate-runner.mjs'
 import { renderDigest } from './digest.mjs'
 import { collectDoctorReport, renderDoctor } from './doctor.mjs'
 import { collectReviewResults, reviewFileName } from './reviews.mjs'
+import { generateReviewDispatch } from './review-gen.mjs'
+import { resolveTaskBranch } from './enforce.mjs'
+import { tmpdir } from 'node:os'
 import { generatePhaseWorkflow } from './workflow-gen.mjs'
 import { createGit, GitError, defaultGitExec } from './git.mjs'
 import { deriveContext } from './gate-runner.mjs'
 
-const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflow|complete|fix|record-fix-round|collect-reviews|config> [options]
+const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|config> [options]
 
   init-run <planPath> --run <id> [--root <path>]
   doctor   --run <id> --plan <path> [--base <branch>] [--run-branch <name>] [--root <path>]
+  review-dispatch --run <id> [--phase <name>] [--models <json>] [--root <path>]
   collect-reviews --run <id> [--phase <name>] [--root <path>]
   gate     --run <id> --plan <path> [--base <branch>] [--root <path>] [--phase <name>] [--no-fleet] [--results <path>]
   digest   --run <id> [--root <path>]
@@ -138,6 +142,7 @@ const REQUIRED = {
   // `--phase` is the manifest phase key, not a plan phase number, so it stays out of
   // NUMERIC_PHASE_COMMANDS and defaults to `default` exactly as `gate`'s does.
   'collect-reviews': ['run'],
+  'review-dispatch': ['run'],
   digest: ['run'],
   claim: ['run', 'task', 'by'],
   unclaim: ['run', 'task'],
@@ -444,6 +449,49 @@ async function loadValidatedConfig(root) {
 // branches on this CLI's exit code. Resolving through here turns that into the message-and-2
 // the rest of the CLI already guarantees, instead of a stack trace from whichever command
 // happened to read the layer first. `null` means "already reported, exit 2".
+// Shared by `workflow` and `review-dispatch`: both hand a tier→model map straight into a
+// generated dispatch, so both need the same refusals. Kept as one function rather than two
+// copies, because a copy that drifts turns "a model name is a non-empty string" into a rule
+// that holds for implementers and not for the reviewer grading their work.
+const TIER_MODELS_REJECTED = Symbol('tier models rejected')
+
+function parseTierModels(flags, io) {
+  // `--models` written as a bare switch parses as `true` (parseFlags's boolean-switch
+  // reading). Skipping it silently would exit 0 with a model-free dispatch — the caller
+  // asked for routing and got none, with nothing on stdout to say so. Treated as the
+  // missing argument it is, exactly as missingArgs treats `=== true` for required flags.
+  if (flags.models === true) {
+    io.out('--models needs a value: a JSON object mapping tiers to model names')
+    return TIER_MODELS_REJECTED
+  }
+  if (flags.models === undefined) return undefined
+
+  let tierModels
+  try {
+    tierModels = JSON.parse(flags.models)
+  } catch {
+    // A caller branches on this exit code. A malformed map must produce a message and
+    // 2, never a raw SyntaxError stack from deep inside JSON.parse.
+    io.out('--models must be a JSON object mapping tiers to model names')
+    return TIER_MODELS_REJECTED
+  }
+  if (tierModels === null || typeof tierModels !== 'object' || Array.isArray(tierModels)) {
+    io.out('--models must be a JSON object mapping tiers to model names')
+    return TIER_MODELS_REJECTED
+  }
+  // The container being an object is not enough: every value is emitted verbatim into
+  // the generated task list AND spread into the agent() options, so a nested object, a
+  // number or an empty string becomes a `model` field no dispatcher can act on and no
+  // reader can spot. A model name is a non-empty string or it is a mistake.
+  for (const [tier, model] of Object.entries(tierModels)) {
+    if (typeof model !== 'string' || model.trim() === '') {
+      io.out(`--models value for '${tier}' must be a non-empty string model name`)
+      return TIER_MODELS_REJECTED
+    }
+  }
+  return tierModels
+}
+
 async function resolveConfig(root, io) {
   try {
     return (await loadValidatedConfig(root)).resolved
@@ -734,39 +782,8 @@ export async function runCli(argv, io = { out: console.log }) {
     // Concrete model names never enter this repository or teammates.gate.json — they live
     // in the dispatching skill, which passes its own tier map through here. Absent, the
     // generated agent() calls carry no model and inherit the session's, as before.
-    let tierModels
-    // `--models` written as a bare switch parses as `true` (parseFlags's boolean-switch
-    // reading). Skipping it silently would exit 0 with a model-free workflow — the caller
-    // asked for routing and got none, with nothing on stdout to say so. Treated as the
-    // missing argument it is, exactly as missingArgs treats `=== true` for required flags.
-    if (flags.models === true) {
-      io.out('--models needs a value: a JSON object mapping tiers to model names')
-      return 2
-    }
-    if (flags.models !== undefined) {
-      try {
-        tierModels = JSON.parse(flags.models)
-      } catch {
-        // A caller branches on this exit code. A malformed map must produce a message and
-        // 2, never a raw SyntaxError stack from deep inside JSON.parse.
-        io.out('--models must be a JSON object mapping tiers to model names')
-        return 2
-      }
-      if (tierModels === null || typeof tierModels !== 'object' || Array.isArray(tierModels)) {
-        io.out('--models must be a JSON object mapping tiers to model names')
-        return 2
-      }
-      // The container being an object is not enough: every value is emitted verbatim into
-      // the generated task list AND spread into the agent() options, so a nested object, a
-      // number or an empty string becomes a `model` field no dispatcher can act on and no
-      // reader can spot. A model name is a non-empty string or it is a mistake.
-      for (const [tier, model] of Object.entries(tierModels)) {
-        if (typeof model !== 'string' || model.trim() === '') {
-          io.out(`--models value for '${tier}' must be a non-empty string model name`)
-          return 2
-        }
-      }
-    }
+    const tierModels = parseTierModels(flags, io)
+    if (tierModels === TIER_MODELS_REJECTED) return 2
 
     // Both are optional: omitted, the brief renders without a plan pointer and falls back to
     // its no-base variant rather than failing. A bare `--plan`/`--base` parses as `true`
@@ -905,6 +922,75 @@ export async function runCli(argv, io = { out: console.log }) {
     // 1 on problems, mirroring the gate, so a caller can branch on the exit code. It is still
     // a report: nothing is recorded, and no verdict is issued or implied.
     return report.problems.length === 0 ? 0 : 1
+  }
+
+  if (command === 'review-dispatch') {
+    // The TRACKED manifest, not the resolved config: the reviewer grades the diff, so letting
+    // the gitignored local layer choose its tier would let the party being judged pick its own
+    // judge. `config.mjs` already refuses `agents.reviewer` in the local layer; reading the
+    // manifest directly here means this command does not depend on that refusal holding.
+    const config = await resolveGateConfig(root, io)
+    if (config === GATE_CONFIG_REJECTED) return 2
+    if (!config) { io.out('no gate manifest — cannot tell which lenses to dispatch'); return 4 }
+
+    const phaseName = flags.phase ?? 'default'
+    const agentChecks = checksForPhase(config, phaseName).filter((c) => c.kind === 'agent')
+    if (agentChecks.length !== 1) {
+      io.out(`this phase declares ${agentChecks.length} agent checks; review-dispatch handles exactly one`)
+      return 4
+    }
+    const check = agentChecks[0]
+
+    const tierModels = parseTierModels(flags, io)
+    if (tierModels === TIER_MODELS_REJECTED) return 2
+
+    const plan = await readState(root, runId, 'plan')
+    if (!plan) { io.out(`no plan for run ${runId}`); return 4 }
+    // `--phase` here names the MANIFEST key, as it does for `gate`. When it is also a plan
+    // phase number the branches narrow to that phase; when it is not (a named manifest phase),
+    // every task branch of the run is under review, which is the honest reading of "this
+    // manifest phase's diff".
+    const phaseNumber = Number(phaseName)
+    const planTasks = Number.isInteger(phaseNumber)
+      ? (plan.tasks ?? []).filter((t) => t.phase === phaseNumber)
+      : (plan.tasks ?? [])
+
+    const git = createGit({ cwd: root })
+    const branches = []
+    for (const task of planTasks) {
+      const branch = resolveTaskBranch(task, runId)
+      if (branch && await git.branchExists(branch)) branches.push(branch)
+    }
+    if (branches.length === 0) {
+      // Refused rather than emitted: reviewers dispatched over branches that do not exist grade
+      // an empty diff and report no findings, which is indistinguishable from a clean review.
+      io.out(`no task branch of phase ${phaseName} exists yet — there is no diff to review`)
+      return 4
+    }
+
+    let spec
+    try {
+      spec = generateReviewDispatch({
+        runId,
+        phaseName,
+        checkName: check.name,
+        lenses: check.lens,
+        blockOn: check.blockOn ?? ['high'],
+        // The fixed reviewer tier is `capable`; only the tracked manifest replaces it.
+        tier: config.agents?.reviewer?.tier ?? 'capable',
+        effort: config.agents?.reviewer?.effort ?? '',
+        tierModels,
+        runBranch: await git.currentBranch(),
+        branches,
+        findingsDir: `.teammates/${runId}/reviews`,
+        scratchRoot: tmpdir(),
+      })
+    } catch (err) {
+      io.out(err.message)
+      return 4
+    }
+    io.out(JSON.stringify(spec, null, 2))
+    return 0
   }
 
   if (command === 'collect-reviews') {

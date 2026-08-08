@@ -324,6 +324,80 @@ test('collect-reviews needs a manifest to know which lenses were dispatched', as
   })
 })
 
+async function writeReviewManifest(root, extra = {}) {
+  await writeFile(
+    path.join(root, 'teammates.gate.json'),
+    JSON.stringify({
+      lens: ['correctness', 'security'],
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', blockOn: ['high'] }] } },
+      ...extra,
+    }),
+    'utf8',
+  )
+}
+
+test('review-dispatch emits one unnamed reviewer per lens over the phase branches', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeReviewManifest(root)
+    for (const id of ['T1', 'T2']) {
+      g(['checkout', '--quiet', '-b', `teammates/r1/${id}`])
+      await writeFile(path.join(root, `${id}.mjs`), 'export const x = 1\n', 'utf8')
+      g(['add', `${id}.mjs`])
+      g(['commit', '--quiet', '-m', `${id} work`])
+      g(['checkout', '--quiet', 'run-branch'])
+    }
+    lines.length = 0
+    const code = await runCli(['review-dispatch', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 0)
+    const spec = JSON.parse(lines.join('\n'))
+    assert.equal(spec.reviewers.length, 2)
+    assert.equal(spec.tier, 'capable')
+    assert.equal(spec.reviewers[0].name, null)
+    assert.match(spec.reviewers[0].findingsPath, /reviews\/1-correctness\.json$/)
+    assert.match(spec.reviewers[0].prompt, /teammates\/r1\/T1/)
+  })
+})
+
+// The reviewer grades the diff, so its tier comes from the tracked manifest only — the
+// gitignored local layer must not be able to pick the judge. The generated dispatch has to
+// follow the same rule the skill states.
+test('review-dispatch takes the reviewer tier from the tracked manifest', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeReviewManifest(root, { agents: { reviewer: { tier: 'mid', effort: 'high' } } })
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'T1.mjs'), 'export const x = 1\n', 'utf8')
+    g(['add', 'T1.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    lines.length = 0
+    const code = await runCli(
+      ['review-dispatch', '--run', 'r1', '--phase', '1', '--root', root, '--models', '{"mid":"sonnet"}'],
+      io,
+    )
+    assert.equal(code, 0)
+    const spec = JSON.parse(lines.join('\n'))
+    assert.equal(spec.tier, 'mid')
+    assert.equal(spec.reviewers[0].model, 'sonnet')
+    assert.equal(spec.reviewers[0].effort, 'high')
+  })
+})
+
+// A phase whose branches do not exist yet has nothing to review. Emitting a dispatch anyway
+// would produce reviewers grading an empty diff and reporting no findings — a clean-looking
+// review of nothing at all.
+test('review-dispatch refuses a phase whose task branches do not exist', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeReviewManifest(root)
+    lines.length = 0
+    const code = await runCli(['review-dispatch', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 4)
+    assert.match(lines.join('\n'), /branch/i)
+  })
+})
+
 test('gate reports a JSON verdict when a manifest exists', async () => {
   await withRepo(async ({ root, planPath, io, lines }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
