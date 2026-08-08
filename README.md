@@ -100,6 +100,43 @@ catches drift and mistakes reliably. It is not a security boundary, and nothing 
 relied on as one. `docs/specs/2026-08-05-tamper-evident-enforcement-design.md` lists exactly
 what is out of scope, and `tests/adversarial.test.mjs` pins each limit with a test.
 
+## Commands
+
+Run everything through `node scripts/cli.mjs <command> --root <project root>`. The skills call
+these for you; they are listed here because an operator often wants the same answer directly.
+
+Driving a run:
+
+- `init-run <planPath> --run <id>` — parse the plan, assign phases, write `.teammates/<id>/`
+- `workflow --run <id> --phase <n>` — generate the phase's implementer dispatches
+- `complete --run <id> --task <id>` — a teammate verifying its own task before returning
+- `gate --run <id> --plan <path>` — compute the current phase's verdict
+- `fix --run <id> --phase <n> --verdict <path>` — decide retry, escalate, or none
+- `finish --run <id> --plan <path>` — recompute a verdict for **every** phase, not just the current one
+
+Seeing what is actually there:
+
+- `doctor --run <id> --plan <path>` — the run as git describes it: branch tips, real contributions,
+  worktrees, dirty paths. `digest` renders what the agents wrote; this asks git instead
+- `plan-drift --run <id> --plan <path>` — what changed in the plan since the anchor, and whether it
+  changed too late to reach the work
+- `digest --run <id>` — the compact fleet status board
+
+Reviews:
+
+- `review-dispatch --run <id>` — generate the reviewer dispatches from the manifest, with the tier,
+  findings path and scratch worktree already resolved
+- `collect-reviews --run <id>` — rebuild a `gate --results` file from the reviewers' findings drops
+
+Housekeeping:
+
+- `preview-check` — validate `preview.link` before a run rather than at the first gate
+- `prune-run --run <id> --plan <path>` — remove this run's worktrees, but only where the phase's gate
+  recomputes to PASS. Dry run unless `--yes`
+- `rebuild-state --run <id> --plan <path>` — reconstruct `.teammates/` bookkeeping from git. It
+  rebuilds no gate history: a verdict is evidence that checks ran, and git carries branches, not
+  evidence
+
 ## Skills
 
 - `using-teammates` — entrypoint; routes to the right process or fleet skill before anything else happens
