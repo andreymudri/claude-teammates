@@ -5,6 +5,17 @@ export class GitError extends Error {}
 // Where the Claude Code harness creates agent worktrees, relative to the repo root.
 const HARNESS_WORKTREES = /^\.claude\//
 
+// Record separator for commitFileSets' `git log --name-only -z` stream. It has to be a token no
+// tracked path can ever equal, because the paths and the separator arrive in the same NUL-framed
+// stream with nothing else to tell them apart. A bare word cannot do it: with "commit" as the
+// marker, a repository tracking a file literally named "commit" reported that one commit as two,
+// dropped the path, and truncated the path that followed it (git prefixes the first path of each
+// commit with "\n", so the next token got its first character eaten). A trailing slash makes the
+// marker unforgeable by construction rather than by luck: a git tree entry name cannot contain
+// "/" at all, so no path git ever reports ends with one. Exported so the tests assert against
+// this exact token instead of restating it.
+export const COMMIT_MARKER = 'commit/'
+
 // argv array, shell: false. Branch names reach git as a single argv entry, so a name
 // containing shell metacharacters is data, never a command.
 export function defaultGitExec(args, cwd) {
@@ -185,16 +196,19 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
       }
       const out = await run([
         '-c', 'core.quotePath=false', 'log', `--max-count=${limit}`,
-        '--no-renames', '--name-only', '--format=%x00commit%x00', '-z', 'HEAD', '--',
+        '--no-renames', '--name-only', `--format=%x00${COMMIT_MARKER}%x00`, '-z', 'HEAD', '--',
       ])
       const sets = []
       let current = null
       let atFirstPath = false
       for (const token of out.split('\0')) {
-        if (token === 'commit') { if (current) sets.push(current); current = []; atFirstPath = true; continue }
+        if (token === COMMIT_MARKER) { if (current) sets.push(current); current = []; atFirstPath = true; continue }
         if (current === null) continue
         if (token === '') continue
-        current.push(atFirstPath ? token.slice(1) : token)
+        // Only the first path of a commit carries git's synthetic leading "\n", and only when it
+        // is really there: a path may itself begin with "\n", and stripping unconditionally would
+        // corrupt it. Every later path in the commit is passed through untouched.
+        current.push(atFirstPath && token.startsWith('\n') ? token.slice(1) : token)
         atFirstPath = false
       }
       if (current) sets.push(current)

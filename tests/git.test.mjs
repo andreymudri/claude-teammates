@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { createGit, GitError, defaultGitExec, teammateRef } from '../scripts/git.mjs'
+import { createGit, GitError, defaultGitExec, teammateRef, COMMIT_MARKER } from '../scripts/git.mjs'
 
 const recorder = (result = { code: 0, stdout: '', stderr: '' }) => {
   const calls = []
@@ -908,17 +908,17 @@ test('listFiles returns every tracked path, NUL-delimited and unquoted', async (
   assert.deepEqual(files, ['src/a.ts', 'src/b b.ts'])
 })
 
-// Reconstructs the exact byte stream `git log -z --name-only --format=%x00commit%x00` produces
+// Reconstructs the exact byte stream `git log -z --name-only --format=%x00<marker>%x00` produces
 // for a sequence of commits (newest first), each given as its list of changed paths. Verified
-// against real git (git 2.53.0, both a Linux checkout and this Windows one): the %x00commit%x00
-// format renders as a literal NUL, "commit", NUL, followed by ONE MORE NUL that is always
+// against real git (git 2.53.0, both a Linux checkout and this Windows one): the %x00<marker>%x00
+// format renders as a literal NUL, the marker, NUL, followed by ONE MORE NUL that is always
 // present — the -z stand-in for the blank line that would otherwise separate the commit header
 // from its file list. Only when the commit touched at least one file does more follow: a single
 // leading "\n" (a second, path-list-specific separator), then the paths themselves NUL-delimited
 // (never newline-delimited — this is the part the original implementation got wrong), then one
 // more terminating NUL. An empty commit contributes nothing past that first extra NUL.
 const realNameOnlyStdout = (commitsNewestFirst) => commitsNewestFirst
-  .map((files) => '\0commit\0\0' + (files.length ? `\n${files.join('\0')}\0` : ''))
+  .map((files) => `\0${COMMIT_MARKER}\0\0` + (files.length ? `\n${files.join('\0')}\0` : ''))
   .join('')
 
 test('realNameOnlyStdout matches real git output byte for byte (regression fixture)', async () => {
@@ -939,7 +939,7 @@ test('realNameOnlyStdout matches real git output byte for byte (regression fixtu
 
     const real = await sh([
       '-c', 'core.quotePath=false', 'log', '--max-count=10',
-      '--no-renames', '--name-only', '--format=%x00commit%x00', '-z', 'HEAD', '--',
+      '--no-renames', '--name-only', `--format=%x00${COMMIT_MARKER}%x00`, '-z', 'HEAD', '--',
     ])
     const expected = realNameOnlyStdout([['a.ts', 'b.ts'], ['a.ts'], []])
     assert.equal(real.stdout, expected)
@@ -954,7 +954,7 @@ test('commitFileSets returns one path list per commit, newest first', async () =
   const sets = await createGit({ exec }).commitFileSets({ limit: 10 })
   assert.deepEqual(calls[0], [
     '-c', 'core.quotePath=false', 'log', '--max-count=10',
-    '--no-renames', '--name-only', '--format=%x00commit%x00', '-z', 'HEAD', '--',
+    '--no-renames', '--name-only', `--format=%x00${COMMIT_MARKER}%x00`, '-z', 'HEAD', '--',
   ])
   assert.deepEqual(sets, [['src/a.ts', 'src/b.ts'], ['src/a.ts']])
 })
@@ -1010,4 +1010,61 @@ test('commitFileSets rejects a non-positive limit rather than asking git for eve
   const { calls, exec } = recorder()
   await assert.rejects(() => createGit({ exec }).commitFileSets({ limit: 0 }), GitError)
   assert.deepEqual(calls, [])
+})
+
+// The record separator must be a token no tracked path can ever equal. Git tree entry names
+// cannot contain "/" at all, so no path git reports ever ends with one: a marker with a trailing
+// slash is unforgeable by construction. A bare word like "commit" is not — see the two tests
+// below, which are the reason this marker exists.
+test('commitFileSets separates commits with a marker no tracked path can equal', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: '', stderr: '' })
+  await createGit({ exec }).commitFileSets({ limit: 10 })
+  const format = calls[0].find((a) => a.startsWith('--format='))
+  assert.equal(format, `--format=%x00${COMMIT_MARKER}%x00`)
+  assert.ok(COMMIT_MARKER.endsWith('/'), 'the marker must end with "/" so no path can forge it')
+})
+
+// The defect this pins: with the literal token "commit" as the separator, a tracked file named
+// exactly "commit" read as a commit boundary. One commit was reported as two, the path "commit"
+// vanished, and the path following it lost its first character ("zzz.txt" -> "zz.txt") — a name
+// that appears in no listFiles() output, so its coupling could never key against anything.
+test('commitFileSets treats a tracked file named "commit" as a path, not a commit boundary', async () => {
+  const stdout = realNameOnlyStdout([['aaa.txt', 'commit', 'zzz.txt']])
+  const { exec } = recorder({ code: 0, stdout, stderr: '' })
+  const sets = await createGit({ exec }).commitFileSets({ limit: 5 })
+  assert.deepEqual(sets, [['aaa.txt', 'commit', 'zzz.txt']])
+})
+
+// Real git, not a fixture: a repository that actually tracks a file named "commit" must come
+// back with all three paths in one commit, in order, none truncated.
+test('commitFileSets survives a real repository tracking a file named "commit"', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-marker-'))
+  const sh = (args) => defaultGitExec(args, root)
+  try {
+    await sh(['init', '--initial-branch=main'])
+    await sh(['config', 'user.email', 'test@example.com'])
+    await sh(['config', 'user.name', 'test'])
+    await writeFile(path.join(root, 'aaa.txt'), 'a\n', 'utf8')
+    await writeFile(path.join(root, 'commit'), 'c\n', 'utf8')
+    await writeFile(path.join(root, 'zzz.txt'), 'z\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'three files, one of them named commit'])
+    await writeFile(path.join(root, 'commit'), 'c2\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'touch commit only'])
+
+    const sets = await createGit({ cwd: root }).commitFileSets({ limit: 10 })
+    assert.deepEqual(sets, [['commit'], ['aaa.txt', 'commit', 'zzz.txt']])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+// The default is what every real caller gets: codemap asks for coupling without naming a limit,
+// so a shrunken default would silently compute the blast radius from a handful of commits while
+// every explicit-limit test above stayed green.
+test('commitFileSets defaults to 500 commits when no limit is given', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: '', stderr: '' })
+  await createGit({ exec }).commitFileSets()
+  assert.ok(calls[0].includes('--max-count=500'), `expected --max-count=500 in ${JSON.stringify(calls[0])}`)
 })
