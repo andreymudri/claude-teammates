@@ -96,6 +96,24 @@ test('the implementer must prove its work is on the conventional branch before r
   )
 })
 
+// A reviewer that goes idle without emitting takes its whole review with it: the work is done
+// and unrecoverable, and the phase's `review` check stays pending, which scores as FAIL. The
+// file is a fallback for that case only — the returned response stays the interface.
+test('the reviewer writes its findings to a file as well as returning them', async () => {
+  const { doc } = await agent('tm-reviewer.md')
+  const section = doc.section('Return value')
+  assertStatement(
+    section,
+    /write that same JSON to the findings path your prompt names/i,
+    'reviewer must drop its findings to a file before returning',
+  )
+  assertStatement(
+    section,
+    /before you return, not after/i,
+    'the write must happen while the reviewer is still alive to do it',
+  )
+})
+
 test('the integrator is declared the sole writer to the run branch', async () => {
   const { doc } = await agent('tm-integrator.md')
   assertStatement(doc, /sole writer/, 'integrator must be declared the sole writer')

@@ -262,20 +262,62 @@ test('phase-gate states that a failed link fails the merge check', async () => {
   })
 })
 
-test('parallel-execution says to prune a worktree when a teammate returns, not only after merge', async () => {
+// The earlier version of this rule said to prune the moment a teammate returned. `phase-gate`
+// resumes that same teammate on a `retry` decision, and a resumed agent whose worktree is gone
+// fails to start at all — so following both skills in order foreclosed the recovery path the
+// gate depends on. The rule now holds the worktree until the phase passes, and names the one
+// case that still needs an early removal: handing the task to a fresh implementer.
+// Unnamed dispatch is the first-line remedy for a reviewer that idles without emitting; the
+// file drop covers a returning dispatch that dies anyway. Both halves have to be stated, and
+// the missing-result case must never be recorded as an empty findings array — "no result" and
+// "no findings" are different facts and only one of them is a pass.
+test('phase-gate gives each reviewer a findings path and reads it before respawning', async () => {
+  const { doc } = await skill('phase-gate')
+  const section = doc.section('Finish the pending checks')
+  assertStatement(
+    section,
+    /name a findings path per lens/i,
+    'each reviewer dispatch must carry the path it writes to',
+  )
+  assertStatement(
+    section,
+    /read that file before respawning/i,
+    'an idle reviewer must be recovered from its file, not paid for twice',
+  )
+  assertStatement(
+    section,
+    /a missing result is never an empty findings array/i,
+    'phase-gate must forbid scoring a lost review as a clean pass',
+  )
+})
+
+test('parallel-execution keeps a returned teammate’s worktree until its phase passes the gate', async () => {
   const { doc } = await skill('parallel-execution')
   const section = doc.section('Worktree mechanics')
   assertClaim(section, {
     label: 'worktree pruning',
-    claim: /^Prune as soon as a teammate returns, not only after merge:.*fails with "already used by worktree"/i,
-    then: /Remove the worktree when the task returns \(git worktree remove <path>\), then git worktree prune/i,
+    claim: /^Prune after the phase passes its gate, not when a teammate returns:.*a resumed teammate whose worktree is gone cannot start/i,
+    then: /Remove the worktree once the phase has a recorded PASS \(git worktree remove <path>\), then git worktree prune/i,
     subject: /\bprun(e|es|ed|ing)\b/i,
-    allow: [/Only prune worktrees belonging to this run/i],
+    allow: [
+      /Only prune worktrees belonging to this run/i,
+      /prune that task's worktree first/i,
+    ],
   })
   assertStatement(
     section,
     /Only prune worktrees belonging to this run/i,
     'the guarantee must state its limit: only this run’s worktrees',
+  )
+  assertStatement(
+    section,
+    /prune that task's worktree first/i,
+    'the one case needing an early removal — a fresh implementer on that task — must be named',
+  )
+  assertStatement(
+    section,
+    /restate the findings, the branch and the file set in its dispatch/i,
+    'a fresh implementer inherits nothing, so the dispatch must carry what the resume would have',
   )
 })
 
@@ -394,6 +436,10 @@ test('phase-gate states reviewers are dispatched without a name and a named one 
     allow: [
       /Six consecutive named dispatches were lost this way in run preview/i,
       /^The file is \{ "results"/i,
+      // Reviewed: this "name" is the findings path the dispatch carries, not the agent name the
+      // claim above forbids. The two uses are unrelated and the fallback does not weaken the
+      // unnamed-dispatch rule — it covers the case where an unnamed reviewer dies anyway.
+      /^Name a findings path per lens in the dispatch/i,
     ],
     forbid: [/dispatch one tm-reviewer per lens[^.]*with a name/i],
   })

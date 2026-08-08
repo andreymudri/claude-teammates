@@ -45,6 +45,14 @@ those you execute:
     - `unset: agents.reviewer.effort` — omit the `effort` option, and the dispatch inherits the
       session's effort. Only effort falls back this way.
 
+  Name a findings path per lens in the dispatch —
+  `.teammates/<runId>/reviews/<phase>-<lens>.json` — which the reviewer writes before it
+  returns. The response stays the interface: read it first, and read that file before
+  respawning a reviewer that idled without returning one. A file present with no response is a
+  recovered review, not a fresh one; record it as recovered. Neither an absent response nor an
+  absent file is a clean lens — a missing result is never an empty findings array, and the
+  check stays `pending`, which the CLI scores as FAIL.
+
   Both come from the tracked manifest only — the reviewer grades the diff, so
   letting the gitignored layer choose its tier would let the party being judged pick its own
   judge. Then take every finding at a `blockOn` severity and

@@ -36,3 +36,9 @@ unverified and say what you would have run to confirm it.
 
 An array of findings, each with `severity`, `file`, `line`, `summary`, and
 `failureScenario` (the concrete inputs and the wrong output they produce).
+
+Write that same JSON to the findings path your prompt names, then return it as your final
+output. Write it before you return, not after — a reviewer that goes idle before emitting
+takes its whole review with it, and the file is the only thing left to recover it from. The
+returned array stays the interface; the file exists so a lost review does not have to be paid
+for twice. An empty array is a real result and is written like any other.

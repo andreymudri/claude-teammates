@@ -175,9 +175,12 @@ teammate automatically; a teammate never shares a worktree with another.
 - **Inspect:** `git worktree list` shows every worktree in the repo, including ones from
   other runs. Use it to confirm a teammate actually got an isolated workspace, and to spot
   stale ones before starting a new run.
-- **Prune as soon as a teammate returns, not only after merge:** a finished teammate's worktree
-  keeps its branch checked out, and the next dispatch that needs that branch — a fix round, a
-  retry, a rebase — fails with "already used by worktree". Remove the worktree when the task
-  returns (`git worktree remove <path>`), then `git worktree prune`. Only prune worktrees
-  belonging to **this** run. This blocked two dispatches in run `preview`, both times costing a
-  re-dispatch.
+- **Prune after the phase passes its gate, not when a teammate returns:** `phase-gate` resolves a
+  `retry` by resuming the same teammate, and a resumed teammate whose worktree is gone cannot
+  start — it fails with "its worktree no longer exists", and the task's whole context is lost
+  with it. Remove the worktree once the phase has a recorded PASS (`git worktree remove <path>`),
+  then `git worktree prune`. Only prune worktrees belonging to **this** run. If a task must go to
+  a **fresh** implementer instead — because resuming stalled — prune that task's worktree first,
+  since a returned teammate's worktree keeps its branch checked out and the new dispatch would
+  fail with "already used by worktree"; then restate the findings, the branch and the file set in
+  its dispatch, because none of that survives the handover.
