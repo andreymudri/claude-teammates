@@ -105,6 +105,45 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
         .filter((line) => line.trim() !== '')
       return lines.some((line) => !HARNESS_WORKTREES.test(line.slice(3)))
     },
+    // `--porcelain` here is the worktree listing's own stable format (one `key value` line per
+    // attribute, entries separated by a blank line), unrelated to `status --porcelain`. Parsed
+    // rather than regexed so a path containing a space — the normal case on Windows — stays one
+    // field: only the FIRST space separates the key from its value.
+    async worktrees() {
+      const out = await run(['worktree', 'list', '--porcelain'])
+      const entries = []
+      let current = null
+      for (const line of out.split(/\r?\n/)) {
+        if (line.trim() === '') { if (current) { entries.push(current); current = null } continue }
+        const sp = line.indexOf(' ')
+        const key = sp === -1 ? line : line.slice(0, sp)
+        const value = sp === -1 ? '' : line.slice(sp + 1)
+        if (key === 'worktree') current = { path: value, head: null, branch: null, detached: false }
+        else if (!current) continue
+        else if (key === 'HEAD') current.head = value
+        else if (key === 'branch') current.branch = value.replace(/^refs\/heads\//, '')
+        else if (key === 'detached') current.detached = true
+      }
+      // git omits the trailing blank line after the last entry when the output does not end in
+      // one; without this the final worktree — often the only one — is dropped silently.
+      if (current) entries.push(current)
+      return entries
+    },
+    // The paths behind isDirty's boolean. Same `.claude/` exemption, for the same reason stated
+    // there: the plugin chose that location, so an adopting project is not asked to ignore it.
+    async dirtyPaths() {
+      return (await run(['-c', 'core.quotePath=false', 'status', '--porcelain']))
+        .split(/\r?\n/)
+        .filter((line) => line.trim() !== '')
+        .map((line) => ({ status: line.slice(0, 2), path: line.slice(3) }))
+        .filter((entry) => !HARNESS_WORKTREES.test(entry.path))
+    },
+    async commitSubject(ref) {
+      if (!isNonEmptyString(ref)) {
+        throw new GitError(`commitSubject requires a non-empty ref, got ${JSON.stringify(ref)}`)
+      }
+      return (await run(['log', '-n', '1', '--format=%h %s', '--end-of-options', ref, '--'])).trim()
+    },
     async branchExists(name) {
       const args = ['rev-parse', '--verify', '--quiet', `refs/heads/${name}`]
       const { code, stderr } = await runRaw(args)

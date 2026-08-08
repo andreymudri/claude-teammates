@@ -15,13 +15,15 @@ import { TIERS, inferTier } from './routing.mjs'
 import { decideFix } from './fix-loop.mjs'
 import { runChecks, aggregateVerdict } from './gate-runner.mjs'
 import { renderDigest } from './digest.mjs'
+import { collectDoctorReport, renderDoctor } from './doctor.mjs'
 import { generatePhaseWorkflow } from './workflow-gen.mjs'
 import { createGit, GitError, defaultGitExec } from './git.mjs'
 import { deriveContext } from './gate-runner.mjs'
 
-const USAGE = `usage: cli.mjs <init-run|gate|digest|claim|unclaim|workflow|complete|fix|record-fix-round|config> [options]
+const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflow|complete|fix|record-fix-round|config> [options]
 
   init-run <planPath> --run <id> [--root <path>]
+  doctor   --run <id> --plan <path> [--base <branch>] [--run-branch <name>] [--root <path>]
   gate     --run <id> --plan <path> [--base <branch>] [--root <path>] [--phase <name>] [--no-fleet] [--results <path>]
   digest   --run <id> [--root <path>]
   claim    --run <id> --task <id> --by <teammate> [--root <path>]
@@ -130,6 +132,7 @@ async function readPackage(root) {
 const REQUIRED = {
   'init-run': ['run'],
   gate: ['run', 'plan'],
+  doctor: ['run', 'plan'],
   digest: ['run'],
   claim: ['run', 'task', 'by'],
   unclaim: ['run', 'task'],
@@ -853,6 +856,50 @@ export async function runCli(argv, io = { out: console.log }) {
     })
     io.out(src)
     return 0
+  }
+
+  if (command === 'doctor') {
+    const git = createGit({ cwd: root })
+    // The plan is read from the WORKING TREE here, not from the anchor commit the gate reads
+    // it at. The gate's reason for reading it from git — the enforced party must not choose
+    // what is enforced — does not apply to a report that enforces nothing, and a diagnostic
+    // that cannot run until the plan is committed is useless at exactly the moment a run is
+    // going wrong.
+    let tasks = []
+    try {
+      tasks = assignPhases(parsePlan(await readFile(path.resolve(root, flags.plan), 'utf8')))
+    } catch (err) {
+      io.out(`cannot read the plan at ${flags.plan}: ${err.message}`)
+      return 2
+    }
+
+    // `--run-branch` exists because the failure most worth diagnosing is the one where the
+    // main worktree was moved off the run branch: in that state `currentBranch` reports the
+    // wrong branch, and every task diff computed from it would be nonsense. Default to the
+    // current branch, which is right whenever nothing moved it.
+    const runBranch = typeof flags['run-branch'] === 'string' && flags['run-branch'] !== ''
+      ? flags['run-branch']
+      : await git.currentBranch()
+
+    let report
+    try {
+      report = await collectDoctorReport({
+        git,
+        runId,
+        runBranch,
+        baseBranch: await resolveBaseBranch(git, flags.base),
+        tasks,
+        repoRoot: root,
+      })
+    } catch (err) {
+      if (!(err instanceof GitError)) throw err
+      io.out(`doctor could not read the repository: ${err.message}`)
+      return 2
+    }
+    io.out(renderDoctor(report))
+    // 1 on problems, mirroring the gate, so a caller can branch on the exit code. It is still
+    // a report: nothing is recorded, and no verdict is issued or implied.
+    return report.problems.length === 0 ? 0 : 1
   }
 
   if (command === 'gate') {

@@ -819,3 +819,64 @@ test('against a real repository, a merge that fails without conflicting throws i
     await rm(root, { recursive: true, force: true })
   }
 })
+
+// --- doctor primitives ----------------------------------------------------------------------
+
+test('worktrees parses the porcelain listing into path, branch and detached state', async () => {
+  const { calls, exec } = recorder({
+    code: 0,
+    stdout: [
+      'worktree C:/repo', 'HEAD abc123', 'branch refs/heads/run/r1', '',
+      'worktree C:/repo/.claude/worktrees/agent-1', 'HEAD def456', 'branch refs/heads/teammates/r1/T1', '',
+      'worktree C:/tmp/preview', 'HEAD 999999', 'detached', '',
+    ].join('\n'),
+    stderr: '',
+  })
+  const list = await createGit({ cwd: '/x', exec }).worktrees()
+  assert.deepEqual(calls[0], ['worktree', 'list', '--porcelain'])
+  assert.deepEqual(list, [
+    { path: 'C:/repo', head: 'abc123', branch: 'run/r1', detached: false },
+    { path: 'C:/repo/.claude/worktrees/agent-1', head: 'def456', branch: 'teammates/r1/T1', detached: false },
+    { path: 'C:/tmp/preview', head: '999999', branch: null, detached: true },
+  ])
+})
+
+// The main worktree's own entry has no trailing blank line when it is the only one, and git
+// emits `bare` instead of a HEAD for a bare repository. Neither may drop an entry or invent one.
+test('worktrees handles a single entry with no trailing blank line', async () => {
+  const { exec } = recorder({ code: 0, stdout: 'worktree C:/repo\nHEAD abc123\nbranch refs/heads/main\n', stderr: '' })
+  const list = await createGit({ exec }).worktrees()
+  assert.deepEqual(list, [{ path: 'C:/repo', head: 'abc123', branch: 'main', detached: false }])
+})
+
+// isDirty answers yes/no for the ownership check; the diagnostic needs to say WHICH paths, or
+// the operator is left running `git status` by hand — the thing this command exists to replace.
+// The same `.claude/` exemption applies, for the same reason: the plugin chose that location.
+test('dirtyPaths lists the porcelain entries and exempts the harness worktree directory', async () => {
+  const { calls, exec } = recorder({
+    code: 0,
+    stdout: ' M scripts/cli.mjs\n?? .claude/worktrees/agent-1/x.txt\n?? stray.txt\n',
+    stderr: '',
+  })
+  const paths = await createGit({ exec }).dirtyPaths()
+  assert.deepEqual(calls[0], ['-c', 'core.quotePath=false', 'status', '--porcelain'])
+  assert.deepEqual(paths, [
+    { status: ' M', path: 'scripts/cli.mjs' },
+    { status: '??', path: 'stray.txt' },
+  ])
+})
+
+test('commitSubject returns the short sha and subject of a ref', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: 'abc1234 fix(gate): something\n', stderr: '' })
+  const subject = await createGit({ exec }).commitSubject('refs/heads/teammates/r1/T1')
+  assert.deepEqual(calls[0], [
+    'log', '-n', '1', '--format=%h %s', '--end-of-options', 'refs/heads/teammates/r1/T1', '--',
+  ])
+  assert.equal(subject, 'abc1234 fix(gate): something')
+})
+
+test('commitSubject rejects an empty ref rather than reporting HEAD', async () => {
+  const { calls, exec } = recorder()
+  await assert.rejects(() => createGit({ exec }).commitSubject(''), GitError)
+  assert.deepEqual(calls, [])
+})

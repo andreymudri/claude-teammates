@@ -196,6 +196,63 @@ test('gate inference with a package.json links node_modules and prints no provis
   })
 })
 
+// End-to-end on a real repository: the report is only worth anything if it reads the actual
+// refs. T1 gets a real commit, T2 a branch pointed at the run tip with nothing on it — the
+// stale-base shape — and the report must tell them apart without being told which is which.
+test('doctor reports a real contribution and an empty branch from git alone', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['branch', 'teammates/r1/T2'])
+    lines.length = 0
+    const code = await runCli(['doctor', '--run', 'r1', '--plan', planPath, '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    assert.match(out, /T1/)
+    assert.match(out, /T1 work/)
+    assert.match(out, /T2.*NO CHANGES|NO CHANGES/s)
+    assert.match(out, /problem/)
+    // Exit 1 on problems, so a caller can branch on it the way it branches on the gate.
+    assert.equal(code, 1)
+  })
+})
+
+test('doctor exits 0 and says so when it finds nothing wrong', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    for (const id of ['T1', 'T2', 'T3']) {
+      g(['checkout', '--quiet', '-b', `teammates/r1/${id}`])
+      await writeFile(path.join(root, `${id}.mjs`), 'export const x = 1\n', 'utf8')
+      g(['add', `${id}.mjs`])
+      g(['commit', '--quiet', '-m', `${id} work`])
+      g(['checkout', '--quiet', 'run-branch'])
+    }
+    lines.length = 0
+    const code = await runCli(['doctor', '--run', 'r1', '--plan', planPath, '--base', 'main', '--root', root], io)
+    assert.match(lines.join('\n'), /no problems/i)
+    assert.equal(code, 0)
+  })
+})
+
+// The diagnostic has to work in exactly the state the gate refuses to run in — the main
+// worktree parked on the base branch — because that is when an operator most needs it.
+test('doctor still reports when the main worktree sits on the base branch', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    g(['checkout', '--quiet', 'main'])
+    lines.length = 0
+    const code = await runCli(
+      ['doctor', '--run', 'r1', '--plan', planPath, '--base', 'main', '--run-branch', 'run-branch', '--root', root],
+      io,
+    )
+    assert.match(lines.join('\n'), /main worktree is on main/)
+    assert.equal(code, 1)
+  })
+})
+
 test('gate reports a JSON verdict when a manifest exists', async () => {
   await withRepo(async ({ root, planPath, io, lines }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
@@ -894,7 +951,7 @@ async function writeVerdict(root, verdict) {
 test('usage lists the fix subcommand', async () => {
   await withRepo(async ({ io, lines }) => {
     assert.equal(await runCli(['nope'], io), 2)
-    assert.match(lines.join('\n'), /init-run\|gate\|digest\|claim\|unclaim\|workflow\|complete\|fix/)
+    assert.match(lines.join('\n'), /init-run\|gate\|doctor\|digest\|claim\|unclaim\|workflow\|complete\|fix/)
     assert.match(lines.join('\n'), /fix\s+--run <id> --phase <n> --verdict <path>/)
   })
 })
