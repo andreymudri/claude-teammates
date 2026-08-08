@@ -5,6 +5,19 @@ description: Use when spawning, listing, messaging, scaling, stopping, or resumi
 
 # Fleet Lifecycle
 
+## When the run directory is gone
+
+`.teammates/` is gitignored, so a clean checkout or a stray delete takes a run's bookkeeping with
+it. Rebuild it from git rather than hand-writing JSON:
+
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" rebuild-state --run <runId> --plan <planPath> --root <project root>
+
+It derives every task's state from its branch — merged or contributing is `done`, a branch that
+exists and contributes nothing is `orphaned`, no branch is `pending` — and refuses to overwrite
+state that still exists unless you pass `--force`. It reconstructs **no** gate history: a verdict
+is evidence that checks ran, and git carries branches, not evidence. Every phase of a rebuilt run
+has to be gated again before anything is reported done.
+
 ## Operations
 
 **add `<role>` [n]** — spawn `n` background agents of that role (`tm-implementer` by

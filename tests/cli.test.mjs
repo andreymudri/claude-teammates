@@ -673,6 +673,62 @@ test('prune-run refuses a worktree whose phase has no passing gate', async () =>
   })
 })
 
+test('rebuild-state reconstructs plan and status from git after the run directory is deleted', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--no-ff', '--quiet', '-m', 'integrate T1', 'teammates/r1/T1'])
+    // The state is gitignored, so this is what a clean checkout leaves behind.
+    await rm(path.join(root, '.teammates'), { recursive: true, force: true })
+    lines.length = 0
+    const code = await runCli(['rebuild-state', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    assert.equal(code, 0)
+    const status = await readStatus(root, 'r1')
+    assert.deepEqual(status.tasks, [
+      { id: 'T1', title: 'A', state: 'done' },
+      { id: 'T2', title: 'B', state: 'pending' },
+    ])
+    // Rebuilt from branches, so it carries no verdict: the phases have to be gated again.
+    assert.equal('gates' in status, false)
+    assert.match(lines.join('\n'), /no gate history/i)
+  })
+})
+
+// Overwriting a live run's bookkeeping would discard its gate history, which is the one thing
+// this cannot reconstruct. It refuses by default and says what to pass.
+test('rebuild-state refuses to overwrite existing state unless forced', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const code = await runCli(['rebuild-state', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /--force/)
+  })
+})
+
+test('rebuild-state with --force replaces existing state and drops the gate history it cannot verify', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    // A recorded gate, of the kind a real run accumulates.
+    const statusPath = path.join(root, '.teammates', 'r1', 'status.json')
+    const before = JSON.parse(await readFile(statusPath, 'utf8'))
+    before.gates = { 1: { verdict: 'PASS', failed: [], recordedAt: 1 } }
+    await writeFile(statusPath, JSON.stringify(before), 'utf8')
+    g(['branch', 'teammates/r1/T1', 'main'])
+    lines.length = 0
+    const code = await runCli(['rebuild-state', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--force'], io)
+    assert.equal(code, 0)
+    const after = await readStatus(root, 'r1')
+    assert.equal('gates' in after, false)
+    // The branch exists and contributes nothing, so the rebuilt record says orphaned.
+    assert.equal(after.tasks[0].state, 'orphaned')
+  })
+})
+
 test('gate reports a JSON verdict when a manifest exists', async () => {
   await withRepo(async ({ root, planPath, io, lines }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)

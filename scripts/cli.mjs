@@ -25,16 +25,18 @@ import { validateLinkPaths } from './preview-links.mjs'
 import { planDrift, renderDrift } from './plan-drift.mjs'
 import { summarizeRun, renderRunSummary } from './finish.mjs'
 import { selectPrunableWorktrees, renderPrunePlan } from './prune.mjs'
+import { rebuildRunState } from './rebuild.mjs'
 import { generatePhaseWorkflow } from './workflow-gen.mjs'
 import { createGit, GitError, defaultGitExec } from './git.mjs'
 import { deriveContext } from './gate-runner.mjs'
 
-const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|config> [options]
+const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|config> [options]
 
   init-run <planPath> --run <id> [--root <path>]
   doctor   --run <id> --plan <path> [--base <branch>] [--run-branch <name>] [--root <path>]
   finish   --run <id> --plan <path> [--base <branch>] [--root <path>]
   prune-run --run <id> --plan <path> [--base <branch>] [--yes] [--root <path>]
+  rebuild-state --run <id> --plan <path> [--base <branch>] [--force] [--root <path>]
   plan-drift --run <id> --plan <path> [--base <branch>] [--root <path>]
   preview-check [--root <path>]
   review-dispatch --run <id> [--phase <name>] [--models <json>] [--root <path>]
@@ -60,7 +62,7 @@ const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflo
 // presence is the whole signal, so any value written after one is a spelling this CLI cannot
 // act on — see the refusal in parseFlags. Kept as a named set so the advice printed for a
 // rejected spelling can name a form that actually works, per flag.
-const VALUELESS_FLAGS = new Set(['no-fleet', 'local', 'yes'])
+const VALUELESS_FLAGS = new Set(['no-fleet', 'local', 'yes', 'force'])
 
 // What to tell a caller who wrote a spelling this CLI does not take. It must never name a form
 // that fails — and for `--no-fleet` it must never name one that does the OPPOSITE of what the
@@ -157,6 +159,7 @@ const REQUIRED = {
   'plan-drift': ['run', 'plan'],
   finish: ['run', 'plan'],
   'prune-run': ['run', 'plan'],
+  'rebuild-state': ['run', 'plan'],
   digest: ['run'],
   claim: ['run', 'task', 'by'],
   unclaim: ['run', 'task'],
@@ -936,6 +939,60 @@ export async function runCli(argv, io = { out: console.log }) {
     // 1 on problems, mirroring the gate, so a caller can branch on the exit code. It is still
     // a report: nothing is recorded, and no verdict is issued or implied.
     return report.problems.length === 0 ? 0 : 1
+  }
+
+  if (command === 'rebuild-state') {
+    // Refused by default: the gate history is the one thing git cannot vouch for, so replacing
+    // a live run's status would destroy the only record of what passed and what it cost.
+    // Recovery is the case this serves, and recovery starts from a run whose files are gone.
+    const existing = await readState(root, runId, 'status')
+    if (existing && flags.force !== true) {
+      io.out(`run ${runId} already has state; rebuilding would discard its gate history, which cannot be reconstructed from git. Pass --force if that is what you want.`)
+      return 2
+    }
+
+    let ctx
+    try {
+      ctx = await derive(root, runId, flags)
+    } catch (err) {
+      io.out(`cannot rebuild the state: ${err.message}`)
+      return 2
+    }
+
+    const resolved = await resolveConfig(root, io)
+    if (!resolved) return 2
+
+    const git = createGit({ cwd: root })
+    const info = {}
+    for (const task of ctx.tasks ?? []) {
+      const branch = resolveTaskBranch(task, runId)
+      const entry = { exists: false, contributes: false, merged: false }
+      if (branch && await git.branchExists(branch)) {
+        entry.exists = true
+        const sha = await git.resolveRef(`refs/heads/${branch}`)
+        // Merged means landed: on the run branch AND past the anchor. The same pair of
+        // questions `fileset` asks, for the same reason — a branch parked at the anchor is an
+        // ancestor of the run branch without ever having carried anything.
+        entry.merged = await git.isAncestor(sha, ctx.runSha) && !(await git.isAncestor(sha, ctx.anchorSha))
+        const forkPoint = await git.mergeBase(ctx.runSha, sha)
+        entry.contributes = (await git.changedFiles({ base: forkPoint, branch: sha })).length > 0
+      }
+      info[task.id] = entry
+    }
+
+    const { plan, status } = rebuildRunState({
+      runId,
+      tasks: ctx.tasks ?? [],
+      info,
+      maxParallel: resolved.maxParallel,
+      currentPhase: ctx.currentPhase,
+    })
+    await writeState(root, runId, 'plan', plan)
+    await writeState(root, runId, 'status', status)
+
+    for (const t of status.tasks) io.out(`${t.id}  ${t.state}`)
+    io.out('rebuilt from git: no gate history, so every phase must be gated again before anything is reported done')
+    return 0
   }
 
   if (command === 'prune-run') {
