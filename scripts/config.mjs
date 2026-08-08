@@ -57,7 +57,9 @@ const VALIDATORS = {
 // Enforcement keys are hand-edited by design, so `config set` never validates them and the
 // operator's only feedback is `config list`. Shape is checked here so that feedback exists;
 // content is not, because a lens name or a check's `run` string is policy, not structure.
-const ENFORCEMENT_VALIDATORS = {
+// Exported so the pairing with ENFORCEMENT_KEYS can be pinned structurally rather than by a
+// literal a maintainer would update in the same edit that breaks it.
+export const ENFORCEMENT_VALIDATORS = {
   lens: (v) => {
     if (!Array.isArray(v) || v.length === 0 || v.some((l) => typeof l !== 'string' || l === '')) {
       throw new ConfigError('lens must be a non-empty array of strings')
@@ -168,11 +170,19 @@ export function validateGate(gate) {
       if (entry.effort !== undefined) VALIDATORS.effort(entry.effort)
     }
   }
-  // Every entry in ENFORCEMENT_KEYS has a validator, so this lookup cannot come back undefined.
-  // If a future key joins that list without one, this throws a TypeError rather than silently
-  // waving the new key through unchecked — which is the failure direction to prefer.
+  // Every entry in ENFORCEMENT_KEYS has a validator. If a future key joins that list without
+  // one, refusing is the right direction — waving an unchecked enforcement key through is the
+  // one outcome this must never have — but it is refused as a ConfigError, not as a raw
+  // `ENFORCEMENT_VALIDATORS[key] is not a function` TypeError. Every other refusal here reaches
+  // the caller as exit 2 with a message, and a config path that instead dies with a stack trace
+  // reads to a skill branching on that exit code as neither a pass nor a stated failure.
   for (const key of ENFORCEMENT_KEYS) {
-    if (gate[key] !== undefined) ENFORCEMENT_VALIDATORS[key](gate[key])
+    if (gate[key] === undefined) continue
+    const validate = ENFORCEMENT_VALIDATORS[key]
+    if (typeof validate !== 'function') {
+      throw new ConfigError(`no validator for enforcement key: ${key}`)
+    }
+    validate(gate[key])
   }
   return gate
 }

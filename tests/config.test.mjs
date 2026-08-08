@@ -12,6 +12,7 @@ import {
   EFFORTS,
   ROLES,
   ENFORCEMENT_KEYS,
+  ENFORCEMENT_VALIDATORS,
   ConfigError,
   validateLocal,
   validateGate,
@@ -147,6 +148,45 @@ test('loadConfig still treats an absent local layer as absent, not as a bad one'
     assert.equal(resolved.maxParallel, 7)
     assert.equal(sources.maxParallel, GATE_FILE)
   })
+})
+
+// `validateGate` looks a validator up per enforcement key. The invariant that every key has one
+// was pinned only by the `['phases', 'lens', 'preview']` literal above — a maintainer adding a
+// fourth key updates that literal in the same edit, so the suite stayed green while a manifest
+// carrying the new key crashed with `ENFORCEMENT_VALIDATORS[key] is not a function`. Derived
+// from the two exports themselves, this cannot be satisfied by editing a list.
+test('every enforcement key has a validator, and every validator an enforcement key', () => {
+  assert.deepEqual(Object.keys(ENFORCEMENT_VALIDATORS).sort(), [...ENFORCEMENT_KEYS].sort())
+  for (const key of ENFORCEMENT_KEYS) {
+    assert.equal(typeof ENFORCEMENT_VALIDATORS[key], 'function', key)
+  }
+})
+
+// And if one is ever missing anyway, the refusal is a ConfigError like every other config
+// failure — not a TypeError escaping as a stack trace and exit 1, which a skill branching on
+// exit 2 reads as neither a pass nor a stated failure. Reached by removing a real validator,
+// because that is the only way into the branch from outside the module.
+test('a missing validator for an enforcement key is a ConfigError, not a TypeError', () => {
+  const saved = ENFORCEMENT_VALIDATORS.preview
+  delete ENFORCEMENT_VALIDATORS.preview
+  try {
+    assert.throws(
+      () => validateGate({ preview: { link: ['node_modules'] } }),
+      (err) => {
+        assert.ok(err instanceof ConfigError)
+        assert.equal(err.message, 'no validator for enforcement key: preview')
+        return true
+      },
+    )
+    // The value is refused, never validated-by-absence: a key with no validator must not be
+    // the one key that passes unchecked.
+    assert.throws(() => validateGate({ preview: 'anything at all' }), ConfigError)
+  } finally {
+    ENFORCEMENT_VALIDATORS.preview = saved
+  }
+  // Restored, so the rest of the file sees the real validator.
+  assert.throws(() => validateGate({ preview: [] }), ConfigError)
+  assert.deepEqual(validateGate({ preview: { link: ['node_modules'] } }), { preview: { link: ['node_modules'] } })
 })
 
 test('validateLocal rejects every enforcement key by name', () => {
