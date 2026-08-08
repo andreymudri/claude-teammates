@@ -28,15 +28,19 @@ import { selectPrunableWorktrees, renderPrunePlan } from './prune.mjs'
 import { rebuildRunState } from './rebuild.mjs'
 import { generatePhaseWorkflow } from './workflow-gen.mjs'
 import { createGit, GitError, defaultGitExec } from './git.mjs'
+import { buildCoupling, neighboursOf, inventory, hotPairs, renderMap } from './codemap.mjs'
+import { mapNotesStale, mapNotesPrompt } from './mapnotes.mjs'
 import { deriveContext } from './gate-runner.mjs'
 
-const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|config> [options]
+const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|config> [options]
 
   init-run <planPath> --run <id> [--root <path>]
   doctor   --run <id> --plan <path> [--base <branch>] [--run-branch <name>] [--root <path>]
   finish   --run <id> --plan <path> [--base <branch>] [--root <path>]
   prune-run --run <id> --plan <path> [--base <branch>] [--yes] [--root <path>]
   rebuild-state --run <id> --plan <path> [--base <branch>] [--force] [--root <path>]
+  map      [--files <a,b>] [--commits <n>] [--top <n>] [--root <path>]
+  map-notes --run <id> [--root <path>]
   plan-drift --run <id> --plan <path> [--base <branch>] [--root <path>]
   preview-check [--root <path>]
   review-dispatch --run <id> [--phase <name>] [--models <json>] [--root <path>]
@@ -160,6 +164,10 @@ const REQUIRED = {
   finish: ['run', 'plan'],
   'prune-run': ['run', 'plan'],
   'rebuild-state': ['run', 'plan'],
+  // Belongs to no run: it reads git history and the working tree, and answers a question about
+  // the repository rather than about a fleet.
+  map: [],
+  'map-notes': ['run'],
   digest: ['run'],
   claim: ['run', 'task', 'by'],
   unclaim: ['run', 'task'],
@@ -189,6 +197,17 @@ const NUMERIC_PHASE_COMMANDS = new Set(['workflow', 'fix', 'record-fix-round'])
 // `gate --no-fleet` never derives anything from git, so it never reads `--plan` and never
 // records anything under `--run` — requiring either would only teach a caller to invent a
 // throwaway value to get past this check. Solo drops both from the requirement.
+// A window flag written with no value parses as boolean `true`, and `Number(true)` is 1 — so
+// `map --commits` would answer, exit 0, and have read a ONE-COMMIT history. Everywhere else in
+// this CLI `flags[f] === true` means "the argument is missing" (see missingArgs, and --models);
+// this keeps that rule intact by refusing anything that is not a string before coercing, and
+// returning NaN so the caller's single positive-integer guard reports it like any other typo.
+function numericWindow(value, fallback) {
+  if (value === undefined) return fallback
+  if (typeof value !== 'string') return NaN
+  return Number(value)
+}
+
 function missingArgs(command, flags, positional) {
   // `=== true`, not `!== undefined`: solo mode is entered only by the one spelling that means
   // it. parseFlags already refuses `--no-fleet <value>` outright, and this is the second half
@@ -639,7 +658,59 @@ async function isTracked(root, file) {
   }
 }
 
+// `git ls-files` reports paths relative to the CURRENT DIRECTORY, while `git log --name-only`
+// reports them relative to the REPOSITORY ROOT. `map` reads both and keys one against the other,
+// so run anywhere below the root the two halves stopped being the same namespace: a file 100%
+// coupled by history was reported as "no coupled files found", and the overview printed
+// root-relative pairs beside cwd-relative directory rows. The prefix that reconciles them is what
+// git itself calls it — `rev-parse --show-prefix` — and everything cwd-relative, including the
+// caller's own --files argument, is lifted through it before any key is compared.
+//
+// This lives here rather than in scripts/git.mjs deliberately: it is a fix to how `map` composes
+// two existing primitives, not a new primitive.
+async function repoPrefix(root) {
+  const { code, stdout, stderr } = await defaultGitExec(['rev-parse', '--show-prefix'], root)
+  if (code !== 0) {
+    throw new GitError(`git rev-parse --show-prefix failed: ${stderr.trim() || `exit ${code}`}`)
+  }
+  // Exactly one trailing newline is git's framing; a directory name may legally end in
+  // whitespace, so nothing else is trimmed.
+  return stdout.replace(/\n$/, '')
+}
+
+function toRepoPath(prefix, p) {
+  const joined = `${prefix}${String(p).replace(/\\/g, '/')}`
+  if (joined === '') return joined
+  const normalized = path.posix.normalize(joined)
+  return normalized.startsWith('./') ? normalized.slice(2) : normalized
+}
+
+// A directory name taken from the repository is attacker-controlled data — a branch, a PR, a
+// vendored dependency can all introduce one — and `map-notes` interpolates it into a prompt under
+// the line "dispatch an Explore agent with exactly this prompt". Unlike the implementer brief,
+// nothing downstream bounds what that agent then does, so the hint is restricted to what a
+// directory name in a normal repository actually looks like: '/'-separated plain path segments.
+// A name carrying a newline, a control character, quoting, or the whitespace and punctuation that
+// let it read as a new instruction is DROPPED rather than escaped — the hint is orientation, and
+// orientation is worth exactly nothing next to a prompt-injection foothold. Surviving names still
+// render, so the signal is narrowed, never removed.
+const PLAIN_SEGMENT = /^[A-Za-z0-9._+@-]+$/
+export function promptSafeDirectories(dirs = []) {
+  return dirs.filter((dir) => {
+    if (typeof dir !== 'string' || dir === '' || dir.length > 120) return false
+    const segments = dir.split('/')
+    return segments.length <= 8 && segments.every((s) => PLAIN_SEGMENT.test(s))
+  })
+}
+
 export async function runCli(argv, io = { out: console.log }) {
+  // Two channels, not one. `io.out` carries the ANSWER a command was asked for — and for
+  // `workflow` that answer is a JavaScript module a caller redirects into a file. Anything
+  // that is commentary about how the answer was produced has to leave by another door, or a
+  // single advisory line becomes the first statement of the generated source and the command
+  // that promised never to fail the dispatch is what fails it. A caller supplying only `out`
+  // keeps working: `err` defaults to console.error, exactly as `out` defaults to console.log.
+  io = { err: console.error, ...io }
   const [command, ...rest] = argv
   const { flags, positional, rejected } = parseFlags(rest)
   // Refused before EVERYTHING else — before the required-argument check, before any command
@@ -881,10 +952,30 @@ export async function runCli(argv, io = { out: console.log }) {
     }
     if (retier) await writeState(root, runId, 'plan', plan)
 
+    // Coupling is recomputed here rather than read from anywhere: it is a statistic about the
+    // repository as it stands, and a stored one would be a second source of truth about a number
+    // nobody can check. A failure to read history is not a failure to dispatch — a brief without
+    // a blast radius is the brief this command emitted until now, so it degrades to that and says so.
+    const neighbours = {}
+    try {
+      const coupling = buildCoupling(await createGit({ cwd: root }).commitFileSets({ limit: 500 }))
+      for (const task of phaseTasks) {
+        const near = neighboursOf(coupling, task.files ?? [], { top: 5 })
+        if (near.length > 0) neighbours[task.id] = near
+      }
+    } catch (err) {
+      if (!(err instanceof GitError)) throw err
+      // stderr, not stdout: stdout is the generated workflow source, and a caller redirects it
+      // straight into a file it then runs. A notice printed there would be a syntax error in the
+      // dispatch — turning "a history failure never fails the dispatch" into its exact opposite.
+      io.err(`could not compute the blast radius (${err.message}); briefs will carry no coupling section`)
+    }
+
     const src = await generatePhaseWorkflow({
       runId,
       phase,
       tasks: phaseTasks,
+      neighbours,
       maxParallel: resolved.maxParallel,
       tierModels,
       planPath,
@@ -1121,6 +1212,115 @@ export async function runCli(argv, io = { out: console.log }) {
     // how a plan is meant to evolve mid-run, and exiting 1 for it would train a caller to
     // ignore the exit code for the case that actually costs something.
     return report.tooLate.length > 0 ? 1 : 0
+  }
+
+  if (command === 'map') {
+    const git = createGit({ cwd: root })
+    // Both windows are validated the same way and for the same reason: `Number('lots')` is NaN,
+    // and NaN reaching either `--max-count` or `slice` produces a plausible-looking answer to a
+    // question nobody asked. A typo must exit, never quietly change the result.
+    const limit = numericWindow(flags.commits, 500)
+    if (!Number.isInteger(limit) || limit <= 0) {
+      io.out('--commits takes a positive whole number of commits to read')
+      return 2
+    }
+    const top = numericWindow(flags.top, 5)
+    if (!Number.isInteger(top) || top <= 0) {
+      io.out('--top takes a positive whole number of files to report')
+      return 2
+    }
+    // `--files` written with no value is `true`, not a string — the same orchestrator mistake
+    // `--commits` and `--top` already refuse, and refused here for a stronger reason than theirs:
+    // falling through, it asked git a question with `flags.files.split` and died with a raw
+    // TypeError, and once that was guarded by truthiness alone it fell through to the WHOLE-
+    // REPOSITORY OVERVIEW and exited 0. A caller that asked "what does my file set put at risk"
+    // must never be answered with a repository summary and a success code.
+    let requestedFiles = null
+    if (typeof flags.files !== 'undefined') {
+      requestedFiles = typeof flags.files === 'string'
+        ? flags.files.split(',').map((f) => f.trim()).filter(Boolean)
+        : []
+      if (requestedFiles.length === 0) {
+        io.out('--files takes a comma-separated list of paths to report the blast radius for')
+        return 2
+      }
+    }
+    let sets
+    let paths
+    let prefix
+    try {
+      sets = await git.commitFileSets({ limit })
+      prefix = await repoPrefix(root)
+      paths = (await git.listFiles()).map((p) => toRepoPath(prefix, p))
+    } catch (err) {
+      if (!(err instanceof GitError)) throw err
+      io.out(`cannot read the repository: ${err.message}`)
+      return 2
+    }
+    const coupling = buildCoupling(sets)
+
+    // A file set turns this from an overview into the one question an implementer has: what does
+    // my change put at risk. Answered for the whole set at once, because that is what a task holds.
+    if (requestedFiles !== null) {
+      // Lifted into the same repo-root namespace the coupling keys live in, so a path the caller
+      // wrote relative to --root still matches the history when --root is not the repository root.
+      const files = requestedFiles.map((f) => toRepoPath(prefix, f))
+      const near = neighboursOf(coupling, files, { top })
+      if (near.length === 0) {
+        io.out(`no coupled files found for ${files.join(', ')} in the last ${limit} commits — new files, or a shallow history`)
+        return 0
+      }
+      for (const n of near) io.out(`${String(Math.round(n.confidence * 100)).padStart(3)}%  ${n.path}`)
+      return 0
+    }
+
+    io.out(renderMap({ inventory: inventory(paths), hotPairs: hotPairs(coupling), usedCommits: coupling.usedCommits }))
+    return 0
+  }
+
+  if (command === 'map-notes') {
+    const git = createGit({ cwd: root })
+    const notesPath = path.join(runDir(root, runId), 'map.md')
+    let sha
+    try {
+      sha = await git.headSha()
+    } catch (err) {
+      if (!(err instanceof GitError)) throw err
+      io.out(`cannot read the repository: ${err.message}`)
+      return 2
+    }
+
+    // ENOENT is the ordinary case — no notes yet. But every other read failure (map.md is a
+    // directory: EISDIR; permissions: EACCES) is the SAME situation from the caller's side:
+    // there are no notes it can use. Rethrowing produced a raw stack and exit 1, which is not a
+    // code any caller branches on, so an unusable file has to arrive as the documented 4 with
+    // the prompt — naming the read failure, so an operator can tell it from an empty file.
+    let text = null
+    let readFailure = null
+    try {
+      text = await readFile(notesPath, 'utf8')
+    } catch (err) {
+      if (err.code !== 'ENOENT') readFailure = `the map notes at ${notesPath} could not be read (${err.code ?? err.message}), so nothing says which commit they describe`
+    }
+
+    const stale = readFailure ?? mapNotesStale(text, { runId, sha })
+    if (!stale) { io.out(`current map notes: ${notesPath}`); return 0 }
+
+    // 4, matching `complete` and `collect-reviews`: this cannot verify what it was asked about.
+    // The prompt is printed so the caller dispatches an Explore agent rather than writing prose
+    // itself — and a teammate never writes this file.
+    io.out(stale)
+    io.out('')
+    io.out('dispatch an Explore agent with exactly this prompt:')
+    io.out('')
+    let topDirectories = []
+    try {
+      topDirectories = promptSafeDirectories(inventory(await git.listFiles(), { top: 8 }).rows.map((r) => r.dir))
+    } catch (err) {
+      if (!(err instanceof GitError)) throw err
+    }
+    io.out(mapNotesPrompt({ runId, sha, notesPath, topDirectories }))
+    return 4
   }
 
   if (command === 'preview-check') {

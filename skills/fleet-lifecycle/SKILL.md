@@ -18,6 +18,24 @@ state that still exists unless you pass `--force`. It reconstructs **no** gate h
 is evidence that checks ran, and git carries branches, not evidence. Every phase of a rebuilt run
 has to be gated again before anything is reported done.
 
+## Map notes
+
+For what a target project's modules are *for* — the part git statistics cannot supply — a run may
+carry `.teammates/<runId>/map.md`, written by an Explore agent:
+
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" map-notes --run <runId> --root <project root>
+
+Exit 0 means the stored notes declare the commit the repository is on; the header is a string the
+writing agent was told to copy, so this is tamper-evident provenance and not proof — nothing
+observes which tree that agent actually read, and nothing detects a header edited afterwards.
+Exit 4 means there are none, they carry no header at all, they name a different commit, they were
+written for a different run, or the file could not be read, and it prints the exact prompt to
+dispatch. Exit 2 means git could not be read, so no comparison happened at all — read that as
+unknown, never as current. Dispatch that agent yourself: a teammate never writes this file, and
+nothing enforced ever reads it. The directory names that
+prompt carries are filtered — anything that is not a plain path segment is dropped — because that
+prompt is handed to an agent that has Bash and is gated by nothing.
+
 ## Operations
 
 **add `<role>` [n]** — spawn `n` background agents of that role (`tm-implementer` by
