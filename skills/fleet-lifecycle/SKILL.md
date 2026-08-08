@@ -25,10 +25,14 @@ carry `.teammates/<runId>/map.md`, written by an Explore agent:
 
     node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" map-notes --run <runId> --root <project root>
 
-Exit 0 means the stored notes describe the commit the repository is on. Exit 4 means there are
-none, or they describe a different commit, and it prints the exact prompt to dispatch — the notes
-name the sha they were written at, so a reader can always tell. Dispatch that agent yourself: a
-teammate never writes this file, and nothing enforced ever reads it. The directory names that
+Exit 0 means the stored notes declare the commit the repository is on; the header is a string the
+writing agent was told to copy, so this is tamper-evident provenance and not proof — nothing
+observes which tree that agent actually read, and nothing detects a header edited afterwards.
+Exit 4 means there are none, they carry no header at all, they name a different commit, they were
+written for a different run, or the file could not be read, and it prints the exact prompt to
+dispatch. Exit 2 means git could not be read, so no comparison happened at all — read that as
+unknown, never as current. Dispatch that agent yourself: a teammate never writes this file, and
+nothing enforced ever reads it. The directory names that
 prompt carries are filtered — anything that is not a plain path segment is dropped — because that
 prompt is handed to an agent that has Bash and is gated by nothing.
 
