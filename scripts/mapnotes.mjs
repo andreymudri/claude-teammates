@@ -7,6 +7,10 @@
 // with the anchor: derived state is allowed to exist as long as it names what it was derived
 // from and anything reading it can check.
 //
+// The header is treated as provenance to be compared, not validated as a sha: a malformed
+// value like "UNKNOWN" is accepted, then reported as a mismatch when the repository is at
+// a different commit, rather than rejected as invalid.
+//
 // Advisory only. No check reads it, and nothing in it can fail a phase.
 
 const HEADER = /^<!--\s*teammates-map\s+run=(\S+)\s+sha=(\S+)\s*-->/

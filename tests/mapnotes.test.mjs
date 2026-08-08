@@ -52,3 +52,12 @@ test('the prompt carries the exact header line, the target path and the refusal 
 test('the prompt omits the directory sentence when there are none', () => {
   assert.doesNotMatch(mapNotesPrompt({ runId: 'r1', sha: 'a', notesPath: 'p' }), /largest directories/)
 })
+
+test('non-hex shas like UNKNOWN are accepted and reported in mismatch messages', () => {
+  const text = mapNotesHeader({ runId: 'r1', sha: 'UNKNOWN' })
+  assert.equal(text, '<!-- teammates-map run=r1 sha=UNKNOWN -->')
+  const header = readMapNotesHeader(text)
+  assert.equal(header.sha, 'UNKNOWN')
+  const staleMessage = mapNotesStale(text, { runId: 'r1', sha: 'HEAD' })
+  assert.match(staleMessage, /UNKNOWN.*HEAD/)
+})
