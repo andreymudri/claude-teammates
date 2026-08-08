@@ -112,15 +112,19 @@ export function hotPairs(coupling, { top = 15, minSupport = DEFAULT_MIN_SUPPORT 
   const out = []
   for (const key of coupling.pairs.keys()) {
     const [a, b] = key.split('\0')
-    const ab = confidence(coupling, a, b)
-    const ba = confidence(coupling, b, a)
-    const [file, other, score] = ab >= ba ? [a, b, ab] : [b, a, ba]
-    // The floor applies to the endpoint whose confidence is being reported, same as
-    // neighboursOf: it only trusts a file's own coupling once that file itself has enough
-    // history. Checking either endpoint let a one-commit file report 100% confidence just
-    // because it happened to pair with something well-established.
-    if ((coupling.support.get(file) ?? 0) < minSupport) continue
-    out.push({ file, other, confidence: score })
+    // Evaluate both directions and keep the strongest one whose reported file clears the
+    // floor, same as neighboursOf: it only trusts a file's own coupling once that file itself
+    // has enough history. Picking the stronger direction FIRST and only then checking its floor
+    // discarded the whole pair whenever that direction's file was under-supported, even when
+    // the other direction was both well-supported and reportable — the two functions would
+    // disagree about whether the pair counted at all.
+    const candidates = [
+      { file: a, other: b, confidence: confidence(coupling, a, b) },
+      { file: b, other: a, confidence: confidence(coupling, b, a) },
+    ].filter((c) => (coupling.support.get(c.file) ?? 0) >= minSupport)
+    if (candidates.length === 0) continue
+    candidates.sort((x, y) => y.confidence - x.confidence)
+    out.push(candidates[0])
   }
   return out.sort((x, y) => y.confidence - x.confidence || x.file.localeCompare(y.file)).slice(0, top)
 }

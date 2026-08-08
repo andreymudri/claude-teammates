@@ -126,7 +126,67 @@ test('hotPairs admits a pair only when the reported file itself clears the floor
     ['default/popular.ts', 'default/other2.ts'],
   ])
   const pairs = hotPairs(c, { minSupport: 3 })
-  assert.deepEqual(pairs, [])
+  // popular.ts (support 3) clears the floor and is coupled to each of once/other1/other2 a
+  // third of the time — exactly what neighboursOf(['default/popular.ts']) reports for the same
+  // fixture. Reporting from the under-supported side (once/other1/other2, support 1 each) and
+  // then dropping the pair when THAT direction fails the floor is the defect this test used to
+  // pin: it made hotPairs silently drop pairs that neighboursOf considers well-evidenced.
+  assert.deepEqual(pairs, [
+    { file: 'default/popular.ts', other: 'default/once.ts', confidence: 1 / 3 },
+    { file: 'default/popular.ts', other: 'default/other1.ts', confidence: 1 / 3 },
+    { file: 'default/popular.ts', other: 'default/other2.ts', confidence: 1 / 3 },
+  ])
+})
+
+// Reproduces the disagreement directly: with this history, neighboursOf(['a']) reports 'b' at
+// 50% confidence (b's support is 2, which clears a floor of 3? no — a's own support is 4, which
+// clears the floor, and confidence is read from a's side). hotPairs must reach the same verdict
+// about the same pair instead of discarding it because b, the higher-confidence direction, is
+// under-supported.
+test('hotPairs falls back to the other direction when the stronger one fails the floor', () => {
+  const history = [['a', 'b'], ['a', 'b'], ['a'], ['a']]
+  const c = buildCoupling(history)
+  const neighbours = neighboursOf(c, ['a'], { minSupport: 3 })
+  assert.deepEqual(neighbours, [{ path: 'b', confidence: 0.5 }])
+  const pairs = hotPairs(c, { minSupport: 3 })
+  assert.deepEqual(pairs, [{ file: 'a', other: 'b', confidence: 0.5 }])
+})
+
+// Direction must be pinned, not just the winning confidence value: a fixture where the stronger
+// direction is NOT the alphabetically-first file. 'a' has support 10 (two of those commits also
+// touch 'z'), so confidence(a -> z) is only 2/10 = 0.2. 'z' has support 2, both of which touch
+// 'a', so confidence(z -> a) is 2/2 = 1. The stronger, correct direction is z -> a; a mutant that
+// always reports the first-sorted endpoint (a) would report 'a' at 0.2 instead.
+test('hotPairs reports file and other for the stronger direction, not the alphabetically-first one', () => {
+  const history = [
+    ['a', 'z'], ['a', 'z'],
+    ['a'], ['a'], ['a'], ['a'], ['a'], ['a'], ['a'], ['a'],
+  ]
+  const c = buildCoupling(history)
+  const pairs = hotPairs(c, { minSupport: 2 })
+  assert.deepEqual(pairs, [{ file: 'z', other: 'a', confidence: 1 }])
+})
+
+// The default top of 15 is never exercised elsewhere: every other hotPairs test passes an
+// explicit top, or has too few pairs for a default cap to matter. Build 20 independent hub/leaf
+// pairs — each pair's own hub file only ever appears with its one leaf, so confidences are all
+// 1 and ties break alphabetically — and confirm the result is capped at 15, not all 20.
+test('hotPairs returns at most 15 pairs when top is not passed', () => {
+  const commits = Array.from({ length: 20 }, (_, i) => [`default/hub${String(i).padStart(2, '0')}.ts`, `default/leaf${String(i).padStart(2, '0')}.ts`])
+  const c = buildCoupling(commits)
+  const pairs = hotPairs(c, { minSupport: 1 })
+  assert.equal(pairs.length, 15)
+  assert.equal(pairs[0].file, 'default/hub00.ts')
+})
+
+// A merge commit reports no file list, so `git log --name-only` yields an empty array for it.
+// Without the unique.length === 0 guard, an empty commit would still count toward usedCommits —
+// inflating "coupling from N commits" with commits that contributed no pair and no support at
+// all, and a repo with hundreds of merges would badly overstate its evidence base.
+test('a commit that touched no files is excluded from usedCommits, not just from pairing', () => {
+  const c = buildCoupling([[], ['default/a.ts', 'default/b.ts'], []])
+  assert.equal(c.usedCommits, 1)
+  assert.equal(c.support.size, 2)
 })
 
 test('inventory rolls files up by directory, largest first', () => {
