@@ -586,6 +586,68 @@ test('a caveman level containing a quote is escaped rather than breaking the sou
   }
 })
 
+// blastRadius(t) is called at generated-workflow run time, so its rendered output — the
+// percentage and the section's presence or absence — only exists once the workflow body is
+// evaluated, never in the raw generated source: the static function definition that decides
+// whether to render it is always present in the source text regardless of neighbours. These
+// content assertions therefore run against the rendered prompt via captureAgentPrompts, exactly
+// as the checkout and baseline sections above are asserted.
+test('a task with neighbours renders a blast radius naming each file and its percentage', async () => {
+  const src = await generatePhaseWorkflow({
+    runId: 'r1', phase: 1, maxParallel: 2,
+    tasks: [{ id: 'T1', title: 'a', files: ['src/a.ts'] }],
+    neighbours: { T1: [{ path: 'src/b.ts', confidence: 0.82 }] },
+  })
+  assert.match(src, /BLAST RADIUS/)
+  assert.match(src, /src\/b\.ts/)
+  const [prompt] = await captureAgentPrompts(src)
+  assert.match(prompt, /BLAST RADIUS/)
+  assert.match(prompt, /82%/)
+  assert.match(prompt, /src\/b\.ts/)
+})
+
+test('a task with no neighbours renders no blast radius section', async () => {
+  const src = await generatePhaseWorkflow({
+    runId: 'r1', phase: 1, maxParallel: 2,
+    tasks: [{ id: 'T1', title: 'a', files: ['src/a.ts'] }],
+    neighbours: { T1: [] },
+  })
+  const [prompt] = await captureAgentPrompts(src)
+  assert.doesNotMatch(prompt, /BLAST RADIUS/)
+})
+
+test('omitting neighbours entirely renders no blast radius and no undefined', async () => {
+  const src = await generatePhaseWorkflow({
+    runId: 'r1', phase: 1, maxParallel: 2,
+    tasks: [{ id: 'T1', title: 'a', files: ['src/a.ts'] }],
+  })
+  const [prompt] = await captureAgentPrompts(src)
+  assert.doesNotMatch(prompt, /BLAST RADIUS/)
+  assert.doesNotMatch(prompt, /undefined/)
+})
+
+// The brief is the specification the gate then enforces, so the caveman variant keeps it for the
+// same reason it keeps the FILES list.
+test('the caveman brief keeps the blast radius', async () => {
+  const src = await generatePhaseWorkflow({
+    runId: 'r1', phase: 1, maxParallel: 2, caveman: 'full',
+    tasks: [{ id: 'T1', title: 'a', files: ['src/a.ts'] }],
+    neighbours: { T1: [{ path: 'src/b.ts', confidence: 0.5 }] },
+  })
+  const [prompt] = await captureAgentPrompts(src)
+  assert.match(prompt, /BLAST RADIUS/)
+})
+
+test('the blast radius tells a teammate to report blocked rather than edit a neighbour', async () => {
+  const src = await generatePhaseWorkflow({
+    runId: 'r1', phase: 1, maxParallel: 2,
+    tasks: [{ id: 'T1', title: 'a', files: ['src/a.ts'] }],
+    neighbours: { T1: [{ path: 'src/b.ts', confidence: 0.5 }] },
+  })
+  const [prompt] = await captureAgentPrompts(src)
+  assert.match(prompt, /report status "blocked" naming it rather than editing it/)
+})
+
 test('the generated source parses as a real module', async () => {
   const src = await generatePhaseWorkflow({
     runId: 'r1',
