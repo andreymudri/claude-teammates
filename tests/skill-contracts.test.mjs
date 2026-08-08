@@ -302,6 +302,12 @@ test('parallel-execution keeps a returned teammate’s worktree until its phase 
     allow: [
       /Only prune worktrees belonging to this run/i,
       /prune that task's worktree first/i,
+      // Reviewed: the command bullet states the same rule mechanically — it recomputes each
+      // phase's gate and removes only worktrees whose phase passes — so it reinforces the claim
+      // rather than qualifying it.
+      /^Prune with the command rather than by hand:/i,
+      /It recomputes each phase's gate, removes only this run's worktrees whose phase passes/i,
+      /Without --yes it reports and removes nothing/i,
     ],
   })
   assertStatement(

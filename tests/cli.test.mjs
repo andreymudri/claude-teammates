@@ -601,6 +601,78 @@ test('finish exits 1 and names the phase whose computed check fails', async () =
   })
 })
 
+// Destructive, so it reports and stops unless told otherwise. A caller that runs it to see what
+// would happen must not lose a worktree for asking.
+test('prune-run is a dry run by default and removes nothing', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'fileset', kind: 'fileset' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--no-ff', '--quiet', '-m', 'integrate T1', 'teammates/r1/T1'])
+    const wtPath = path.join(root, '.claude', 'worktrees', 'a1')
+    g(['worktree', 'add', '--quiet', wtPath, 'teammates/r1/T1'])
+    lines.length = 0
+    const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    assert.equal(code, 0)
+    assert.match(lines.join('\n'), /dry run/i)
+    // Still there: nothing was removed.
+    assert.match(g(['worktree', 'list']), /a1/)
+  })
+})
+
+test('prune-run with --yes removes this run’s worktree once its phase passes', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'fileset', kind: 'fileset' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--no-ff', '--quiet', '-m', 'integrate T1', 'teammates/r1/T1'])
+    const wtPath = path.join(root, '.claude', 'worktrees', 'a1')
+    g(['worktree', 'add', '--quiet', wtPath, 'teammates/r1/T1'])
+    lines.length = 0
+    const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
+    assert.equal(code, 0)
+    assert.doesNotMatch(g(['worktree', 'list']), /a1/)
+  })
+})
+
+// The rule the two skills disagreed about, now mechanical: no passing gate, no prune, and the
+// message says why rather than leaving the caller to guess.
+test('prune-run refuses a worktree whose phase has no passing gate', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'fileset', kind: 'fileset' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    // T1's branch exists but carries nothing, so phase 1 cannot pass its gate.
+    g(['branch', 'teammates/r1/T1', 'main'])
+    const wtPath = path.join(root, '.claude', 'worktrees', 'a1')
+    g(['worktree', 'add', '--quiet', wtPath, 'teammates/r1/T1'])
+    lines.length = 0
+    const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
+    assert.equal(code, 0)
+    assert.match(lines.join('\n'), /no passing gate/i)
+    assert.match(g(['worktree', 'list']), /a1/)
+  })
+})
+
 test('gate reports a JSON verdict when a manifest exists', async () => {
   await withRepo(async ({ root, planPath, io, lines }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)

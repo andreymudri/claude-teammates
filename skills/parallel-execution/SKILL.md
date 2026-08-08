@@ -195,6 +195,12 @@ teammate automatically; a teammate never shares a worktree with another.
 - **Inspect:** `git worktree list` shows every worktree in the repo, including ones from
   other runs. Use it to confirm a teammate actually got an isolated workspace, and to spot
   stale ones before starting a new run.
+- **Prune with the command rather than by hand:**
+
+      node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" prune-run --run <runId> --plan <planPath> --root <project root> [--yes]
+
+  It recomputes each phase's gate, removes only this run's worktrees whose phase passes, and
+  names every one it left alone and why. Without `--yes` it reports and removes nothing.
 - **Prune after the phase passes its gate, not when a teammate returns:** `phase-gate` resolves a
   `retry` by resuming the same teammate, and a resumed teammate whose worktree is gone cannot
   start — it fails with "its worktree no longer exists", and the task's whole context is lost

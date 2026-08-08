@@ -24,15 +24,17 @@ import { stat } from 'node:fs/promises'
 import { validateLinkPaths } from './preview-links.mjs'
 import { planDrift, renderDrift } from './plan-drift.mjs'
 import { summarizeRun, renderRunSummary } from './finish.mjs'
+import { selectPrunableWorktrees, renderPrunePlan } from './prune.mjs'
 import { generatePhaseWorkflow } from './workflow-gen.mjs'
 import { createGit, GitError, defaultGitExec } from './git.mjs'
 import { deriveContext } from './gate-runner.mjs'
 
-const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|config> [options]
+const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|config> [options]
 
   init-run <planPath> --run <id> [--root <path>]
   doctor   --run <id> --plan <path> [--base <branch>] [--run-branch <name>] [--root <path>]
   finish   --run <id> --plan <path> [--base <branch>] [--root <path>]
+  prune-run --run <id> --plan <path> [--base <branch>] [--yes] [--root <path>]
   plan-drift --run <id> --plan <path> [--base <branch>] [--root <path>]
   preview-check [--root <path>]
   review-dispatch --run <id> [--phase <name>] [--models <json>] [--root <path>]
@@ -58,7 +60,7 @@ const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflo
 // presence is the whole signal, so any value written after one is a spelling this CLI cannot
 // act on — see the refusal in parseFlags. Kept as a named set so the advice printed for a
 // rejected spelling can name a form that actually works, per flag.
-const VALUELESS_FLAGS = new Set(['no-fleet', 'local'])
+const VALUELESS_FLAGS = new Set(['no-fleet', 'local', 'yes'])
 
 // What to tell a caller who wrote a spelling this CLI does not take. It must never name a form
 // that fails — and for `--no-fleet` it must never name one that does the OPPOSITE of what the
@@ -154,6 +156,7 @@ const REQUIRED = {
   'preview-check': [],
   'plan-drift': ['run', 'plan'],
   finish: ['run', 'plan'],
+  'prune-run': ['run', 'plan'],
   digest: ['run'],
   claim: ['run', 'task', 'by'],
   unclaim: ['run', 'task'],
@@ -933,6 +936,63 @@ export async function runCli(argv, io = { out: console.log }) {
     // 1 on problems, mirroring the gate, so a caller can branch on the exit code. It is still
     // a report: nothing is recorded, and no verdict is issued or implied.
     return report.problems.length === 0 ? 0 : 1
+  }
+
+  if (command === 'prune-run') {
+    const config = await resolveGateConfig(root, io)
+    if (config === GATE_CONFIG_REJECTED) return 2
+    if (!config) { io.out(`no ${GATE_FILE} — without a gate there is no passing phase, so nothing is prunable`); return 4 }
+
+    let ctx
+    try {
+      ctx = { cwd: root, previewLink: previewLinks(config), ...(await derive(root, runId, flags)) }
+    } catch (err) {
+      io.out(`cannot decide what is prunable: ${err.message}`)
+      return 4
+    }
+
+    // Which phases hold a passing gate is RECOMPUTED, never read from `status.gates`. That file
+    // is written by the agents whose worktrees are about to be removed, and a phase marked PASS
+    // there is exactly how a fix round would lose the context it still needs.
+    const passedPhases = []
+    for (const phase of [...new Set((ctx.tasks ?? []).map((t) => t.phase))].sort((a, b) => a - b)) {
+      const results = await runChecks(checksForPhase(config, String(phase)), { ...ctx, currentPhase: phase })
+      if (aggregateVerdict(results).verdict === 'PASS') passedPhases.push(phase)
+    }
+
+    const git = createGit({ cwd: root })
+    const worktrees = await git.worktrees()
+    const plan = selectPrunableWorktrees({
+      runId,
+      worktrees,
+      // git lists the main worktree first, always. Naming it explicitly beats matching it
+      // against `root`, which can differ by symlink, drive-letter case, or trailing separator.
+      mainWorktree: worktrees[0]?.path ?? null,
+      taskPhases: Object.fromEntries((ctx.tasks ?? []).map((t) => [t.id, t.phase])),
+      passedPhases,
+    })
+    io.out(renderPrunePlan(plan))
+
+    // Removing a worktree is not reversible from here, so the default is to say what would
+    // happen. `--yes` is the caller stating the intent, in the same spelling every other
+    // valueless flag in this CLI uses.
+    if (flags.yes !== true) {
+      io.out('dry run: nothing was removed. Re-run with --yes to remove the worktrees listed as prunable.')
+      return 0
+    }
+
+    let failed = 0
+    for (const w of plan.prunable) {
+      try {
+        await git.removeWorktree(w.path)
+        io.out(`removed ${w.path}`)
+      } catch (err) {
+        if (!(err instanceof GitError)) throw err
+        failed += 1
+        io.out(`could not remove ${w.path}: ${err.message}`)
+      }
+    }
+    return failed > 0 ? 1 : 0
   }
 
   if (command === 'finish') {
