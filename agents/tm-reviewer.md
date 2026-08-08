@@ -16,6 +16,22 @@ reviewer owns it.
 - Cite `file:line` for every finding.
 - No findings is a valid and common result. Do not invent one to look useful.
 
+## Boundaries
+
+You are read-only. Never write to any ref — no commit, merge, rebase, reset, cherry-pick,
+push, or update-ref — on the base branch, the run branch, or any task branch. A review that
+writes to a shared ref produces the very state the phase gate exists to prevent: merged work
+with no recorded PASS, which the gate cannot catch because it runs before integration and
+never sees what you merged.
+
+Never run git checkout in the main worktree. If your lens needs code actually executed
+across branches — building a combination to confirm a finding reproduces — create a scratch
+worktree outside the repository, at the path your prompt names or under the system temp
+directory, on a branch of your own that belongs to no run. Remove it when you are done.
+
+If you cannot verify a finding without writing to a shared ref, report the finding
+unverified and say what you would have run to confirm it.
+
 ## Return value
 
 An array of findings, each with `severity`, `file`, `line`, `summary`, and

@@ -47,6 +47,55 @@ test('the reviewer takes one lens and returns severities', async () => {
   assert.match(doc.text, /high\b/)
 })
 
+// A reviewer holds full tool access and, before this rule existed, merged seven task branches
+// into the main branch with no gate PASS — the exact state the gate exists to prevent, and one
+// it cannot catch, since it runs before integration. The prohibition and the reason it matters
+// must sit in one block; the subject lock keeps any later sentence about writing refs reviewed.
+test('the reviewer is read-only and may not write to any ref', async () => {
+  const { doc } = await agent('tm-reviewer.md')
+  const boundaries = doc.section('Boundaries')
+  assertClaim(boundaries, {
+    label: 'reviewer write prohibition',
+    claim: /^You are read-only\b/,
+    then: /Never write to any ref/i,
+    subject: /update-ref/i,
+  })
+})
+
+test('the reviewer runs cross-branch checks in a scratch worktree, never in the main worktree', async () => {
+  const { doc } = await agent('tm-reviewer.md')
+  const boundaries = doc.section('Boundaries')
+  assertStatement(
+    boundaries,
+    /never run git checkout in the main worktree/i,
+    'reviewer must not check anything out in the main worktree',
+  )
+  assertStatement(
+    boundaries,
+    /scratch worktree outside the repository/i,
+    'reviewer must be told where cross-branch verification happens',
+  )
+  assertStatement(
+    boundaries,
+    /report the finding unverified/i,
+    'reviewer must have a sanctioned way out when it cannot verify read-only',
+  )
+})
+
+test('the implementer must prove its work is on the conventional branch before returning done', async () => {
+  const { doc } = await agent('tm-implementer.md')
+  assertStatement(
+    doc,
+    /git merge-base/,
+    'implementer must run the fork-point diff, not a tip-vs-tip diff',
+  )
+  assertStatement(
+    doc,
+    /empty diff means your commits landed on another ref/i,
+    'implementer must be told what an empty contribution proves',
+  )
+})
+
 test('the integrator is declared the sole writer to the run branch', async () => {
   const { doc } = await agent('tm-integrator.md')
   assertStatement(doc, /sole writer/, 'integrator must be declared the sole writer')

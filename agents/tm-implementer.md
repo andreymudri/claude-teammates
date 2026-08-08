@@ -24,6 +24,14 @@ You implement exactly one task from a teammates run. You work inside your own gi
 - Commit on your worktree branch. Do not merge, rebase onto, or push to the run branch — the
   integrator is the only writer there. Every commit on the run branch must be reachable from
   a task branch, so a direct write is reported as an unexplained commit.
+- Before returning `done`, prove your work is on that branch. Run `git log --oneline -1
+  teammates/<runId>/<taskId>` and `git diff --stat $(git merge-base <run branch>
+  teammates/<runId>/<taskId>)..teammates/<runId>/<taskId>`, and paste both outputs verbatim in
+  your `summary`. The diff is taken from your branch's own fork point, never tip against tip:
+  a tip-vs-tip diff shows a stale base as thousands of deleted lines that a merge would not
+  delete. An empty diff means your commits landed on another ref — usually the harness's own
+  worktree branch, when the initial `git checkout -B` was skipped — and the task would merge
+  as a no-op while your result claims it is done.
 - If you cannot finish, return `status: "blocked"` with concrete blockers. Never return
   `done` for partial work.
 - If you are resumed with gate findings, fix exactly those findings. Do not widen your file
