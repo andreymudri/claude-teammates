@@ -280,6 +280,26 @@ test('runFilesetCheck fails naming a stray path', async () => {
   assert.match(res.output, /secret\.mjs/)
 })
 
+// A teammate that skips its `git checkout -B teammates/<run>/<task>` and commits on the
+// harness's own worktree branch leaves the conventional ref existing but empty: it points at
+// the run tip with no work on it. `filesetViolations` of an empty change list is empty, so the
+// check used to pass, the task merged as a no-op, and the returned `status: done` was believed.
+// An existing branch that contributes nothing is a failure, not a clean pass.
+test('runFilesetCheck fails when a task branch contributes no file changes', async () => {
+  const git = fakeGit({
+    branchExists: async () => true,
+    changedFiles: async () => [],
+  })
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = { git, runId: RUN_ID, anchorSha: 'anchorSha1', tasks: [T1_TASK], currentPhase: 1, phaseError: null }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.match(res.output, /T1/)
+  assert.match(res.output, /no file changes/)
+  // The branch sha is still recorded, so verdictCoversTree keeps working across a fix round.
+  assert.deepEqual(res.branchShas, { [T1_BRANCH]: `refs/heads/${T1_BRANCH}-sha` })
+})
+
 test('runFilesetCheck fails on a missing branch', async () => {
   const git = fakeGit({ branchExists: async () => false })
   const check = { name: 'fileset', kind: 'fileset' }

@@ -216,6 +216,17 @@ export async function runFilesetCheck(check, ctx = {}) {
       // the anchor again, so it degenerates to the same wrong diff.
       const forkPoint = await git.mergeBase(runSha, sha)
       const changed = await git.changedFiles({ base: forkPoint, branch: sha })
+      // An existing branch that changes nothing is not a vacuous pass. A teammate that skips
+      // its `git checkout -B teammates/<runId>/<taskId>` commits on whatever branch it was
+      // handed — the harness's own worktree branch — and leaves the conventional ref sitting
+      // at the run tip with no work on it. The ref exists, filesetViolations of an empty list
+      // is empty, and the task then merges as a no-op while its result says `done`. The
+      // branch is resolved by convention precisely so the enforced party cannot redirect the
+      // check; emptiness is what that redirection looks like from here.
+      if (changed.length === 0) {
+        problems.push(`${task.id}: branch ${branch} contributes no file changes past its fork point ${forkPoint} — the work is not on the conventional ref, and merging this task would be a no-op`)
+        continue
+      }
       const violations = filesetViolations(changed, task.files)
       if (violations.length > 0) problems.push(`${task.id}: outside declared set — ${violations.join(', ')}`)
     } catch (err) {
