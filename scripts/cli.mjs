@@ -197,6 +197,17 @@ const NUMERIC_PHASE_COMMANDS = new Set(['workflow', 'fix', 'record-fix-round'])
 // `gate --no-fleet` never derives anything from git, so it never reads `--plan` and never
 // records anything under `--run` — requiring either would only teach a caller to invent a
 // throwaway value to get past this check. Solo drops both from the requirement.
+// A window flag written with no value parses as boolean `true`, and `Number(true)` is 1 — so
+// `map --commits` would answer, exit 0, and have read a ONE-COMMIT history. Everywhere else in
+// this CLI `flags[f] === true` means "the argument is missing" (see missingArgs, and --models);
+// this keeps that rule intact by refusing anything that is not a string before coercing, and
+// returning NaN so the caller's single positive-integer guard reports it like any other typo.
+function numericWindow(value, fallback) {
+  if (value === undefined) return fallback
+  if (typeof value !== 'string') return NaN
+  return Number(value)
+}
+
 function missingArgs(command, flags, positional) {
   // `=== true`, not `!== undefined`: solo mode is entered only by the one spelling that means
   // it. parseFlags already refuses `--no-fleet <value>` outright, and this is the second half
@@ -648,6 +659,13 @@ async function isTracked(root, file) {
 }
 
 export async function runCli(argv, io = { out: console.log }) {
+  // Two channels, not one. `io.out` carries the ANSWER a command was asked for — and for
+  // `workflow` that answer is a JavaScript module a caller redirects into a file. Anything
+  // that is commentary about how the answer was produced has to leave by another door, or a
+  // single advisory line becomes the first statement of the generated source and the command
+  // that promised never to fail the dispatch is what fails it. A caller supplying only `out`
+  // keeps working: `err` defaults to console.error, exactly as `out` defaults to console.log.
+  io = { err: console.error, ...io }
   const [command, ...rest] = argv
   const { flags, positional, rejected } = parseFlags(rest)
   // Refused before EVERYTHING else — before the required-argument check, before any command
@@ -902,7 +920,10 @@ export async function runCli(argv, io = { out: console.log }) {
       }
     } catch (err) {
       if (!(err instanceof GitError)) throw err
-      io.out(`could not compute the blast radius (${err.message}); briefs will carry no coupling section`)
+      // stderr, not stdout: stdout is the generated workflow source, and a caller redirects it
+      // straight into a file it then runs. A notice printed there would be a syntax error in the
+      // dispatch — turning "a history failure never fails the dispatch" into its exact opposite.
+      io.err(`could not compute the blast radius (${err.message}); briefs will carry no coupling section`)
     }
 
     const src = await generatePhaseWorkflow({
@@ -1153,12 +1174,12 @@ export async function runCli(argv, io = { out: console.log }) {
     // Both windows are validated the same way and for the same reason: `Number('lots')` is NaN,
     // and NaN reaching either `--max-count` or `slice` produces a plausible-looking answer to a
     // question nobody asked. A typo must exit, never quietly change the result.
-    const limit = flags.commits === undefined ? 500 : Number(flags.commits)
+    const limit = numericWindow(flags.commits, 500)
     if (!Number.isInteger(limit) || limit <= 0) {
       io.out('--commits takes a positive whole number of commits to read')
       return 2
     }
-    const top = flags.top === undefined ? 5 : Number(flags.top)
+    const top = numericWindow(flags.top, 5)
     if (!Number.isInteger(top) || top <= 0) {
       io.out('--top takes a positive whole number of files to report')
       return 2
@@ -1204,14 +1225,20 @@ export async function runCli(argv, io = { out: console.log }) {
       return 2
     }
 
+    // ENOENT is the ordinary case — no notes yet. But every other read failure (map.md is a
+    // directory: EISDIR; permissions: EACCES) is the SAME situation from the caller's side:
+    // there are no notes it can use. Rethrowing produced a raw stack and exit 1, which is not a
+    // code any caller branches on, so an unusable file has to arrive as the documented 4 with
+    // the prompt — naming the read failure, so an operator can tell it from an empty file.
     let text = null
+    let readFailure = null
     try {
       text = await readFile(notesPath, 'utf8')
     } catch (err) {
-      if (err.code !== 'ENOENT') throw err
+      if (err.code !== 'ENOENT') readFailure = `the map notes at ${notesPath} could not be read (${err.code ?? err.message}), so nothing says which commit they describe`
     }
 
-    const stale = mapNotesStale(text, { runId, sha })
+    const stale = readFailure ?? mapNotesStale(text, { runId, sha })
     if (!stale) { io.out(`current map notes: ${notesPath}`); return 0 }
 
     // 4, matching `complete` and `collect-reviews`: this cannot verify what it was asked about.

@@ -49,9 +49,14 @@ async function withRepo(fn) {
   git(root, ['commit', '--quiet', '-m', 'initial'])
   git(root, ['checkout', '--quiet', '-b', 'run-branch'])
   const lines = []
-  const io = { out: (t) => lines.push(t) }
+  // Two captured channels, kept apart on purpose: `lines` is the ANSWER (for `workflow`, a
+  // JavaScript module a caller redirects into a file), `errLines` is commentary about how that
+  // answer was produced. A test that folded them together could not tell a notice printed into
+  // the generated source from one printed beside it.
+  const errLines = []
+  const io = { out: (t) => lines.push(t), err: (t) => errLines.push(t) }
   try {
-    await fn({ root, planPath, io, lines, git: (args) => git(root, args) })
+    await fn({ root, planPath, io, lines, errLines, git: (args) => git(root, args) })
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -4149,5 +4154,213 @@ test('workflow puts a blast radius in the brief when the history supports one', 
     await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root], io)
     assert.match(lines.join('\n'), /BLAST RADIUS/)
     assert.match(lines.join('\n'), /a\.helper\.mjs/)
+  })
+})
+
+// --- the blast-radius degradation notice belongs on stderr ---------------------------------
+//
+// `workflow`'s stdout is a JavaScript module; the documented way to use it is to redirect it
+// into a file and run that file. The clause that catches a history failure exists to guarantee
+// "a failure to read git never fails the dispatch" — printed to stdout, it became the FIRST
+// STATEMENT of the generated source and was therefore the one thing that did fail it, with
+// exit 0 and a file that dies at parse time.
+test('a history failure leaves the generated workflow source parseable', async () => {
+  await withRepo(async ({ root, planPath, io, lines, errLines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    // An unborn HEAD: `git log HEAD` has no commit to resolve, so commitFileSets throws and
+    // the degradation clause runs. Nothing else in `workflow` (no --plan here) reads git.
+    g(['checkout', '--quiet', '--orphan', 'no-history'])
+    lines.length = 0
+    errLines.length = 0
+    const code = await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 0)
+    assert.match(errLines.join('\n'), /could not compute the blast radius/)
+    assert.doesNotMatch(lines.join('\n'), /could not compute the blast radius/)
+
+    // Substring assertions cannot catch a stray line at the top of a source file; only a parser
+    // can. `node --check` is exactly what the redirected file faces when it is run.
+    const dir = await mkdtemp(path.join(tmpdir(), 'tm-workflow-parse-'))
+    try {
+      const file = path.join(dir, 'phase.js')
+      await writeFile(file, lines.join('\n'), 'utf8')
+      execFileSync(process.execPath, ['--check', file], { encoding: 'utf8' })
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+// --- a window flag written with no value is a missing argument, not the number 1 ------------
+//
+// `Number(true) === 1`, so an unguarded `--commits` answered from a one-commit history and
+// exited 0 — the most misleading possible outcome, since the answer looks like a real map.
+test('map rejects --commits written with no value rather than reading one commit', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    lines.length = 0
+    assert.equal(await runCli(['map', '--commits', '--root', root], io), 2)
+    assert.match(lines.join('\n'), /--commits takes a positive whole number/)
+  })
+})
+
+test('map rejects --top written with no value rather than reporting one neighbour', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    lines.length = 0
+    assert.equal(await runCli(['map', '--files', 'x.mjs', '--top', '--root', root], io), 2)
+    assert.match(lines.join('\n'), /--top takes a positive whole number/)
+  })
+})
+
+// The value must not merely be validated — it has to reach the history read. A hardcoded window
+// would still pass every rejection test above while silently ignoring what the caller asked for.
+test('map --commits bounds the history the map is computed from', async () => {
+  await withRepo(async ({ root, io, lines, git: g }) => {
+    for (let i = 0; i < 4; i += 1) {
+      await writeFile(path.join(root, 'x.mjs'), `export const x = ${i}\n`, 'utf8')
+      g(['add', '.'])
+      g(['commit', '--quiet', '-m', `round ${i}`])
+    }
+    lines.length = 0
+    assert.equal(await runCli(['map', '--commits', '2', '--root', root], io), 0)
+    assert.match(lines.join('\n'), /coupling from 2 commits/)
+  })
+})
+
+// The overview asserted end to end. "tracked files" alone is emitted by renderMap for an empty
+// inventory too, so it says nothing about whether the real repository was measured.
+test('map renders the directory rows and the coupled pairs of the repository', async () => {
+  await withRepo(async ({ root, io, lines, git: g }) => {
+    await mkdir(path.join(root, 'src'), { recursive: true })
+    // Four rounds, because the coupling floor ignores a file seen in fewer than three commits:
+    // a fixture that commits its files once never reaches renderMap's "most coupled pairs"
+    // branch at all, and the section it prints would be unpinned by construction.
+    for (let i = 0; i < 4; i += 1) {
+      await writeFile(path.join(root, 'src', 'x.mjs'), `export const x = ${i}\n`, 'utf8')
+      await writeFile(path.join(root, 'src', 'x.test.mjs'), `export const t = ${i}\n`, 'utf8')
+      g(['add', '.'])
+      g(['commit', '--quiet', '-m', `round ${i}`])
+    }
+    lines.length = 0
+    assert.equal(await runCli(['map', '--root', root], io), 0)
+    const out = lines.join('\n')
+    assert.match(out, /^\d+ tracked files across \d+ directories, coupling from \d+ commits$/m)
+    assert.match(out, /^largest directories:$/m)
+    assert.match(out, /^\s+2\s+src$/m)
+    assert.match(out, /^most coupled pairs:$/m)
+    assert.match(out, /^\s+100%\s+src\/x\.(mjs|test\.mjs) -> src\/x\.(mjs|test\.mjs)$/m)
+  })
+})
+
+// The usage advertises a comma-separated set, and a task's file set is normally more than one
+// path. Tested with a single path only, the split was indistinguishable from `[flags.files]`,
+// and a two-file task would have been told it has no blast radius at all.
+test('map --files answers for every path in a comma-separated set', async () => {
+  await withRepo(async ({ root, io, lines, git: g }) => {
+    for (let i = 0; i < 4; i += 1) {
+      await writeFile(path.join(root, 'a.mjs'), `export const a = ${i}\n`, 'utf8')
+      await writeFile(path.join(root, 'a.test.mjs'), `export const at = ${i}\n`, 'utf8')
+      g(['add', '.'])
+      g(['commit', '--quiet', '-m', `a round ${i}`])
+      await writeFile(path.join(root, 'b.mjs'), `export const b = ${i}\n`, 'utf8')
+      await writeFile(path.join(root, 'b.test.mjs'), `export const bt = ${i}\n`, 'utf8')
+      g(['add', '.'])
+      g(['commit', '--quiet', '-m', `b round ${i}`])
+    }
+    lines.length = 0
+    assert.equal(await runCli(['map', '--files', 'a.mjs, b.mjs', '--root', root], io), 0)
+    const out = lines.join('\n')
+    assert.match(out, /^\s*\d+%\s+a\.test\.mjs$/m)
+    assert.match(out, /^\s*\d+%\s+b\.test\.mjs$/m)
+    // The set's own members are never reported back as their own blast radius.
+    assert.doesNotMatch(out, /^\s*\d+%\s+[ab]\.mjs$/m)
+  })
+})
+
+// The number is the whole point of the line — it is what tells an implementer whether to read
+// the neighbour or ignore it. A fixture where every coupling is 100% cannot tell a real
+// calculation from a constant, so this one is deliberately partial.
+test('map --files reports the confidence percentage, not just the neighbour', async () => {
+  await withRepo(async ({ root, io, lines, git: g }) => {
+    // a.mjs in four commits; a.sometimes.mjs in two of them — 50%, a value no constant matches.
+    for (let i = 0; i < 4; i += 1) {
+      await writeFile(path.join(root, 'a.mjs'), `export const a = ${i}\n`, 'utf8')
+      if (i % 2 === 0) {
+        await writeFile(path.join(root, 'a.sometimes.mjs'), `export const s = ${i}\n`, 'utf8')
+      }
+      g(['add', '.'])
+      g(['commit', '--quiet', '-m', `round ${i}`])
+    }
+    lines.length = 0
+    assert.equal(await runCli(['map', '--files', 'a.mjs', '--root', root], io), 0)
+    assert.match(lines.join('\n'), /^\s*50%\s+a\.sometimes\.mjs$/m)
+  })
+})
+
+// An unreadable repository must not read as a successful empty map: a caller that branches on
+// the exit code would take "no coupling" as a fact about the code rather than about git.
+test('map exits 2 when the repository cannot be read', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-not-a-repo-'))
+  const lines = []
+  const io = { out: (t) => lines.push(t), err: (t) => lines.push(t) }
+  try {
+    assert.equal(await runCli(['map', '--root', dir], io), 2)
+    assert.match(lines.join('\n'), /cannot read the repository/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+// --- map-notes never writes the file it reports on ------------------------------------------
+//
+// The prohibition is absolute: the map notes are written by a dispatched Explore agent that
+// read the code, and by nothing else. A CLI that filled the file in would produce prose it
+// guessed, under a valid provenance header — after which every later `map-notes` call reports
+// it current and every reader treats a machine's guess as an agent-verified fact.
+test('map-notes creates no map.md when none exists', async () => {
+  await withRepo(async ({ root, planPath, io }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const notesPath = path.join(root, '.teammates', 'r1', 'map.md')
+    assert.equal(await runCli(['map-notes', '--run', 'r1', '--root', root], io), 4)
+    await assert.rejects(readFile(notesPath, 'utf8'), (err) => err.code === 'ENOENT')
+  })
+})
+
+test('map-notes leaves stale notes byte-identical rather than rewriting them', async () => {
+  await withRepo(async ({ root, planPath, io }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const notesPath = path.join(root, '.teammates', 'r1', 'map.md')
+    const before = '<!-- teammates-map run=r1 sha=0000000 -->\n\n# Map\n\nhand-written prose\n'
+    await writeFile(notesPath, before, 'utf8')
+    assert.equal(await runCli(['map-notes', '--run', 'r1', '--root', root], io), 4)
+    assert.equal(await readFile(notesPath, 'utf8'), before)
+  })
+})
+
+// ENOENT is not the only way a file fails to be read. Rethrowing anything else produced a raw
+// stack and exit 1 — a code no caller branches on — for a situation identical from the caller's
+// side to having no notes at all: there is nothing here it can use.
+test('map-notes reports an unreadable notes file as unusable notes, not as a crash', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    // A directory where the notes file belongs: reading it is EISDIR, never ENOENT.
+    await mkdir(path.join(root, '.teammates', 'r1', 'map.md'), { recursive: true })
+    lines.length = 0
+    const code = await runCli(['map-notes', '--run', 'r1', '--root', root], io)
+    assert.equal(code, 4)
+    assert.match(lines.join('\n'), /could not be read/)
+    assert.match(lines.join('\n'), /dispatch an Explore agent/)
+  })
+})
+
+// The orientation hint is the only thing in the prompt derived from this repository rather than
+// restated from the skill; dropped, the prompt still reads perfectly well and says nothing.
+test('map-notes puts the repository top directories into the Explore prompt', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await mkdir(path.join(root, 'engine'), { recursive: true })
+    await writeFile(path.join(root, 'engine', 'core.mjs'), 'export const c = 1\n', 'utf8')
+    g(['add', '.'])
+    g(['commit', '--quiet', '-m', 'engine'])
+    lines.length = 0
+    assert.equal(await runCli(['map-notes', '--run', 'r1', '--root', root], io), 4)
+    assert.match(lines.join('\n'), /largest directories by file count are:.*\bengine\b/)
   })
 })
