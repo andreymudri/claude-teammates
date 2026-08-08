@@ -166,6 +166,19 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
     //
     // --no-renames for the same reason changedFiles uses it: with rename detection on, git reports
     // only the post-image, so the pre-image path looks untouched in the commit that removed it.
+    //
+    // Confirmed against real `git log -z --name-only --format=%x00commit%x00` output (see
+    // scripts/git.mjs test fixtures): with -z, git NUL-delimits paths rather than joining them
+    // with newlines. Splitting on '\0' therefore already yields one token per path, verbatim and
+    // unquoted (core.quotePath=false), with two exceptions that are artifacts of git's own framing,
+    // not part of any path: (1) every token between one commit's NUL-delimited path list and the
+    // next '\0commit\0' marker is an empty string — a real path is never empty, so empty tokens are
+    // always framing and are dropped; (2) git prepends a single literal '\n' before the FIRST path
+    // of a commit's name-list only (a stand-in for the blank line that separates the commit header
+    // from its file list when -z is not used) — subsequent paths in the same commit carry no such
+    // prefix. Stripping exactly that one leading character from exactly the first path token — never
+    // trimming, never splitting on interior newlines — is what lets a path with a leading or
+    // trailing space, or an embedded newline, round-trip byte for byte, matching listFiles().
     async commitFileSets({ limit = 500 } = {}) {
       if (!Number.isInteger(limit) || limit <= 0) {
         throw new GitError(`commitFileSets requires a positive integer limit, got ${JSON.stringify(limit)}`)
@@ -176,15 +189,13 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
       ])
       const sets = []
       let current = null
+      let atFirstPath = false
       for (const token of out.split('\0')) {
-        if (token === 'commit') { if (current) sets.push(current); current = []; continue }
+        if (token === 'commit') { if (current) sets.push(current); current = []; atFirstPath = true; continue }
         if (current === null) continue
-        // Split on newlines to handle multiple files per commit
-        const lines = token.split(/\r?\n/)
-        for (const line of lines) {
-          const path = line.trim()
-          if (path !== '') current.push(path)
-        }
+        if (token === '') continue
+        current.push(atFirstPath ? token.slice(1) : token)
+        atFirstPath = false
       }
       if (current) sets.push(current)
       return sets

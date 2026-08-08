@@ -908,8 +908,48 @@ test('listFiles returns every tracked path, NUL-delimited and unquoted', async (
   assert.deepEqual(files, ['src/a.ts', 'src/b b.ts'])
 })
 
+// Reconstructs the exact byte stream `git log -z --name-only --format=%x00commit%x00` produces
+// for a sequence of commits (newest first), each given as its list of changed paths. Verified
+// against real git (git 2.53.0, both a Linux checkout and this Windows one): the %x00commit%x00
+// format renders as a literal NUL, "commit", NUL, followed by ONE MORE NUL that is always
+// present — the -z stand-in for the blank line that would otherwise separate the commit header
+// from its file list. Only when the commit touched at least one file does more follow: a single
+// leading "\n" (a second, path-list-specific separator), then the paths themselves NUL-delimited
+// (never newline-delimited — this is the part the original implementation got wrong), then one
+// more terminating NUL. An empty commit contributes nothing past that first extra NUL.
+const realNameOnlyStdout = (commitsNewestFirst) => commitsNewestFirst
+  .map((files) => '\0commit\0\0' + (files.length ? `\n${files.join('\0')}\0` : ''))
+  .join('')
+
+test('realNameOnlyStdout matches real git output byte for byte (regression fixture)', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-nameonly-'))
+  const sh = (args) => defaultGitExec(args, root)
+  try {
+    await sh(['init', '--initial-branch=main'])
+    await sh(['config', 'user.email', 'test@example.com'])
+    await sh(['config', 'user.name', 'test'])
+    await sh(['commit', '--allow-empty', '-m', 'empty commit'])
+    await writeFile(path.join(root, 'a.ts'), 'a\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'one file'])
+    await writeFile(path.join(root, 'a.ts'), 'a2\n', 'utf8')
+    await writeFile(path.join(root, 'b.ts'), 'b\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'two files'])
+
+    const real = await sh([
+      '-c', 'core.quotePath=false', 'log', '--max-count=10',
+      '--no-renames', '--name-only', '--format=%x00commit%x00', '-z', 'HEAD', '--',
+    ])
+    const expected = realNameOnlyStdout([['a.ts', 'b.ts'], ['a.ts'], []])
+    assert.equal(real.stdout, expected)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('commitFileSets returns one path list per commit, newest first', async () => {
-  const stdout = '\0commit\0src/a.ts\nsrc/b.ts\0\0commit\0src/a.ts\0'
+  const stdout = realNameOnlyStdout([['src/a.ts', 'src/b.ts'], ['src/a.ts']])
   const { calls, exec } = recorder({ code: 0, stdout, stderr: '' })
   const sets = await createGit({ exec }).commitFileSets({ limit: 10 })
   assert.deepEqual(calls[0], [
@@ -922,9 +962,48 @@ test('commitFileSets returns one path list per commit, newest first', async () =
 // A commit that touched nothing is a real commit and must keep its slot: dropping it would
 // shift every support count computed from the list.
 test('commitFileSets keeps an empty commit as an empty set', async () => {
-  const { exec } = recorder({ code: 0, stdout: '\0commit\0\0commit\0src/a.ts\0', stderr: '' })
+  const stdout = realNameOnlyStdout([[], ['src/a.ts']])
+  const { exec } = recorder({ code: 0, stdout, stderr: '' })
   const sets = await createGit({ exec }).commitFileSets({ limit: 5 })
   assert.deepEqual(sets, [[], ['src/a.ts']])
+})
+
+// The defect this pins: splitting each token on newlines and trimming every line means a
+// tracked path with a leading or trailing space comes back differently from commitFileSets than
+// from listFiles, so the two never key together and that file's coupling is invisible. Only the
+// synthetic leading "\n" git inserts before the first path of a commit may be stripped — never
+// whitespace that is part of the path itself.
+test('commitFileSets preserves a leading space in a path rather than trimming it away', async () => {
+  const stdout = realNameOnlyStdout([[' lead.ts']])
+  const { exec } = recorder({ code: 0, stdout, stderr: '' })
+  const sets = await createGit({ exec }).commitFileSets({ limit: 5 })
+  assert.deepEqual(sets, [[' lead.ts']])
+})
+
+test('commitFileSets preserves a trailing space in a path rather than trimming it away', async () => {
+  const stdout = realNameOnlyStdout([['trail.ts ']])
+  const { exec } = recorder({ code: 0, stdout, stderr: '' })
+  const sets = await createGit({ exec }).commitFileSets({ limit: 5 })
+  assert.deepEqual(sets, [['trail.ts ']])
+})
+
+// A leading/trailing space on a SECOND path in the same commit must survive too: only the first
+// path of a commit ever carries git's synthetic leading "\n", so a naive "strip one leading char
+// from every token" fix would silently corrupt this one.
+test('commitFileSets preserves a leading space on a non-first path in the same commit', async () => {
+  const stdout = realNameOnlyStdout([['a.ts', ' lead.ts', 'trail.ts ']])
+  const { exec } = recorder({ code: 0, stdout, stderr: '' })
+  const sets = await createGit({ exec }).commitFileSets({ limit: 5 })
+  assert.deepEqual(sets, [['a.ts', ' lead.ts', 'trail.ts ']])
+})
+
+// A path containing an embedded newline must stay one entry, not split into phantom paths that
+// inflate that commit's file count and its pair matrix.
+test('commitFileSets does not split a path on an embedded newline', async () => {
+  const stdout = realNameOnlyStdout([['weird\nname.ts']])
+  const { exec } = recorder({ code: 0, stdout, stderr: '' })
+  const sets = await createGit({ exec }).commitFileSets({ limit: 5 })
+  assert.deepEqual(sets, [['weird\nname.ts']])
 })
 
 test('commitFileSets rejects a non-positive limit rather than asking git for every commit', async () => {
