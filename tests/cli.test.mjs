@@ -3079,6 +3079,74 @@ test('config set validates the local layer it is merging into rather than rewrit
   })
 })
 
+// The counterpart layer, which the write path did not look at: readers validate both through
+// `loadValidatedConfig`, so a write that validated only its own target left `config set … --local`
+// at exit 0 on a repo whose `config list` exited 2. One CLI must give one answer about one
+// repository, whichever direction the asymmetry runs.
+test('config set validates the layer it is NOT writing as well', async () => {
+  const cases = [
+    {
+      what: 'a malformed gate manifest blocks a local write',
+      broken: ['teammates.gate.json', '[]'],
+      argv: (root) => ['config', 'set', 'maxParallel', '3', '--local', '--root', root],
+      written: 'teammates.local.json',
+      message: /^teammates\.gate\.json must contain a JSON object$/m,
+    },
+    {
+      what: 'a malformed local layer blocks a tracked write',
+      broken: ['teammates.local.json', '"text"'],
+      argv: (root) => ['config', 'set', 'maxParallel', '3', '--root', root],
+      written: 'teammates.gate.json',
+      message: /^teammates\.local\.json must contain a JSON object$/m,
+    },
+    {
+      // Not only a malformed body: an over-reaching one. The local layer's own rules are part
+      // of what a reader enforces, so a write must see them too.
+      what: 'an enforcement key in the local layer blocks a tracked write',
+      broken: ['teammates.local.json', JSON.stringify({ lens: ['correctness'] })],
+      argv: (root) => ['config', 'set', 'caveman', 'full', '--root', root],
+      written: 'teammates.gate.json',
+      message: /^lens is an enforcement key; it may only be set in teammates\.gate\.json$/m,
+    },
+  ]
+  for (const { what, broken, argv, written, message } of cases) {
+    await withRepo(async ({ root, io, lines }) => {
+      const [brokenFile, body] = broken
+      await writeFile(path.join(root, brokenFile), body, 'utf8')
+      assert.equal(await runCli(argv(root), io), 2, what)
+      assert.match(lines.join('\n'), message, what)
+      // Neither file touched: the broken one is not rewritten into shape, and the target is not
+      // written behind a refusal the operator was just shown.
+      assert.equal(await readFile(path.join(root, brokenFile), 'utf8'), body, what)
+      assert.equal(await exists(path.join(root, written)), false, what)
+    })
+  }
+})
+
+test('config unset validates the layer it is NOT writing as well', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    await writeFile(path.join(root, 'teammates.gate.json'), '[]', 'utf8')
+    await writeFile(path.join(root, 'teammates.local.json'), JSON.stringify({ maxParallel: 3 }), 'utf8')
+    assert.equal(await runCli(['config', 'unset', 'maxParallel', '--local', '--root', root], io), 2)
+    assert.match(lines.join('\n'), /^teammates\.gate\.json must contain a JSON object$/m)
+    assert.deepEqual(await readLocal(root), { maxParallel: 3 })
+  })
+})
+
+// The counterpart being absent is the ordinary case — a project with no manifest at all — and
+// must never be what fails a write. This is the assertion that keeps the fix from turning into
+// "config set requires both files to exist".
+test('an absent counterpart layer does not block a write in either direction', async () => {
+  await withRepo(async ({ root, io }) => {
+    assert.equal(await runCli(['config', 'set', 'maxParallel', '3', '--local', '--root', root], io), 0)
+    assert.deepEqual(await readLocal(root), { maxParallel: 3 })
+  })
+  await withRepo(async ({ root, io }) => {
+    assert.equal(await runCli(['config', 'set', 'caveman', 'full', '--root', root], io), 0)
+    assert.deepEqual(await readGateFile(root), { caveman: 'full' })
+  })
+})
+
 // `.gitignore` has no effect on a path git already tracks. Claiming the entry was added says
 // the layer is untracked — the trust split the whole local/gate divide rests on — when it is
 // not, so the tracked case is reported rather than papered over.

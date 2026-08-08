@@ -482,6 +482,28 @@ function validateLayer(file, layer) {
 // the same `null` for both.
 const ABSENT = Symbol('absent layer')
 
+// Every READER validates both layers through `loadValidatedConfig`; the write path validated
+// only the layer it was writing. So `config set maxParallel 3 --local` exited 0 against a repo
+// whose `teammates.gate.json` was malformed, while `config list` on that same repo exited 2 —
+// one CLI, two answers about one repository. The same shape as the layer-and-spelling asymmetries
+// fixed in the read path and in `loadConfig`: a guard applied to one side and not its counterpart.
+//
+// Gate first, then local, which is `loadConfig`'s own order — a repo broken in both layers must
+// name the same file whichever command the operator reached for. The layer being written is
+// validated from the object already in hand rather than re-read, so this adds one read, not two.
+async function validateBothLayers(root, targetFile, targetLayer) {
+  for (const file of [GATE_FILE, LOCAL_FILE]) {
+    if (file === targetFile) {
+      validateLayer(file, targetLayer)
+      continue
+    }
+    const raw = await readLayer(root, file, { missing: ABSENT })
+    // An absent counterpart is the ordinary case, never a failure: a project with no manifest
+    // must still be able to write a local override, and vice versa.
+    if (raw !== ABSENT) validateLayer(file, raw)
+  }
+}
+
 // `.gitignore` has no effect on a path git already tracks: the entry is written, the file goes
 // on being committed, and the trust split the "added …" message claims — this layer is
 // untracked, so a teammate cannot change it without leaving the dirty worktree `fileset` and
@@ -1109,8 +1131,10 @@ export async function runCli(argv, io = { out: console.log }) {
         // Whichever layer this is. `readLayer` parses but does not validate, and `?? {}` only
         // catches a nullish body: a file holding `[]` or `"text"` reached `setKey`, which set
         // a property `JSON.stringify` then dropped — reported as `wrote …` at exit 0 — or
-        // threw a raw TypeError. Both layers get the check, in the one place that writes them.
-        validateLayer(file, layer)
+        // threw a raw TypeError. Both layers get the check, in the one place that writes them,
+        // and the counterpart layer gets it too so this command agrees with every reader about
+        // the repository it is writing into.
+        await validateBothLayers(root, file, layer)
         if (sub === 'set') {
           if (rawValue === undefined) { io.out('config set needs a value'); return 2 }
           let parsed
