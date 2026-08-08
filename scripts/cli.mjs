@@ -658,6 +658,51 @@ async function isTracked(root, file) {
   }
 }
 
+// `git ls-files` reports paths relative to the CURRENT DIRECTORY, while `git log --name-only`
+// reports them relative to the REPOSITORY ROOT. `map` reads both and keys one against the other,
+// so run anywhere below the root the two halves stopped being the same namespace: a file 100%
+// coupled by history was reported as "no coupled files found", and the overview printed
+// root-relative pairs beside cwd-relative directory rows. The prefix that reconciles them is what
+// git itself calls it — `rev-parse --show-prefix` — and everything cwd-relative, including the
+// caller's own --files argument, is lifted through it before any key is compared.
+//
+// This lives here rather than in scripts/git.mjs deliberately: it is a fix to how `map` composes
+// two existing primitives, not a new primitive.
+async function repoPrefix(root) {
+  const { code, stdout, stderr } = await defaultGitExec(['rev-parse', '--show-prefix'], root)
+  if (code !== 0) {
+    throw new GitError(`git rev-parse --show-prefix failed: ${stderr.trim() || `exit ${code}`}`)
+  }
+  // Exactly one trailing newline is git's framing; a directory name may legally end in
+  // whitespace, so nothing else is trimmed.
+  return stdout.replace(/\n$/, '')
+}
+
+function toRepoPath(prefix, p) {
+  const joined = `${prefix}${String(p).replace(/\\/g, '/')}`
+  if (joined === '') return joined
+  const normalized = path.posix.normalize(joined)
+  return normalized.startsWith('./') ? normalized.slice(2) : normalized
+}
+
+// A directory name taken from the repository is attacker-controlled data — a branch, a PR, a
+// vendored dependency can all introduce one — and `map-notes` interpolates it into a prompt under
+// the line "dispatch an Explore agent with exactly this prompt". Unlike the implementer brief,
+// nothing downstream bounds what that agent then does, so the hint is restricted to what a
+// directory name in a normal repository actually looks like: '/'-separated plain path segments.
+// A name carrying a newline, a control character, quoting, or the whitespace and punctuation that
+// let it read as a new instruction is DROPPED rather than escaped — the hint is orientation, and
+// orientation is worth exactly nothing next to a prompt-injection foothold. Surviving names still
+// render, so the signal is narrowed, never removed.
+const PLAIN_SEGMENT = /^[A-Za-z0-9._+@-]+$/
+export function promptSafeDirectories(dirs = []) {
+  return dirs.filter((dir) => {
+    if (typeof dir !== 'string' || dir === '' || dir.length > 120) return false
+    const segments = dir.split('/')
+    return segments.length <= 8 && segments.every((s) => PLAIN_SEGMENT.test(s))
+  })
+}
+
 export async function runCli(argv, io = { out: console.log }) {
   // Two channels, not one. `io.out` carries the ANSWER a command was asked for — and for
   // `workflow` that answer is a JavaScript module a caller redirects into a file. Anything
@@ -1184,11 +1229,29 @@ export async function runCli(argv, io = { out: console.log }) {
       io.out('--top takes a positive whole number of files to report')
       return 2
     }
+    // `--files` written with no value is `true`, not a string — the same orchestrator mistake
+    // `--commits` and `--top` already refuse, and refused here for a stronger reason than theirs:
+    // falling through, it asked git a question with `flags.files.split` and died with a raw
+    // TypeError, and once that was guarded by truthiness alone it fell through to the WHOLE-
+    // REPOSITORY OVERVIEW and exited 0. A caller that asked "what does my file set put at risk"
+    // must never be answered with a repository summary and a success code.
+    let requestedFiles = null
+    if (typeof flags.files !== 'undefined') {
+      requestedFiles = typeof flags.files === 'string'
+        ? flags.files.split(',').map((f) => f.trim()).filter(Boolean)
+        : []
+      if (requestedFiles.length === 0) {
+        io.out('--files takes a comma-separated list of paths to report the blast radius for')
+        return 2
+      }
+    }
     let sets
     let paths
+    let prefix
     try {
       sets = await git.commitFileSets({ limit })
-      paths = await git.listFiles()
+      prefix = await repoPrefix(root)
+      paths = (await git.listFiles()).map((p) => toRepoPath(prefix, p))
     } catch (err) {
       if (!(err instanceof GitError)) throw err
       io.out(`cannot read the repository: ${err.message}`)
@@ -1198,8 +1261,10 @@ export async function runCli(argv, io = { out: console.log }) {
 
     // A file set turns this from an overview into the one question an implementer has: what does
     // my change put at risk. Answered for the whole set at once, because that is what a task holds.
-    if (typeof flags.files === 'string' && flags.files.trim() !== '') {
-      const files = flags.files.split(',').map((f) => f.trim()).filter(Boolean)
+    if (requestedFiles !== null) {
+      // Lifted into the same repo-root namespace the coupling keys live in, so a path the caller
+      // wrote relative to --root still matches the history when --root is not the repository root.
+      const files = requestedFiles.map((f) => toRepoPath(prefix, f))
       const near = neighboursOf(coupling, files, { top })
       if (near.length === 0) {
         io.out(`no coupled files found for ${files.join(', ')} in the last ${limit} commits — new files, or a shallow history`)
@@ -1250,7 +1315,7 @@ export async function runCli(argv, io = { out: console.log }) {
     io.out('')
     let topDirectories = []
     try {
-      topDirectories = inventory(await git.listFiles(), { top: 8 }).rows.map((r) => r.dir)
+      topDirectories = promptSafeDirectories(inventory(await git.listFiles(), { top: 8 }).rows.map((r) => r.dir))
     } catch (err) {
       if (!(err instanceof GitError)) throw err
     }
