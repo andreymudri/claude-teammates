@@ -20,14 +20,17 @@ import { collectReviewResults, reviewFileName } from './reviews.mjs'
 import { generateReviewDispatch } from './review-gen.mjs'
 import { resolveTaskBranch } from './enforce.mjs'
 import { tmpdir } from 'node:os'
+import { stat } from 'node:fs/promises'
+import { validateLinkPaths } from './preview-links.mjs'
 import { generatePhaseWorkflow } from './workflow-gen.mjs'
 import { createGit, GitError, defaultGitExec } from './git.mjs'
 import { deriveContext } from './gate-runner.mjs'
 
-const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|config> [options]
+const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|config> [options]
 
   init-run <planPath> --run <id> [--root <path>]
   doctor   --run <id> --plan <path> [--base <branch>] [--run-branch <name>] [--root <path>]
+  preview-check [--root <path>]
   review-dispatch --run <id> [--phase <name>] [--models <json>] [--root <path>]
   collect-reviews --run <id> [--phase <name>] [--root <path>]
   gate     --run <id> --plan <path> [--base <branch>] [--root <path>] [--phase <name>] [--no-fleet] [--results <path>]
@@ -143,6 +146,8 @@ const REQUIRED = {
   // NUMERIC_PHASE_COMMANDS and defaults to `default` exactly as `gate`'s does.
   'collect-reviews': ['run'],
   'review-dispatch': ['run'],
+  // No required flags: it reads the manifest and the working tree, and belongs to no run.
+  'preview-check': [],
   digest: ['run'],
   claim: ['run', 'task', 'by'],
   unclaim: ['run', 'task'],
@@ -922,6 +927,57 @@ export async function runCli(argv, io = { out: console.log }) {
     // 1 on problems, mirroring the gate, so a caller can branch on the exit code. It is still
     // a report: nothing is recorded, and no verdict is issued or implied.
     return report.problems.length === 0 ? 0 : 1
+  }
+
+  if (command === 'preview-check') {
+    const config = await resolveGateConfig(root, io)
+    if (config === GATE_CONFIG_REJECTED) return 2
+    if (!config) { io.out(`no ${GATE_FILE} — nothing to check`); return 4 }
+
+    const links = previewLinks(config)
+    if (links.length === 0) {
+      // Not a failure: a project whose checks need nothing but tracked content is the normal
+      // case for this repository itself. Said out loud, because silence here would read as
+      // "checked, all good" to a project that meant to declare something and did not.
+      io.out(`no preview.link declared — the merge preview will contain tracked content only`)
+      return 0
+    }
+
+    // The same validator the merge check runs, so a manifest that passes here cannot fail there
+    // for a reason this command could have named first.
+    const invalid = validateLinkPaths(links)
+    if (invalid) { io.out(invalid); return 1 }
+
+    const git = createGit({ cwd: root })
+    const problems = []
+    for (const entry of links) {
+      const target = path.resolve(root, entry)
+      try {
+        const info = await stat(target)
+        if (!info.isDirectory()) problems.push(`${entry}: exists but is not a directory`)
+      } catch (err) {
+        if (err.code !== 'ENOENT') throw err
+        problems.push(`${entry}: does not exist — the preview would be missing it, and every command check would fail on a tree that is otherwise fine`)
+        continue
+      }
+      try {
+        // Linking over a path the merge produced would shadow the merged result, which is the
+        // one thing the preview exists to measure.
+        if (await git.tracks(entry)) {
+          problems.push(`${entry}: is tracked by the repository — linking over it would shadow the merged result`)
+        }
+      } catch (err) {
+        if (!(err instanceof GitError)) throw err
+        problems.push(`${entry}: ${err.message}`)
+      }
+    }
+
+    if (problems.length === 0) {
+      io.out(`preview.link is usable: ${links.join(', ')}`)
+      return 0
+    }
+    for (const p of problems) io.out(p)
+    return 1
   }
 
   if (command === 'review-dispatch') {

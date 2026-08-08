@@ -880,3 +880,23 @@ test('commitSubject rejects an empty ref rather than reporting HEAD', async () =
   await assert.rejects(() => createGit({ exec }).commitSubject(''), GitError)
   assert.deepEqual(calls, [])
 })
+
+test('tracks reports whether the repository has any tracked file under a path', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: 'scripts/cli.mjs\nscripts/git.mjs\n', stderr: '' })
+  const yes = await createGit({ exec }).tracks('scripts')
+  assert.deepEqual(calls[0], ['ls-files', '--error-unmatch', '-z', '--', 'scripts'])
+  assert.equal(yes, true)
+})
+
+// `ls-files --error-unmatch` exits 1 for a path the index does not carry. That is an answer,
+// not a failure, and must not surface as a GitError the caller reports as a broken repository.
+test('tracks returns false on the exit code git uses for an unmatched path', async () => {
+  const { exec } = recorder({ code: 1, stdout: '', stderr: "did not match any file(s) known to git" })
+  assert.equal(await createGit({ exec }).tracks('node_modules'), false)
+})
+
+test('tracks rejects an empty pathspec rather than asking about the whole repository', async () => {
+  const { calls, exec } = recorder()
+  await assert.rejects(() => createGit({ exec }).tracks(''), GitError)
+  assert.deepEqual(calls, [])
+})

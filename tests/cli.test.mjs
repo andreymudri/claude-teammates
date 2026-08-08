@@ -398,6 +398,82 @@ test('review-dispatch refuses a phase whose task branches do not exist', async (
   })
 })
 
+// The merge check already reports a bad link, but only once a phase is ready to gate — after
+// every teammate has run. This answers the same question before the run starts, when the fix is
+// a one-line manifest edit rather than a re-dispatch.
+test('preview-check passes when every declared link target exists and is untracked', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    await mkdir(path.join(root, 'node_modules'), { recursive: true })
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      preview: { link: ['node_modules'] },
+      phases: { default: { checks: [] } },
+    }), 'utf8')
+    lines.length = 0
+    const code = await runCli(['preview-check', '--root', root], io)
+    assert.equal(code, 0)
+    assert.match(lines.join('\n'), /node_modules/)
+  })
+})
+
+test('preview-check names a declared link target that does not exist', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      preview: { link: ['.venv'] },
+      phases: { default: { checks: [] } },
+    }), 'utf8')
+    lines.length = 0
+    const code = await runCli(['preview-check', '--root', root], io)
+    assert.equal(code, 1)
+    assert.match(lines.join('\n'), /\.venv/)
+  })
+})
+
+test('preview-check rejects an escaping entry with the same rule the merge check applies', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      preview: { link: ['../elsewhere'] },
+      phases: { default: { checks: [] } },
+    }), 'utf8')
+    lines.length = 0
+    const code = await runCli(['preview-check', '--root', root], io)
+    assert.equal(code, 1)
+    assert.match(lines.join('\n'), /escapes the repository/)
+  })
+})
+
+// Linking a tracked path over the merged tree would shadow the merge result — the thing the
+// preview exists to measure — so it is a failure here too, not a warning.
+test('preview-check fails a link target the repository already tracks', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      preview: { link: ['scripts'] },
+      phases: { default: { checks: [] } },
+    }), 'utf8')
+    await mkdir(path.join(root, 'scripts'), { recursive: true })
+    await writeFile(path.join(root, 'scripts', 'x.mjs'), 'export const x = 1\n', 'utf8')
+    // Committed, so it is genuinely tracked rather than merely present.
+    const { execFileSync } = await import('node:child_process')
+    execFileSync('git', ['add', 'scripts'], { cwd: root })
+    execFileSync('git', ['commit', '--quiet', '-m', 'add scripts'], { cwd: root })
+    lines.length = 0
+    const code = await runCli(['preview-check', '--root', root], io)
+    assert.equal(code, 1)
+    assert.match(lines.join('\n'), /tracked/)
+  })
+})
+
+test('preview-check says plainly when a manifest declares no links at all', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [] } },
+    }), 'utf8')
+    lines.length = 0
+    const code = await runCli(['preview-check', '--root', root], io)
+    assert.equal(code, 0)
+    assert.match(lines.join('\n'), /no preview\.link/i)
+  })
+})
+
 test('gate reports a JSON verdict when a manifest exists', async () => {
   await withRepo(async ({ root, planPath, io, lines }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)

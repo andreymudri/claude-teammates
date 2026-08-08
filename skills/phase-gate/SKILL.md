@@ -105,6 +105,14 @@ dependency declares what to link:
 
     { "preview": { "link": ["node_modules"] } }
 
+Check that declaration before a run rather than at the first gate, when the fix is still a
+one-line manifest edit:
+
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" preview-check --root <project root>
+
+It applies the same rules the `merge` check applies and exits 1 naming any entry that is
+missing, not a directory, escaping, repeated, or tracked.
+
 The gate symlinks each declared directory into the preview after the merge and removes the links
 before the worktree. Entries must be repo-relative and inside the repository; an absolute path, a
 `..` escape, a missing target, or a path the repository already tracks fails the `merge` check

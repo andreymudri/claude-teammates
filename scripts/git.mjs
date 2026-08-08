@@ -138,6 +138,20 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
         .map((line) => ({ status: line.slice(0, 2), path: line.slice(3) }))
         .filter((entry) => !HARNESS_WORKTREES.test(entry.path))
     },
+    // Whether the index carries anything under a path. `--error-unmatch` turns "nothing
+    // matched" into exit 1 rather than an empty success, so the two answers are distinguishable
+    // without parsing stdout; `--` keeps a pathspec that looks like an option in pathspec
+    // position.
+    async tracks(pathspec) {
+      if (!isNonEmptyString(pathspec)) {
+        throw new GitError(`tracks requires a non-empty pathspec, got ${JSON.stringify(pathspec)}`)
+      }
+      const args = ['ls-files', '--error-unmatch', '-z', '--', pathspec]
+      const { code, stderr } = await runRaw(args)
+      if (code === 0) return true
+      if (code === 1) return false
+      throw new GitError(`git ${args.join(' ')} failed: ${stderr.trim() || `exit ${code}`}`)
+    },
     async commitSubject(ref) {
       if (!isNonEmptyString(ref)) {
         throw new GitError(`commitSubject requires a non-empty ref, got ${JSON.stringify(ref)}`)
