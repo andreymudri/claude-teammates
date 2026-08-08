@@ -5,6 +5,17 @@ export class GitError extends Error {}
 // Where the Claude Code harness creates agent worktrees, relative to the repo root.
 const HARNESS_WORKTREES = /^\.claude\//
 
+// Record separator for commitFileSets' `git log --name-only -z` stream. It has to be a token no
+// tracked path can ever equal, because the paths and the separator arrive in the same NUL-framed
+// stream with nothing else to tell them apart. A bare word cannot do it: with "commit" as the
+// marker, a repository tracking a file literally named "commit" reported that one commit as two,
+// dropped the path, and truncated the path that followed it (git prefixes the first path of each
+// commit with "\n", so the next token got its first character eaten). A trailing slash makes the
+// marker unforgeable by construction rather than by luck: a git tree entry name cannot contain
+// "/" at all, so no path git ever reports ends with one. Exported so the tests assert against
+// this exact token instead of restating it.
+export const COMMIT_MARKER = 'commit/'
+
 // argv array, shell: false. Branch names reach git as a single argv entry, so a name
 // containing shell metacharacters is data, never a command.
 export function defaultGitExec(args, cwd) {
@@ -151,6 +162,57 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
       if (code === 0) return true
       if (code === 1) return false
       throw new GitError(`git ${args.join(' ')} failed: ${stderr.trim() || `exit ${code}`}`)
+    },
+    // Every tracked path, for the inventory half of the map. `-z` with core.quotePath=false so a
+    // path containing a space, a quote or a non-ASCII character comes back as written rather than
+    // as git's escaped display form.
+    async listFiles() {
+      const out = await run(['-c', 'core.quotePath=false', 'ls-files', '-z'])
+      return out.split('\0').filter(Boolean)
+    },
+    // One entry per commit, each the list of paths that commit touched, newest first. The record
+    // separator is an explicit marker rather than a blank line: a commit that touched no file at
+    // all (an empty commit, a pure merge) would otherwise be indistinguishable from the gap
+    // between two commits, and dropping it silently changes every support count derived from it.
+    //
+    // --no-renames for the same reason changedFiles uses it: with rename detection on, git reports
+    // only the post-image, so the pre-image path looks untouched in the commit that removed it.
+    //
+    // Confirmed against real `git log -z --name-only --format=%x00commit%x00` output (see
+    // scripts/git.mjs test fixtures): with -z, git NUL-delimits paths rather than joining them
+    // with newlines. Splitting on '\0' therefore already yields one token per path, verbatim and
+    // unquoted (core.quotePath=false), with two exceptions that are artifacts of git's own framing,
+    // not part of any path: (1) every token between one commit's NUL-delimited path list and the
+    // next '\0commit\0' marker is an empty string — a real path is never empty, so empty tokens are
+    // always framing and are dropped; (2) git prepends a single literal '\n' before the FIRST path
+    // of a commit's name-list only (a stand-in for the blank line that separates the commit header
+    // from its file list when -z is not used) — subsequent paths in the same commit carry no such
+    // prefix. Stripping exactly that one leading character from exactly the first path token — never
+    // trimming, never splitting on interior newlines — is what lets a path with a leading or
+    // trailing space, or an embedded newline, round-trip byte for byte, matching listFiles().
+    async commitFileSets({ limit = 500 } = {}) {
+      if (!Number.isInteger(limit) || limit <= 0) {
+        throw new GitError(`commitFileSets requires a positive integer limit, got ${JSON.stringify(limit)}`)
+      }
+      const out = await run([
+        '-c', 'core.quotePath=false', 'log', `--max-count=${limit}`,
+        '--no-renames', '--name-only', `--format=%x00${COMMIT_MARKER}%x00`, '-z', 'HEAD', '--',
+      ])
+      const sets = []
+      let current = null
+      let atFirstPath = false
+      for (const token of out.split('\0')) {
+        if (token === COMMIT_MARKER) { if (current) sets.push(current); current = []; atFirstPath = true; continue }
+        if (current === null) continue
+        if (token === '') continue
+        // Only the first path of a commit carries git's synthetic leading "\n", and only when it
+        // is really there: a path may itself begin with "\n", and stripping unconditionally would
+        // corrupt it. Every later path in the commit is passed through untouched.
+        current.push(atFirstPath && token.startsWith('\n') ? token.slice(1) : token)
+        atFirstPath = false
+      }
+      if (current) sets.push(current)
+      return sets
     },
     async commitSubject(ref) {
       if (!isNonEmptyString(ref)) {
