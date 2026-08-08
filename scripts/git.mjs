@@ -152,6 +152,43 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
       if (code === 1) return false
       throw new GitError(`git ${args.join(' ')} failed: ${stderr.trim() || `exit ${code}`}`)
     },
+    // Every tracked path, for the inventory half of the map. `-z` with core.quotePath=false so a
+    // path containing a space, a quote or a non-ASCII character comes back as written rather than
+    // as git's escaped display form.
+    async listFiles() {
+      const out = await run(['-c', 'core.quotePath=false', 'ls-files', '-z'])
+      return out.split('\0').filter(Boolean)
+    },
+    // One entry per commit, each the list of paths that commit touched, newest first. The record
+    // separator is an explicit marker rather than a blank line: a commit that touched no file at
+    // all (an empty commit, a pure merge) would otherwise be indistinguishable from the gap
+    // between two commits, and dropping it silently changes every support count derived from it.
+    //
+    // --no-renames for the same reason changedFiles uses it: with rename detection on, git reports
+    // only the post-image, so the pre-image path looks untouched in the commit that removed it.
+    async commitFileSets({ limit = 500 } = {}) {
+      if (!Number.isInteger(limit) || limit <= 0) {
+        throw new GitError(`commitFileSets requires a positive integer limit, got ${JSON.stringify(limit)}`)
+      }
+      const out = await run([
+        '-c', 'core.quotePath=false', 'log', `--max-count=${limit}`,
+        '--no-renames', '--name-only', '--format=%x00commit%x00', '-z', 'HEAD', '--',
+      ])
+      const sets = []
+      let current = null
+      for (const token of out.split('\0')) {
+        if (token === 'commit') { if (current) sets.push(current); current = []; continue }
+        if (current === null) continue
+        // Split on newlines to handle multiple files per commit
+        const lines = token.split(/\r?\n/)
+        for (const line of lines) {
+          const path = line.trim()
+          if (path !== '') current.push(path)
+        }
+      }
+      if (current) sets.push(current)
+      return sets
+    },
     async commitSubject(ref) {
       if (!isNonEmptyString(ref)) {
         throw new GitError(`commitSubject requires a non-empty ref, got ${JSON.stringify(ref)}`)

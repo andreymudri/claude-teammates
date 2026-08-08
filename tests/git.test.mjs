@@ -900,3 +900,35 @@ test('tracks rejects an empty pathspec rather than asking about the whole reposi
   await assert.rejects(() => createGit({ exec }).tracks(''), GitError)
   assert.deepEqual(calls, [])
 })
+
+test('listFiles returns every tracked path, NUL-delimited and unquoted', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: 'src/a.ts\0src/b b.ts\0', stderr: '' })
+  const files = await createGit({ exec }).listFiles()
+  assert.deepEqual(calls[0], ['-c', 'core.quotePath=false', 'ls-files', '-z'])
+  assert.deepEqual(files, ['src/a.ts', 'src/b b.ts'])
+})
+
+test('commitFileSets returns one path list per commit, newest first', async () => {
+  const stdout = '\0commit\0src/a.ts\nsrc/b.ts\0\0commit\0src/a.ts\0'
+  const { calls, exec } = recorder({ code: 0, stdout, stderr: '' })
+  const sets = await createGit({ exec }).commitFileSets({ limit: 10 })
+  assert.deepEqual(calls[0], [
+    '-c', 'core.quotePath=false', 'log', '--max-count=10',
+    '--no-renames', '--name-only', '--format=%x00commit%x00', '-z', 'HEAD', '--',
+  ])
+  assert.deepEqual(sets, [['src/a.ts', 'src/b.ts'], ['src/a.ts']])
+})
+
+// A commit that touched nothing is a real commit and must keep its slot: dropping it would
+// shift every support count computed from the list.
+test('commitFileSets keeps an empty commit as an empty set', async () => {
+  const { exec } = recorder({ code: 0, stdout: '\0commit\0\0commit\0src/a.ts\0', stderr: '' })
+  const sets = await createGit({ exec }).commitFileSets({ limit: 5 })
+  assert.deepEqual(sets, [[], ['src/a.ts']])
+})
+
+test('commitFileSets rejects a non-positive limit rather than asking git for every commit', async () => {
+  const { calls, exec } = recorder()
+  await assert.rejects(() => createGit({ exec }).commitFileSets({ limit: 0 }), GitError)
+  assert.deepEqual(calls, [])
+})
