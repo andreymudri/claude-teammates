@@ -38,9 +38,12 @@ and you write it to that path yourself, with the same command and `--write`:
 
 That reads the returned text from `<path>`, checks the same header plus a body check — text must
 remain once the header is stripped off, so an agent that echoes back only the line it was handed
-writes nothing — and only then writes it to the notes file: it exits 0 on a write, exits 2 if
-`--write` is given no path, and exits 4 with a refusal printed verbatim and nothing written for an
-unreadable file, a missing or mismatched header, or a body that is only the header. A teammate
+writes nothing — and only then writes it to the notes file: it exits 0 on a write and exits 2 if
+`--write` is given no path. Exit 4 covers an unreadable source file, a missing or mismatched
+header, or a body that is only the header — the validator's refusal, printed verbatim — and also
+a write that fails outright, such as the notes path existing as a directory, reported instead as
+a generated message naming the failure rather than a validator refusal. Nothing is written in any
+of the exit-4 cases. A teammate
 never writes this file, and nothing enforced ever reads it. The directory names that
 prompt carries are filtered — anything that is not a plain path segment is dropped — because that
 prompt is handed to an agent that has Bash and is gated by nothing.
