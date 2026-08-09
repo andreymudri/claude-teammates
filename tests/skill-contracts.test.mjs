@@ -98,8 +98,14 @@ test('phase-gate says plainly what a none decision means and does not mean', asy
   // sentence about `none` fails whatever it says — no vocabulary of negations is consulted.
   assertClaim(onFail, {
     label: 'the none decision',
-    claim: /^On none, the decision engine found no failing check in the verdict you handed it\b/i,
-    then: /This does not mean "the failure needs no fix" and it is never permission to integrate/i,
+    // Both `claim:` and `then:` are anchored end-to-end for the same reason as the `allow`
+    // entries below: `assertClaim`'s subject screen exempts BOTH the claim statement and its
+    // `then` consequence from the inventory check (it would otherwise flag itself), so an
+    // unanchored pattern on either one is the one place a clause appended to that exact sentence
+    // — e.g. turning "it is never permission to integrate" into "... unless the gate already ran
+    // once" — goes unscreened everywhere else in this test.
+    claim: /^On none, the decision engine found no failing check in the verdict you handed it\.$/i,
+    then: /^This does not mean "the failure needs no fix" and it is never permission to integrate\.$/i,
     subject: /\bnone\b/i,
     // Every entry below is anchored end-to-end (^...$), not just at the front or not at all.
     // An unanchored — or front-only-anchored — pattern waives any statement that merely CONTAINS
@@ -177,8 +183,12 @@ test('phase-gate documents the real fix invocation and its exit-code contract', 
   assertCode(section, /fix --run <runId> --phase <n> --verdict <path>/, 'phase-gate must show the fix invocation')
   assertClaim(section, {
     label: 'fix exit codes',
-    claim: /^--verdict names a file holding that same JSON, and --phase must match its own phase field/i,
-    then: /^Exit 1 means the run has no plan at all or the verdict file could not be read: an argument error, not a decision/i,
+    // Anchored end-to-end, both patterns: the subject screen exempts the claim statement AND its
+    // `then` consequence from the inventory check, so leaving either open at the end lets a
+    // clause appended to that exact sentence pass unscreened, the same hole the `allow` entry
+    // below was fixed for.
+    claim: /^--verdict names a file holding that same JSON, and --phase must match its own phase field — a mismatch exits 2 rather than adjudicating the wrong phase's findings, and so does a malformed teammates\.gate\.json\.$/i,
+    then: /^Exit 1 means the run has no plan at all or the verdict file could not be read: an argument error, not a decision\.$/i,
     subject: /\bexit 0\b|\bexit 1\b|\bexit 2\b/i,
     allow: [
       /^Exit 0 covers none, retry, and escalate alike, so the exit status never tells them apart — only the decision field does\.$/i,
@@ -621,7 +631,13 @@ test('fleet-lifecycle states the orchestrator writes the map, not the agent', as
   )
   assertClaim(section, {
     label: 'map notes writer',
-    claim: /A teammate never writes this file, and nothing enforced ever reads it/,
+    // Anchored end-to-end: `assertClaim`'s `subject:` inventory screen exempts the claim
+    // statement itself (it would otherwise flag itself), so an unanchored `claim:` is the one
+    // pattern nothing else in this check screens — a clause appended to this exact sentence
+    // ("... unless you dispatch one with Bash and tell it to.") still matches an unanchored
+    // pattern as a substring and passes uncaught. Anchoring forces the whole statement to equal
+    // what was reviewed, the same fix already applied to the `allow` entries in this file.
+    claim: /^A teammate never writes this file, and nothing enforced ever reads it\.$/,
     subject: /writes this file|map\.md/i,
     allow: [dispatchPattern],
   })
