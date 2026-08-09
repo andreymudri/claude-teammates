@@ -946,3 +946,125 @@ test('runFilesetCheck fails a branch parked at the run tip with no contribution'
       Verify this test fails against the current code before your change and passes after, and
       that the existing "does not report an already-integrated branch as contributing nothing"
       test still passes — a genuinely landed branch is past the anchor and NOT at the tip.
+
+### Task 10: make the verdict commands cheap, and give the orchestrator a way to write map notes
+
+**Files:**
+- Modify: `scripts/cli.mjs`
+- Test: `tests/cli.test.mjs`
+
+**Depends:** T7
+
+**Model:** capable
+
+This task closes two gaps this plan described in its preamble but never tasked. Both were found by
+re-reading the plan against itself after phase 1 landed.
+
+- [ ] **Step 1:** Gap 3 of the preamble is unaddressed: `finish` and `prune-run` both run every
+      `command` check of every phase to answer a question that does not need them. On run `codemap`
+      this made `prune-run` exceed a 120-second timeout deciding whether a directory could be
+      deleted, and `finish` needs one full test suite per phase — three suites, roughly five
+      minutes, to report whether a run is finished.
+
+      Add `--enforcement-only` to both commands. When given, run only the checks whose kind is in
+      `ALWAYS_ENFORCED_KINDS` (`fileset`, `ownership`, `merge`) and record every `command` check as
+      `skip`, never as `pass`. The skipped checks must appear in the output as skipped — this
+      repository's rule is that a skipped check is reported as skipped, every time, and a verdict
+      that hides which checks did not run is worse than a slow one.
+
+      Keep the full run as the default for both. When `--enforcement-only` is absent, print one
+      line naming how many command checks are about to run, so an operator who is about to wait
+      knows why they are waiting.
+
+- [ ] **Step 2:** `scripts/mapnotes.mjs` exports `mapNotesWritable` and nothing calls it. Task 2
+      inverted the map-notes contract — the dispatched read-only agent RETURNS the map and the
+      orchestrator writes it — but no command accepts that returned text, so the orchestrator must
+      write `.teammates/<runId>/map.md` by hand and the validator guarding that write is dead code.
+
+      Add `map-notes --write <path>`: read the file at `<path>` (the agent's returned map, saved by
+      the caller), validate it with `mapNotesWritable` against the current run id and the HEAD sha,
+      and on success write it to `.teammates/<runId>/map.md`, exiting 0 and naming what was written.
+      On a validation failure, exit 4 printing the refusal reason verbatim and write nothing — a map
+      that cannot be vouched for must never land, because a later reader treats a stamped file as
+      provenance.
+
+      Without `--write`, `map-notes` keeps its current behaviour: report whether stored notes are
+      current, and print the Explore prompt when they are not. Add `write` to this command's entry
+      in the `KNOWN_FLAGS` table from Task 7.
+
+- [ ] **Step 3:** Add these tests to `tests/cli.test.mjs`:
+
+```js
+test('finish --enforcement-only skips command checks and reports them as skipped', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [
+        { name: 'test', kind: 'command', run: 'node -e "process.exit(1)"' },
+        { name: 'fileset', kind: 'fileset' },
+      ] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--enforcement-only'], io)
+    const out = lines.join('\n')
+    // The command check would FAIL if it ran; it must be skipped, and said to be skipped.
+    assert.match(out, /skipped: test/)
+    assert.doesNotMatch(out, /failed: test/)
+  })
+})
+
+test('prune-run names how many command checks it is about to run when they are not skipped', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'test', kind: 'command', run: 'node -e ""' }, { name: 'fileset', kind: 'fileset' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    assert.match(lines.join('\n'), /command check/)
+  })
+})
+
+test('map-notes --write validates the returned map before writing it', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const sha = g(['rev-parse', 'HEAD']).trim()
+    const returned = path.join(root, 'returned.md')
+    await writeFile(returned, `<!-- teammates-map run=r1 sha=${sha} -->\n\n# Map\n\nsrc owns orders.\n`, 'utf8')
+    lines.length = 0
+    const code = await runCli(['map-notes', '--run', 'r1', '--root', root, '--write', returned], io)
+    assert.equal(code, 0)
+    const written = await readFile(path.join(root, '.teammates', 'r1', 'map.md'), 'utf8')
+    assert.match(written, /owns orders/)
+  })
+})
+
+test('map-notes --write refuses a map whose header names another commit and writes nothing', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const returned = path.join(root, 'returned.md')
+    await writeFile(returned, '<!-- teammates-map run=r1 sha=0000000 -->\n\n# Map\n\nbody\n', 'utf8')
+    lines.length = 0
+    const code = await runCli(['map-notes', '--run', 'r1', '--root', root, '--write', returned], io)
+    assert.equal(code, 4)
+    assert.match(lines.join('\n'), /0000000/)
+    await assert.rejects(() => readFile(path.join(root, '.teammates', 'r1', 'map.md'), 'utf8'))
+  })
+})
+
+test('map-notes --write refuses a header-only map', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const sha = g(['rev-parse', 'HEAD']).trim()
+    const returned = path.join(root, 'returned.md')
+    await writeFile(returned, `<!-- teammates-map run=r1 sha=${sha} -->\n`, 'utf8')
+    lines.length = 0
+    assert.equal(await runCli(['map-notes', '--run', 'r1', '--root', root, '--write', returned], io), 4)
+    assert.match(lines.join('\n'), /no body beyond the header/)
+  })
+})
+```
