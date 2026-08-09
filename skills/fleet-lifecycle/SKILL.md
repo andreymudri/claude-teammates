@@ -32,9 +32,16 @@ Exit 4 means there are none, they carry no header at all, they name a different 
 written for a different run, or the file could not be read, and it prints the exact prompt to
 dispatch. Exit 2 means git could not be read, so no comparison happened at all — read that as
 unknown, never as current. Dispatch a read-only agent with the printed prompt; it RETURNS the map
-and you write it to that path yourself, after checking the header it returned names this run and
-this commit. A teammate never writes this file, and nothing enforced ever reads it. The directory
-names that
+and you write it to that path yourself, with the same command and `--write`:
+
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" map-notes --run <runId> --root <project root> --write <path to the agent's returned text>
+
+That reads the returned text from `<path>`, checks the same header plus a body check — text must
+remain once the header is stripped off, so an agent that echoes back only the line it was handed
+writes nothing — and only then writes it to the notes file: it exits 0 on a write, exits 2 if
+`--write` is given no path, and exits 4 with a refusal printed verbatim and nothing written for an
+unreadable file, a missing or mismatched header, or a body that is only the header. A teammate
+never writes this file, and nothing enforced ever reads it. The directory names that
 prompt carries are filtered — anything that is not a plain path segment is dropped — because that
 prompt is handed to an agent that has Bash and is gated by nothing.
 

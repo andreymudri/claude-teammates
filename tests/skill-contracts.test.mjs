@@ -1,6 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile, readdir } from 'node:fs/promises'
+import { readFile, readdir, mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { runCli } from '../scripts/cli.mjs'
 import {
   assertClaim,
   assertCode,
@@ -105,7 +108,10 @@ test('phase-gate says plainly what a none decision means and does not mean', asy
       /Integrate only on a freshly recomputed PASS, never on none/i,
       // Reviewed: this documents the `fix` exit-code contract (Exit 0 covers all three
       // decisions), not the semantics of a `none` decision itself — unrelated to the claim above.
-      /Exit 0 covers none, retry, and escalate alike, so the exit status never tells them apart/i,
+      // Anchored end-to-end (not just at the front): an unanchored tail let a mutated sentence
+      // that INVERTS the none-is-not-permission-to-integrate rule slip through under this same
+      // waiver, because the waiver only had to match a prefix, not the whole statement.
+      /^Exit 0 covers none, retry, and escalate alike, so the exit status never tells them apart — only the decision field does\.$/i,
     ],
   })
   assertStatement(
@@ -171,9 +177,40 @@ test('phase-gate documents the real fix invocation and its exit-code contract', 
     then: /^Exit 1 means the run has no plan at all or the verdict file could not be read: an argument error, not a decision/i,
     subject: /\bexit 0\b|\bexit 1\b|\bexit 2\b/i,
     allow: [
-      /^Exit 0 covers none, retry, and escalate alike, so the exit status never tells them apart/i,
+      /^Exit 0 covers none, retry, and escalate alike, so the exit status never tells them apart — only the decision field does\.$/i,
     ],
   })
+})
+
+// The skill's exit-1 sentence names two distinct causes ("no plan at all" and "the verdict file
+// could not be read"); the other two documented codes (0 and 2) are pinned by `decideFix`'s own
+// unit tests and by the derived-context / gateConfig plumbing elsewhere, but nothing previously
+// ran `fix` through the CLI itself to pin exit 1. Invoking `runCli` directly, the same pattern
+// `tests/cli.test.mjs` uses, so a rename of either `return 1` in scripts/cli.mjs's `fix` handler
+// breaks this test rather than only the prose.
+test('the CLI actually exits 1 for both causes phase-gate documents under exit 1 for fix', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-skill-fix-'))
+  const io = { out: () => {}, err: () => {} }
+  try {
+    // No `init-run` has happened for this run id at all: no plan exists.
+    const noPlanCode = await runCli(
+      ['fix', '--run', 'ghost-run', '--phase', '1', '--verdict', path.join(root, 'verdict.json'), '--root', root],
+      io,
+    )
+    assert.equal(noPlanCode, 1, 'fix must exit 1 when the run has no plan')
+
+    // A run WITH a plan, but a --verdict path that cannot be read.
+    const planPath = path.join(root, 'plan.md')
+    await writeFile(planPath, '### Task 1: A\n\n**Files:**\n- Create: `a.mjs`\n', 'utf8')
+    assert.equal(await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io), 0)
+    const badVerdictCode = await runCli(
+      ['fix', '--run', 'r1', '--phase', '1', '--verdict', path.join(root, 'missing-verdict.json'), '--root', root],
+      io,
+    )
+    assert.equal(badVerdictCode, 1, 'fix must exit 1 when the verdict file cannot be read')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('tm-implementer forbids weakening a test to satisfy a fix-round finding', async () => {
@@ -578,7 +615,6 @@ test('fleet-lifecycle states the orchestrator writes the map, not the agent', as
     subject: /writes this file|map\.md/i,
     allow: [
       /it RETURNS the map and you write it to that path yourself/,
-      /A killed gate cannot run its own cleanup/,
     ],
   })
 })
@@ -600,9 +636,19 @@ test('phase-gate states that findings are stamped with the tips they judged', as
 
 test('phase-gate documents finish taking per-phase results', async () => {
   const { doc } = await skill('phase-gate')
-  assert.match(doc.text, /phases.*1.*results/s)
+  const section = doc.section('Finish the pending checks')
+  // A whole-document regex with `.*` gaps is exactly what tests/md-contract.mjs exists to
+  // replace: /phases.*1.*results/s is satisfied by "results" drifting in from an unrelated later
+  // sentence, so mutating the documented shape to { "phases": { "1": [...] } } — which `finish`
+  // itself rejects with "--results phase 1 must be an object with a results array" — stayed
+  // green. Lock the one statement that carries the shape instead.
   assertStatement(
-    doc,
+    section,
+    /^Hand it the same results, keyed by phase: \{ "phases": \{ "1": \{ "results": \[\.\.\.\] \} \} \}\.$/i,
+    'the skill must state the exact --results shape finish expects, keyed by phase',
+  )
+  assertStatement(
+    section,
     /A phase that passed on supplied results is marked \(review supplied\) in its output/,
     'a reader must be able to tell a recomputed pass from a reported one',
   )
