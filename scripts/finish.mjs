@@ -17,8 +17,12 @@
 // run `codemap` against three phases that each held a CLI-computed PASS.
 //
 // Keyed by phase, because a run's phases are reviewed separately and a single flat list could
-// silently satisfy phase 3 with phase 1's review. Same rule as gate's: only `agent` and `mcp`
-// results may be supplied, and the verdict is still computed, never taken.
+// silently satisfy phase 3 with phase 1's review. `validateSuppliedPhases` below validates only
+// the SHAPE of the supplied file — that phases is an object keyed by canonical phase numbers,
+// each holding a results array. It does not know or enforce gate's rule that only `agent` and
+// `mcp` results may be supplied, or check the `status`/`source` of an individual result: that
+// is the caller's job, via `validateSuppliedResults` in scripts/cli.mjs, which must run over
+// each phase's results array before any of it is merged.
 export function suppliedForPhase(supplied, phase) {
   if (!supplied || typeof supplied !== 'object') return []
   const byPhase = supplied.phases ?? {}
@@ -37,7 +41,18 @@ export function validateSuppliedPhases(supplied) {
     return '--results "phases" must be an object keyed by phase number'
   }
   for (const [phase, entry] of Object.entries(byPhase)) {
-    if (!Number.isInteger(Number(phase))) return `--results names a non-numeric phase: ${JSON.stringify(phase)}`
+    const asNumber = Number(phase)
+    if (!Number.isInteger(asNumber)) return `--results names a non-numeric phase: ${JSON.stringify(phase)}`
+    // A key that parses to a phase number but is not that number's OWN canonical string form
+    // ('01', '1.0', ' 1', '1e0', '0x1', or '' — which `Number('')` coerces to 0) would match
+    // nothing at lookup: `suppliedForPhase` looks up `String(phase)`, so only the canonical
+    // form is ever read back. Refusing here (rather than canonicalising at lookup) keeps this
+    // module's rule consistent — every other malformed shape above is refused, not guessed at
+    // — and the consequence is that the caller must supply keys exactly as `String(n)` renders
+    // them, or the evidence is rejected up front instead of silently going missing.
+    if (String(asNumber) !== phase) {
+      return `--results names a non-canonical phase key: ${JSON.stringify(phase)} (use ${JSON.stringify(String(asNumber))})`
+    }
     if (!entry || typeof entry !== 'object' || !Array.isArray(entry.results)) {
       return `--results phase ${phase} must be an object with a results array`
     }
