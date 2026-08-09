@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { reviewFileName, collectReviewResults } from '../scripts/reviews.mjs'
+import { reviewFileName, collectReviewResults, reviewStamp, reviewStale } from '../scripts/reviews.mjs'
 
 test('a lens findings file is named by phase and lens', () => {
   assert.equal(reviewFileName(1, 'correctness'), '1-correctness.json')
@@ -97,4 +97,87 @@ test('the output names the lens each finding came from', () => {
     blockOn: ['high'],
   })
   assert.deepEqual(out.results[0].findings.map((f) => f.lens), ['correctness', 'security'])
+})
+
+const STAMP = { phase: '1', branches: ['teammates/r1/T1@aaa', 'teammates/r1/T2@bbb'] }
+
+test('a stamp names the phase, the lens and every branch tip it judged', () => {
+  const s = reviewStamp({ phase: 1, lens: 'tests', branchShas: { 'teammates/r1/T2': 'bbb', 'teammates/r1/T1': 'aaa' } })
+  assert.equal(s.phase, '1')
+  assert.equal(s.lens, 'tests')
+  // Sorted, so two runs over the same tips produce the same stamp.
+  assert.deepEqual(s.branches, ['teammates/r1/T1@aaa', 'teammates/r1/T2@bbb'])
+})
+
+test('a stamp matching the current tips is not stale', () => {
+  assert.equal(reviewStale({ stamp: { ...STAMP, lens: 'tests' } }, { ...STAMP, lens: 'tests' }), null)
+})
+
+// The exact failure this closes: a fix round moves a branch, the old findings file stays on disk.
+test('findings describing an older branch tip are stale and say which', () => {
+  const why = reviewStale(
+    { stamp: { phase: '1', lens: 'tests', branches: ['teammates/r1/T1@aaa'] } },
+    { phase: '1', lens: 'tests', branches: ['teammates/r1/T1@ccc'] },
+  )
+  assert.match(why, /aaa/)
+  assert.match(why, /ccc/)
+})
+
+test('an unstamped findings file is stale whatever it contains', () => {
+  assert.match(reviewStale({ findings: [] }, { ...STAMP, lens: 'tests' }), /no stamp/)
+})
+
+// A phase-1 findings file must not satisfy phase 2, even when the lens and the branch tips it
+// names line up — the exact reason the stamp carries a phase at all. Deleting the phase
+// comparison from `reviewStale` would leave every existing test green, since they all compare
+// phase '1' against phase '1'.
+test('findings stamped for one phase do not satisfy a different phase', () => {
+  const why = reviewStale(
+    { stamp: { phase: '1', lens: 'tests', branches: STAMP.branches } },
+    { phase: '2', lens: 'tests', branches: STAMP.branches },
+  )
+  assert.match(why, /phase 1/)
+  assert.match(why, /phase 2/)
+})
+
+// The lens comparison, pinned the same way: matching phase and branches must not paper over a
+// mismatched lens.
+test('findings stamped for one lens do not satisfy a different lens', () => {
+  const why = reviewStale(
+    { stamp: { phase: '1', lens: 'security', branches: STAMP.branches } },
+    { phase: '1', lens: 'correctness', branches: STAMP.branches },
+  )
+  assert.match(why, /security/)
+  assert.match(why, /correctness/)
+})
+
+// The not-an-object guard, pinned directly rather than relying on it merely not throwing
+// elsewhere.
+test('a non-object findings file is refused rather than throwing', () => {
+  assert.match(reviewStale(null, { ...STAMP, lens: 'tests' }), /not an object/)
+  assert.match(reviewStale('nope', { ...STAMP, lens: 'tests' }), /not an object/)
+  assert.match(reviewStale([], { ...STAMP, lens: 'tests' }), /not an object/)
+})
+
+test('a stale lens is reported and never contributes a pass', () => {
+  const out = collectReviewResults({
+    checkName: 'review',
+    lenses: ['correctness'],
+    files: [{ lens: 'correctness', findings: [], stamp: { phase: '1', lens: 'correctness', branches: ['teammates/r1/T1@old'] } }],
+    expected: { phase: '1', branches: ['teammates/r1/T1@new'] },
+    blockOn: ['high'],
+  })
+  assert.deepEqual(out.results, [])
+  assert.deepEqual(out.missing, ['correctness'])
+  assert.equal(out.stale.length, 1)
+  assert.match(out.stale[0].reason, /old/)
+})
+
+test('with no expected stamp supplied, a file without one is still accepted', () => {
+  const out = collectReviewResults({
+    checkName: 'review', lenses: ['correctness'],
+    files: [{ lens: 'correctness', findings: [] }], blockOn: ['high'],
+  })
+  assert.equal(out.results.length, 1)
+  assert.deepEqual(out.stale, [])
 })
