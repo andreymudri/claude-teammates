@@ -812,7 +812,7 @@ test('prune-run reports a leaked merge preview and removes it with --yes', async
 - Modify: `skills/phase-gate/SKILL.md`
 - Test: `tests/skill-contracts.test.mjs`
 
-**Depends:** T7
+**Depends:** T7, T12
 
 - [ ] **Step 1:** `skills/fleet-lifecycle/SKILL.md`'s Map notes section says an Explore agent
       writes `map.md`. It does not — it returns the map and the orchestrator writes it. Replace
@@ -889,7 +889,7 @@ test('phase-gate documents finish taking per-phase results', async () => {
 - Modify: `scripts/gate-runner.mjs`
 - Test: `tests/gate-runner.test.mjs`
 
-**Depends:** T7
+**Depends:** T7, T12
 
 **Model:** capable
 
@@ -953,7 +953,7 @@ test('runFilesetCheck fails a branch parked at the run tip with no contribution'
 - Modify: `scripts/cli.mjs`
 - Test: `tests/cli.test.mjs`
 
-**Depends:** T7
+**Depends:** T7, T12
 
 **Model:** capable
 
@@ -1196,3 +1196,179 @@ test('runFilesetCheck fails a branch parked at an intermediate post-anchor commi
       that fixture is expected and is not a weakening of the test.
 
 - [ ] **Step 6:** Run the full suite in the FOREGROUND and report the counts.
+
+### Task 12: make the reviewer's findings file one shape, and pin it
+
+**Files:**
+- Modify: `agents/tm-reviewer.md`
+- Test: `tests/agents.test.mjs`
+
+**Depends:** T7
+
+**Model:** mid
+
+T7 taught `collect-reviews` to refuse a findings file that carries no stamp, and taught
+`review-dispatch` to append a `stampInstruction` naming the exact object each reviewer must
+write. Those two halves agree with each other. The reviewer's own contract does not:
+`agents/tm-reviewer.md` still says the return value is "an array of findings" and describes
+writing "that same JSON" to the findings path. A reviewer that follows its card writes a bare
+array, `reviewStale` reports "the findings file carries no stamp", and `collect-reviews` exits 4.
+
+This is not theoretical drift. Across two phases of run `gaps`, five reviewers produced four
+different file shapes — a bare array, `{stamp, findings}`, and two flat objects with the stamp
+fields spread at the top level and no `stamp` key at all. Only one of the five would be
+collectable. The recovery path exists precisely for a reviewer that goes idle before returning,
+which is the case where nobody is left to reformat the file by hand.
+
+The direction of failure is safe — an unreadable file is never read as an empty review — so this
+is a usability and recoverability defect, not a correctness hole. Fix it in the contract, not by
+widening what the collector accepts: a collector that guesses at four shapes is how "no findings"
+and "no readable findings" stop being distinguishable.
+
+- [ ] **Step 1:** Rewrite the Return value section of `agents/tm-reviewer.md` to state one shape.
+      The wrapper is the file's shape AND the response's shape, so there is exactly one thing to
+      write and one thing to return:
+
+```json
+{
+  "stamp": { "phase": "1", "lens": "correctness", "branches": ["teammates/<run>/T1@<sha>"] },
+  "findings": [
+    { "severity": "high|medium|low", "file": "...", "line": 0, "summary": "...", "failureScenario": "..." }
+  ]
+}
+```
+
+      State that the `stamp` object is supplied verbatim in the dispatch prompt and must be
+      copied unchanged — a reviewer must never construct or edit it. Read the real definitions
+      before writing this section rather than trusting the sketch above: `reviewStamp` and
+      `reviewStale` in `scripts/reviews.mjs`, and `stampInstruction` in `scripts/cli.mjs`.
+
+- [ ] **Step 2:** Keep, and do not soften, what the current section already gets right: write the
+      file BEFORE returning, the response stays the interface, and an empty `findings` array is a
+      real result written like any other. Add one sentence for the case the run just exercised —
+      a dispatch prompt that carries no stamp (a hand-written dispatch, or an older CLI) means
+      the file cannot be collected, so say so in the response rather than inventing a stamp.
+      A reviewer that fabricates a stamp asserts it judged tips it may never have read.
+
+- [ ] **Step 3:** State honestly in the card what the stamp is worth. `scripts/reviews.mjs:28-36`
+      already says it: the reviewer stamps its own file, so a reviewer that judged nothing can
+      still emit a well-formed stamp and pass `reviewStale`. It is tamper-evident against drift
+      and fix rounds, not proof of review. Do not let the card imply more than the module claims —
+      that inversion is the defect class this plan keeps finding.
+
+- [ ] **Step 4:** Pin the contract in `tests/agents.test.mjs`, which already asserts statements in
+      the agent cards. Add assertions that `agents/tm-reviewer.md` names the `stamp` key, names
+      the `findings` key, tells the reviewer to copy the stamp verbatim rather than build it, and
+      does NOT tell the reviewer to write a bare array. The last one is the assertion that would
+      have caught this: the card and the collector disagreed for a whole phase with a green suite.
+
+- [ ] **Step 5:** Run the full suite in the FOREGROUND and report the counts.
+
+### Task 13: close the phase-2 findings against the CLI
+
+**Files:**
+- Modify: `scripts/cli.mjs`
+- Test: `tests/cli.test.mjs`
+
+**Depends:** T10
+
+**Model:** capable
+
+Phase 2's review returned eleven findings, none blocking. Ten of them land in these two files.
+They are collected here rather than folded into T10 so that T10's stated scope keeps describing
+what T10 does. The findings themselves are in `.teammates/gaps/reviews/2-*.json`; each step below
+names what was reproduced, because a step that only says "fix X" invites a fix that satisfies the
+sentence rather than the failure.
+
+- [ ] **Step 1:** The flaky worktree-name match. `tests/cli.test.mjs` matches a worktree name with
+      the bare regex `/a1/` against `git worktree list` output, which also matches any abbreviated
+      commit sha containing those two characters. Measured at roughly 2.5% across 40 isolated
+      runs, with an observed failure on sha `3a1b132`. It fails a phase on correct behaviour in
+      the `doesNotMatch` direction, and in the paired `assert.match` direction it PASSES when the
+      worktree was wrongly removed — so it masks a real regression at the same rate. Match the
+      worktree path rather than a two-character substring. The three pre-existing occurrences
+      around lines 648, 671 and 693 have the same weakness; fix those too, since a flaky gate is
+      worse than a missing check.
+
+- [ ] **Step 2:** The unlink fallback is untested. Replacing the whole
+      `catch { failed += 1; io.out('left ... in place ...'); continue }` block around
+      `scripts/cli.mjs:1375-1383` with a bare swallow leaves the suite green — so nothing asserts
+      the one branch that turns a partial link sweep into a refusal. That branch is the safety
+      net for the hazard the canary test proves is real: with it swallowed, a sweep that throws
+      falls through to `git worktree remove --force` and destroys the link target's contents.
+      Add a test that MAKES THE SWEEP FAIL and asserts the worktree is still listed afterwards
+      and the command exits 1. Confirm the new test fails against the swallowed-catch mutant.
+
+- [ ] **Step 3:** The `PREVIEW_LINK_MAX_DEPTH` guard at `scripts/cli.mjs:518` can be turned from
+      a `throw` into a silent `return 0` with the suite green, because nothing constructs a tree
+      deeper than two levels. The comment states the guard throws specifically because a partial
+      sweep followed by a removal is the failure the sweep exists to prevent. Build a tree deeper
+      than the limit and assert the throw.
+
+- [ ] **Step 4:** The ENOENT deadlock. `scripts/merge-preview.mjs` calls
+      `git.removeWorktree(dir).catch(() => {})` and then removes the directory, so a failed
+      removal leaves "worktree still registered, directory gone" — a temp cleaner produces the
+      same state. `git worktree list --porcelain` still reports that path, so it enters
+      `plan.previews`; `unlinkPreviewLinks` then calls `readdir` on a path that does not exist,
+      throws ENOENT, and the catch counts it as a failed sweep. `prune-run --yes` exits 1 on every
+      subsequent run and the stale registration can never be cleared. The printed reason is also
+      false in that state — there are no links to sweep in a directory that is not there. Let
+      ENOENT on the preview root fall through to `removeWorktree`, which is what clears the
+      registration, and keep every other error blocking. Pin both halves.
+
+- [ ] **Step 5:** The tripwire does not trip. The KNOWN_FLAGS test hardcodes its twenty commands
+      instead of deriving them, so it catches a command REMOVED from the table and not one ADDED
+      without an entry — and adding is the direction that happens. Proven by adding a real 21st
+      subcommand: the suite stayed green at 269/269 while that command swallowed an unknown flag
+      and exited 0. Derive the command list from `REQUIRED`'s keys, or assert
+      `Object.keys(REQUIRED)` equals `Object.keys(KNOWN_FLAGS)`. Verify by adding a throwaway 21st
+      command locally and confirming the suite now fails.
+
+- [ ] **Step 6:** `complete --base` and `--phase` are declared in KNOWN_FLAGS and really read
+      (`checksForPhase(config, flags.phase ?? 'default')`, and `flags.base` via `derive`), but are
+      passed by no test in the entire suite — 581 CLI invocations, neither flag among them. So
+      dropping `base` from that entry breaks every caller that passes it while the suite stays
+      green. Cover both. The existing test named "every command still accepts the flags it
+      documents" checks one flag on one command; either make it live up to its name or rename it.
+
+- [ ] **Step 7:** `doctor`'s `--run-branch` mismatch guard at `scripts/cli.mjs:1200` is asserted by
+      nothing: changing `if (derived.runBranch === runBranch)` to `if (true)` keeps the suite
+      green. With that mutant, `doctor --run r1 --run-branch other` applies an anchor derived from
+      a different branch, so `landed` is computed against the wrong anchor and a task branch can
+      be reported as integrated on a run branch it was never merged into — with no
+      "could not derive the run anchor" note to warn the reader. Both new doctor tests leave
+      `--run-branch` unset, so only the equal case is exercised. Cover the mismatch.
+
+- [ ] **Step 8:** A results block keyed to a phase the run does not have is silently dropped.
+      `validateSuppliedPhases` checks shape only, and evidence is read with
+      `suppliedForPhase(supplied, phase)` for phases taken from the plan, so a key naming no real
+      phase is never looked at — including one supplying a `command` result, which under a real
+      phase is refused with exit 2. An operator with a typo'd phase key gets a pending report and
+      no hint the evidence was discarded. Report an unmatched phase key rather than ignoring it.
+      The direction is already safe; this is about not lying by omission.
+
+- [ ] **Step 9:** Two prose corrections, both the class this plan keeps finding — a comment
+      claiming more than the code delivers:
+      - The comment around `scripts/cli.mjs:1366-1371` reads as though the link sweep closes the
+        junction hazard outright. It closes it for a preview whose owner is DEAD. A live preview
+        of a running gate is classified as leaked by name and location alone, and a junction its
+        owner creates between the sweep and the removal is still followed. Say which case is
+        covered.
+      - The reaper force-removes any detached, branchless worktree under the temp root whose leaf
+        matches the preview name pattern, including one an operator created deliberately,
+        discarding uncommitted work in it. The dry run is the default and the plan is printed
+        first, so this is a documentation gap rather than a behaviour change: say what the
+        pattern will match.
+
+- [ ] **Step 10:** The TOCTOU itself. A live merge preview is indistinguishable from a leaked one
+      by name and location, so `prune-run` can sweep a preview whose owner is mid-link-provisioning
+      and then remove it through a junction created in that window. `scripts/prune.mjs:30-36`
+      already declares "safe to remove only when no gate is running" as the caller's precondition,
+      and `prune-run` does not check it — what T7 changed is that violating it is now destructive
+      rather than merely noisy. Close it if you can do so within these two files: a preview whose
+      worktree was registered very recently, or whose directory mtime is moving, is not safely
+      reapable. If closing it needs `scripts/prune.mjs` or `scripts/merge-preview.mjs`, that is a
+      file-set problem — report status "blocked" naming the file rather than editing it, and say
+      what you would have changed.
+
+- [ ] **Step 11:** Run the full suite in the FOREGROUND and report the counts.
