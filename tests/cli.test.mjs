@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rm, stat, symlink, writeFile, readFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -619,6 +619,470 @@ test('finish exits 1 and names the phase whose computed check fails', async () =
     const code = await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
     assert.match(lines.join('\n'), /failing check: 2/)
     assert.equal(code, 1)
+  })
+})
+
+// --- --enforcement-only: the cheap verdict, and what it must never hide ----------------------
+//
+// `finish` and `prune-run` recompute every phase, and the `command` checks are what makes that
+// cost a full test suite per phase. The flag drops them — but a verdict that hides which checks
+// did not run is worse than a slow one, so each one must come back as a reported `skip`.
+test('finish --enforcement-only skips command checks and reports them as skipped', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [
+        { name: 'test', kind: 'command', run: 'node -e "process.exit(1)"' },
+        { name: 'fileset', kind: 'fileset' },
+      ] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--enforcement-only'], io)
+    const out = lines.join('\n')
+    // The command check would FAIL if it ran; it must be skipped, and said to be skipped.
+    assert.match(out, /skipped: test/)
+    assert.doesNotMatch(out, /failed: test/)
+  })
+})
+
+// The complement: without the flag the command check really does run, so the fail it produces
+// must still be reported. A flag that silently skipped them always would be the bug it prevents.
+test('finish without --enforcement-only still runs the command checks and reports their failure', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'test', kind: 'command', run: 'node -e "process.exit(1)"' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    const code = await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    assert.match(out, /failed: test/)
+    assert.doesNotMatch(out, /skipped: test/)
+    assert.equal(code, 1)
+  })
+})
+
+// An operator about to wait minutes for three test suites should be told that is what is
+// happening, and that a cheaper answer exists — not left watching a silent process.
+test('finish names how many command checks it is about to run', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'test', kind: 'command', run: 'node -e ""' }, { name: 'fileset', kind: 'fileset' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    assert.match(out, /running 2 command checks across 2 phases/)
+    // The manifest declares `fileset`, so the cheaper route genuinely exists here.
+    assert.match(out, /pass --enforcement-only/)
+  })
+})
+
+// --- the recommendation must only name a flag that would be accepted ------------------------
+//
+// A manifest with command checks but no enforcement check is the barren shape `enforcementOnlyRefusal`
+// exists for. The announcement told the caller to pass `--enforcement-only` to shorten the wait;
+// doing so exits 2 with "cannot answer for phase 1, 2", having run nothing. Gating this on the
+// check COUNT — the round-2 fix — only covered manifests with no command checks at all, which is
+// exactly the case where the line was never printed and the flag was never recommended.
+test('finish does not recommend --enforcement-only on a manifest it would refuse', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'test', kind: 'command', run: 'node -e ""' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    // The wait is still explained — there really are command checks about to run.
+    assert.match(out, /running 2 command checks across 2 phases/)
+    // But the flag is not offered, because this manifest is exactly the one it refuses.
+    assert.doesNotMatch(out, /pass --enforcement-only/)
+  })
+})
+
+test('prune-run does not recommend --enforcement-only on a manifest it would refuse', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'test', kind: 'command', run: 'node -e ""' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    assert.match(out, /running 2 command checks across 2 phases/)
+    assert.doesNotMatch(out, /pass --enforcement-only/)
+  })
+})
+
+// The count and the phase span are the whole point of the line: a bare "command check" substring
+// is also printed by `running 0 command checks across 0 phases`, which would say nothing while
+// real checks ran for minutes. Asserted the same way its `finish` sibling above is.
+test('prune-run names how many command checks it is about to run when they are not skipped', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'test', kind: 'command', run: 'node -e ""' }, { name: 'fileset', kind: 'fileset' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    assert.match(lines.join('\n'), /running 2 command checks across 2 phases/)
+    // `fileset` is declared, so the flag would be accepted and is worth recommending.
+    assert.match(lines.join('\n'), /pass --enforcement-only/)
+  })
+})
+
+// --- what --enforcement-only must never buy --------------------------------------------------
+//
+// The flag trades coverage for time, and the trade is only honest while something was actually
+// enforced. A phase whose manifest declares no enforcement check has nothing left to run once the
+// command checks are dropped, so the flag cannot answer for it at all — and the answer it used to
+// give was the worst possible one: the synthesised skips satisfied `aggregateVerdict`'s
+// fail-closed "at least one check ran" clause, so a phase that verified NOTHING read PASS.
+test('finish --enforcement-only refuses a phase whose manifest declares no enforcement check', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'test', kind: 'command', run: 'node -e "process.exit(1)"' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    const code = await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--enforcement-only'], io)
+    const out = lines.join('\n')
+    assert.equal(code, 2)
+    assert.match(out, /--enforcement-only cannot answer for phase 1/)
+    // The exact sentence this refusal exists to prevent.
+    assert.doesNotMatch(out, /ready to land/)
+  })
+})
+
+test('prune-run --enforcement-only refuses a phase whose manifest declares no enforcement check', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'test', kind: 'command', run: 'node -e "process.exit(1)"' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--enforcement-only', '--yes'], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /--enforcement-only cannot answer for phase 1/)
+  })
+})
+
+// The refusal loops over every phase, and every other manifest in this file declares a single
+// `default` block that applies to all of them — so the loop itself went unpinned. A manifest that
+// is barren in ONE phase only is the shape that matters: relaxing the guard to fire on two or
+// more barren phases leaves this file green while phase 2 sails through having verified nothing.
+test('--enforcement-only refuses when only some phases declare no enforcement check', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: {
+        1: { checks: [{ name: 'test', kind: 'command', run: 'node -e ""' }, { name: 'fileset', kind: 'fileset' }] },
+        2: { checks: [{ name: 'test', kind: 'command', run: 'node -e ""' }] },
+      },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    const code = await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--enforcement-only'], io)
+    const out = lines.join('\n')
+    assert.equal(code, 2)
+    // Phase 2 is the barren one, and the message names it rather than the phase that is fine.
+    assert.match(out, /cannot answer for phase 2\b/)
+    assert.doesNotMatch(out, /cannot answer for phase 1\b/)
+    assert.doesNotMatch(out, /ready to land/)
+  })
+})
+
+// `MANIFEST_ENFORCED_KINDS` decides which manifests the flag can answer for, and membership was
+// unpinned in both directions. Narrowed to `fileset` alone, an ownership-only manifest is wrongly
+// REFUSED — the flag would report nothing for a phase it can perfectly well report on.
+test('--enforcement-only accepts an ownership-only manifest and runs the ownership check', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [
+        { name: 'test', kind: 'command', run: 'node -e "process.exit(1)"' },
+        { name: 'ownership', kind: 'ownership' },
+      ] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--no-ff', '--quiet', '-m', 'integrate T1', 'teammates/r1/T1'])
+    // A commit written straight onto the run branch, on no task branch: the unexplained commit
+    // `ownership` exists to catch. Its failure below is the positive evidence that the check ran.
+    await writeFile(path.join(root, 'stray.mjs'), 'export const s = 1\n', 'utf8')
+    g(['add', 'stray.mjs'])
+    g(['commit', '--quiet', '-m', 'direct write'])
+    lines.length = 0
+    const code = await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--enforcement-only'], io)
+    const out = lines.join('\n')
+    assert.doesNotMatch(out, /cannot answer/)
+    assert.match(out, /skipped: test/)
+    assert.match(out, /failed: ownership/)
+    assert.doesNotMatch(out, /skipped: ownership/)
+    assert.equal(code, 1)
+  })
+})
+
+// The other direction: `merge` is enforced but the gate COMPUTES it, so a manifest cannot declare
+// it — an entry claiming that kind finds no runner and lands as a blocking pending. Counting it as
+// declared enforcement would let `[command, merge]` past the refusal into a verdict resting on
+// nothing the manifest actually asked for.
+test('--enforcement-only refuses a manifest whose only enforced kind is the computed merge check', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [
+        { name: 'test', kind: 'command', run: 'node -e ""' },
+        { name: 'merge', kind: 'merge' },
+      ] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    const code = await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--enforcement-only'], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /cannot answer for phase 1/)
+  })
+})
+
+// The line exists to explain a wait. With nothing to wait for it explained nothing and gave
+// advice that contradicts the very next thing the caller would hit: "pass --enforcement-only" on
+// a manifest with no enforcement check is refused with exit 2.
+test('finish says nothing about command checks when the manifest declares none', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeReviewOnlyManifest(root)
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    assert.doesNotMatch(out, /command check/)
+    assert.doesNotMatch(out, /pass --enforcement-only/)
+  })
+})
+
+test('prune-run says nothing about command checks when the manifest declares none', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeReviewOnlyManifest(root)
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    assert.doesNotMatch(lines.join('\n'), /command check/)
+  })
+})
+
+// The invariant the comment above `runPhaseChecks` claims and nothing pinned: `--enforcement-only`
+// drops `command` checks and NOTHING ELSE. Widening that filter to also drop `fileset`/`ownership`
+// leaves the flag reporting PASS for a phase whose enforcement was never run — the same hole as
+// above, reached by a one-line edit. `fileset` genuinely fails for phase 2 here (T2's branch
+// carries nothing), so its running is observable as a failure, not merely as an absence.
+test('--enforcement-only still runs the enforcement checks it exists to report', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [
+        { name: 'test', kind: 'command', run: 'node -e "process.exit(1)"' },
+        { name: 'fileset', kind: 'fileset' },
+        { name: 'ownership', kind: 'ownership' },
+      ] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--no-ff', '--quiet', '-m', 'integrate T1', 'teammates/r1/T1'])
+    g(['branch', 'teammates/r1/T2', 'main'])
+    lines.length = 0
+    const code = await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--enforcement-only'], io)
+    const out = lines.join('\n')
+    // The command check was dropped, as asked.
+    assert.match(out, /skipped: test/)
+    // The enforcement checks were NOT: fileset ran and failed for the phase it should fail for.
+    assert.match(out, /failed: fileset/)
+    assert.doesNotMatch(out, /skipped: fileset/)
+    assert.doesNotMatch(out, /skipped: ownership/)
+    // A failing enforcement check still blocks under this flag; it is not an advisory mode.
+    assert.equal(code, 1)
+  })
+})
+
+// A cheap verdict may be enough to REPORT. It is never enough to DELETE. `prune-run --yes` runs
+// `git worktree remove --force`, which discards a teammate's uncommitted work and takes with it
+// the worktree a retry needs to resume — so a phase whose PASS rests on checks nobody ran must
+// stay out of the prune plan however the caller asked.
+test('prune-run --enforcement-only --yes will not remove a worktree on a verdict resting on skipped checks', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [
+        { name: 'test', kind: 'command', run: 'node -e "process.exit(1)"' },
+        { name: 'fileset', kind: 'fileset' },
+      ] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--no-ff', '--quiet', '-m', 'integrate T1', 'teammates/r1/T1'])
+    // Deliberately not `a1`: a bare two-character name also matches any abbreviated sha in
+    // `git worktree list` output.
+    const wtPath = path.join(root, '.claude', 'worktrees', 'keep-me-t1')
+    g(['worktree', 'add', '--quiet', wtPath, 'teammates/r1/T1'])
+    lines.length = 0
+    const code = await runCli(
+      ['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--enforcement-only', '--yes'],
+      io,
+    )
+    assert.equal(code, 0)
+    assert.match(lines.join('\n'), /phase 1: skipped: test/)
+    assert.match(lines.join('\n'), /not prunable/)
+    // The worktree, and whatever uncommitted work is in it, is still there.
+    assert.match(g(['worktree', 'list']), /keep-me-t1/)
+    await stat(wtPath)
+  })
+})
+
+// A SUPPLIED `skip` is a different act from a skip this flag synthesised. `skip` is one of the
+// three statuses `--results` may carry, and supplying one is a caller stating they know that
+// check did not run and accepting it — evidence, deliberately given. Refusing to prune on it
+// left no remedy that exists: the caller never passed `--enforcement-only`, so the advice to
+// re-run without it is unfollowable, and the only way forward would be rewriting the supplied
+// `skip` as a `pass`, which is falsifying the very evidence the flag exists to carry honestly.
+test('prune-run prunes a phase whose skip was supplied by the caller rather than synthesised', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      lens: ['correctness'],
+      phases: { default: { checks: [
+        { name: 'fileset', kind: 'fileset' },
+        { name: 'review', kind: 'agent', agent: 'tm-reviewer' },
+      ] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--no-ff', '--quiet', '-m', 'integrate T1', 'teammates/r1/T1'])
+    const wtPath = path.join(root, '.claude', 'worktrees', 'supplied-skip-t1')
+    g(['worktree', 'add', '--quiet', wtPath, 'teammates/r1/T1'])
+    const results = path.join(root, 'r.json')
+    await writeFile(results, JSON.stringify({
+      phases: { 1: { results: [{ name: 'review', status: 'skip' }] } },
+    }), 'utf8')
+    lines.length = 0
+    const code = await runCli(
+      ['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes', '--results', results],
+      io,
+    )
+    assert.equal(code, 0)
+    // Still reported as skipped — that rule is unconditional.
+    assert.match(lines.join('\n'), /phase 1: skipped: review/)
+    // But it does not block the prune, and nothing tells the caller to drop a flag they never
+    // passed.
+    assert.doesNotMatch(lines.join('\n'), /not prunable/)
+    assert.doesNotMatch(lines.join('\n'), /without --enforcement-only/)
+    assert.doesNotMatch(g(['worktree', 'list']), /supplied-skip-t1/)
+  })
+})
+
+// The same phase, same manifest, WITHOUT the flag: the command check runs, fails, and the phase
+// is not prunable for that reason. This is the control — it shows the test above is about the
+// skipped checks and not about the phase being unprunable anyway.
+test('prune-run without --enforcement-only prunes the phase whose checks all actually ran', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [
+        { name: 'test', kind: 'command', run: 'node -e ""' },
+        { name: 'fileset', kind: 'fileset' },
+      ] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--no-ff', '--quiet', '-m', 'integrate T1', 'teammates/r1/T1'])
+    const wtPath = path.join(root, '.claude', 'worktrees', 'prune-me-t1')
+    g(['worktree', 'add', '--quiet', wtPath, 'teammates/r1/T1'])
+    lines.length = 0
+    const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
+    assert.equal(code, 0)
+    assert.doesNotMatch(g(['worktree', 'list']), /prune-me-t1/)
+  })
+})
+
+// prune-run reports a verdict only as a phase's presence in the prune plan, so a skipped check
+// would otherwise leave no trace in its output at all.
+test('prune-run --enforcement-only reports the command checks it skipped and does not announce a run', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [
+        { name: 'test', kind: 'command', run: 'node -e "process.exit(1)"' },
+        { name: 'fileset', kind: 'fileset' },
+      ] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--enforcement-only'], io)
+    const out = lines.join('\n')
+    assert.match(out, /phase 1: skipped: test/)
+    assert.doesNotMatch(out, /running \d+ command check/)
+  })
+})
+
+// `--enforcement-only` is a switch: present or absent. Written with a value it reads to a human
+// as a setting, and every consumer here tests only for presence, so a value is refused.
+test('--enforcement-only refuses a value rather than reading it as a setting', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const code = await runCli(
+      ['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--enforcement-only', 'false'],
+      io,
+    )
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /--enforcement-only` takes no value/)
   })
 })
 
@@ -4325,12 +4789,16 @@ test('map exits 2 when the repository cannot be read', async () => {
   }
 })
 
-// --- map-notes never writes the file it reports on ------------------------------------------
+// --- map-notes never authors the file it reports on -----------------------------------------
 //
-// The prohibition is absolute: the map notes are written by a dispatched Explore agent that
-// read the code, and by nothing else. A CLI that filled the file in would produce prose it
-// guessed, under a valid provenance header — after which every later `map-notes` call reports
-// it current and every reader treats a machine's guess as an agent-verified fact.
+// The prose is written by a dispatched Explore agent that read the code, and by nothing else. A
+// CLI that filled the file in would produce prose it guessed, under a valid provenance header —
+// after which every later `map-notes` call reports it current and every reader treats a
+// machine's guess as an agent-verified fact.
+//
+// `--write` is the one path that puts bytes in that file, and it authors nothing: it copies text
+// the caller supplies, only after `mapNotesWritable` confirms the header still names this run and
+// this commit. The tests below cover the reporting path, which must write nothing at all.
 test('map-notes creates no map.md when none exists', async () => {
   await withRepo(async ({ root, planPath, io }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
@@ -4378,6 +4846,165 @@ test('map-notes puts the repository top directories into the Explore prompt', as
     lines.length = 0
     assert.equal(await runCli(['map-notes', '--run', 'r1', '--root', root], io), 4)
     assert.match(lines.join('\n'), /largest directories by file count are:.*\bengine\b/)
+  })
+})
+
+// --- map-notes --write: the orchestrator's half of the inverted contract ---------------------
+//
+// The agent is dispatched read-only and RETURNS the map; the caller saves that text and hands
+// the path here. Without this path the orchestrator wrote `.teammates/<runId>/map.md` by hand
+// and `mapNotesWritable` — the validator that exists so the stamped file can be vouched for —
+// was called by nothing.
+test('map-notes --write validates the returned map before writing it', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const sha = g(['rev-parse', 'HEAD']).trim()
+    const returned = path.join(root, 'returned.md')
+    await writeFile(returned, `<!-- teammates-map run=r1 sha=${sha} -->\n\n# Map\n\nsrc owns orders.\n`, 'utf8')
+    lines.length = 0
+    const code = await runCli(['map-notes', '--run', 'r1', '--root', root, '--write', returned], io)
+    assert.equal(code, 0)
+    const written = await readFile(path.join(root, '.teammates', 'r1', 'map.md'), 'utf8')
+    assert.match(written, /owns orders/)
+  })
+})
+
+test('map-notes --write refuses a map whose header names another commit and writes nothing', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const returned = path.join(root, 'returned.md')
+    await writeFile(returned, '<!-- teammates-map run=r1 sha=0000000 -->\n\n# Map\n\nbody\n', 'utf8')
+    lines.length = 0
+    const code = await runCli(['map-notes', '--run', 'r1', '--root', root, '--write', returned], io)
+    assert.equal(code, 4)
+    assert.match(lines.join('\n'), /0000000/)
+    await assert.rejects(() => readFile(path.join(root, '.teammates', 'r1', 'map.md'), 'utf8'))
+  })
+})
+
+test('map-notes --write refuses a header-only map', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const sha = g(['rev-parse', 'HEAD']).trim()
+    const returned = path.join(root, 'returned.md')
+    await writeFile(returned, `<!-- teammates-map run=r1 sha=${sha} -->\n`, 'utf8')
+    lines.length = 0
+    assert.equal(await runCli(['map-notes', '--run', 'r1', '--root', root, '--write', returned], io), 4)
+    assert.match(lines.join('\n'), /no body beyond the header/)
+  })
+})
+
+// A written map is a stamped one: the very next `map-notes` call must report it current, or the
+// write produced a file the reader it was written for refuses.
+test('map-notes reports the map it just wrote as current', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const sha = g(['rev-parse', 'HEAD']).trim()
+    const returned = path.join(root, 'returned.md')
+    await writeFile(returned, `<!-- teammates-map run=r1 sha=${sha} -->\n\n# Map\n\nsrc owns orders.\n`, 'utf8')
+    assert.equal(await runCli(['map-notes', '--run', 'r1', '--root', root, '--write', returned], io), 0)
+    lines.length = 0
+    assert.equal(await runCli(['map-notes', '--run', 'r1', '--root', root], io), 0)
+    assert.match(lines.join('\n'), /current map notes/)
+  })
+})
+
+// A map returned for a different run carries a header that vouches for someone else's tree.
+test('map-notes --write refuses a map returned for another run', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const sha = g(['rev-parse', 'HEAD']).trim()
+    const returned = path.join(root, 'returned.md')
+    await writeFile(returned, `<!-- teammates-map run=other sha=${sha} -->\n\n# Map\n\nbody\n`, 'utf8')
+    lines.length = 0
+    assert.equal(await runCli(['map-notes', '--run', 'r1', '--root', root, '--write', returned], io), 4)
+    assert.match(lines.join('\n'), /claims run other/)
+    await assert.rejects(() => readFile(path.join(root, '.teammates', 'r1', 'map.md'), 'utf8'))
+  })
+})
+
+// A missing source file is the caller's mistake, not a crash: exit 4 with the path it tried.
+test('map-notes --write reports an unreadable source file rather than throwing', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const code = await runCli(['map-notes', '--run', 'r1', '--root', root, '--write', path.join(root, 'nope.md')], io)
+    assert.equal(code, 4)
+    assert.match(lines.join('\n'), /cannot read the returned map at .*nope\.md: ENOENT/)
+  })
+})
+
+// The write goes through a temp file and a rename, so a reader never finds a half-written map
+// under a header vouching for the whole of it. What this test pins is narrower than that: the
+// temp file is scaffolding, and none is left in the run directory for a later reader to trip
+// over. The atomicity itself is NOT pinned here and cannot be from a single process — swapping
+// the rename for a plain `writeFile` that cleans up after itself is not observable without a
+// concurrent reader. Stated plainly rather than implied by a test that does not reach it.
+test('map-notes --write leaves no temp file behind on success', async () => {
+  await withRepo(async ({ root, planPath, io, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const sha = g(['rev-parse', 'HEAD']).trim()
+    const returned = path.join(root, 'returned.md')
+    const body = `<!-- teammates-map run=r1 sha=${sha} -->\n\n# Map\n\nsrc owns orders.\n`
+    await writeFile(returned, body, 'utf8')
+    assert.equal(await runCli(['map-notes', '--run', 'r1', '--root', root, '--write', returned], io), 0)
+    const entries = await readdir(path.join(root, '.teammates', 'r1'))
+    assert.ok(entries.includes('map.md'), `map.md missing from ${JSON.stringify(entries)}`)
+    assert.deepEqual(entries.filter((e) => e.includes('.tmp')), [])
+    // The bytes are the agent's, unaltered: this path copies, it never authors.
+    assert.equal(await readFile(path.join(root, '.teammates', 'r1', 'map.md'), 'utf8'), body)
+  })
+})
+
+// The read path two blocks below already treats an unreadable map.md as "there is nothing here
+// you can use" and exits 4. The write path threw instead: `rename` onto a directory raises
+// EPERM/EISDIR, nothing caught it, and the CLI produced an unhandled-rejection stack and exit 1
+// — a code its documented 0/2/4 contract does not include — with the temp file left in place.
+test('map-notes --write reports an unwritable destination as a refusal, not a crash', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const sha = g(['rev-parse', 'HEAD']).trim()
+    // A directory where the notes file belongs: renaming onto it can never succeed.
+    await mkdir(path.join(root, '.teammates', 'r1', 'map.md'), { recursive: true })
+    const returned = path.join(root, 'returned.md')
+    await writeFile(returned, `<!-- teammates-map run=r1 sha=${sha} -->\n\n# Map\n\nbody\n`, 'utf8')
+    lines.length = 0
+    const code = await runCli(['map-notes', '--run', 'r1', '--root', root, '--write', returned], io)
+    assert.equal(code, 4)
+    assert.match(lines.join('\n'), /could not be written/)
+    // No scaffolding left in the run directory for a later reader to trip over.
+    assert.deepEqual((await readdir(path.join(root, '.teammates', 'r1'))).filter((e) => e.includes('.tmp')), [])
+  })
+})
+
+// What this pins is the ORDER: `mapNotesWritable` runs before anything is written, so a refusal
+// reaches the existing file not at all. It is not evidence about a torn write — no write is
+// attempted on this path — and it is not the atomicity test the one above declines to be.
+// Ordering is worth pinning on its own: moving the write above the validation makes stale notes,
+// still a record of what some agent said about some commit, get replaced by a map the validator
+// then refuses to vouch for.
+test('map-notes --write leaves existing notes byte-identical when it refuses', async () => {
+  await withRepo(async ({ root, planPath, io }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const notesPath = path.join(root, '.teammates', 'r1', 'map.md')
+    const before = '<!-- teammates-map run=r1 sha=0000000 -->\n\n# Map\n\nolder prose\n'
+    await writeFile(notesPath, before, 'utf8')
+    const returned = path.join(root, 'returned.md')
+    await writeFile(returned, '<!-- teammates-map run=r1 sha=1111111 -->\n\n# Map\n\nrejected prose\n', 'utf8')
+    assert.equal(await runCli(['map-notes', '--run', 'r1', '--root', root, '--write', returned], io), 4)
+    assert.equal(await readFile(notesPath, 'utf8'), before)
+  })
+})
+
+// `--write` with no value is the missing argument it looks like, never a request to write
+// nothing: `flags[f] === true` means the value was omitted everywhere else in this CLI too.
+test('map-notes --write with no value is refused as a missing argument', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const code = await runCli(['map-notes', '--run', 'r1', '--root', root, '--write'], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /--write takes the path/)
   })
 })
 
