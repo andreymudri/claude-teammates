@@ -11,6 +11,55 @@
 // together would turn "nobody reviewed phase 3" into "phase 3 is broken", which invites a retry
 // of work that was never wrong.
 
+// The per-phase counterpart of `gate --results`. `finish` recomputes every phase, and every
+// phase with an `agent` check comes back pending, because nothing runs an agent check — so on
+// this repository's own manifest `finish` could never report a run complete, which it proved on
+// run `codemap` against three phases that each held a CLI-computed PASS.
+//
+// Keyed by phase, because a run's phases are reviewed separately and a single flat list could
+// silently satisfy phase 3 with phase 1's review. `validateSuppliedPhases` below validates only
+// the SHAPE of the supplied file — that phases is an object keyed by canonical phase numbers,
+// each holding a results array. It does not know or enforce gate's rule that only `agent` and
+// `mcp` results may be supplied, or check the `status`/`source` of an individual result: that
+// is the caller's job, via `validateSuppliedResults` in scripts/cli.mjs, which must run over
+// each phase's results array before any of it is merged.
+export function suppliedForPhase(supplied, phase) {
+  if (!supplied || typeof supplied !== 'object') return []
+  const byPhase = supplied.phases ?? {}
+  const entry = byPhase[String(phase)]
+  return Array.isArray(entry?.results) ? entry.results : []
+}
+
+export function validateSuppliedPhases(supplied) {
+  if (supplied === null || supplied === undefined) return null
+  if (typeof supplied !== 'object' || Array.isArray(supplied)) {
+    return '--results must be a JSON object shaped { "phases": { "<n>": { "results": [...] } } }'
+  }
+  const byPhase = supplied.phases
+  if (byPhase === undefined) return '--results names no phases: expected { "phases": { "<n>": { "results": [...] } } }'
+  if (byPhase === null || typeof byPhase !== 'object' || Array.isArray(byPhase)) {
+    return '--results "phases" must be an object keyed by phase number'
+  }
+  for (const [phase, entry] of Object.entries(byPhase)) {
+    const asNumber = Number(phase)
+    if (!Number.isInteger(asNumber)) return `--results names a non-numeric phase: ${JSON.stringify(phase)}`
+    // A key that parses to a phase number but is not that number's OWN canonical string form
+    // ('01', '1.0', ' 1', '1e0', '0x1', or '' — which `Number('')` coerces to 0) would match
+    // nothing at lookup: `suppliedForPhase` looks up `String(phase)`, so only the canonical
+    // form is ever read back. Refusing here (rather than canonicalising at lookup) keeps this
+    // module's rule consistent — every other malformed shape above is refused, not guessed at
+    // — and the consequence is that the caller must supply keys exactly as `String(n)` renders
+    // them, or the evidence is rejected up front instead of silently going missing.
+    if (String(asNumber) !== phase) {
+      return `--results names a non-canonical phase key: ${JSON.stringify(phase)} (use ${JSON.stringify(String(asNumber))})`
+    }
+    if (!entry || typeof entry !== 'object' || !Array.isArray(entry.results)) {
+      return `--results phase ${phase} must be an object with a results array`
+    }
+  }
+  return null
+}
+
 export function summarizeRun(phaseResults = []) {
   const failedPhases = []
   const pendingPhases = []
@@ -38,7 +87,7 @@ export function renderRunSummary(runId, phaseResults = []) {
       ...(verdict.pending ?? []).map((n) => `pending: ${n}`),
       ...(verdict.skipped ?? []).map((n) => `skipped: ${n}`),
     ]
-    lines.push(`  phase ${entry.phase}   ${verdict.verdict ?? 'FAIL'}${blocking.length ? `   ${blocking.join(', ')}` : ''}`)
+    lines.push(`  phase ${entry.phase}   ${verdict.verdict ?? 'FAIL'}${entry.supplied ? ' (review supplied)' : ''}${blocking.length ? `   ${blocking.join(', ')}` : ''}`)
   }
 
   if (summary.complete) {

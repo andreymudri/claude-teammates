@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { summarizeRun, renderRunSummary } from '../scripts/finish.mjs'
+import { summarizeRun, renderRunSummary, suppliedForPhase, validateSuppliedPhases } from '../scripts/finish.mjs'
 
 const phase = (n, over = {}) => ({
   phase: n,
@@ -76,4 +76,67 @@ test('the rendered table says the run is verified when every phase passes', () =
 // read later as a record that once passed — the exact confusion status.gates already causes.
 test('the rendered table states that the verdicts were recomputed now', () => {
   assert.match(renderRunSummary('r1', [phase(1)]), /recomputed/i)
+})
+
+test('results are selected by phase, never shared between phases', () => {
+  const supplied = { phases: { 1: { results: [{ name: 'review', status: 'pass' }] }, 2: { results: [] } } }
+  assert.equal(suppliedForPhase(supplied, 1).length, 1)
+  assert.deepEqual(suppliedForPhase(supplied, 2), [])
+  assert.deepEqual(suppliedForPhase(supplied, 3), [])
+})
+
+test('a missing or malformed results file yields nothing rather than throwing', () => {
+  assert.deepEqual(suppliedForPhase(null, 1), [])
+  assert.deepEqual(suppliedForPhase({ phases: null }, 1), [])
+})
+
+test('a results file shaped as a flat list is refused, naming the shape expected', () => {
+  assert.match(validateSuppliedPhases([{ name: 'review' }]), /must be a JSON object shaped/)
+  assert.match(validateSuppliedPhases({ results: [] }), /names no phases/)
+})
+
+// "phases" itself must be an object keyed by phase number. `{"phases": []}` is the case that
+// matters most: an array has typeof 'object', so a validator that only checked typeof would
+// let it through, `Object.entries` on an array iterates its indices (or nothing, if empty), and
+// finish would silently supply nothing while telling the operator the check is still pending.
+// The assertion below matches text only this specific refusal contains — "keyed by phase
+// number" — so deleting the refusal and falling through to the flat-list message (which also
+// contains the word "phases") does not accidentally satisfy this test.
+test('"phases" that is not an object is refused, not silently emptied', () => {
+  assert.match(validateSuppliedPhases({ phases: [] }), /"phases" must be an object keyed by phase number/)
+  assert.match(validateSuppliedPhases({ phases: 'x' }), /"phases" must be an object keyed by phase number/)
+  assert.match(validateSuppliedPhases({ phases: null }), /"phases" must be an object keyed by phase number/)
+})
+
+test('a non-numeric phase key is refused', () => {
+  assert.match(validateSuppliedPhases({ phases: { default: { results: [] } } }), /non-numeric phase/)
+})
+
+// A key that parses to a number but is not that number's own canonical string form matches
+// nothing at lookup: `suppliedForPhase` looks up `byPhase[String(phase)]`, so '01' never
+// resolves to phase 1. Refusing here is the chosen behaviour (see the comment in finish.mjs),
+// so each of these must be rejected rather than silently accepted and then never found.
+test('a numeric phase key that is not its own canonical form is refused', () => {
+  for (const key of ['01', '1.0', ' 1', '1e0', '0x1', '']) {
+    assert.match(
+      validateSuppliedPhases({ phases: { [key]: { results: [] } } }),
+      /non-canonical phase key/,
+      `expected ${JSON.stringify(key)} to be refused`,
+    )
+  }
+})
+
+test('a phase entry without a results array is refused', () => {
+  assert.match(validateSuppliedPhases({ phases: { 1: {} } }), /results array/)
+})
+
+test('a well-formed file passes validation', () => {
+  assert.equal(validateSuppliedPhases({ phases: { 1: { results: [] } } }), null)
+})
+
+test('the summary marks a phase that passed on supplied results', () => {
+  const out = renderRunSummary('r1', [
+    { phase: 1, supplied: true, verdict: { verdict: 'PASS', failed: [], optionalFailed: [], skipped: [], pending: [] } },
+  ])
+  assert.match(out, /review supplied/)
 })
