@@ -518,6 +518,7 @@ test('the summary marks a phase that passed on supplied results', () => {
 - Modify: `agents/tm-implementer.md`
 - Modify: `templates/phase-workflow.js`
 - Test: `tests/agents.test.mjs`
+- Test: `tests/workflow-gen.test.mjs`
 
 - [ ] **Step 1:** Three of four fix-round agents in run `codemap` backgrounded the test suite and
       then parked waiting for a notification a subagent never receives. Each needed a manual nudge.
