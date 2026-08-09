@@ -4,7 +4,16 @@ import { mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile, readFile } from 
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { runCli, mergeSuppliedResults, parseConstraints, promptSafeDirectories } from '../scripts/cli.mjs'
+import {
+  runCli,
+  mergeSuppliedResults,
+  parseConstraints,
+  promptSafeDirectories,
+  isMissingPreviewRoot,
+  REQUIRED,
+  KNOWN_FLAGS,
+  UNIVERSAL_FLAGS,
+} from '../scripts/cli.mjs'
 
 const PLAN = `### Task 1: A
 
@@ -22,6 +31,47 @@ const PLAN = `### Task 1: A
 function git(cwd, args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8' })
 }
+
+// Whether a worktree is registered, asked by its own final path segment.
+//
+// NOT by matching the name against `git worktree list` output. That output carries more than
+// worktree paths — an abbreviated commit sha on every line, and the temp root's own mkdtemp
+// suffix inside every path — and a short name matches those just as happily as it matches a
+// worktree. Both sources have really fired: the sha `3a1b132`, and the main worktree line
+// `.../Temp/tm-cli-a1TUr0 822d690 [run-branch]`, each of which contains `a1`.
+//
+// It is worth the helper because the flake is two-sided. In the `doesNotMatch` direction it
+// fails a phase on correct behaviour; in the paired `match` direction it PASSES when the
+// worktree was wrongly removed, masking a real regression at the same rate it invents a fake
+// one. The porcelain form is used because there the path is the entire field.
+function worktreeLeaves(listing) {
+  return listing
+    .split('\n')
+    .filter((line) => line.startsWith('worktree '))
+    .map((line) => path.basename(line.slice('worktree '.length).trim().replace(/[\\/]+$/, '')))
+}
+
+function hasWorktree(cwd, leaf) {
+  return worktreeLeaves(git(cwd, ['worktree', 'list', '--porcelain'])).includes(leaf)
+}
+
+// The two shapes that actually broke the bare-substring match, pinned so a future
+// simplification of `worktreeLeaves` back to a substring test fails here rather than
+// intermittently in a phase gate.
+test('a worktree lookup is not fooled by a sha or a temp root containing the name', () => {
+  const hostile = [
+    // The temp root: its mkdtemp suffix contains `a1`, and so does the abbreviated sha.
+    'worktree C:/Users/andre/AppData/Local/Temp/tm-cli-a1TUr0',
+    'HEAD 3a1b132ff0e2a5f6c8d4b9e7a3c1d0f5e6b7a8c9',
+    'branch refs/heads/run-branch',
+    '',
+  ].join('\n')
+  assert.deepEqual(worktreeLeaves(hostile), ['tm-cli-a1TUr0'])
+  assert.equal(worktreeLeaves(hostile).includes('a1'), false, 'no worktree named a1 is registered here')
+
+  const withReal = `${hostile}worktree C:/Users/andre/AppData/Local/Temp/tm-cli-a1TUr0/.claude/worktrees/a1\nHEAD 3a1b132ff0e2a5f6c8d4b9e7a3c1d0f5e6b7a8c9\nbranch refs/heads/teammates/r1/T1\n\n`
+  assert.equal(worktreeLeaves(withReal).includes('a1'), true, 'a real worktree named a1 is still found')
+})
 
 // Every derived command (gate without --no-fleet, complete) needs a real git repository:
 // deriveContext reads the plan from the merge-base commit, not the working tree, so a
@@ -957,8 +1007,8 @@ test('prune-run --enforcement-only --yes will not remove a worktree on a verdict
     g(['commit', '--quiet', '-m', 'T1 work'])
     g(['checkout', '--quiet', 'run-branch'])
     g(['merge', '--no-ff', '--quiet', '-m', 'integrate T1', 'teammates/r1/T1'])
-    // Deliberately not `a1`: a bare two-character name also matches any abbreviated sha in
-    // `git worktree list` output.
+    // A descriptive name rather than `a1`; the lookup itself is anchored on the worktree's own
+    // path segment (see `hasWorktree`), so neither spelling can be matched by a sha.
     const wtPath = path.join(root, '.claude', 'worktrees', 'keep-me-t1')
     g(['worktree', 'add', '--quiet', wtPath, 'teammates/r1/T1'])
     lines.length = 0
@@ -970,7 +1020,7 @@ test('prune-run --enforcement-only --yes will not remove a worktree on a verdict
     assert.match(lines.join('\n'), /phase 1: skipped: test/)
     assert.match(lines.join('\n'), /not prunable/)
     // The worktree, and whatever uncommitted work is in it, is still there.
-    assert.match(g(['worktree', 'list']), /keep-me-t1/)
+    assert.equal(hasWorktree(root, 'keep-me-t1'), true)
     await stat(wtPath)
   })
 })
@@ -1017,7 +1067,7 @@ test('prune-run prunes a phase whose skip was supplied by the caller rather than
     // passed.
     assert.doesNotMatch(lines.join('\n'), /not prunable/)
     assert.doesNotMatch(lines.join('\n'), /without --enforcement-only/)
-    assert.doesNotMatch(g(['worktree', 'list']), /supplied-skip-t1/)
+    assert.equal(hasWorktree(root, 'supplied-skip-t1'), false)
   })
 })
 
@@ -1046,7 +1096,7 @@ test('prune-run without --enforcement-only prunes the phase whose checks all act
     lines.length = 0
     const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
     assert.equal(code, 0)
-    assert.doesNotMatch(g(['worktree', 'list']), /prune-me-t1/)
+    assert.equal(hasWorktree(root, 'prune-me-t1'), false)
   })
 })
 
@@ -1109,7 +1159,7 @@ test('prune-run is a dry run by default and removes nothing', async () => {
     assert.equal(code, 0)
     assert.match(lines.join('\n'), /dry run/i)
     // Still there: nothing was removed.
-    assert.match(g(['worktree', 'list']), /a1/)
+    assert.equal(hasWorktree(root, 'a1'), true)
   })
 })
 
@@ -1132,7 +1182,7 @@ test('prune-run with --yes removes this run’s worktree once its phase passes',
     lines.length = 0
     const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
     assert.equal(code, 0)
-    assert.doesNotMatch(g(['worktree', 'list']), /a1/)
+    assert.equal(hasWorktree(root, 'a1'), false)
   })
 })
 
@@ -1154,7 +1204,7 @@ test('prune-run refuses a worktree whose phase has no passing gate', async () =>
     const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
     assert.equal(code, 0)
     assert.match(lines.join('\n'), /no passing gate/i)
-    assert.match(g(['worktree', 'list']), /a1/)
+    assert.equal(hasWorktree(root, 'a1'), true)
   })
 })
 
@@ -5208,15 +5258,15 @@ test('an unknown flag is refused before a missing required argument is reported'
   })
 })
 
-// The table is a whitelist, so a command absent from it is a command whose flags go unchecked.
-// This is the tripwire for that: a new subcommand added to the CLI and not to KNOWN_FLAGS fails
-// here rather than silently swallowing every flag anyone ever mistypes at it.
+// KNOWN_FLAGS is a whitelist, so a command absent from it is a command whose flags go unchecked.
+// Every command in REQUIRED really does refuse an unknown flag — but REQUIRED is a hand-maintained
+// table too, so on its own this catches only a command added to REQUIRED and not to KNOWN_FLAGS.
+// The case that actually happens — a subcommand added to the dispatch chain and to NEITHER table —
+// is caught by the test below, which reads the dispatch itself. The two are kept apart on purpose:
+// this one proves the refusal HAPPENS, that one proves the tables COVER the dispatch.
 test('every command this CLI dispatches refuses a flag it does not read', async () => {
-  const commands = [
-    'init-run', 'gate', 'doctor', 'digest', 'claim', 'unclaim', 'workflow', 'complete', 'fix',
-    'record-fix-round', 'review-dispatch', 'collect-reviews', 'preview-check', 'plan-drift',
-    'finish', 'prune-run', 'rebuild-state', 'map', 'map-notes', 'config',
-  ]
+  const commands = Object.keys(REQUIRED)
+  assert.ok(commands.length > 0)
   await withRepo(async ({ root, io, lines }) => {
     for (const command of commands) {
       lines.length = 0
@@ -5227,12 +5277,54 @@ test('every command this CLI dispatches refuses a flag it does not read', async 
   })
 })
 
-test('every command still accepts the flags it documents', async () => {
+// The real tripwire, and the reason it reads SOURCE rather than another export: what decides
+// whether a subcommand exists is the chain of `command === '<name>'` branches in runCli, and
+// nothing about adding one forces a developer to touch any table. Derived from a third table
+// this could not see a command registered in no table at all — verified by inserting a real
+// dispatch branch `if (command === 'brand-new') { io.out('brand-new ran'); return 0 }` before
+// the `config` branch: the suite stayed green at 309/309 while `runCli(['brand-new',
+// '--totally-bogus', 'x'])` printed `brand-new ran` and returned 0, which is verbatim the
+// incident this tripwire exists for.
+//
+// Scanning source is uglier than an exported set, and it is chosen anyway because an exported
+// set is one more thing to keep in step with the dispatch — the exact failure being closed. It
+// collects EVERY `command === '<name>'` in the file, including the handful outside the dispatch
+// chain (`solo`, the init-run positional, the claim/unclaim task check): those all name real
+// commands, and a comparison against a name that is not a command is itself worth failing on.
+const CLI_SOURCE = await readFile(new URL('../scripts/cli.mjs', import.meta.url), 'utf8')
+
+function dispatchedCommands(source) {
+  return [...new Set([...source.matchAll(/command === '([^']+)'/g)].map((m) => m[1]))].sort()
+}
+
+test('both flag tables cover every command the dispatch chain answers to', () => {
+  const dispatched = dispatchedCommands(CLI_SOURCE)
+  assert.ok(dispatched.length > 0, 'the dispatch chain was not found — this test is reading the wrong thing')
+  // REQUIRED decides whether a missing argument is reported; KNOWN_FLAGS decides whether an
+  // unknown flag is refused. A command missing from either is unguarded in that respect, and a
+  // table entry naming no dispatched command is a stale one.
+  assert.deepEqual(dispatched, Object.keys(REQUIRED).sort())
+  assert.deepEqual(dispatched, Object.keys(KNOWN_FLAGS).sort())
+})
+
+// Named for what it now does. The previous version checked one flag on one command, which left
+// every declared flag droppable from its KNOWN_FLAGS entry with the suite green — `complete`'s
+// `--base` and `--phase` are both really read and were passed by no test in the entire suite.
+// Only the unknown-flag refusal is asserted here: what each flag DOES is other tests' business,
+// and giving them all dummy values means most commands exit early on something else.
+test('no command refuses a flag its own table declares', async () => {
   await withRepo(async ({ root, io, lines }) => {
-    lines.length = 0
-    // --root is universal and must never be refused.
-    const code = await runCli(['preview-check', '--root', root], io)
-    assert.notEqual(code, 2)
+    for (const [command, declared] of Object.entries(KNOWN_FLAGS)) {
+      for (const flag of [...declared, ...UNIVERSAL_FLAGS]) {
+        lines.length = 0
+        await runCli([command, `--${flag}`, 'x', '--root', root], io)
+        assert.doesNotMatch(
+          lines.join('\n'),
+          /does not take --/,
+          `${command} refused --${flag}, which its own KNOWN_FLAGS entry declares`,
+        )
+      }
+    }
   })
 })
 
@@ -5374,7 +5466,7 @@ test('prune-run prunes a review-only phase only when the review is supplied', as
 
     lines.length = 0
     await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
-    assert.match(g(['worktree', 'list']), /a1/, 'no review supplied: the worktree stays')
+    assert.equal(hasWorktree(root, 'a1'), true, 'no review supplied: the worktree stays')
 
     const results = path.join(root, 'r.json')
     await writeFile(results, JSON.stringify({
@@ -5386,7 +5478,7 @@ test('prune-run prunes a review-only phase only when the review is supplied', as
       io,
     )
     assert.equal(code, 0)
-    assert.doesNotMatch(g(['worktree', 'list']), /a1/)
+    assert.equal(hasWorktree(root, 'a1'), false)
   })
 })
 
@@ -5490,7 +5582,7 @@ test('prune-run reports a leaked merge preview and removes it with --yes', async
       assert.equal(await pathExists(preview), true, 'a dry run removes nothing')
       lines.length = 0
       await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
-      assert.doesNotMatch(g(['worktree', 'list']), /tm-preview-leak/)
+      assert.equal(hasWorktree(root, path.basename(preview)), false)
       assert.match(lines.join('\n'), /removed leaked preview/)
     } finally {
       await rm(preview, { recursive: true, force: true })
@@ -5528,7 +5620,7 @@ test('prune-run leaves the target of a preview’s junction intact', async () =>
         true,
         'removing a preview must never reach through its junctions into the link target',
       )
-      assert.doesNotMatch(g(['worktree', 'list']), /tm-preview-canary/)
+      assert.equal(hasWorktree(root, path.basename(preview)), false)
     } finally {
       await rm(preview, { recursive: true, force: true })
       await rm(target, { recursive: true, force: true })
@@ -5572,5 +5664,332 @@ test('doctor says so when it cannot derive the run anchor', async () => {
     // Still a report: the diagnostic must work in the states the gate refuses to run in.
     assert.match(out, /run r1/)
     assert.notEqual(code, 2)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// T13: the phase-2 findings against the CLI — the link sweep's failure branch and
+// its depth guard, the ENOENT deadlock, the flags no test ever passed, `doctor`'s
+// run-branch mismatch, and evidence supplied for a phase that does not exist.
+// ---------------------------------------------------------------------------
+
+// Registers a leaked-looking merge preview (detached, branchless, tm-preview-* under the temp
+// root) and hands its path to the body. Removed from disk afterwards whatever the body did, so
+// a test that deliberately leaves one unremovable does not leave it behind.
+async function withLeakedPreview(g, name, fn) {
+  const preview = path.join(tmpdir(), `tm-preview-${name}-${process.pid}-${Date.now()}`)
+  g(['worktree', 'add', '--detach', '--quiet', preview, 'HEAD'])
+  try {
+    await fn(preview)
+  } finally {
+    await rm(preview, { recursive: true, force: true })
+  }
+}
+
+async function writePruneManifest(root, g) {
+  await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+    phases: { default: { checks: [{ name: 'fileset', kind: 'fileset' }] } },
+  }), 'utf8')
+  g(['add', 'teammates.gate.json'])
+  g(['commit', '--quiet', '-m', 'manifest'])
+}
+
+// Deeper than PREVIEW_LINK_MAX_DEPTH (12), so the sweep reaches its guard. This is the only
+// shape a test can build that makes the sweep fail without mocking the filesystem, and it is a
+// real one: an unaccountable tree is exactly what the guard exists to refuse.
+async function makeTooDeepTree(dir) {
+  await mkdir(path.join(dir, ...Array.from({ length: 15 }, (_, i) => `d${i}`)), { recursive: true })
+}
+
+// The guard can be turned from a `throw` into a silent `return 0` with the rest of the suite
+// green, because nothing else builds a tree deeper than two levels — and a silent return is a
+// PARTIAL sweep followed by a removal, which is the exact failure the sweep exists to prevent.
+test('the preview link sweep refuses a tree it cannot account for rather than sweeping part of it', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writePruneManifest(root, g)
+    await withLeakedPreview(g, 'deep', async (preview) => {
+      await makeTooDeepTree(preview)
+      lines.length = 0
+      const code = await runCli(
+        ['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'],
+        io,
+      )
+      assert.equal(code, 1)
+      assert.match(lines.join('\n'), /nested deeper than 12 levels/)
+    })
+  })
+})
+
+// The failure branch itself. Replacing the whole `catch { failed += 1; io.out('left ... in
+// place'); continue }` with a bare swallow leaves the rest of the suite green — so nothing
+// asserted the one branch that turns a partial sweep into a refusal. Swallowed, a sweep that
+// throws falls through to `git worktree remove --force`, which follows a junction and destroys
+// the contents of its target. This is also the control for the ENOENT test below: an error that
+// is NOT a missing preview root still blocks, whatever it is.
+test('a preview whose links could not be swept is left in place and the command exits 1', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writePruneManifest(root, g)
+    await withLeakedPreview(g, 'unsweepable', async (preview) => {
+      await makeTooDeepTree(preview)
+      lines.length = 0
+      const code = await runCli(
+        ['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'],
+        io,
+      )
+      assert.equal(code, 1)
+      assert.match(lines.join('\n'), /left .* in place: its provisioned links could not be removed/)
+      // Still registered, and still on disk: nothing was removed on top of a sweep that failed.
+      assert.equal(hasWorktree(root, path.basename(preview)), true)
+      assert.equal(await pathExists(preview), true)
+    })
+  })
+})
+
+// The ENOENT deadlock. scripts/merge-preview.mjs removes the preview directory after a
+// `removeWorktree` whose failure it swallows, so "registered, directory gone" is a state the
+// tooling itself produces — and a temp cleaner produces it unaided. `git worktree list
+// --porcelain` still reports the path, so it still enters the prune plan; treating the sweep's
+// ENOENT as a failed sweep made `prune-run --yes` exit 1 forever with no way to clear it.
+test('prune-run clears a preview that is registered but whose directory is gone', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writePruneManifest(root, g)
+    await withLeakedPreview(g, 'vanished', async (preview) => {
+      await rm(preview, { recursive: true, force: true })
+      assert.equal(hasWorktree(root, path.basename(preview)), true, 'the registration outlives the directory')
+      lines.length = 0
+      const code = await runCli(
+        ['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'],
+        io,
+      )
+      assert.equal(code, 0)
+      assert.equal(hasWorktree(root, path.basename(preview)), false, 'the stale registration is cleared')
+      const out = lines.join('\n')
+      assert.match(out, /registered but its directory is gone/)
+      // The old message claimed links could not be removed from a directory that is not there.
+      assert.doesNotMatch(out, /provisioned links could not be removed/)
+    })
+  })
+})
+
+// The two clauses of `isMissingPreviewRoot`, pinned INDEPENDENTLY. Each can be deleted with the
+// whole suite green otherwise, because the only non-ENOENT sweep failure any end-to-end test
+// stages is the depth guard's plain `Error`, which carries no `.path` — so it is excluded by the
+// SURVIVING clause rather than by the mutated one. Both mutants are destructive: a `true` here
+// skips the `continue` and removes a worktree whose junctions were never swept.
+//
+// Unit tests, deliberately. An error whose `.code` is ENOENT and whose `.path` is a subdirectory
+// is a directory vanishing between the sweep's `readdir` and its recursive descent — a race no
+// test can stage deterministically — so pinning it end to end would mean pretending to a
+// reproduction that does not exist. The paired end-to-end test below stages the one shape that
+// IS reproducible, and shows a false answer here really does leave the worktree in place.
+function sweepError(code, failedPath) {
+  return Object.assign(new Error(`${code}: ${failedPath}`), { code, path: failedPath })
+}
+
+test('a sweep failure on the preview root that is not ENOENT is not read as a missing directory', () => {
+  const root = path.join(tmpdir(), 'tm-preview-clause')
+  // The directory IS there and could not be read: its links are unaccounted for, so it blocks.
+  for (const code of ['EACCES', 'EPERM', 'EBUSY', 'ENOTDIR']) {
+    assert.equal(isMissingPreviewRoot(sweepError(code, root), root), false, `${code} was read as a missing root`)
+  }
+  assert.equal(isMissingPreviewRoot(sweepError('ENOENT', root), root), true, 'the real missing-root case still passes')
+})
+
+test('an ENOENT from inside the preview tree is not read as a missing preview root', () => {
+  const root = path.join(tmpdir(), 'tm-preview-clause')
+  // A directory that disappeared mid-sweep, which says nothing about the root's own links.
+  assert.equal(isMissingPreviewRoot(sweepError('ENOENT', path.join(root, 'node_modules')), root), false)
+  assert.equal(isMissingPreviewRoot(sweepError('ENOENT', path.join(root, 'packages', 'web')), root), false)
+  // An error carrying no path at all cannot be shown to be about the root either.
+  assert.equal(isMissingPreviewRoot(Object.assign(new Error('boom'), { code: 'ENOENT' }), root), false)
+  // Trailing-separator and case differences in the SAME path are not a different path.
+  assert.equal(isMissingPreviewRoot(sweepError('ENOENT', `${root}${path.sep}`), root), true)
+})
+
+// The end-to-end half of the first clause, and the one shape that can be staged: a plain file
+// standing where the registered worktree directory was. git still lists that worktree, and
+// `readdir` fails ENOTDIR carrying the preview root's own path — so this is a sweep failure that
+// trips the path clause and NOT the code clause, which is what makes it the mutant's mirror.
+test('a preview root that cannot be read is left in place even though the sweep failed on the root itself', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writePruneManifest(root, g)
+    await withLeakedPreview(g, 'unreadable', async (preview) => {
+      await rm(preview, { recursive: true, force: true })
+      await writeFile(preview, 'not a directory', 'utf8')
+      lines.length = 0
+      const code = await runCli(
+        ['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'],
+        io,
+      )
+      assert.equal(code, 1)
+      assert.match(lines.join('\n'), /left .* in place: its provisioned links could not be removed/)
+      assert.doesNotMatch(lines.join('\n'), /registered but its directory is gone/)
+      assert.equal(hasWorktree(root, path.basename(preview)), true, 'nothing is removed on a sweep that failed')
+    })
+  })
+})
+
+// `complete --phase` names a MANIFEST block, and it is really read
+// (`checksForPhase(config, flags.phase ?? 'default')`) — but no test in the suite passed it, so
+// dropping it from KNOWN_FLAGS broke every caller with the suite green.
+test('complete --phase selects the manifest block it names', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: {
+        default: { checks: [{ name: 'strict', kind: 'command', run: 'node -e "process.exit(1)"' }] },
+        lenient: { checks: [{ name: 'noop', kind: 'command', run: 'node -e ""' }] },
+      },
+    }), 'utf8')
+    lines.length = 0
+    // The default block fails, so without the flag the task stays pending.
+    assert.equal(await runCli(['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--root', root], io), 4)
+    assert.equal((await readStatus(root, 'r1')).tasks.find((t) => t.id === 'T1').state, 'pending')
+
+    lines.length = 0
+    const code = await runCli(
+      ['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--phase', 'lenient', '--root', root],
+      io,
+    )
+    assert.equal(code, 0)
+    assert.match(lines.join('\n'), /T1 done/)
+    assert.equal((await readStatus(root, 'r1')).tasks.find((t) => t.id === 'T1').state, 'done')
+  })
+})
+
+// The same for `complete --base`, read through `derive`. Passing the branch the repository is
+// already on is the one base `derive` refuses — a gate run from the base branch is vacuous — so
+// the flag reaching `derive` is visible in the answer rather than merely accepted.
+test('complete --base reaches the derivation rather than being accepted and ignored', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(
+      path.join(root, 'teammates.gate.json'),
+      JSON.stringify({ phases: { default: { checks: [{ name: 'noop', kind: 'command', run: 'node -e ""' }] } } }),
+      'utf8',
+    )
+    // --base main is the branch derive would have chosen anyway: it passes.
+    lines.length = 0
+    assert.equal(
+      await runCli(['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--base', 'main', '--root', root], io),
+      0,
+    )
+    // --base run-branch is the branch the repository is checked out on, and derive refuses it.
+    lines.length = 0
+    const code = await runCli(
+      ['complete', '--run', 'r1', '--task', 'T2', '--plan', 'plan.md', '--base', 'run-branch', '--root', root],
+      io,
+    )
+    assert.equal(code, 4)
+    assert.match(lines.join('\n'), /cannot verify completion/)
+  })
+})
+
+// `doctor --run-branch` names the branch the report is ABOUT. When it disagrees with the branch
+// the main worktree is on, the anchor `derive` computed belongs to a different branch, and
+// applying it would compute `landed` against the wrong anchor — reporting a task branch as
+// integrated into a run branch it was never merged into. Both existing doctor tests leave
+// `--run-branch` unset, so only the equal case was exercised; changing the guard to `if (true)`
+// kept the suite green.
+test('doctor refuses an anchor derived from a branch other than the one it reports on', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--no-ff', '--quiet', '-m', 'integrate T1', 'teammates/r1/T1'])
+    // A second branch at the same tip: the report is asked about that one while the main
+    // worktree stays on run-branch.
+    g(['branch', 'other-run'])
+    lines.length = 0
+    await runCli(
+      ['doctor', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--run-branch', 'other-run', '--root', root],
+      io,
+    )
+    const out = lines.join('\n')
+    assert.match(out, /the report is about other-run but the main worktree is on run-branch/)
+    // Said out loud, never silently: without the anchor an integrated branch reads as carrying
+    // nothing, and a reader who is not told cannot know that.
+    assert.match(out, /could not derive the run anchor/)
+    assert.doesNotMatch(out, /T1 .*integrated/)
+  })
+})
+
+// Evidence is looked up per plan phase, so a block keyed to a phase the run does not have is
+// read by nobody — including one supplying a `command` result, which under a real phase is
+// refused with exit 2. Dropping it is the safe direction; saying nothing about it is not.
+test('finish reports a results block keyed to a phase the run does not have', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeReviewOnlyManifest(root)
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    const results = path.join(root, 'r.json')
+    await writeFile(results, JSON.stringify({
+      phases: {
+        1: { results: [{ name: 'review', kind: 'agent', status: 'pass', findings: [] }] },
+        // The plan has two phases. Phase 7 does not exist, and this block is a typo.
+        7: { results: [{ name: 'review', kind: 'agent', status: 'pass', findings: [] }] },
+      },
+    }), 'utf8')
+    lines.length = 0
+    await runCli(
+      ['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--results', results],
+      io,
+    )
+    const out = lines.join('\n')
+    assert.match(out, /--results supplies evidence for phase 7, which this run does not have/)
+    // The phases that do exist are still used, and the unmatched one changes no verdict.
+    assert.match(out, /phase 1 .*\(review supplied\)/)
+  })
+})
+
+test('prune-run reports a results block keyed to a phase the run does not have', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeReviewOnlyManifest(root)
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    const results = path.join(root, 'r.json')
+    await writeFile(results, JSON.stringify({
+      phases: { 9: { results: [{ name: 'review', kind: 'agent', status: 'pass', findings: [] }] } },
+    }), 'utf8')
+    lines.length = 0
+    const code = await runCli(
+      ['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--results', results],
+      io,
+    )
+    assert.equal(code, 0)
+    assert.match(lines.join('\n'), /--results supplies evidence for phase 9, which this run does not have/)
+  })
+})
+
+// A results file naming only real phases says nothing: the note must not fire on the ordinary
+// case, or it becomes noise a reader learns to skip past.
+test('a results file naming only real phases draws no unmatched-phase note', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeReviewOnlyManifest(root)
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    const results = path.join(root, 'r.json')
+    await writeFile(results, JSON.stringify({
+      phases: {
+        1: { results: [{ name: 'review', kind: 'agent', status: 'pass', findings: [] }] },
+        2: { results: [{ name: 'review', kind: 'agent', status: 'pass', findings: [] }] },
+      },
+    }), 'utf8')
+    lines.length = 0
+    await runCli(
+      ['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--results', results],
+      io,
+    )
+    assert.doesNotMatch(lines.join('\n'), /which this run does not have/)
   })
 })
