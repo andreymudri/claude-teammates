@@ -257,10 +257,25 @@ const RESULTS_COMMANDS = new Set(['gate', 'finish', 'prune-run'])
 //     produced "phase 1 PASS   skipped: test" and then "the run branch is ready to land", exit 0,
 //     where the identical state without the flag exits 1 — a run declared landable having
 //     verified nothing.
-//   - `prune-run` below refuses to PRUNE any phase whose verdict rests on a skipped check. A
-//     cheap verdict is enough to report; it is never enough to run `git worktree remove --force`
-//     over a teammate's uncommitted work.
+//   - `prune-run` below refuses to PRUNE any phase whose verdict rests on a check THIS FLAG
+//     skipped. A cheap verdict is enough to report; it is never enough to run
+//     `git worktree remove --force` over a teammate's uncommitted work.
 const ENFORCEMENT_ONLY_SKIP = 'skipped by --enforcement-only: this verdict reports the enforcement checks, not whether the merged tree works'
+
+// Marks a `skip` this flag synthesised, as opposed to one that arrived any other way. Three
+// sources produce a `skip`, and they are not the same act:
+//
+//   - this flag, which drops a check the caller did not ask about and nobody ran;
+//   - `--results`, where `skip` is one of the three statuses a caller may supply — a deliberate
+//     assertion that the check did not run and that they accept it, which is evidence given, not
+//     evidence missing;
+//   - `runChecks` itself, which skips `command` checks when the phase does not merge; there the
+//     `merge` check fails, so the phase never reaches a PASS to be pruned on anyway.
+//
+// Only the first is this flag's business. Refusing to prune on any of the three made a supplied
+// `skip` unprunable with no remedy the caller could follow — they never passed the flag they were
+// told to drop, and the only way forward would have been rewriting their `skip` as a `pass`.
+const ENFORCEMENT_ONLY_SKIPPED = Symbol('skipped by --enforcement-only')
 
 // The enforcement kinds a manifest can actually declare. `merge` is deliberately absent even
 // though it is enforced: the gate computes it for itself, `aggregateVerdict` excludes it from the
@@ -298,6 +313,10 @@ async function runPhaseChecks(checks, ctx, enforcementOnly) {
       status: 'skip',
       output: ENFORCEMENT_ONLY_SKIP,
       optional: c.optional === true,
+      // A symbol, not a string field: `--results` is parsed from JSON, which cannot express one,
+      // so no supplied result can ever claim to be a skip this flag synthesised. `aggregateVerdict`
+      // reports skips by name only, so the marker is read off the results list directly.
+      [ENFORCEMENT_ONLY_SKIPPED]: true,
     })),
   ]
 }
@@ -305,7 +324,14 @@ async function runPhaseChecks(checks, ctx, enforcementOnly) {
 // Printed once, before the first check runs, when the command checks are NOT being skipped. An
 // operator about to wait several minutes should be told that is what is happening and that a
 // cheaper answer exists, rather than watching a silent process and reaching for the timeout.
+//
+// Silent when there are none. The line exists to explain a wait, and with nothing to wait for it
+// explained nothing while recommending a flag the very next invocation would refuse: a manifest
+// with no `command` check to drop generally has no enforcement check either, and
+// `enforcementOnlyRefusal` exits 2 on it. This is not the "a skipped check is always reported"
+// rule — no check is being hidden here; there is no check.
 function announceCommandChecks(io, command, checkCount, phaseCount) {
+  if (checkCount === 0) return
   io.out(
     `${command}: running ${checkCount} command check${checkCount === 1 ? '' : 's'}`
     + ` across ${phaseCount} phase${phaseCount === 1 ? '' : 's'} — this is the slow part;`
@@ -1422,20 +1448,24 @@ export async function runCli(argv, io = { out: console.log }) {
       // This command reports a verdict only as a phase's presence in the prune plan below, so
       // without this the checks that did not run would leave no trace in the output at all.
       reportSkipped(io, phase, verdict)
-      // A PASS resting on a skipped check does not authorise a deletion. `--yes` below runs
-      // `git worktree remove --force`, which discards whatever a teammate has not committed and
-      // removes the worktree a `retry` needs to resume that teammate — and unlike a wrong report,
-      // that is not recoverable by running the command again with better flags. The same rule
-      // that makes this command recompute rather than read `status.gates` (see above) applies to
-      // its own cheap mode: prune on evidence, never on an absence of it.
+      // A PASS resting on a check THIS FLAG dropped does not authorise a deletion. `--yes` below
+      // runs `git worktree remove --force`, which discards whatever a teammate has not committed
+      // and removes the worktree a `retry` needs to resume that teammate — and unlike a wrong
+      // report, that is not recoverable by running the command again with better flags. The same
+      // rule that makes this command recompute rather than read `status.gates` (see above)
+      // applies to its own cheap mode: prune on evidence, never on an absence of it.
       //
-      // This also catches the merge-conflict skips `runChecks` produces on its own, where the
-      // `merge` check fails and the phase was never prunable anyway — so it only ever narrows.
+      // Scoped to this flag's own skips, and to nothing else. A `skip` supplied through
+      // `--results` is evidence the caller gave deliberately, and blocking on it offered a remedy
+      // they could not follow — see ENFORCEMENT_ONLY_SKIPPED for the three sources and why only
+      // one of them is this command's business.
       if (verdict.verdict !== 'PASS') continue
-      if ((verdict.skipped ?? []).length > 0) {
+      const flagSkipped = results.filter((r) => r[ENFORCEMENT_ONLY_SKIPPED] === true).map((r) => r.name)
+      if (flagSkipped.length > 0) {
         io.out(
-          `phase ${phase} is not prunable: its verdict rests on ${verdict.skipped.length} check(s) nobody ran`
-          + ` (${verdict.skipped.join(', ')}). Re-run without --enforcement-only to prune it.`,
+          `phase ${phase} is not prunable: --enforcement-only left ${flagSkipped.length} check(s) unrun`
+          + ` (${flagSkipped.join(', ')}), and a worktree is removed only on checks that ran.`
+          + ' Re-run without --enforcement-only to prune it.',
         )
         continue
       }
