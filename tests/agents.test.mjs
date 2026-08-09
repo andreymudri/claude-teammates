@@ -41,6 +41,39 @@ test('the implementer is bound to its declared files and the result schema', asy
   }
 })
 
+test('the implementer must run its tests in the foreground', async () => {
+  const { doc } = await agent('tm-implementer.md')
+  assertStatement(
+    doc,
+    /Run the test command in the FOREGROUND and wait for it/,
+    'implementer must be told to wait on its own test run',
+  )
+  assertStatement(
+    doc,
+    /nothing notifies you when a backgrounded command finishes/,
+    'the reason must be stated, not just the rule',
+  )
+})
+
+test('the implementer reports blocked rather than improvising a branch', async () => {
+  const { doc } = await agent('tm-implementer.md')
+  assertStatement(
+    doc,
+    /If your task's branch is checked out in another worktree, report status: "blocked" naming it/,
+    'implementer must not invent a branch when its own is held',
+  )
+  assertStatement(
+    doc,
+    /work anywhere but teammates\/<runId>\/<taskId> is invisible to it and merges as a no-op/,
+    'the consequence of working on the wrong ref must be stated',
+  )
+})
+
+test('the implementer returns repo-relative paths', async () => {
+  const { doc } = await agent('tm-implementer.md')
+  assert.match(doc.text, /repo-relative, never absolute worktree paths/)
+})
+
 // The read-only rule is prose, and prose is not enforcement: a reviewer holding the full tool
 // set can do exactly what the rule forbids. Narrowing the declared tools removes the editing
 // tools outright. It does not close the class — Bash is required for the git reads a diff

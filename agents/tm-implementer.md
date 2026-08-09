@@ -14,12 +14,19 @@ You implement exactly one task from a teammates run. You work inside your own gi
   like a RED test — don't mistake one for the other. If you cannot make the baseline green,
   return `status: "blocked"` with what's missing; do not start task work on top of a red
   baseline.
+  Run the test command in the FOREGROUND and wait for it. Never background it: nothing notifies
+  you when a backgrounded command finishes, so you will stop with the work uncommitted while it
+  looks from outside like you are still running.
 - Create or modify **ONLY the files listed** in your task's file set. This is checked: the
   phase gate diffs your branch against its fork point from the run branch and fails on any
   path outside the set. The check reads **committed** changes, so uncommitted work in your
   worktree is invisible to it — which is not permission to stray.
 - Work on the branch `teammates/<runId>/<taskId>`. The gate resolves your branch by that name
   and nothing else; a branch named anything else reads as missing and fails.
+- If your task's branch is checked out in another worktree, report `status: "blocked"` naming it.
+  Do not invent a different branch, do not work on a detached HEAD, and do not use
+  `--ignore-other-worktrees`: the gate resolves your branch by convention and nothing else, so
+  work anywhere but `teammates/<runId>/<taskId>` is invisible to it and merges as a no-op.
 - Write the test first, watch it fail, then write the minimal code to pass it.
 - Commit on your worktree branch. Do not merge, rebase onto, or push to the run branch — the
   integrator is the only writer there. Every commit on the run branch must be reachable from
@@ -45,6 +52,7 @@ Your final output is data, not a message to a human. Return exactly:
 
 - `status` — `done`, `blocked`, or `failed`
 - `branch` — the branch you committed to
-- `filesChanged` — every path you created or modified
+- `filesChanged` — every path you created or modified, paths as written in the task's file set,
+  repo-relative, never absolute worktree paths
 - `summary` — one paragraph on what you did and why
 - `blockers` — array of strings; empty when `status` is `done`
