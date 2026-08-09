@@ -103,6 +103,9 @@ test('phase-gate says plainly what a none decision means and does not mean', asy
       /the decision comes back none; that is incidental, not guaranteed/i,
       /a none decision means the verdict you passed is not the one that failed/i,
       /Integrate only on a freshly recomputed PASS, never on none/i,
+      // Reviewed: this documents the `fix` exit-code contract (Exit 0 covers all three
+      // decisions), not the semantics of a `none` decision itself — unrelated to the claim above.
+      /Exit 0 covers none, retry, and escalate alike, so the exit status never tells them apart/i,
     ],
   })
   assertStatement(
@@ -158,12 +161,18 @@ test('phase-gate requires the fix decision to use this pass’s verdict, never t
   })
 })
 
-test('phase-gate marks the fix-decision invocation as pending, not missing', async () => {
+test('phase-gate documents the real fix invocation and its exit-code contract', async () => {
   const { doc } = await skill('phase-gate')
-  assertClaim(doc.section('On FAIL'), {
-    label: 'pending invocation',
-    claim: /The exact invocation and that exit-0-for-all-three contract are specified by the task that adds the decision subcommand/i,
-    then: /Until then the command is not there to run: pending, not missing/i,
+  const section = doc.section('On FAIL')
+  assertCode(section, /fix --run <runId> --phase <n> --verdict <path>/, 'phase-gate must show the fix invocation')
+  assertClaim(section, {
+    label: 'fix exit codes',
+    claim: /^--verdict names a file holding that same JSON, and --phase must match its own phase field/i,
+    then: /^Exit 1 means the run has no plan at all or the verdict file could not be read: an argument error, not a decision/i,
+    subject: /\bexit 0\b|\bexit 1\b|\bexit 2\b/i,
+    allow: [
+      /^Exit 0 covers none, retry, and escalate alike, so the exit status never tells them apart/i,
+    ],
   })
 })
 
@@ -553,4 +562,48 @@ test('fleet-lifecycle claims only what map-notes verifies, and names every exit 
     claim: /^Exit 2 means git could not be read, so no comparison happened at all — read that as unknown, never as current\.$/i,
     subject: /\bexit 2\b/i,
   })
+})
+
+test('fleet-lifecycle states the orchestrator writes the map, not the agent', async () => {
+  const { doc } = await skill('fleet-lifecycle')
+  const section = doc.section('Map notes')
+  assertStatement(
+    section,
+    /it RETURNS the map and you write it to that path yourself/,
+    'the skill must not tell a read-only agent to write a file',
+  )
+  assertClaim(section, {
+    label: 'map notes writer',
+    claim: /A teammate never writes this file, and nothing enforced ever reads it/,
+    subject: /writes this file|map\.md/i,
+    allow: [
+      /it RETURNS the map and you write it to that path yourself/,
+      /A killed gate cannot run its own cleanup/,
+    ],
+  })
+})
+
+test('phase-gate states that findings are stamped with the tips they judged', async () => {
+  const { doc } = await skill('phase-gate')
+  const section = doc.section('Finish the pending checks')
+  assertStatement(
+    section,
+    /refuses a file whose stamp names different tips/,
+    'the skill must state that stale findings are refused',
+  )
+  assertStatement(
+    section,
+    /findings about the old tree are not findings about this one/,
+    'the reason must be stated, not just the rule',
+  )
+})
+
+test('phase-gate documents finish taking per-phase results', async () => {
+  const { doc } = await skill('phase-gate')
+  assert.match(doc.text, /phases.*1.*results/s)
+  assertStatement(
+    doc,
+    /A phase that passed on supplied results is marked \(review supplied\) in its output/,
+    'a reader must be able to tell a recomputed pass from a reported one',
+  )
 })

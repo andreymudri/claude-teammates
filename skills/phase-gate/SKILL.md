@@ -62,6 +62,10 @@ those you execute:
   absent file is a clean lens — a missing result is never an empty findings array, and the
   check stays `pending`, which the CLI scores as FAIL.
 
+  Each findings file carries a `stamp` naming the phase, the lens and the branch tips it judged.
+  `collect-reviews` refuses a file whose stamp names different tips — a fix round moves a branch,
+  and findings about the old tree are not findings about this one.
+
   To rebuild the results file from those drops rather than by hand:
 
     node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" collect-reviews --run <runId> --root <project root> [--phase <name>]
@@ -92,6 +96,11 @@ Only `agent` and `mcp` checks may be supplied; a `command`, `fileset`, or `owner
 rejected, because those are computed and supplying one would be a way to hand the gate a passing
 enforcement check. The verdict is recomputed from the merged set, so a recorded PASS is always
 CLI-computed — never hand-written into `status.json`.
+
+`finish` recomputes every phase, and every `agent` check comes back pending because nothing runs
+one. Hand it the same results, keyed by phase: `{ "phases": { "1": { "results": [...] } } }`. A
+phase that passed on supplied results is marked `(review supplied)` in its output, so a reader
+can tell a recomputed pass from a reported one.
 
 ## What the `merge` check does
 
@@ -141,9 +150,13 @@ run root, and the verdict JSON you just produced; it prints one of three decisio
 `retry`, or `escalate` — and exits 0 for all three, so read the `decision` field rather than the
 exit status.
 
-The exact invocation and that exit-0-for-all-three contract are specified by the task that adds
-the decision subcommand — plan task T8, phase 2 — and are documented alongside it once it lands.
-Until then the command is not there to run: **pending, not missing.**
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" fix --run <runId> --phase <n> --verdict <path> --root <project root>
+
+`--verdict` names a file holding that same JSON, and `--phase` must match its own `phase` field —
+a mismatch exits 2 rather than adjudicating the wrong phase's findings, and so does a malformed
+`teammates.gate.json`. Exit 1 means the run has no plan at all or the verdict file could not be
+read: an argument error, not a decision. Exit 0 covers `none`, `retry`, and `escalate` alike, so
+the exit status never tells them apart — only the `decision` field does.
 
 **The verdict you hand it must be the JSON this gate printed in this same pass, and must never be
 read back from `.teammates/`.** The only verdict persisted on disk lives in

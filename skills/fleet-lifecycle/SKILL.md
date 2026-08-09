@@ -21,7 +21,7 @@ has to be gated again before anything is reported done.
 ## Map notes
 
 For what a target project's modules are *for* — the part git statistics cannot supply — a run may
-carry `.teammates/<runId>/map.md`, written by an Explore agent:
+carry hand-written notes on it, verified and refreshed with:
 
     node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" map-notes --run <runId> --root <project root>
 
@@ -31,10 +31,16 @@ observes which tree that agent actually read, and nothing detects a header edite
 Exit 4 means there are none, they carry no header at all, they name a different commit, they were
 written for a different run, or the file could not be read, and it prints the exact prompt to
 dispatch. Exit 2 means git could not be read, so no comparison happened at all — read that as
-unknown, never as current. Dispatch that agent yourself: a teammate never writes this file, and
-nothing enforced ever reads it. The directory names that
+unknown, never as current. Dispatch a read-only agent with the printed prompt; it RETURNS the map
+and you write it to that path yourself, after checking the header it returned names this run and
+this commit. A teammate never writes this file, and nothing enforced ever reads it. The directory
+names that
 prompt carries are filtered — anything that is not a plain path segment is dropped — because that
 prompt is handed to an agent that has Bash and is gated by nothing.
+
+A killed gate cannot run its own cleanup, so `prune-run` also reports leaked merge-preview
+worktrees — the gate's own scratch worktrees under the system temp directory — and removes them
+with `--yes`.
 
 ## Operations
 
