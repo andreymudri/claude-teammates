@@ -26,7 +26,7 @@ function insideRepo(worktreePath, repoRoot) {
   return target !== root && target.startsWith(`${root}/`)
 }
 
-export async function collectDoctorReport({ git, runId, runBranch, baseBranch, tasks = [], repoRoot = null }) {
+export async function collectDoctorReport({ git, runId, runBranch, baseBranch, tasks = [], repoRoot = null, anchorSha = null, runSha: passedRunSha = null }) {
   const problems = []
 
   const mainBranch = await git.currentBranch()
@@ -53,12 +53,12 @@ export async function collectDoctorReport({ git, runId, runBranch, baseBranch, t
   // report about everything else rather than a single failure standing in for all of it.
   let baseSha = null
   if (baseBranch && await git.branchExists(baseBranch)) baseSha = await git.resolveRef(`refs/heads/${baseBranch}`)
-  const runSha = await git.branchExists(runBranch) ? await git.resolveRef(`refs/heads/${runBranch}`) : null
+  const runSha = passedRunSha ?? (await git.branchExists(runBranch) ? await git.resolveRef(`refs/heads/${runBranch}`) : null)
 
   const taskReports = []
   for (const task of tasks) {
     const branch = resolveTaskBranch(task, runId)
-    const entry = { id: task.id, branch, exists: false, tip: null, changed: [], sideDoor: false }
+    const entry = { id: task.id, branch, exists: false, tip: null, changed: [], sideDoor: false, landed: false }
     try {
       if (!branch || !(await git.branchExists(branch))) {
         problems.push(`${task.id}: branch ${branch} does not exist — the work is not where the gate looks for it`)
@@ -74,7 +74,16 @@ export async function collectDoctorReport({ git, runId, runBranch, baseBranch, t
       if (runSha) {
         const forkPoint = await git.mergeBase(runSha, sha)
         entry.changed = await git.changedFiles({ base: forkPoint, branch: sha })
-        if (entry.changed.length === 0) {
+        // A landed branch's fork point IS its tip, so its diff is empty however much work it
+        // carried — reporting that as a problem makes every re-inspection of an integrated
+        // phase look broken. "On the run branch" alone is not enough: the anchor and everything
+        // before it are ancestors too, so a branch parked at the anchor — a teammate that
+        // committed elsewhere and left the conventional ref where it started — would read as
+        // landed and escape the very check this is.
+        entry.landed = anchorSha
+          ? (await git.isAncestor(sha, runSha)) && !(await git.isAncestor(sha, anchorSha))
+          : false
+        if (entry.changed.length === 0 && !entry.landed) {
           problems.push(`${task.id}: branch ${branch} has no file changes past its fork point — the work landed on another ref and this task would merge as a no-op`)
         }
         if (baseSha && await git.isAncestor(sha, baseSha) && !(await git.isAncestor(sha, runSha))) {
@@ -107,7 +116,9 @@ export function renderDoctor(report) {
     lines.push('tasks')
     for (const t of report.tasks) {
       if (!t.exists) { lines.push(`  ${t.id}  ${t.branch}  MISSING`); continue }
-      const files = t.changed.length === 0 ? 'NO CHANGES' : `${t.changed.length} file(s)`
+      const files = t.landed
+        ? 'integrated'
+        : (t.changed.length === 0 ? 'NO CHANGES' : `${t.changed.length} file(s)`)
       lines.push(`  ${t.id}  ${t.branch}  ${files}${t.sideDoor ? '  SIDE DOOR' : ''}`)
       lines.push(`      ${t.tip}`)
     }

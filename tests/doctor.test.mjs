@@ -146,3 +146,40 @@ test('renderDoctor says so plainly when nothing is wrong', () => {
   })
   assert.match(out, /no problems/i)
 })
+
+test('a branch that landed on the run branch is reported integrated, not as contributing nothing', async () => {
+  const report = await collectDoctorReport({
+    git: fakeGit({
+      changedFiles: async () => [],
+      // On the run branch and past the anchor: landed.
+      isAncestor: async (_sha, target) => target === 'runSha1',
+    }),
+    runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, tasks: [T1],
+    runSha: 'runSha1', anchorSha: 'anchorSha1',
+  })
+  assert.equal(report.tasks[0].landed, true)
+  assert.deepEqual(report.problems, [])
+})
+
+// The distinction the landed test exists for: a branch sitting AT the anchor is an ancestor of
+// the run branch too, and it is exactly the stale-base shape.
+test('a branch parked at the anchor is still reported as contributing nothing', async () => {
+  const report = await collectDoctorReport({
+    git: fakeGit({ changedFiles: async () => [], isAncestor: async () => true }),
+    runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, tasks: [T1],
+    runSha: 'runSha1', anchorSha: 'anchorSha1',
+  })
+  assert.equal(report.tasks[0].landed, false)
+  assert.match(report.problems.join('\n'), /no file changes/)
+})
+
+test('renderDoctor prints integrated rather than NO CHANGES for a landed task', () => {
+  const out = renderDoctor({
+    runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, mainBranch: RUN_BRANCH,
+    dirty: [], worktrees: [],
+    tasks: [{ id: 'T1', branch: 'teammates/r1/T1', exists: true, tip: 'abc work', changed: [], sideDoor: false, landed: true }],
+    problems: [],
+  })
+  assert.match(out, /integrated/)
+  assert.doesNotMatch(out, /NO CHANGES/)
+})
