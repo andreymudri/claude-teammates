@@ -1068,3 +1068,131 @@ test('map-notes --write refuses a header-only map', async () => {
   })
 })
 ```
+
+### Task 11: decide landed by the merge that carried the branch, not by ancestry
+
+**Files:**
+- Modify: `scripts/git.mjs`
+- Modify: `scripts/doctor.mjs`
+- Modify: `scripts/gate-runner.mjs`
+- Test: `tests/git.test.mjs`
+- Test: `tests/doctor.test.mjs`
+- Test: `tests/gate-runner.test.mjs`
+
+**Depends:** T9
+
+**Model:** capable
+
+T1 and T9 each added a `sha !== runSha` exclusion to the landed test, and each documented the
+same residual: a branch parked at an INTERMEDIATE post-anchor commit on the run branch still
+reads as landed. That shape is not exotic. A teammate branches with
+`git checkout -B <task> <run branch>`, the integrator then merges a sibling and the run tip
+moves, and the branch is now parked at a post-anchor commit that is no longer the tip — so the
+tip exclusion does not fire, `landed` is true, and the "contributes no file changes" complaint
+is suppressed for a task that would merge as a no-op. In `runFilesetCheck` that is an enforcing
+check passing work that is not there.
+
+The residual exists because ancestry is the wrong question. "Is this sha reachable from the run
+branch" is true of every commit the run branch has ever passed through. The question worth
+asking is whether the run branch merged THIS BRANCH: whether some merge commit past the anchor
+names this sha as a parent other than its first. That is answerable with one `rev-list`, and it
+subsumes both exclusions already added rather than adding a third.
+
+- [ ] **Step 1:** Add a primitive to `scripts/git.mjs`, beside `isAncestor`. It returns the set
+      of shas the run branch merged in as secondary parents, past the anchor:
+
+```js
+    async mergedBranchTips({ runSha, anchorSha }) {
+      if (!isNonEmptyString(runSha) || !isNonEmptyString(anchorSha)) {
+        throw new GitError(`mergedBranchTips requires non-empty refs, got runSha=${JSON.stringify(runSha)} anchorSha=${JSON.stringify(anchorSha)}`)
+      }
+      // --parents prints "<commit> <parent1> <parent2>..."; everything past the first parent is
+      // a branch this merge carried in. --min-parents=2 keeps only merges, and --not <anchor>
+      // bounds the walk to this run rather than the repository's whole history.
+      const args = ['rev-list', '--min-parents=2', '--parents', '--end-of-options', runSha, '--not', anchorSha]
+      const out = await run(args)
+      const tips = new Set()
+      for (const line of out.split('\n')) {
+        const parts = line.trim().split(/\s+/).filter(Boolean)
+        for (const parent of parts.slice(2)) tips.add(parent)
+      }
+      return tips
+    },
+```
+
+      Match the surrounding style for invoking git: use whatever helper the other read-only
+      methods in this file use (`run` / `runRaw`) rather than introducing a new one, and follow
+      their error handling. Pin it in `tests/git.test.mjs` against a real repository: a `--no-ff`
+      merge puts the merged branch's tip in the set; a fast-forward puts nothing in it; a commit
+      on the run branch that is not a merge parent is not in the set; an octopus merge
+      contributes every parent past the first.
+
+- [ ] **Step 2:** In `scripts/doctor.mjs`, replace the three-clause `landed` expression with a
+      lookup in that set. Compute the set once per report, not once per task — it is one
+      `rev-list` for the whole run, and calling it per task turns a report over ten tasks into
+      ten walks:
+
+```js
+        entry.landed = anchorSha ? mergedTips.has(sha) : false
+```
+
+      Keep the `anchorSha ? ... : false` shape exactly as it is. An un-wired caller that supplies
+      no anchor must keep getting `false` and the old behaviour, which is what makes this change
+      safe to land before every caller passes one.
+
+      `scripts/doctor.mjs` is a pure module and must not gain git access: the set is computed by
+      the caller and passed in as data, the same way `anchorSha` and `runSha` already are.
+
+- [ ] **Step 3:** Replace the comment block above it. T1 wrote an honest description of a limit
+      this task removes, so leaving it in place would be prose overstating the opposite way —
+      claiming a hole that is now closed. State what the new test decides, and state what remains
+      genuinely open, which is now a different and much narrower list:
+
+      - A branch integrated by FAST-FORWARD leaves no merge commit and so no secondary parent,
+        and reads as not landed. That is correct for this check's purpose — a fast-forwarded
+        branch with real work has a non-empty diff and never reaches the landed test at all — and
+        `scripts/enforce.mjs` already reports fast-forward integration of a task branch as a
+        violation in its own right. Say both halves; do not imply this check detects it.
+      - A SQUASH merge likewise carries no secondary parent. The plugin's integrator never
+        squashes, so this is a statement about a repository someone else merged into, not about a
+        run this tool drove.
+      - Two branches whose tips are the identical sha are indistinguishable here. Nothing in this
+        design can tell them apart, because there is nothing to tell apart.
+
+- [ ] **Step 4:** Apply the same replacement to `runFilesetCheck` in `scripts/gate-runner.mjs`.
+      This is the enforcing path, so it is the reason the task exists: compute the set once in
+      the check's context and replace the `landed` expression with the same lookup. T9 will have
+      just added the `sha !== runSha` exclusion here and a comment describing the intermediate
+      residual as accepted; both go, replaced by the set lookup and the Step 3 wording. Keep the
+      two files' descriptions of the remaining limits consistent with each other, as T9 required.
+
+- [ ] **Step 5:** Add to `tests/gate-runner.test.mjs`, beside T9's run-tip test, the case neither
+      exclusion caught — a branch parked at a post-anchor commit that is NOT the tip:
+
+```js
+// The case the tip exclusion cannot see. The integrator merged a sibling after this branch was
+// created, so the run tip moved past the commit the branch is parked at: it is past the anchor,
+// it is not the tip, and it carries nothing. Only "was this branch merged in" tells it apart.
+test('runFilesetCheck fails a branch parked at an intermediate post-anchor commit', async () => {
+  const git = fakeGit({
+    branchExists: async () => true,
+    changedFiles: async () => [],
+    isAncestor: async (_sha, target) => target === 'runSha2',
+    resolveRef: async () => 'runSha2',
+    mergedBranchTips: async () => new Set(['someOtherBranchTip']),
+  })
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = { git, runId: RUN_ID, runSha: 'runSha2', anchorSha: 'anchorSha1', tasks: [T1_TASK], currentPhase: 1, phaseError: null }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.match(res.output, /contributes no file changes/)
+})
+```
+
+      Verify this test fails against T9's code before your change and passes after. Then verify
+      that T9's run-tip test and the existing "does not report an already-integrated branch as
+      contributing nothing" test both still pass — the latter must have its `fakeGit` return a
+      set CONTAINING the branch tip, since that is now what makes a branch integrated. Updating
+      that fixture is expected and is not a weakening of the test.
+
+- [ ] **Step 6:** Run the full suite in the FOREGROUND and report the counts.
