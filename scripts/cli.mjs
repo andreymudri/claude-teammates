@@ -150,7 +150,11 @@ async function readPackage(root) {
   }
 }
 
-const REQUIRED = {
+// Exported so the suite can DERIVE the command list rather than restate it. A hardcoded list
+// catches a command REMOVED from these tables and not one ADDED without an entry — and adding is
+// the direction that happens, which is how a 21st subcommand could swallow an unknown flag and
+// exit 0 with the suite green.
+export const REQUIRED = {
   'init-run': ['run'],
   gate: ['run', 'plan'],
   doctor: ['run', 'plan'],
@@ -190,8 +194,8 @@ const REQUIRED = {
 // This is a WHITELIST, and a command absent from it is unchecked — so a new command must be
 // added here as well as to REQUIRED, or its flags go unvalidated. Every command this CLI
 // dispatches is listed, including the ones taking nothing at all.
-const UNIVERSAL_FLAGS = new Set(['root'])
-const KNOWN_FLAGS = {
+export const UNIVERSAL_FLAGS = new Set(['root'])
+export const KNOWN_FLAGS = {
   'init-run': ['run'],
   gate: ['run', 'plan', 'base', 'phase', 'no-fleet', 'results'],
   doctor: ['run', 'plan', 'base', 'run-branch'],
@@ -615,6 +619,26 @@ async function readSuppliedPhases(flags, io) {
   return parsed
 }
 
+// A supplied block keyed to a phase the run does not have is read by NOBODY: evidence is looked
+// up with `suppliedForPhase(supplied, phase)` for phases taken from the plan, so a key naming no
+// real phase is never consulted — including one carrying a `command` result, which under a real
+// phase is refused with exit 2. An operator with a typo'd phase key would otherwise get a pending
+// report and no hint their evidence was discarded.
+//
+// Reported, never refused. Dropping the block is already the safe direction — unmatched evidence
+// changes no verdict — so this exists only so the output stops lying by omission.
+function reportUnmatchedSuppliedPhases(io, supplied, phases) {
+  const byPhase = supplied?.phases
+  if (!byPhase || typeof byPhase !== 'object') return
+  const real = new Set(phases.map((p) => String(p)))
+  const unmatched = Object.keys(byPhase).filter((key) => !real.has(key))
+  if (unmatched.length === 0) return
+  io.out(
+    `--results supplies evidence for phase ${unmatched.join(', ')}, which this run does not have`
+    + ` (its phases are ${phases.join(', ') || 'none'}) — that evidence was not used`,
+  )
+}
+
 // How deep the link sweep below will walk. A `preview.link` entry is a repo-relative directory
 // path, so a handful of segments covers every shape the manifest can declare; reaching the limit
 // means a tree this cannot vouch for, and it THROWS rather than returning quietly — a partial
@@ -655,6 +679,29 @@ async function unlinkPreviewLinks(dir, depth = 0) {
     if (info.isDirectory()) removed += await unlinkPreviewLinks(entry, depth + 1)
   }
   return removed
+}
+
+// "The preview root is not there at all", told apart from every other sweep failure.
+//
+// It is a state that really occurs: scripts/merge-preview.mjs removes the directory after
+// `git.removeWorktree(dir).catch(() => {})`, so a removal that failed leaves the worktree
+// registered with its directory gone, and a temp cleaner produces the same state unaided.
+// `git worktree list --porcelain` still reports that path, so it still enters `plan.previews`,
+// and the sweep's `readdir` then throws ENOENT. Treated as a failed sweep, that deadlocks:
+// `prune-run --yes` exits 1 on every subsequent run and the stale registration — which
+// `git worktree remove --force` clears happily, missing directory and all — can never be
+// cleared. The printed reason would be false as well: a directory that is not there holds no
+// links to sweep, so nothing is being left in place to protect a link target.
+//
+// Narrow on purpose. Only ENOENT, and only on the ROOT the sweep was asked to walk: an ENOENT
+// deeper in the tree is a directory disappearing mid-sweep, which is exactly the concurrent
+// mutation the sweep must not remove a worktree on top of, and every other error code still
+// blocks.
+function isMissingPreviewRoot(err, dir) {
+  return Boolean(err)
+    && err.code === 'ENOENT'
+    && typeof err.path === 'string'
+    && path.resolve(err.path) === path.resolve(dir)
 }
 
 // The task branches of a phase, resolved to the shas they stand at right now. This is what a
@@ -1438,6 +1485,7 @@ export async function runCli(argv, io = { out: console.log }) {
     // there is exactly how a fix round would lose the context it still needs.
     const enforcementOnly = flags['enforcement-only'] === true
     const phases = [...new Set((ctx.tasks ?? []).map((t) => t.phase))].sort((a, b) => a - b)
+    reportUnmatchedSuppliedPhases(io, supplied, phases)
     // Computed either way: it decides whether the flag is refused, and — when it was not passed —
     // whether the announcement should recommend it at all.
     const refusal = enforcementOnlyRefusal(config, phases)
@@ -1530,16 +1578,38 @@ export async function runCli(argv, io = { out: console.log }) {
     // holding those junctions. A preview whose links cannot be removed is LEFT IN PLACE and
     // reported: an accumulated worktree costs disk, and the alternative costs the operator their
     // repository's build inputs.
+    //
+    // WHAT THIS SWEEP DOES AND DOES NOT CLOSE. It closes the junction hazard for a preview whose
+    // owner is DEAD — the links it finds are the ones a killed gate's `finally` never tore down,
+    // and they are gone before anything is removed. It does NOT close it for a LIVE preview: a
+    // gate running right now holds a detached, branchless tm-preview-* worktree that is
+    // indistinguishable by name and location from a leaked one (see scripts/prune.mjs), so a
+    // live preview is classified as leaked, and a junction its owner creates in the window
+    // BETWEEN this sweep and the removal below is still followed. Satisfying "no gate is
+    // running" remains the caller's precondition, unchecked here.
+    //
+    // WHAT THE PATTERN MATCHES, since the reaper is force-removing directories nobody named:
+    // every detached, branchless worktree registered in this repository whose path lies under
+    // the system temp root and whose final segment begins `tm-preview-`. That includes one an
+    // operator created deliberately and left uncommitted work in — the leaf name is the whole
+    // test. The dry run is the default and the plan is printed before anything is removed, so
+    // the operator sees each path before `--yes`.
     for (const p of plan.previews ?? []) {
       try {
         await unlinkPreviewLinks(p.path)
       } catch (err) {
-        failed += 1
-        io.out(
-          `left ${p.path} in place: its provisioned links could not be removed (${err.message}),`
-          + ' and `git worktree remove --force` deletes the CONTENTS of a junction\'s target',
-        )
-        continue
+        // Registered but not on disk: no links exist to sweep, and the removal below is what
+        // clears the registration. Blocking on it would deadlock the command forever — see
+        // isMissingPreviewRoot.
+        if (!isMissingPreviewRoot(err, p.path)) {
+          failed += 1
+          io.out(
+            `left ${p.path} in place: its provisioned links could not be removed (${err.message}),`
+            + ' and `git worktree remove --force` deletes the CONTENTS of a junction\'s target',
+          )
+          continue
+        }
+        io.out(`${p.path} is registered but its directory is gone: nothing to sweep, clearing the registration`)
       }
       try {
         await git.removeWorktree(p.path)
@@ -1576,6 +1646,7 @@ export async function runCli(argv, io = { out: console.log }) {
     // written by the agents being enforced, so a phase deleted from that file would simply not
     // be verified — the check would report on whatever remained and call the run finished.
     const phases = [...new Set((ctx.tasks ?? []).map((t) => t.phase))].sort((a, b) => a - b)
+    reportUnmatchedSuppliedPhases(io, supplied, phases)
 
     const enforcementOnly = flags['enforcement-only'] === true
     // Computed either way: it decides whether the flag is refused, and — when it was not passed —
