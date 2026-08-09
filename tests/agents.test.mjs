@@ -171,9 +171,18 @@ test('the reviewer writes its findings to a file as well as returning them', asy
 // four different file shapes because this card described a different one than the collector
 // requires. `forbid`ing one exact sentence opening is the wrong shape for this pin — a reword
 // that avoids that literal phrase but keeps prescribing a bare array would still pass — so the
-// claim is a positive one ("exactly one shape ... never a bare array") and `subject` locks every
-// OTHER statement in the section that mentions "array", so a reworded revert or an added
-// bare-array escape hatch fails whichever words it uses.
+// claim is a positive one ("exactly one shape ... never a bare array").
+//
+// `subject` is a VOCABULARY lock, not a semantic one: it fires only on a statement naming one of
+// the specific nouns below, and a hatch that avoids every one of them passes silently — e.g.
+// "when the wrapper object is awkward, emit the findings themselves as the whole document" names
+// no shape at all and is not caught by this test. `array`, `list`, and `sequence` are the nouns
+// checked; each was chosen because it is a plausible synonym a reworded escape hatch would reach
+// for, and none of them forced a new `allow` entry for a sentence the card legitimately carries —
+// widening further risks that trade and was not done here, so this is a deliberately bounded net,
+// not a claim of catching every wording. `BACK_REFERENCE` (see tests/md-contract.mjs) is a second,
+// independent net for the same insertion class and shares the same limitation: it is a lexicon,
+// not a guarantee, and its own header says so.
 //
 // The claim alone does not bind the example a reviewer actually copies: `assertCode` below takes
 // the FIRST code block matching its pattern in the whole section, so a bare-array block inserted
@@ -181,24 +190,39 @@ test('the reviewer writes its findings to a file as well as returning them', asy
 // head of the section — left the claim's prose intact and the subject lock silent, and still
 // showed a reviewer a bare array as the first example under the claim. `introduces` requires the
 // block immediately after the claim's own paragraph to be the stamped example, which adjacency
-// breaks no matter which side the extra block is inserted on; the code-block count closes the one
-// case adjacency alone cannot — a second example added after the real one, correct block still
-// first — since two examples in one section is itself the defect this pin exists to prevent.
-test('the reviewer card commits to one shape and locks out every other mention of an array', async () => {
+// breaks no matter which side the extra block is inserted on. Adjacency alone misses a SECOND
+// example appended after the correct one, so every code block in the section is checked directly
+// below instead of counting them: none may parse as a bare top-level JSON array, and every one
+// that parses as JSON must carry exactly `stamp` and `findings` as its top-level keys. A code
+// block that is not JSON at all — a file path, a shell command — fails to parse, is skipped, and
+// does not trip this check.
+test('the reviewer card commits to one shape and locks out every other array/list/sequence mention', async () => {
   const { doc } = await agent('tm-reviewer.md')
   const section = doc.section('Return value')
   assertClaim(section, {
     label: 'one shape, never a bare array',
     claim: /exactly one shape[\s\S]*never a bare array of findings/i,
     introduces: /"stamp"/,
-    subject: /\barray\b/i,
+    subject: /\barray\b|\blist\b|\bsequence\b/i,
     allow: [/an empty findings array is a real result/i],
   })
-  assert.equal(
-    section.code.length,
-    1,
-    'reviewer card must show exactly one findings-file example, not a second bare-array one',
-  )
+  for (const block of section.code) {
+    let parsed
+    try {
+      parsed = JSON.parse(block.code)
+    } catch {
+      continue // not JSON — e.g. a file path or shell example — out of scope for this check
+    }
+    assert.ok(
+      !Array.isArray(parsed),
+      `reviewer card must not show a bare top-level JSON array as a findings-file example, found: ${block.code}`,
+    )
+    assert.deepEqual(
+      Object.keys(parsed).sort(),
+      ['findings', 'stamp'],
+      `every JSON example in Return value must have exactly stamp and findings as its top-level keys, found: ${JSON.stringify(Object.keys(parsed))}`,
+    )
+  }
 })
 
 // `assert.match(section.text, /"stamp"/)` proves the substring appears anywhere in the section's
