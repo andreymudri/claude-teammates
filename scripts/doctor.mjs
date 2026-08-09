@@ -96,7 +96,14 @@ export async function collectDoctorReport({ git, runId, runBranch, baseBranch, t
         // carried — reporting that as a problem makes every re-inspection of an integrated
         // phase look broken. What decides it is whether the run branch MERGED THIS BRANCH:
         // whether a merge commit past the anchor names this sha as a parent other than its
-        // first. Ancestry cannot decide it, because "reachable from the run branch" is true of
+        // first, AND that sha is itself past the anchor. `mergedBranchTips` enforces the second
+        // half by returning only parents inside the anchor..run range, which is why this reads
+        // as a single membership test. That half is load-bearing: a plan amendment merges the
+        // BASE into the run branch, naming the base tip as a secondary parent, and for a run
+        // whose amendments have landed the anchor IS the base tip — unfiltered, a branch parked
+        // at the anchor would read as merged.
+        //
+        // Ancestry alone cannot decide it, because "reachable from the run branch" is true of
         // every commit the run branch has ever passed through — the anchor, the current tip,
         // and every intermediate commit a teammate's ref might be parked at. Being named as a
         // merge parent is a fact about the merge that carried the branch, so standing still

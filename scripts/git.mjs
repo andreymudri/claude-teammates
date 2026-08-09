@@ -260,23 +260,45 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
     // still.
     //
     // --parents prints "<commit> <parent1> <parent2>..."; everything past the first parent is a
-    // branch this merge carried in. --min-parents=2 keeps only merges. The anchor..run range
-    // bounds the walk to this run rather than the repository's whole history — the range form
-    // rather than "--not <anchor>", because git rejects "--not" after a non-option argument
-    // ("fatal: option '--not' must come before non-option arguments"), and the options have to
-    // precede --end-of-options. Trailing "--" for the same reason commitsBetween carries one: a
-    // file named exactly like the range must not be resolvable as a pathspec.
+    // branch that merge carried in. The anchor..run range bounds the walk to this run rather
+    // than the repository's whole history — the range form rather than "--not <anchor>", because
+    // git rejects "--not" after a non-option argument ("fatal: option '--not' must come before
+    // non-option arguments"), and the options have to precede --end-of-options. Trailing "--"
+    // for the same reason commitsBetween carries one: a file named exactly like the range must
+    // not be resolvable as a pathspec.
+    //
+    // The range bounds which MERGE COMMITS are walked. It does NOT filter the parents they
+    // print, and that distinction is the whole reason this method filters them itself. This
+    // plugin's plan-amendment procedure merges the BASE branch into the run branch, so the base
+    // tip is printed as a secondary parent of a merge inside the range — and for a run whose
+    // amendments have all landed, merge-base(base, run) IS that base tip. Left in, the anchor
+    // would be a member of this set, and a task branch parked at the anchor (a teammate that
+    // committed on another ref and left the conventional ref where `git checkout -B <task>
+    // <base>` put it) would read as merged, suppressing the very emptiness complaint that shape
+    // exists to trigger. The same route admits older base tips, via a task branch that merged
+    // the base into itself.
+    //
+    // So a parent counts only if it is itself inside the range. Every parent of a commit on the
+    // run branch is reachable from the run branch by construction, so "inside anchor..run" is
+    // exactly "not reachable from the anchor" — the filter expressed as a bound rather than as
+    // an isAncestor call per parent. Dropping --min-parents=2 is what makes it one walk instead
+    // of two: the unfiltered walk prints every commit in the range, so the same output carries
+    // both the range membership and the merge parents. Non-merge lines contribute no parents,
+    // since everything past the first is empty for them.
     async mergedBranchTips({ runSha, anchorSha }) {
       if (!isNonEmptyString(runSha) || !isNonEmptyString(anchorSha)) {
         throw new GitError(`mergedBranchTips requires non-empty refs, got runSha=${JSON.stringify(runSha)} anchorSha=${JSON.stringify(anchorSha)}`)
       }
-      const out = await run(['rev-list', '--min-parents=2', '--parents', '--end-of-options', `${anchorSha}..${runSha}`, '--'])
-      const tips = new Set()
+      const out = await run(['rev-list', '--parents', '--end-of-options', `${anchorSha}..${runSha}`, '--'])
+      const inRange = new Set()
+      const parents = []
       for (const line of out.split(/\r?\n/)) {
         const parts = line.trim().split(/\s+/).filter(Boolean)
-        for (const parent of parts.slice(2)) tips.add(parent)
+        if (parts.length === 0) continue
+        inRange.add(parts[0])
+        for (const parent of parts.slice(2)) parents.push(parent)
       }
-      return tips
+      return new Set(parents.filter((parent) => inRange.has(parent)))
     },
     async commitsBetween({ from, to }) {
       if (!isNonEmptyString(from) || !isNonEmptyString(to)) {

@@ -1,7 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import { collectDoctorReport, renderDoctor } from '../scripts/doctor.mjs'
-import { GitError } from '../scripts/git.mjs'
+import { GitError, createGit, defaultGitExec } from '../scripts/git.mjs'
 
 const RUN_ID = 'r1'
 const RUN_BRANCH = 'run/r1'
@@ -275,6 +278,51 @@ test('a failing merged-tips walk is reported as a problem rather than thrown', a
     runSha: 'runSha1', anchorSha: 'anchorSha1',
   })
   assert.match(report.problems.join('\n'), /bad revision/)
+})
+
+// Against real git rather than a fake, because the defect this pins lives in what real rev-list
+// output CONTAINS: a plan amendment merges the base into the run branch, so the base tip is a
+// secondary parent of a merge inside the range, and for a run whose amendments have landed the
+// anchor IS that base tip. A branch parked at the anchor must still be reported as contributing
+// nothing — the counterpart of the same fixture in tests/gate-runner.test.mjs, kept in step
+// because the two files compute this the same way.
+test('a branch parked at the anchor is reported as a problem after a plan amendment (real repo)', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-doctor-'))
+  const sh = (args) => defaultGitExec(args, root)
+  try {
+    await sh(['init', '--initial-branch=main'])
+    await sh(['config', 'user.email', 'test@example.com'])
+    await sh(['config', 'user.name', 'test'])
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+    await writeFile(path.join(root, 'run.txt'), 'r1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'r1'])
+    await sh(['checkout', 'main'])
+    await writeFile(path.join(root, 'plan.md'), 'amended\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'amend the plan'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'merge: plan amendment', 'main'])
+
+    const anchorSha = (await sh(['merge-base', 'main', 'run'])).stdout.trim()
+    const runSha = (await sh(['rev-parse', 'run'])).stdout.trim()
+    await sh(['branch', 'teammates/r1/T14', anchorSha])
+
+    const report = await collectDoctorReport({
+      git: createGit({ cwd: root }),
+      runId: RUN_ID, runBranch: 'run', baseBranch: 'main',
+      tasks: [{ id: 'T14', phase: 1, files: ['a.mjs'] }],
+      anchorSha, runSha,
+    })
+
+    assert.equal(report.tasks[0].landed, false)
+    assert.match(report.problems.join('\n'), /T14: branch teammates\/r1\/T14 has no file changes/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('renderDoctor prints integrated rather than NO CHANGES for a landed task', () => {

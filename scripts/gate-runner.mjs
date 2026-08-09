@@ -240,16 +240,24 @@ export async function runFilesetCheck(check, ctx = {}) {
         // `ownership`'s question, and it asks it of every commit on the run branch, every run.
         //
         // What decides it is whether the run branch MERGED THIS BRANCH: whether a merge commit
-        // past the anchor names this sha as a parent other than its first. Ancestry cannot
-        // decide it, and every exclusion bolted onto ancestry left a hole. "On the run branch"
-        // alone is satisfied by a branch parked at the anchor — a teammate that committed on
-        // the harness's own branch and left the conventional ref where it started. Adding "past
-        // the anchor" is satisfied, from phase 2 onward, by a branch left exactly where
-        // `git checkout -B <task> <run branch>` put it. Adding "not the run tip" is still
-        // satisfied by a branch parked at an INTERMEDIATE post-anchor commit, which is what a
-        // branch becomes as soon as the integrator merges a sibling and the run tip moves past
-        // it. All three shapes carry no work; being NAMED as a merge parent is a fact about the
-        // merge that carried the branch, so none of them can satisfy it by standing still.
+        // past the anchor names this sha as a parent other than its first, AND that sha is
+        // itself past the anchor. `mergedBranchTips` enforces the second half — it returns only
+        // parents inside the anchor..run range — so this reads as a single membership test. The
+        // second half is not decoration: a plan amendment merges the BASE into the run branch,
+        // which names the base tip as a secondary parent, and for a run whose amendments have
+        // landed the anchor IS the base tip. Anything that weakens that filter puts the anchor
+        // back in the set and re-opens the parked-at-the-anchor hole below.
+        //
+        // Ancestry alone cannot decide it, and each exclusion bolted onto ancestry left the next
+        // hole. "On the run branch" is satisfied by a branch parked at the anchor — a teammate
+        // that committed on the harness's own branch and left the conventional ref where it
+        // started. Adding "past the anchor" is satisfied, from phase 2 onward, by a branch left
+        // exactly where `git checkout -B <task> <run branch>` put it. Adding "not the run tip"
+        // is still satisfied by a branch parked at an INTERMEDIATE post-anchor commit, which is
+        // what a branch becomes as soon as the integrator merges a sibling and the run tip moves
+        // past it. All three carry no work, and none can be reached by standing still: being
+        // named as a merge parent is a fact about the merge that carried the branch, and the
+        // range filter keeps the amendment merges from vouching for the first of them.
         //
         // What this does NOT distinguish, stated as what is true rather than as what would be
         // convenient:

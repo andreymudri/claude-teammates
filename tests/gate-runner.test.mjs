@@ -1173,6 +1173,49 @@ test('a phase-1 branch parked at an intermediate post-anchor commit fails the fi
   })
 })
 
+// The merge-parent test subsumes the TIP exclusion but NOT the anchor exclusion, because this
+// plugin's own plan-amendment procedure merges the base branch into the run branch — so the base
+// tip is a secondary parent of a merge inside the range, and for a run whose amendments have all
+// landed, merge-base(base, run) IS that base tip. Without filtering, the anchor is a member of
+// the merged set, and a task branch parked at the anchor — a teammate that ran
+// `git checkout -B <task> <base>`, committed on some other ref, and left the conventional ref
+// empty — reads as merged and the phase integrates a no-op. This is the shape the old
+// `!isAncestor(sha, anchorSha)` clause caught, and an enforcing check must never get less strict.
+test('a task branch parked at the anchor still fails after a plan amendment merged the base in (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+    await writeFile(path.join(root, 'run.txt'), 'r1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'r1'])
+
+    // The plan amendment: the base advances, and the run branch merges it in.
+    await sh(['checkout', 'main'])
+    await writeFile(path.join(root, 'plan.md'), 'amended\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'amend the plan'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'merge: plan amendment', 'main'])
+
+    const anchorSha = (await sh(['merge-base', 'main', 'run'])).stdout.trim()
+    const runSha = (await sh(['rev-parse', 'run'])).stdout.trim()
+    assert.equal(anchorSha, (await sh(['rev-parse', 'main'])).stdout.trim(), 'fixture: the anchor is the base tip')
+
+    // The stale ref: created off the base, never moved, carrying nothing.
+    await sh(['branch', 'teammates/r1/T14', anchorSha])
+
+    const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, {
+      git, runId: 'r1', runSha, anchorSha,
+      tasks: [{ id: 'T14', phase: 1, files: ['a.mjs'] }], currentPhase: 1, phaseError: null,
+    })
+
+    assert.equal(res.status, 'fail')
+    assert.match(res.output, /T14: branch teammates\/r1\/T14 contributes no file changes/)
+  })
+})
+
 // The limit the comment above the landed test states, pinned so the comment is checkable rather
 // than merely plausible. A branch integrated by FAST-FORWARD carries real work, but leaves no
 // merge commit to name it and no diff past its own fork point, so it is indistinguishable from a
