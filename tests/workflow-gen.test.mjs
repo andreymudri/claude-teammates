@@ -502,6 +502,28 @@ test('with caveman omitted the full brief and a false CAVEMAN marker are emitted
   assert.ok(!prompt.includes('STYLE.'), 'no style section without a caveman level')
 })
 
+test('the full brief requires the baseline test run to happen in the foreground', async () => {
+  // A backgrounded baseline stalls with the work uncommitted and nothing notifies the teammate
+  // when it finishes. This line is the rule that prevents that, so the full (non-caveman) brief
+  // must carry it verbatim, not just the terse variant covered by the load-bearing list above.
+  const src = await generatePhaseWorkflow({
+    runId: 'r1',
+    phase: 1,
+    tasks: [{ id: 'T1', title: 'auth middleware', files: ['src/auth.ts'], phase: 1 }],
+    maxParallel: 2,
+    baseBranch: 'main',
+  })
+  const [prompt] = await captureAgentPrompts(src)
+  assert.ok(
+    prompt.includes('Run the project\'s test command once, IN THE FOREGROUND, and confirm it is green.'),
+    'the full brief must instruct the baseline test run to happen in the foreground',
+  )
+  assert.ok(
+    prompt.includes('Never background it: nothing notifies you when a backgrounded command finishes.'),
+    'the full brief must state why backgrounding the baseline run is unsafe',
+  )
+})
+
 test('a caveman brief keeps every load-bearing instruction verbatim', async () => {
   // Compressing a brief is compressing a specification. The gate enforces the file set and the
   // checkout, so those sentences are the last thing that may be shortened away.
@@ -526,6 +548,8 @@ test('a caveman brief keeps every load-bearing instruction verbatim', async () =
     'GLOBAL CONSTRAINTS:',
     '- Node >= 24.2.0',
     'PLAN. Read docs/plans/p.md',
+    'Run the project\'s test command once, IN THE FOREGROUND, and confirm it is green.',
+    'Never background it: nothing notifies you when a backgrounded command finishes.',
   ]) {
     assert.ok(prompt.includes(required), `caveman brief dropped a load-bearing line: ${required}`)
   }
