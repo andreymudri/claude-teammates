@@ -891,6 +891,8 @@ test('phase-gate documents finish taking per-phase results', async () => {
 
 **Depends:** T7
 
+**Model:** capable
+
 - [ ] **Step 1:** `runFilesetCheck` computes the same landed test `doctor` did, at
       `scripts/gate-runner.mjs:239`:
 
