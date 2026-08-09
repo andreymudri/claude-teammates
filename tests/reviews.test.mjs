@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { reviewFileName, collectReviewResults } from '../scripts/reviews.mjs'
+import { reviewFileName, collectReviewResults, reviewStamp, reviewStale } from '../scripts/reviews.mjs'
 
 test('a lens findings file is named by phase and lens', () => {
   assert.equal(reviewFileName(1, 'correctness'), '1-correctness.json')
@@ -97,4 +97,55 @@ test('the output names the lens each finding came from', () => {
     blockOn: ['high'],
   })
   assert.deepEqual(out.results[0].findings.map((f) => f.lens), ['correctness', 'security'])
+})
+
+const STAMP = { phase: '1', branches: ['teammates/r1/T1@aaa', 'teammates/r1/T2@bbb'] }
+
+test('a stamp names the phase, the lens and every branch tip it judged', () => {
+  const s = reviewStamp({ phase: 1, lens: 'tests', branchShas: { 'teammates/r1/T2': 'bbb', 'teammates/r1/T1': 'aaa' } })
+  assert.equal(s.phase, '1')
+  assert.equal(s.lens, 'tests')
+  // Sorted, so two runs over the same tips produce the same stamp.
+  assert.deepEqual(s.branches, ['teammates/r1/T1@aaa', 'teammates/r1/T2@bbb'])
+})
+
+test('a stamp matching the current tips is not stale', () => {
+  assert.equal(reviewStale({ stamp: { ...STAMP, lens: 'tests' } }, { ...STAMP, lens: 'tests' }), null)
+})
+
+// The exact failure this closes: a fix round moves a branch, the old findings file stays on disk.
+test('findings describing an older branch tip are stale and say which', () => {
+  const why = reviewStale(
+    { stamp: { phase: '1', lens: 'tests', branches: ['teammates/r1/T1@aaa'] } },
+    { phase: '1', lens: 'tests', branches: ['teammates/r1/T1@ccc'] },
+  )
+  assert.match(why, /aaa/)
+  assert.match(why, /ccc/)
+})
+
+test('an unstamped findings file is stale whatever it contains', () => {
+  assert.match(reviewStale({ findings: [] }, { ...STAMP, lens: 'tests' }), /no stamp/)
+})
+
+test('a stale lens is reported and never contributes a pass', () => {
+  const out = collectReviewResults({
+    checkName: 'review',
+    lenses: ['correctness'],
+    files: [{ lens: 'correctness', findings: [], stamp: { phase: '1', lens: 'correctness', branches: ['teammates/r1/T1@old'] } }],
+    expected: { phase: '1', branches: ['teammates/r1/T1@new'] },
+    blockOn: ['high'],
+  })
+  assert.deepEqual(out.results, [])
+  assert.deepEqual(out.missing, ['correctness'])
+  assert.equal(out.stale.length, 1)
+  assert.match(out.stale[0].reason, /old/)
+})
+
+test('with no expected stamp supplied, a file without one is still accepted', () => {
+  const out = collectReviewResults({
+    checkName: 'review', lenses: ['correctness'],
+    files: [{ lens: 'correctness', findings: [] }], blockOn: ['high'],
+  })
+  assert.equal(out.results.length, 1)
+  assert.deepEqual(out.stale, [])
 })
