@@ -882,3 +882,65 @@ test('phase-gate documents finish taking per-phase results', async () => {
   )
 })
 ```
+
+### Task 9: close the same landed blind spot in the enforcing path
+
+**Files:**
+- Modify: `scripts/gate-runner.mjs`
+- Test: `tests/gate-runner.test.mjs`
+
+**Depends:** T7
+
+- [ ] **Step 1:** `runFilesetCheck` computes the same landed test `doctor` did, at
+      `scripts/gate-runner.mjs:239`:
+
+```js
+        const landed = await git.isAncestor(sha, runSha) && !(await git.isAncestor(sha, anchorSha))
+```
+
+      From phase 2 onward the run tip is itself past the anchor, so a branch parked AT THE RUN TIP
+      — where `git checkout -B <task> <run branch>` leaves it, and where a teammate that then
+      commits on the harness branch abandons it — satisfies both halves. `landed` is true, the
+      emptiness complaint is suppressed, and `fileset` PASSES a task that would merge as a no-op.
+      This is the enforcing path, not the advisory one: it decides whether a phase may integrate.
+
+      Add the same tip exclusion T1 added to `doctor`:
+
+```js
+        const landed = await git.isAncestor(sha, runSha)
+          && !(await git.isAncestor(sha, anchorSha))
+          && sha !== runSha
+```
+
+- [ ] **Step 2:** Extend the comment above it. It currently explains only the anchor-parked case,
+      which it already handled. State the tip-parked case it now handles, and state honestly what
+      remains open: a branch parked at an intermediate post-anchor commit on the run branch still
+      reads as landed, because distinguishing it needs a walk of the run branch's merge commits
+      for one whose second parent is this branch. `scripts/doctor.mjs` carries the same residual
+      limit and documents it the same way; keep the two descriptions consistent.
+
+- [ ] **Step 3:** Add to `tests/gate-runner.test.mjs`, beside the existing landed test:
+
+```js
+// The enforcing counterpart of doctor's run-tip case. From phase 2 onward the run tip is past
+// the anchor, so a branch left exactly where `git checkout -B <task> <run branch>` put it
+// satisfies both halves of the landed test while carrying no work of its own — and this check
+// decides whether the phase may integrate.
+test('runFilesetCheck fails a branch parked at the run tip with no contribution', async () => {
+  const git = fakeGit({
+    branchExists: async () => true,
+    changedFiles: async () => [],
+    isAncestor: async (_sha, target) => target === 'runSha1',
+    resolveRef: async () => 'runSha1',
+  })
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = { git, runId: RUN_ID, runSha: 'runSha1', anchorSha: 'anchorSha1', tasks: [T1_TASK], currentPhase: 1, phaseError: null }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.match(res.output, /contributes no file changes/)
+})
+```
+
+      Verify this test fails against the current code before your change and passes after, and
+      that the existing "does not report an already-integrated branch as contributing nothing"
+      test still passes — a genuinely landed branch is past the anchor and NOT at the tip.
