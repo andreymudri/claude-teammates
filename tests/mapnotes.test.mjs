@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mapNotesHeader, readMapNotesHeader, mapNotesStale, mapNotesPrompt } from '../scripts/mapnotes.mjs'
+import { mapNotesHeader, readMapNotesHeader, mapNotesStale, mapNotesPrompt, mapNotesWritable } from '../scripts/mapnotes.mjs'
 
 test('the header names the run and the commit the notes describe', () => {
   assert.equal(mapNotesHeader({ runId: 'r1', sha: 'abc123' }), '<!-- teammates-map run=r1 sha=abc123 -->')
@@ -41,12 +41,20 @@ test('notes from another run are stale', () => {
   assert.match(mapNotesStale(text, { runId: 'r1', sha: 'abc123' }), /run other/)
 })
 
-test('the prompt carries the exact header line, the target path and the refusal to guess', () => {
+test('the prompt tells the agent to return the map and not to write it', () => {
   const prompt = mapNotesPrompt({ runId: 'r1', sha: 'abc123', notesPath: '.teammates/r1/map.md', topDirectories: ['src', 'test'] })
   assert.match(prompt, /<!-- teammates-map run=r1 sha=abc123 -->/)
-  assert.match(prompt, /\.teammates\/r1\/map\.md/)
+  assert.match(prompt, /do NOT write it to a file/)
+  assert.match(prompt, /the orchestrator writes/)
   assert.match(prompt, /src, test/)
   assert.match(prompt, /Say "unclear"/)
+})
+
+// The instruction that made this necessary: an agent told to write is an agent that will shell
+// out to do it when it has no Write tool.
+test('the prompt never instructs the agent to write the notes file', () => {
+  const prompt = mapNotesPrompt({ runId: 'r1', sha: 'abc', notesPath: 'p' })
+  assert.doesNotMatch(prompt, /Write a map/i)
 })
 
 test('the prompt omits the directory sentence when there are none', () => {
@@ -73,9 +81,24 @@ test('leading whitespace before a real header at the start is still accepted', (
   assert.equal(mapNotesStale(text, { runId: 'r1', sha: 'abc123' }), null)
 })
 
-test('the prompt confines the agent to writing only the map file', () => {
-  const prompt = mapNotesPrompt({ runId: 'r1', sha: 'abc123', notesPath: '.teammates/r1/map.md' })
-  assert.match(prompt, /do not modify any\s+file other than the map you are writing/)
+test('a returned map carrying the right header is writable', () => {
+  const text = `${mapNotesHeader({ runId: 'r1', sha: 'abc123' })}\n\n# Map\n`
+  assert.equal(mapNotesWritable(text, { runId: 'r1', sha: 'abc123' }), null)
+})
+
+test('a returned map with no header is refused rather than written', () => {
+  assert.match(mapNotesWritable('# Map\nprose\n', { runId: 'r1', sha: 'abc123' }), /does not begin with/)
+})
+
+test('a returned map claiming another commit or run is refused', () => {
+  const wrongSha = `${mapNotesHeader({ runId: 'r1', sha: 'old111' })}\nbody\n`
+  assert.match(mapNotesWritable(wrongSha, { runId: 'r1', sha: 'new222' }), /old111.*new222/)
+  const wrongRun = `${mapNotesHeader({ runId: 'other', sha: 'abc' })}\nbody\n`
+  assert.match(mapNotesWritable(wrongRun, { runId: 'r1', sha: 'abc' }), /run other/)
+})
+
+test('an empty return is refused', () => {
+  assert.match(mapNotesWritable('', { runId: 'r1', sha: 'abc' }), /returned nothing/)
 })
 
 test('non-hex shas like UNKNOWN are accepted and reported in mismatch messages', () => {

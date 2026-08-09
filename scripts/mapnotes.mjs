@@ -1,5 +1,6 @@
-// The agent-written half of the map: prose about what a target project's modules are FOR, which
-// no statistic over git history can supply.
+// The agent-returned half of the map: prose about what a target project's modules are FOR,
+// which no statistic over git history can supply. Returned by a dispatched read-only agent and
+// written by the orchestrator.
 //
 // It is stored, unlike the coupling half, because an agent wrote it and rewriting it costs a
 // model call. So it carries the commit it was written at, and a reader that finds the repository
@@ -41,9 +42,11 @@ export function mapNotesStale(text, { runId, sha }) {
 // the header line and the instruction not to guess stay in one place with the parser above.
 export function mapNotesPrompt({ runId, sha, notesPath, topDirectories = [] }) {
   return [
-    `Write a map of this repository for a fleet working on it, to ${notesPath}.`,
+    'Map this repository for a fleet about to work on it. Return the map as your final output —',
+    'do NOT write it to a file. You are dispatched read-only on purpose: the orchestrator writes',
+    `it to ${notesPath}, because nothing a teammate writes is trusted by this design.`,
     '',
-    `Start the file with exactly this line, unchanged: ${mapNotesHeader({ runId, sha })}`,
+    `Begin your output with exactly this line, unchanged: ${mapNotesHeader({ runId, sha })}`,
     '',
     'Then, for each significant area of the codebase: what it is for, what depends on it, and the',
     'one thing a newcomer would get wrong about it. Prefer naming the module that owns a concept',
@@ -53,6 +56,20 @@ export function mapNotesPrompt({ runId, sha, notesPath, topDirectories = [] }) {
     topDirectories.length ? `The largest directories by file count are: ${topDirectories.join(', ')}.` : '',
     '',
     'Read the code. Do not infer the architecture from README claims alone, and do not modify any',
-    'file other than the map you are writing.',
+    'file in this repository — you are reading it, not changing it.',
   ].filter((line) => line !== '').join('\n')
+}
+
+// The orchestrator writes the notes, so it needs one place to decide whether what an agent
+// returned is writable. A returned map missing its header is not "close enough": the header is
+// the only thing that lets a later reader tell which tree the prose describes, and inventing one
+// on the agent's behalf would manufacture exactly the provenance this design refuses to fake.
+export function mapNotesWritable(text, { runId, sha }) {
+  const body = String(text ?? '')
+  if (body.trim() === '') return 'the agent returned nothing to write'
+  const header = readMapNotesHeader(body)
+  if (!header) return 'the returned map does not begin with the teammates-map header it was given'
+  if (header.sha !== sha) return `the returned map claims commit ${header.sha}, but the dispatch named ${sha}`
+  if (header.runId !== runId) return `the returned map claims run ${header.runId}, but the dispatch named ${runId}`
+  return null
 }
