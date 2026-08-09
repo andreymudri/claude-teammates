@@ -622,6 +622,118 @@ test('finish exits 1 and names the phase whose computed check fails', async () =
   })
 })
 
+// --- --enforcement-only: the cheap verdict, and what it must never hide ----------------------
+//
+// `finish` and `prune-run` recompute every phase, and the `command` checks are what makes that
+// cost a full test suite per phase. The flag drops them — but a verdict that hides which checks
+// did not run is worse than a slow one, so each one must come back as a reported `skip`.
+test('finish --enforcement-only skips command checks and reports them as skipped', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [
+        { name: 'test', kind: 'command', run: 'node -e "process.exit(1)"' },
+        { name: 'fileset', kind: 'fileset' },
+      ] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--enforcement-only'], io)
+    const out = lines.join('\n')
+    // The command check would FAIL if it ran; it must be skipped, and said to be skipped.
+    assert.match(out, /skipped: test/)
+    assert.doesNotMatch(out, /failed: test/)
+  })
+})
+
+// The complement: without the flag the command check really does run, so the fail it produces
+// must still be reported. A flag that silently skipped them always would be the bug it prevents.
+test('finish without --enforcement-only still runs the command checks and reports their failure', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'test', kind: 'command', run: 'node -e "process.exit(1)"' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    const code = await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    assert.match(out, /failed: test/)
+    assert.doesNotMatch(out, /skipped: test/)
+    assert.equal(code, 1)
+  })
+})
+
+// An operator about to wait minutes for three test suites should be told that is what is
+// happening, and that a cheaper answer exists — not left watching a silent process.
+test('finish names how many command checks it is about to run', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'test', kind: 'command', run: 'node -e ""' }, { name: 'fileset', kind: 'fileset' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    assert.match(out, /running 2 command checks across 2 phases/)
+    assert.match(out, /--enforcement-only/)
+  })
+})
+
+test('prune-run names how many command checks it is about to run when they are not skipped', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'test', kind: 'command', run: 'node -e ""' }, { name: 'fileset', kind: 'fileset' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    assert.match(lines.join('\n'), /command check/)
+  })
+})
+
+// prune-run reports a verdict only as a phase's presence in the prune plan, so a skipped check
+// would otherwise leave no trace in its output at all.
+test('prune-run --enforcement-only reports the command checks it skipped and does not announce a run', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [
+        { name: 'test', kind: 'command', run: 'node -e "process.exit(1)"' },
+        { name: 'fileset', kind: 'fileset' },
+      ] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--enforcement-only'], io)
+    const out = lines.join('\n')
+    assert.match(out, /phase 1: skipped: test/)
+    assert.doesNotMatch(out, /running \d+ command check/)
+  })
+})
+
+// `--enforcement-only` is a switch: present or absent. Written with a value it reads to a human
+// as a setting, and every consumer here tests only for presence, so a value is refused.
+test('--enforcement-only refuses a value rather than reading it as a setting', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const code = await runCli(
+      ['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--enforcement-only', 'false'],
+      io,
+    )
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /--enforcement-only` takes no value/)
+  })
+})
+
 // Destructive, so it reports and stops unless told otherwise. A caller that runs it to see what
 // would happen must not lose a worktree for asking.
 test('prune-run is a dry run by default and removes nothing', async () => {
@@ -4325,12 +4437,16 @@ test('map exits 2 when the repository cannot be read', async () => {
   }
 })
 
-// --- map-notes never writes the file it reports on ------------------------------------------
+// --- map-notes never authors the file it reports on -----------------------------------------
 //
-// The prohibition is absolute: the map notes are written by a dispatched Explore agent that
-// read the code, and by nothing else. A CLI that filled the file in would produce prose it
-// guessed, under a valid provenance header — after which every later `map-notes` call reports
-// it current and every reader treats a machine's guess as an agent-verified fact.
+// The prose is written by a dispatched Explore agent that read the code, and by nothing else. A
+// CLI that filled the file in would produce prose it guessed, under a valid provenance header —
+// after which every later `map-notes` call reports it current and every reader treats a
+// machine's guess as an agent-verified fact.
+//
+// `--write` is the one path that puts bytes in that file, and it authors nothing: it copies text
+// the caller supplies, only after `mapNotesWritable` confirms the header still names this run and
+// this commit. The tests below cover the reporting path, which must write nothing at all.
 test('map-notes creates no map.md when none exists', async () => {
   await withRepo(async ({ root, planPath, io }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
@@ -4378,6 +4494,103 @@ test('map-notes puts the repository top directories into the Explore prompt', as
     lines.length = 0
     assert.equal(await runCli(['map-notes', '--run', 'r1', '--root', root], io), 4)
     assert.match(lines.join('\n'), /largest directories by file count are:.*\bengine\b/)
+  })
+})
+
+// --- map-notes --write: the orchestrator's half of the inverted contract ---------------------
+//
+// The agent is dispatched read-only and RETURNS the map; the caller saves that text and hands
+// the path here. Without this path the orchestrator wrote `.teammates/<runId>/map.md` by hand
+// and `mapNotesWritable` — the validator that exists so the stamped file can be vouched for —
+// was called by nothing.
+test('map-notes --write validates the returned map before writing it', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const sha = g(['rev-parse', 'HEAD']).trim()
+    const returned = path.join(root, 'returned.md')
+    await writeFile(returned, `<!-- teammates-map run=r1 sha=${sha} -->\n\n# Map\n\nsrc owns orders.\n`, 'utf8')
+    lines.length = 0
+    const code = await runCli(['map-notes', '--run', 'r1', '--root', root, '--write', returned], io)
+    assert.equal(code, 0)
+    const written = await readFile(path.join(root, '.teammates', 'r1', 'map.md'), 'utf8')
+    assert.match(written, /owns orders/)
+  })
+})
+
+test('map-notes --write refuses a map whose header names another commit and writes nothing', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const returned = path.join(root, 'returned.md')
+    await writeFile(returned, '<!-- teammates-map run=r1 sha=0000000 -->\n\n# Map\n\nbody\n', 'utf8')
+    lines.length = 0
+    const code = await runCli(['map-notes', '--run', 'r1', '--root', root, '--write', returned], io)
+    assert.equal(code, 4)
+    assert.match(lines.join('\n'), /0000000/)
+    await assert.rejects(() => readFile(path.join(root, '.teammates', 'r1', 'map.md'), 'utf8'))
+  })
+})
+
+test('map-notes --write refuses a header-only map', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const sha = g(['rev-parse', 'HEAD']).trim()
+    const returned = path.join(root, 'returned.md')
+    await writeFile(returned, `<!-- teammates-map run=r1 sha=${sha} -->\n`, 'utf8')
+    lines.length = 0
+    assert.equal(await runCli(['map-notes', '--run', 'r1', '--root', root, '--write', returned], io), 4)
+    assert.match(lines.join('\n'), /no body beyond the header/)
+  })
+})
+
+// A written map is a stamped one: the very next `map-notes` call must report it current, or the
+// write produced a file the reader it was written for refuses.
+test('map-notes reports the map it just wrote as current', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const sha = g(['rev-parse', 'HEAD']).trim()
+    const returned = path.join(root, 'returned.md')
+    await writeFile(returned, `<!-- teammates-map run=r1 sha=${sha} -->\n\n# Map\n\nsrc owns orders.\n`, 'utf8')
+    assert.equal(await runCli(['map-notes', '--run', 'r1', '--root', root, '--write', returned], io), 0)
+    lines.length = 0
+    assert.equal(await runCli(['map-notes', '--run', 'r1', '--root', root], io), 0)
+    assert.match(lines.join('\n'), /current map notes/)
+  })
+})
+
+// A map returned for a different run carries a header that vouches for someone else's tree.
+test('map-notes --write refuses a map returned for another run', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const sha = g(['rev-parse', 'HEAD']).trim()
+    const returned = path.join(root, 'returned.md')
+    await writeFile(returned, `<!-- teammates-map run=other sha=${sha} -->\n\n# Map\n\nbody\n`, 'utf8')
+    lines.length = 0
+    assert.equal(await runCli(['map-notes', '--run', 'r1', '--root', root, '--write', returned], io), 4)
+    assert.match(lines.join('\n'), /claims run other/)
+    await assert.rejects(() => readFile(path.join(root, '.teammates', 'r1', 'map.md'), 'utf8'))
+  })
+})
+
+// A missing source file is the caller's mistake, not a crash: exit 4 with the path it tried.
+test('map-notes --write reports an unreadable source file rather than throwing', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const code = await runCli(['map-notes', '--run', 'r1', '--root', root, '--write', path.join(root, 'nope.md')], io)
+    assert.equal(code, 4)
+    assert.match(lines.join('\n'), /cannot read the returned map at .*nope\.md: ENOENT/)
+  })
+})
+
+// `--write` with no value is the missing argument it looks like, never a request to write
+// nothing: `flags[f] === true` means the value was omitted everywhere else in this CLI too.
+test('map-notes --write with no value is refused as a missing argument', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const code = await runCli(['map-notes', '--run', 'r1', '--root', root, '--write'], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /--write takes the path/)
   })
 })
 

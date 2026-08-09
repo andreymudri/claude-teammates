@@ -1,4 +1,4 @@
-import { readFile, lstat, readdir, unlink } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, rename, lstat, readdir, unlink } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parsePlan } from './plan-parser.mjs'
@@ -29,18 +29,18 @@ import { rebuildRunState } from './rebuild.mjs'
 import { generatePhaseWorkflow } from './workflow-gen.mjs'
 import { createGit, GitError, defaultGitExec } from './git.mjs'
 import { buildCoupling, neighboursOf, inventory, hotPairs, renderMap } from './codemap.mjs'
-import { mapNotesStale, mapNotesPrompt } from './mapnotes.mjs'
+import { mapNotesStale, mapNotesPrompt, mapNotesWritable } from './mapnotes.mjs'
 import { deriveContext } from './gate-runner.mjs'
 
 const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|config> [options]
 
   init-run <planPath> --run <id> [--root <path>]
   doctor   --run <id> --plan <path> [--base <branch>] [--run-branch <name>] [--root <path>]
-  finish   --run <id> --plan <path> [--base <branch>] [--root <path>] [--results <path>]
-  prune-run --run <id> --plan <path> [--base <branch>] [--yes] [--root <path>] [--results <path>]
+  finish   --run <id> --plan <path> [--base <branch>] [--root <path>] [--results <path>] [--enforcement-only]
+  prune-run --run <id> --plan <path> [--base <branch>] [--yes] [--root <path>] [--results <path>] [--enforcement-only]
   rebuild-state --run <id> --plan <path> [--base <branch>] [--force] [--root <path>]
   map      [--files <a,b>] [--commits <n>] [--top <n>] [--root <path>]
-  map-notes --run <id> [--root <path>]
+  map-notes --run <id> [--root <path>] [--write <path>]
   plan-drift --run <id> --plan <path> [--base <branch>] [--root <path>]
   preview-check [--root <path>]
   review-dispatch --run <id> [--phase <name>] [--models <json>] [--root <path>]
@@ -66,7 +66,7 @@ const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflo
 // presence is the whole signal, so any value written after one is a spelling this CLI cannot
 // act on — see the refusal in parseFlags. Kept as a named set so the advice printed for a
 // rejected spelling can name a form that actually works, per flag.
-const VALUELESS_FLAGS = new Set(['no-fleet', 'local', 'yes', 'force'])
+const VALUELESS_FLAGS = new Set(['no-fleet', 'local', 'yes', 'force', 'enforcement-only'])
 
 // What to tell a caller who wrote a spelling this CLI does not take. It must never name a form
 // that fails — and for `--no-fleet` it must never name one that does the OPPOSITE of what the
@@ -206,11 +206,11 @@ const KNOWN_FLAGS = {
   'collect-reviews': ['run', 'phase'],
   'preview-check': [],
   'plan-drift': ['run', 'plan', 'base'],
-  finish: ['run', 'plan', 'base', 'results'],
-  'prune-run': ['run', 'plan', 'base', 'yes', 'results'],
+  finish: ['run', 'plan', 'base', 'results', 'enforcement-only'],
+  'prune-run': ['run', 'plan', 'base', 'yes', 'results', 'enforcement-only'],
   'rebuild-state': ['run', 'plan', 'base', 'force'],
   map: ['files', 'commits', 'top'],
-  'map-notes': ['run'],
+  'map-notes': ['run', 'write'],
   config: ['local'],
 }
 
@@ -229,6 +229,64 @@ const NUMERIC_PHASE_COMMANDS = new Set(['workflow', 'fix', 'record-fix-round'])
 // Every command that accepts caller-supplied check results. `gate` takes a flat list for the one
 // phase it computes; `finish` and `prune-run` recompute every phase, so theirs is keyed by phase.
 const RESULTS_COMMANDS = new Set(['gate', 'finish', 'prune-run'])
+
+// `finish` and `prune-run` recompute every phase, and a `command` check is the expensive part of
+// every one of them: on a run with three phases and a test suite per phase, `finish` costs three
+// full suites to answer "is this run finished", and `prune-run` has timed out at 120s deciding
+// whether a directory could be deleted. `--enforcement-only` asks the narrower question those
+// two callers usually mean — does the enforcement still hold — and pays only for the checks that
+// answer it.
+//
+// Only `command` checks are dropped. Everything else runs exactly as it otherwise would: the
+// always-enforced kinds (`fileset`, `ownership`, and the `merge` result `runChecks` computes for
+// itself) are the point of the flag, and a manifest kind with no runner must still land as the
+// blocking `pending` it always was rather than disappear from the list.
+//
+// Every dropped check is recorded as `skip` — never omitted, and never `pass`. `aggregateVerdict`
+// collects skips and both callers below print them by name, because a verdict that hides which
+// checks did not run is worse than a slow one. It follows that this flag can report PASS where a
+// full run would have reported FAIL: that is what it buys, and the printed skip list is the only
+// thing that says so.
+const ENFORCEMENT_ONLY_SKIP = 'skipped by --enforcement-only: this verdict reports the enforcement checks, not whether the merged tree works'
+
+function commandChecks(checks) {
+  return checks.filter((c) => c.kind === 'command')
+}
+
+async function runPhaseChecks(checks, ctx, enforcementOnly) {
+  if (!enforcementOnly) return runChecks(checks, ctx)
+  const results = await runChecks(checks.filter((c) => c.kind !== 'command'), ctx)
+  return [
+    ...results,
+    // `optional` is read off the manifest exactly as gate-runner's own `checkResult` reads it, so
+    // a skip carries the same shape as every other result in the list. It does not change the
+    // verdict either way — a skip never blocks — but a result missing the field would.
+    ...commandChecks(checks).map((c) => ({
+      name: c.name,
+      kind: c.kind,
+      status: 'skip',
+      output: ENFORCEMENT_ONLY_SKIP,
+      optional: c.optional === true,
+    })),
+  ]
+}
+
+// Printed once, before the first check runs, when the command checks are NOT being skipped. An
+// operator about to wait several minutes should be told that is what is happening and that a
+// cheaper answer exists, rather than watching a silent process and reaching for the timeout.
+function announceCommandChecks(io, command, checkCount, phaseCount) {
+  io.out(
+    `${command}: running ${checkCount} command check${checkCount === 1 ? '' : 's'}`
+    + ` across ${phaseCount} phase${phaseCount === 1 ? '' : 's'} — this is the slow part;`
+    + ' pass --enforcement-only to skip them and report the enforcement checks alone',
+  )
+}
+
+// A phase reports the checks it did not run, every time, whatever put them in that state:
+// `--enforcement-only` here, and the merge-conflict skip `runChecks` produces on its own.
+function reportSkipped(io, phase, verdict) {
+  for (const name of verdict.skipped ?? []) io.out(`phase ${phase}: skipped: ${name}`)
+}
 
 // A skill branches on this CLI's exit code. A missing argument must produce the usage
 // message and exit 2, never an unhandled TypeError and a stack trace.
@@ -1312,14 +1370,25 @@ export async function runCli(argv, io = { out: console.log }) {
     // Which phases hold a passing gate is RECOMPUTED, never read from `status.gates`. That file
     // is written by the agents whose worktrees are about to be removed, and a phase marked PASS
     // there is exactly how a fix round would lose the context it still needs.
+    const enforcementOnly = flags['enforcement-only'] === true
+    const phases = [...new Set((ctx.tasks ?? []).map((t) => t.phase))].sort((a, b) => a - b)
+    if (!enforcementOnly) {
+      const total = phases.reduce((n, p) => n + commandChecks(checksForPhase(config, String(p))).length, 0)
+      announceCommandChecks(io, 'prune-run', total, phases.length)
+    }
+
     const passedPhases = []
-    for (const phase of [...new Set((ctx.tasks ?? []).map((t) => t.phase))].sort((a, b) => a - b)) {
+    for (const phase of phases) {
       const checks = checksForPhase(config, String(phase))
       const forPhase = suppliedForPhase(supplied, phase)
       const invalid = validateSuppliedResults(forPhase, checks)
       if (invalid) { io.out(`phase ${phase}: ${invalid}`); return 2 }
-      const results = mergeSuppliedResults(await runChecks(checks, { ...ctx, currentPhase: phase }), forPhase)
-      if (aggregateVerdict(results).verdict === 'PASS') passedPhases.push(phase)
+      const results = mergeSuppliedResults(await runPhaseChecks(checks, { ...ctx, currentPhase: phase }, enforcementOnly), forPhase)
+      const verdict = aggregateVerdict(results)
+      // This command reports a verdict only as a phase's presence in the prune plan below, so
+      // without this the checks that did not run would leave no trace in the output at all.
+      reportSkipped(io, phase, verdict)
+      if (verdict.verdict === 'PASS') passedPhases.push(phase)
     }
 
     const git = createGit({ cwd: root })
@@ -1416,6 +1485,12 @@ export async function runCli(argv, io = { out: console.log }) {
     // be verified — the check would report on whatever remained and call the run finished.
     const phases = [...new Set((ctx.tasks ?? []).map((t) => t.phase))].sort((a, b) => a - b)
 
+    const enforcementOnly = flags['enforcement-only'] === true
+    if (!enforcementOnly) {
+      const total = phases.reduce((n, p) => n + commandChecks(checksForPhase(config, String(p))).length, 0)
+      announceCommandChecks(io, 'finish', total, phases.length)
+    }
+
     const phaseResults = []
     for (const phase of phases) {
       // Every phase is computed as if it were current. `deriveContext` sets `currentPhase` to
@@ -1429,7 +1504,7 @@ export async function runCli(argv, io = { out: console.log }) {
       const forPhase = suppliedForPhase(supplied, phase)
       const invalid = validateSuppliedResults(forPhase, checks)
       if (invalid) { io.out(`phase ${phase}: ${invalid}`); return 2 }
-      const results = mergeSuppliedResults(await runChecks(checks, phaseCtx), forPhase)
+      const results = mergeSuppliedResults(await runPhaseChecks(checks, phaseCtx, enforcementOnly), forPhase)
       // `supplied` is carried into the summary so a reader can tell a recomputed pass from a
       // reported one. It changes no verdict: aggregateVerdict stays the only producer of those.
       phaseResults.push({ phase, supplied: forPhase.length > 0, verdict: aggregateVerdict(results) })
@@ -1550,6 +1625,49 @@ export async function runCli(argv, io = { out: console.log }) {
       if (!(err instanceof GitError)) throw err
       io.out(`cannot read the repository: ${err.message}`)
       return 2
+    }
+
+    // The orchestrator's half of the inverted map-notes contract: the dispatched agent is
+    // read-only and RETURNS the map, the caller saves that text somewhere, and this is the one
+    // path that turns it into `.teammates/<runId>/map.md`. Without it the orchestrator writes
+    // that file by hand and `mapNotesWritable` — the validator that exists precisely so the
+    // stamped file can be vouched for — is never called by anything.
+    //
+    // Still not a path by which this CLI authors a map: it copies text an agent produced, after
+    // checking the header the agent was handed still names this run and this commit. A map that
+    // fails that check must not land at all, because every later reader treats the header as
+    // provenance, and a file written past a failed validation would manufacture exactly the
+    // fact this design refuses to fake.
+    if (flags.write !== undefined) {
+      // Valueless `--write` is the missing argument it looks like, not a request to write
+      // nothing. Same rule as everywhere else in this CLI: `flags[f] === true` means the value
+      // was omitted. REQUIRED cannot express "required only when present", so it is checked here.
+      if (flags.write === true) {
+        io.out('--write takes the path of the file holding the map the agent returned')
+        return 2
+      }
+      const source = path.resolve(root, flags.write)
+      let returned
+      try {
+        returned = await readFile(source, 'utf8')
+      } catch (err) {
+        io.out(`cannot read the returned map at ${source}: ${err.code ?? err.message}`)
+        return 4
+      }
+      const refusal = mapNotesWritable(returned, { runId, sha })
+      // Verbatim, and nothing is written. The reason names the mismatch it found — which commit,
+      // which run, or a missing body — and that is what tells the caller whether to re-dispatch
+      // the agent or to re-save what it already returned.
+      if (refusal) { io.out(refusal); return 4 }
+      await mkdir(path.dirname(notesPath), { recursive: true })
+      // Written through a uniquely-named temp file and renamed, the same way `writeState` writes
+      // every other file under `.teammates/`: a reader must never find a half-written map under
+      // a header that vouches for the whole of it.
+      const tmp = `${notesPath}.${process.pid}.${Math.floor(performance.now() * 1000)}.tmp`
+      await writeFile(tmp, returned, 'utf8')
+      await rename(tmp, notesPath)
+      io.out(`wrote the returned map to ${notesPath} for run ${runId} at commit ${sha}`)
+      return 0
     }
 
     // ENOENT is the ordinary case — no notes yet. But every other read failure (map.md is a
