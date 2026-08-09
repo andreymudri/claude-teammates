@@ -305,8 +305,9 @@ async function runPhaseChecks(checks, ctx, enforcementOnly) {
   return [
     ...results,
     // `optional` is read off the manifest exactly as gate-runner's own `checkResult` reads it, so
-    // a skip carries the same shape as every other result in the list. It does not change the
-    // verdict either way — a skip never blocks — but a result missing the field would.
+    // every result in the list has the same shape whoever built it. It changes no verdict here:
+    // `aggregateVerdict` reads `optional` only for `fail` and `pending`, never for `skip`.
+    // Set for consistency, not for consequence.
     ...commandChecks(checks).map((c) => ({
       name: c.name,
       kind: c.kind,
@@ -325,17 +326,25 @@ async function runPhaseChecks(checks, ctx, enforcementOnly) {
 // operator about to wait several minutes should be told that is what is happening and that a
 // cheaper answer exists, rather than watching a silent process and reaching for the timeout.
 //
-// Silent when there are none. The line exists to explain a wait, and with nothing to wait for it
-// explained nothing while recommending a flag the very next invocation would refuse: a manifest
-// with no `command` check to drop generally has no enforcement check either, and
-// `enforcementOnlyRefusal` exits 2 on it. This is not the "a skipped check is always reported"
-// rule — no check is being hidden here; there is no check.
-function announceCommandChecks(io, command, checkCount, phaseCount) {
+// Two independent conditions, kept separate because they answer different questions:
+//
+//   - `checkCount === 0` silences the line entirely. It exists to explain a wait, and with
+//     nothing to wait for it explained nothing. This is not the "a skipped check is always
+//     reported" rule — no check is being hidden here; there is no check.
+//   - `recommendEnforcementOnly` decides only the tail. Whether the wait is worth explaining and
+//     whether the cheaper route exists are unrelated: a manifest of nothing but `command` checks
+//     has a real wait to explain AND is exactly the barren shape `enforcementOnlyRefusal` exits 2
+//     on, so it must be told about the wait and not sent to a flag that would refuse it. Gating
+//     the recommendation on the count instead only reached manifests with no command checks,
+//     which is the one case where the line is never printed at all.
+function announceCommandChecks(io, command, checkCount, phaseCount, recommendEnforcementOnly) {
   if (checkCount === 0) return
   io.out(
     `${command}: running ${checkCount} command check${checkCount === 1 ? '' : 's'}`
     + ` across ${phaseCount} phase${phaseCount === 1 ? '' : 's'} — this is the slow part;`
-    + ' pass --enforcement-only to skip them and report the enforcement checks alone',
+    + (recommendEnforcementOnly
+      ? ' pass --enforcement-only to skip them and report the enforcement checks alone'
+      : ' --enforcement-only cannot shorten it, because no phase declares an enforcement check to report instead'),
   )
 }
 
@@ -1429,12 +1438,14 @@ export async function runCli(argv, io = { out: console.log }) {
     // there is exactly how a fix round would lose the context it still needs.
     const enforcementOnly = flags['enforcement-only'] === true
     const phases = [...new Set((ctx.tasks ?? []).map((t) => t.phase))].sort((a, b) => a - b)
+    // Computed either way: it decides whether the flag is refused, and — when it was not passed —
+    // whether the announcement should recommend it at all.
+    const refusal = enforcementOnlyRefusal(config, phases)
     if (enforcementOnly) {
-      const refusal = enforcementOnlyRefusal(config, phases)
       if (refusal) { io.out(refusal); return 2 }
     } else {
       const total = phases.reduce((n, p) => n + commandChecks(checksForPhase(config, String(p))).length, 0)
-      announceCommandChecks(io, 'prune-run', total, phases.length)
+      announceCommandChecks(io, 'prune-run', total, phases.length, refusal === null)
     }
 
     const passedPhases = []
@@ -1567,15 +1578,17 @@ export async function runCli(argv, io = { out: console.log }) {
     const phases = [...new Set((ctx.tasks ?? []).map((t) => t.phase))].sort((a, b) => a - b)
 
     const enforcementOnly = flags['enforcement-only'] === true
+    // Computed either way: it decides whether the flag is refused, and — when it was not passed —
+    // whether the announcement should recommend it at all.
+    const refusal = enforcementOnlyRefusal(config, phases)
     if (enforcementOnly) {
       // Before any check runs, and before any phase reaches the summary below: a phase with no
       // enforcement check left to run would otherwise be summarised PASS on nothing but its own
       // skips, and reported as "ready to land".
-      const refusal = enforcementOnlyRefusal(config, phases)
       if (refusal) { io.out(refusal); return 2 }
     } else {
       const total = phases.reduce((n, p) => n + commandChecks(checksForPhase(config, String(p))).length, 0)
-      announceCommandChecks(io, 'finish', total, phases.length)
+      announceCommandChecks(io, 'finish', total, phases.length, refusal === null)
     }
 
     const phaseResults = []

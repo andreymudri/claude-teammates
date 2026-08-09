@@ -680,7 +680,49 @@ test('finish names how many command checks it is about to run', async () => {
     await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
     const out = lines.join('\n')
     assert.match(out, /running 2 command checks across 2 phases/)
-    assert.match(out, /--enforcement-only/)
+    // The manifest declares `fileset`, so the cheaper route genuinely exists here.
+    assert.match(out, /pass --enforcement-only/)
+  })
+})
+
+// --- the recommendation must only name a flag that would be accepted ------------------------
+//
+// A manifest with command checks but no enforcement check is the barren shape `enforcementOnlyRefusal`
+// exists for. The announcement told the caller to pass `--enforcement-only` to shorten the wait;
+// doing so exits 2 with "cannot answer for phase 1, 2", having run nothing. Gating this on the
+// check COUNT — the round-2 fix — only covered manifests with no command checks at all, which is
+// exactly the case where the line was never printed and the flag was never recommended.
+test('finish does not recommend --enforcement-only on a manifest it would refuse', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'test', kind: 'command', run: 'node -e ""' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    // The wait is still explained — there really are command checks about to run.
+    assert.match(out, /running 2 command checks across 2 phases/)
+    // But the flag is not offered, because this manifest is exactly the one it refuses.
+    assert.doesNotMatch(out, /pass --enforcement-only/)
+  })
+})
+
+test('prune-run does not recommend --enforcement-only on a manifest it would refuse', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'test', kind: 'command', run: 'node -e ""' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    assert.match(out, /running 2 command checks across 2 phases/)
+    assert.doesNotMatch(out, /pass --enforcement-only/)
   })
 })
 
@@ -698,6 +740,8 @@ test('prune-run names how many command checks it is about to run when they are n
     lines.length = 0
     await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
     assert.match(lines.join('\n'), /running 2 command checks across 2 phases/)
+    // `fileset` is declared, so the flag would be accepted and is worth recommending.
+    assert.match(lines.join('\n'), /pass --enforcement-only/)
   })
 })
 
