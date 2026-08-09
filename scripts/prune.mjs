@@ -16,6 +16,19 @@
 
 const TASK_BRANCH = /^teammates\/([^/]+)\/([^/]+)$/
 
+// A merge preview is a detached worktree under the system temp directory, named tm-preview-*.
+// Its own cleanup runs in a `finally`, which a SIGKILL skips — so these accumulate, and every
+// one of them shows up in `doctor` as a worktree the operator never created. They belong to no
+// run and hold no branch, which is exactly what makes them safe to reap: there is no task
+// context to lose and no ref to strand.
+const PREVIEW_DIR = /[\\/]tm-preview-[^\\/]+$/
+
+export function leakedPreviews(worktrees = []) {
+  return worktrees
+    .filter((w) => w && w.detached && !w.branch && PREVIEW_DIR.test(String(w.path)))
+    .map((w) => ({ path: w.path, head: w.head ?? null }))
+}
+
 function norm(p) {
   return String(p ?? '').replace(/\\/g, '/').replace(/\/+$/, '')
 }
@@ -39,6 +52,7 @@ export function selectPrunableWorktrees({
       skipped.push({ path: wt.path, reason: 'this is the main worktree; it is never pruned' })
       continue
     }
+    if (PREVIEW_DIR.test(String(wt.path)) && wt.detached && !wt.branch) continue
     if (!wt.branch) {
       skipped.push({ path: wt.path, reason: 'no branch checked out (detached); this run does not own it' })
       continue
@@ -71,7 +85,7 @@ export function selectPrunableWorktrees({
     prunable.push({ path: wt.path, branch: wt.branch, taskId })
   }
 
-  return { runId, prunable, skipped }
+  return { runId, prunable, skipped, previews: leakedPreviews(worktrees) }
 }
 
 export function renderPrunePlan(plan) {
@@ -80,6 +94,10 @@ export function renderPrunePlan(plan) {
   else {
     lines.push(`prunable (${plan.prunable.length}):`)
     for (const w of plan.prunable) lines.push(`  ${w.taskId}  ${w.branch}  ${w.path}`)
+  }
+  if (plan.previews?.length) {
+    lines.push(`leaked merge previews (${plan.previews.length}), safe to remove — a killed gate skips its own cleanup:`)
+    for (const p of plan.previews) lines.push(`  ${p.path}`)
   }
   if (plan.skipped.length) {
     lines.push('left alone:')

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { selectPrunableWorktrees, renderPrunePlan } from '../scripts/prune.mjs'
+import { selectPrunableWorktrees, renderPrunePlan, leakedPreviews } from '../scripts/prune.mjs'
 
 const RUN_ID = 'r1'
 
@@ -113,4 +113,31 @@ test('renderPrunePlan says plainly when there is nothing to remove', () => {
     runId: RUN_ID, worktrees: [wt('/repo', 'run/r1')], mainWorktree: '/repo',
   }))
   assert.match(out, /nothing to prune/i)
+})
+
+const preview = (path) => ({ path, branch: null, head: 'ccc', detached: true })
+
+test('a detached tm-preview worktree under temp is identified as leaked', () => {
+  const out = leakedPreviews([preview('C:/Users/x/AppData/Local/Temp/tm-preview-AbCdEf')])
+  assert.deepEqual(out, [{ path: 'C:/Users/x/AppData/Local/Temp/tm-preview-AbCdEf', head: 'ccc' }])
+})
+
+// Named like a preview but holding a branch: not ours to reap. Something is checked out there.
+test('a worktree holding a branch is never treated as a leaked preview', () => {
+  assert.deepEqual(leakedPreviews([{ path: '/tmp/tm-preview-x', branch: 'teammates/r1/T1', head: 'a', detached: false }]), [])
+})
+
+test('an ordinary detached worktree is not a leaked preview', () => {
+  assert.deepEqual(leakedPreviews([preview('/tmp/scratch-thing')]), [])
+})
+
+test('the prune plan lists leaked previews separately from what it left alone', () => {
+  const plan = selectPrunableWorktrees({
+    runId: RUN_ID,
+    worktrees: [wt('/repo', 'run/r1'), preview('/tmp/tm-preview-zz')],
+    mainWorktree: '/repo',
+  })
+  assert.deepEqual(plan.previews.map((p) => p.path), ['/tmp/tm-preview-zz'])
+  assert.equal(plan.skipped.some((s) => s.path === '/tmp/tm-preview-zz'), false)
+  assert.match(renderPrunePlan(plan), /leaked merge previews/)
 })
