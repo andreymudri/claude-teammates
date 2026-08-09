@@ -173,6 +173,24 @@ test('a branch parked at the anchor is still reported as contributing nothing', 
   assert.match(report.problems.join('\n'), /no file changes/)
 })
 
+// From phase 2 onward the run tip is past the anchor, so a branch parked at the tip satisfies
+// both halves of the landed test while carrying no work of its own. This is the shape the
+// emptiness complaint exists for, and it must not read as integrated.
+test('a branch parked at the current run tip is not landed', async () => {
+  const report = await collectDoctorReport({
+    git: fakeGit({
+      changedFiles: async () => [],
+      // Ancestor of the run tip, not of the anchor: the run-tip-parked shape.
+      isAncestor: async (_sha, target) => target === 'runSha1',
+      resolveRef: async () => 'runSha1',
+    }),
+    runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, tasks: [T1],
+    runSha: 'runSha1', anchorSha: 'anchorSha1',
+  })
+  assert.equal(report.tasks[0].landed, false)
+  assert.match(report.problems.join('\n'), /no file changes/)
+})
+
 test('renderDoctor prints integrated rather than NO CHANGES for a landed task', () => {
   const out = renderDoctor({
     runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, mainBranch: RUN_BRANCH,

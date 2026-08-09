@@ -79,9 +79,21 @@ export async function collectDoctorReport({ git, runId, runBranch, baseBranch, t
         // phase look broken. "On the run branch" alone is not enough: the anchor and everything
         // before it are ancestors too, so a branch parked at the anchor — a teammate that
         // committed elsewhere and left the conventional ref where it started — would read as
-        // landed and escape the very check this is.
+        // landed and escape the very check this is. Nor is "past the anchor" enough on its own:
+        // from phase 2 the run tip is itself past the anchor, so a branch left exactly where
+        // `git checkout -B <task> <run branch>` put it satisfies both halves while carrying
+        // nothing — hence the tip exclusion.
+        //
+        // What is left uncaught: a branch parked at some intermediate post-anchor commit on the
+        // run branch, rather than at its tip, still reads as landed, because nothing here tells
+        // it apart from a genuinely merged branch. Closing that means walking the run branch's
+        // merge commits for one whose second parent is this branch — more git than a read-only
+        // report needs to justify for a shape no incident has produced, so it is accepted here
+        // the way runFilesetCheck in `scripts/gate-runner.mjs` accepts not re-diffing an
+        // integrated phase. That function computes this same `landed` test and shares this
+        // blind spot; it has not yet been given the tip exclusion.
         entry.landed = anchorSha
-          ? (await git.isAncestor(sha, runSha)) && !(await git.isAncestor(sha, anchorSha))
+          ? (await git.isAncestor(sha, runSha)) && !(await git.isAncestor(sha, anchorSha)) && sha !== runSha
           : false
         if (entry.changed.length === 0 && !entry.landed) {
           problems.push(`${task.id}: branch ${branch} has no file changes past its fork point — the work landed on another ref and this task would merge as a no-op`)
