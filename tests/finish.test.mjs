@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { summarizeRun, renderRunSummary } from '../scripts/finish.mjs'
+import { summarizeRun, renderRunSummary, suppliedForPhase, validateSuppliedPhases } from '../scripts/finish.mjs'
 
 const phase = (n, over = {}) => ({
   phase: n,
@@ -76,4 +76,40 @@ test('the rendered table says the run is verified when every phase passes', () =
 // read later as a record that once passed — the exact confusion status.gates already causes.
 test('the rendered table states that the verdicts were recomputed now', () => {
   assert.match(renderRunSummary('r1', [phase(1)]), /recomputed/i)
+})
+
+test('results are selected by phase, never shared between phases', () => {
+  const supplied = { phases: { 1: { results: [{ name: 'review', status: 'pass' }] }, 2: { results: [] } } }
+  assert.equal(suppliedForPhase(supplied, 1).length, 1)
+  assert.deepEqual(suppliedForPhase(supplied, 2), [])
+  assert.deepEqual(suppliedForPhase(supplied, 3), [])
+})
+
+test('a missing or malformed results file yields nothing rather than throwing', () => {
+  assert.deepEqual(suppliedForPhase(null, 1), [])
+  assert.deepEqual(suppliedForPhase({ phases: null }, 1), [])
+})
+
+test('a results file shaped as a flat list is refused, naming the shape expected', () => {
+  assert.match(validateSuppliedPhases([{ name: 'review' }]), /phases/)
+  assert.match(validateSuppliedPhases({ results: [] }), /names no phases/)
+})
+
+test('a non-numeric phase key is refused', () => {
+  assert.match(validateSuppliedPhases({ phases: { default: { results: [] } } }), /non-numeric phase/)
+})
+
+test('a phase entry without a results array is refused', () => {
+  assert.match(validateSuppliedPhases({ phases: { 1: {} } }), /results array/)
+})
+
+test('a well-formed file passes validation', () => {
+  assert.equal(validateSuppliedPhases({ phases: { 1: { results: [] } } }), null)
+})
+
+test('the summary marks a phase that passed on supplied results', () => {
+  const out = renderRunSummary('r1', [
+    { phase: 1, supplied: true, verdict: { verdict: 'PASS', failed: [], optionalFailed: [], skipped: [], pending: [] } },
+  ])
+  assert.match(out, /review supplied/)
 })
