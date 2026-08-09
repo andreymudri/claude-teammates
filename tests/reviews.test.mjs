@@ -127,6 +127,38 @@ test('an unstamped findings file is stale whatever it contains', () => {
   assert.match(reviewStale({ findings: [] }, { ...STAMP, lens: 'tests' }), /no stamp/)
 })
 
+// A phase-1 findings file must not satisfy phase 2, even when the lens and the branch tips it
+// names line up — the exact reason the stamp carries a phase at all. Deleting the phase
+// comparison from `reviewStale` would leave every existing test green, since they all compare
+// phase '1' against phase '1'.
+test('findings stamped for one phase do not satisfy a different phase', () => {
+  const why = reviewStale(
+    { stamp: { phase: '1', lens: 'tests', branches: STAMP.branches } },
+    { phase: '2', lens: 'tests', branches: STAMP.branches },
+  )
+  assert.match(why, /phase 1/)
+  assert.match(why, /phase 2/)
+})
+
+// The lens comparison, pinned the same way: matching phase and branches must not paper over a
+// mismatched lens.
+test('findings stamped for one lens do not satisfy a different lens', () => {
+  const why = reviewStale(
+    { stamp: { phase: '1', lens: 'security', branches: STAMP.branches } },
+    { phase: '1', lens: 'correctness', branches: STAMP.branches },
+  )
+  assert.match(why, /security/)
+  assert.match(why, /correctness/)
+})
+
+// The not-an-object guard, pinned directly rather than relying on it merely not throwing
+// elsewhere.
+test('a non-object findings file is refused rather than throwing', () => {
+  assert.match(reviewStale(null, { ...STAMP, lens: 'tests' }), /not an object/)
+  assert.match(reviewStale('nope', { ...STAMP, lens: 'tests' }), /not an object/)
+  assert.match(reviewStale([], { ...STAMP, lens: 'tests' }), /not an object/)
+})
+
 test('a stale lens is reported and never contributes a pass', () => {
   const out = collectReviewResults({
     checkName: 'review',

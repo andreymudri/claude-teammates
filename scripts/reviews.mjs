@@ -24,6 +24,18 @@ export function reviewFileName(phase, lens) {
 // files and reports findings about code that no longer exists — worked around by hand three
 // times during run `codemap` by deleting the files between rounds, which is exactly the kind of
 // manual step this design removes everywhere else.
+//
+// The stamp is tamper-evident, not proof, the same distinction this repository draws for the
+// map-notes header. It is self-reported: the reviewer that writes the findings file is the same
+// reviewer that reads its own tips and stamps them on, so a reviewer that errors out — or one
+// that stamps before it reads anything — can `git rev-parse` the current tips, emit `{findings:
+// [], stamp: {...}}`, and pass `reviewStale` while having judged nothing. What the stamp rules
+// out is a *stale* file surviving into a round it was never written for; it does not rule out a
+// *fabricated* one, because the reviewer computed the very tips it is graded against. This is not
+// a regression — an unstamped file passed the same collection with the same blind trust before
+// the stamp existed — but the stamp must not be read as closing that gap. Nothing short of the
+// orchestrator computing the diff itself and handing the reviewer a digest it cannot derive would
+// close it.
 export function reviewStamp({ phase, lens, branchShas = {} }) {
   const names = Object.keys(branchShas).sort()
   return { phase: String(phase), lens, branches: names.map((n) => `${n}@${branchShas[n]}`) }
@@ -33,7 +45,7 @@ export function reviewStamp({ phase, lens, branchShas = {} }) {
 // A file with no stamp at all is stale, never "probably current": an unstamped file is the
 // artefact this design refuses to trust everywhere else.
 export function reviewStale(file, expected) {
-  if (!file || typeof file !== 'object') return 'the findings file is not an object'
+  if (!file || typeof file !== 'object' || Array.isArray(file)) return 'the findings file is not an object'
   const stamp = file.stamp
   if (!stamp) return 'the findings file carries no stamp, so nothing says which diff it judged'
   if (String(stamp.phase) !== String(expected.phase)) {
