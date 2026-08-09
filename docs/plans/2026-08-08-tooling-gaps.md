@@ -1281,14 +1281,29 @@ names what was reproduced, because a step that only says "fix X" invites a fix t
 sentence rather than the failure.
 
 - [ ] **Step 1:** The flaky worktree-name match. `tests/cli.test.mjs` matches a worktree name with
-      the bare regex `/a1/` against `git worktree list` output, which also matches any abbreviated
-      commit sha containing those two characters. Measured at roughly 2.5% across 40 isolated
-      runs, with an observed failure on sha `3a1b132`. It fails a phase on correct behaviour in
-      the `doesNotMatch` direction, and in the paired `assert.match` direction it PASSES when the
-      worktree was wrongly removed — so it masks a real regression at the same rate. Match the
-      worktree path rather than a two-character substring. The three pre-existing occurrences
-      around lines 648, 671 and 693 have the same weakness; fix those too, since a flaky gate is
-      worse than a missing check.
+      the bare regex `/a1/` against `git worktree list` output, which also matches those two
+      characters ANYWHERE in that output. There are at least TWO INDEPENDENT SOURCES, and a fix
+      that covers only one leaves the phase still flaky.
+
+      The first is an abbreviated commit sha: measured at roughly 2.5% across 40 isolated runs,
+      with an observed failure on sha `3a1b132`.
+
+      The second was found later, when this flake failed a real phase-4 gate run on shas that had
+      passed the same check minutes earlier — the `mkdtemp` suffix of the temp root itself:
+
+          'C:/Users/andre/AppData/Local/Temp/tm-cli-a1TUr0 822d690 [run-branch]'
+
+      So the true rate is higher than the sha-only measurement, and the fix proposed in review
+      (matching `worktrees[\\/]a1`) would NOT have caught this one, because the match came from the
+      temp root rather than from anything under a worktrees directory. Anchor on the worktree’s own
+      path segment as it actually appears in `git worktree list`, and verify your fix against BOTH
+      shapes: a sha containing the substring, and a temp-root directory name containing it.
+
+      Why it is worth the trouble: it fails a phase on correct behaviour in the `doesNotMatch`
+      direction, and in the paired `assert.match` direction it PASSES when the worktree was
+      wrongly removed — so it masks a real regression at the same rate that it invents a fake
+      one. The three pre-existing occurrences around lines 648, 671 and 693 have the same
+      weakness; fix those too, since a flaky gate is worse than a missing check.
 
 - [ ] **Step 2:** The unlink fallback is untested. Replacing the whole
       `catch { failed += 1; io.out('left ... in place ...'); continue }` block around
