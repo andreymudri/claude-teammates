@@ -9,6 +9,7 @@ import {
   mergeSuppliedResults,
   parseConstraints,
   promptSafeDirectories,
+  isMissingPreviewRoot,
   REQUIRED,
   KNOWN_FLAGS,
   UNIVERSAL_FLAGS,
@@ -5258,10 +5259,11 @@ test('an unknown flag is refused before a missing required argument is reported'
 })
 
 // KNOWN_FLAGS is a whitelist, so a command absent from it is a command whose flags go unchecked.
-// This is the tripwire for that — and it is DERIVED from REQUIRED rather than restated, because
-// a hardcoded list only catches a command REMOVED from the tables. Adding is the direction that
-// happens: a real 21st subcommand was added against the hardcoded list and the suite stayed green
-// at 269/269 while that command swallowed an unknown flag and exited 0.
+// Every command in REQUIRED really does refuse an unknown flag — but REQUIRED is a hand-maintained
+// table too, so on its own this catches only a command added to REQUIRED and not to KNOWN_FLAGS.
+// The case that actually happens — a subcommand added to the dispatch chain and to NEITHER table —
+// is caught by the test below, which reads the dispatch itself. The two are kept apart on purpose:
+// this one proves the refusal HAPPENS, that one proves the tables COVER the dispatch.
 test('every command this CLI dispatches refuses a flag it does not read', async () => {
   const commands = Object.keys(REQUIRED)
   assert.ok(commands.length > 0)
@@ -5275,11 +5277,34 @@ test('every command this CLI dispatches refuses a flag it does not read', async 
   })
 })
 
-// The other half of deriving the list: REQUIRED is the set of commands this CLI dispatches, and
-// KNOWN_FLAGS is the set whose flags are validated. A command in one and not the other is either
-// an unvalidated command or a table entry for a command that does not exist.
-test('the required-argument and known-flag tables describe the same commands', () => {
-  assert.deepEqual(Object.keys(REQUIRED).sort(), Object.keys(KNOWN_FLAGS).sort())
+// The real tripwire, and the reason it reads SOURCE rather than another export: what decides
+// whether a subcommand exists is the chain of `command === '<name>'` branches in runCli, and
+// nothing about adding one forces a developer to touch any table. Derived from a third table
+// this could not see a command registered in no table at all — verified by inserting a real
+// dispatch branch `if (command === 'brand-new') { io.out('brand-new ran'); return 0 }` before
+// the `config` branch: the suite stayed green at 309/309 while `runCli(['brand-new',
+// '--totally-bogus', 'x'])` printed `brand-new ran` and returned 0, which is verbatim the
+// incident this tripwire exists for.
+//
+// Scanning source is uglier than an exported set, and it is chosen anyway because an exported
+// set is one more thing to keep in step with the dispatch — the exact failure being closed. It
+// collects EVERY `command === '<name>'` in the file, including the handful outside the dispatch
+// chain (`solo`, the init-run positional, the claim/unclaim task check): those all name real
+// commands, and a comparison against a name that is not a command is itself worth failing on.
+const CLI_SOURCE = await readFile(new URL('../scripts/cli.mjs', import.meta.url), 'utf8')
+
+function dispatchedCommands(source) {
+  return [...new Set([...source.matchAll(/command === '([^']+)'/g)].map((m) => m[1]))].sort()
+}
+
+test('both flag tables cover every command the dispatch chain answers to', () => {
+  const dispatched = dispatchedCommands(CLI_SOURCE)
+  assert.ok(dispatched.length > 0, 'the dispatch chain was not found — this test is reading the wrong thing')
+  // REQUIRED decides whether a missing argument is reported; KNOWN_FLAGS decides whether an
+  // unknown flag is refused. A command missing from either is unguarded in that respect, and a
+  // table entry naming no dispatched command is a stale one.
+  assert.deepEqual(dispatched, Object.keys(REQUIRED).sort())
+  assert.deepEqual(dispatched, Object.keys(KNOWN_FLAGS).sort())
 })
 
 // Named for what it now does. The previous version checked one flag on one command, which left
@@ -5745,6 +5770,65 @@ test('prune-run clears a preview that is registered but whose directory is gone'
       assert.match(out, /registered but its directory is gone/)
       // The old message claimed links could not be removed from a directory that is not there.
       assert.doesNotMatch(out, /provisioned links could not be removed/)
+    })
+  })
+})
+
+// The two clauses of `isMissingPreviewRoot`, pinned INDEPENDENTLY. Each can be deleted with the
+// whole suite green otherwise, because the only non-ENOENT sweep failure any end-to-end test
+// stages is the depth guard's plain `Error`, which carries no `.path` — so it is excluded by the
+// SURVIVING clause rather than by the mutated one. Both mutants are destructive: a `true` here
+// skips the `continue` and removes a worktree whose junctions were never swept.
+//
+// Unit tests, deliberately. An error whose `.code` is ENOENT and whose `.path` is a subdirectory
+// is a directory vanishing between the sweep's `readdir` and its recursive descent — a race no
+// test can stage deterministically — so pinning it end to end would mean pretending to a
+// reproduction that does not exist. The paired end-to-end test below stages the one shape that
+// IS reproducible, and shows a false answer here really does leave the worktree in place.
+function sweepError(code, failedPath) {
+  return Object.assign(new Error(`${code}: ${failedPath}`), { code, path: failedPath })
+}
+
+test('a sweep failure on the preview root that is not ENOENT is not read as a missing directory', () => {
+  const root = path.join(tmpdir(), 'tm-preview-clause')
+  // The directory IS there and could not be read: its links are unaccounted for, so it blocks.
+  for (const code of ['EACCES', 'EPERM', 'EBUSY', 'ENOTDIR']) {
+    assert.equal(isMissingPreviewRoot(sweepError(code, root), root), false, `${code} was read as a missing root`)
+  }
+  assert.equal(isMissingPreviewRoot(sweepError('ENOENT', root), root), true, 'the real missing-root case still passes')
+})
+
+test('an ENOENT from inside the preview tree is not read as a missing preview root', () => {
+  const root = path.join(tmpdir(), 'tm-preview-clause')
+  // A directory that disappeared mid-sweep, which says nothing about the root's own links.
+  assert.equal(isMissingPreviewRoot(sweepError('ENOENT', path.join(root, 'node_modules')), root), false)
+  assert.equal(isMissingPreviewRoot(sweepError('ENOENT', path.join(root, 'packages', 'web')), root), false)
+  // An error carrying no path at all cannot be shown to be about the root either.
+  assert.equal(isMissingPreviewRoot(Object.assign(new Error('boom'), { code: 'ENOENT' }), root), false)
+  // Trailing-separator and case differences in the SAME path are not a different path.
+  assert.equal(isMissingPreviewRoot(sweepError('ENOENT', `${root}${path.sep}`), root), true)
+})
+
+// The end-to-end half of the first clause, and the one shape that can be staged: a plain file
+// standing where the registered worktree directory was. git still lists that worktree, and
+// `readdir` fails ENOTDIR carrying the preview root's own path — so this is a sweep failure that
+// trips the path clause and NOT the code clause, which is what makes it the mutant's mirror.
+test('a preview root that cannot be read is left in place even though the sweep failed on the root itself', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writePruneManifest(root, g)
+    await withLeakedPreview(g, 'unreadable', async (preview) => {
+      await rm(preview, { recursive: true, force: true })
+      await writeFile(preview, 'not a directory', 'utf8')
+      lines.length = 0
+      const code = await runCli(
+        ['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'],
+        io,
+      )
+      assert.equal(code, 1)
+      assert.match(lines.join('\n'), /left .* in place: its provisioned links could not be removed/)
+      assert.doesNotMatch(lines.join('\n'), /registered but its directory is gone/)
+      assert.equal(hasWorktree(root, path.basename(preview)), true, 'nothing is removed on a sweep that failed')
     })
   })
 })

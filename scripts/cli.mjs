@@ -693,11 +693,21 @@ async function unlinkPreviewLinks(dir, depth = 0) {
 // cleared. The printed reason would be false as well: a directory that is not there holds no
 // links to sweep, so nothing is being left in place to protect a link target.
 //
-// Narrow on purpose. Only ENOENT, and only on the ROOT the sweep was asked to walk: an ENOENT
-// deeper in the tree is a directory disappearing mid-sweep, which is exactly the concurrent
-// mutation the sweep must not remove a worktree on top of, and every other error code still
-// blocks.
-function isMissingPreviewRoot(err, dir) {
+// Narrow on purpose, and BOTH clauses carry weight — each is on the destructive path, because a
+// `true` here skips the `continue` and lets `git worktree remove --force` run with the preview's
+// junctions still in place, which deletes the CONTENTS of their targets:
+//
+//   - only ENOENT. An EACCES, EPERM or EBUSY `readdir` on the preview root is a directory that IS
+//     there and could not be read, so its links are unaccounted for and it must block.
+//   - only on the ROOT the sweep was asked to walk. An ENOENT deeper in the tree is a directory
+//     disappearing mid-sweep — exactly the concurrent mutation a worktree must not be removed on
+//     top of — and it says nothing about whether the root's own links were swept.
+//
+// Exported so each clause can be pinned on its own. The end-to-end tests can only construct a
+// sweep failure that trips one clause at a time by accident (the depth guard's plain Error has no
+// `.path`; an ENOENT deep in the tree is a race no test can stage deterministically), so deleting
+// either clause left the whole suite green — a test passing for the wrong reason.
+export function isMissingPreviewRoot(err, dir) {
   return Boolean(err)
     && err.code === 'ENOENT'
     && typeof err.path === 'string'
