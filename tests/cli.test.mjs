@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rm, stat, symlink, writeFile, readFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -684,6 +684,9 @@ test('finish names how many command checks it is about to run', async () => {
   })
 })
 
+// The count and the phase span are the whole point of the line: a bare "command check" substring
+// is also printed by `running 0 command checks across 0 phases`, which would say nothing while
+// real checks ran for minutes. Asserted the same way its `finish` sibling above is.
 test('prune-run names how many command checks it is about to run when they are not skipped', async () => {
   await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
@@ -694,7 +697,153 @@ test('prune-run names how many command checks it is about to run when they are n
     g(['commit', '--quiet', '-m', 'manifest'])
     lines.length = 0
     await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
-    assert.match(lines.join('\n'), /command check/)
+    assert.match(lines.join('\n'), /running 2 command checks across 2 phases/)
+  })
+})
+
+// --- what --enforcement-only must never buy --------------------------------------------------
+//
+// The flag trades coverage for time, and the trade is only honest while something was actually
+// enforced. A phase whose manifest declares no enforcement check has nothing left to run once the
+// command checks are dropped, so the flag cannot answer for it at all — and the answer it used to
+// give was the worst possible one: the synthesised skips satisfied `aggregateVerdict`'s
+// fail-closed "at least one check ran" clause, so a phase that verified NOTHING read PASS.
+test('finish --enforcement-only refuses a phase whose manifest declares no enforcement check', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'test', kind: 'command', run: 'node -e "process.exit(1)"' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    const code = await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--enforcement-only'], io)
+    const out = lines.join('\n')
+    assert.equal(code, 2)
+    assert.match(out, /--enforcement-only cannot answer for phase 1/)
+    // The exact sentence this refusal exists to prevent.
+    assert.doesNotMatch(out, /ready to land/)
+  })
+})
+
+test('prune-run --enforcement-only refuses a phase whose manifest declares no enforcement check', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'test', kind: 'command', run: 'node -e "process.exit(1)"' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--enforcement-only', '--yes'], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /--enforcement-only cannot answer for phase 1/)
+  })
+})
+
+// The invariant the comment above `runPhaseChecks` claims and nothing pinned: `--enforcement-only`
+// drops `command` checks and NOTHING ELSE. Widening that filter to also drop `fileset`/`ownership`
+// leaves the flag reporting PASS for a phase whose enforcement was never run — the same hole as
+// above, reached by a one-line edit. `fileset` genuinely fails for phase 2 here (T2's branch
+// carries nothing), so its running is observable as a failure, not merely as an absence.
+test('--enforcement-only still runs the enforcement checks it exists to report', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [
+        { name: 'test', kind: 'command', run: 'node -e "process.exit(1)"' },
+        { name: 'fileset', kind: 'fileset' },
+        { name: 'ownership', kind: 'ownership' },
+      ] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--no-ff', '--quiet', '-m', 'integrate T1', 'teammates/r1/T1'])
+    g(['branch', 'teammates/r1/T2', 'main'])
+    lines.length = 0
+    const code = await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--enforcement-only'], io)
+    const out = lines.join('\n')
+    // The command check was dropped, as asked.
+    assert.match(out, /skipped: test/)
+    // The enforcement checks were NOT: fileset ran and failed for the phase it should fail for.
+    assert.match(out, /failed: fileset/)
+    assert.doesNotMatch(out, /skipped: fileset/)
+    assert.doesNotMatch(out, /skipped: ownership/)
+    // A failing enforcement check still blocks under this flag; it is not an advisory mode.
+    assert.equal(code, 1)
+  })
+})
+
+// A cheap verdict may be enough to REPORT. It is never enough to DELETE. `prune-run --yes` runs
+// `git worktree remove --force`, which discards a teammate's uncommitted work and takes with it
+// the worktree a retry needs to resume — so a phase whose PASS rests on checks nobody ran must
+// stay out of the prune plan however the caller asked.
+test('prune-run --enforcement-only --yes will not remove a worktree on a verdict resting on skipped checks', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [
+        { name: 'test', kind: 'command', run: 'node -e "process.exit(1)"' },
+        { name: 'fileset', kind: 'fileset' },
+      ] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--no-ff', '--quiet', '-m', 'integrate T1', 'teammates/r1/T1'])
+    // Deliberately not `a1`: a bare two-character name also matches any abbreviated sha in
+    // `git worktree list` output.
+    const wtPath = path.join(root, '.claude', 'worktrees', 'keep-me-t1')
+    g(['worktree', 'add', '--quiet', wtPath, 'teammates/r1/T1'])
+    lines.length = 0
+    const code = await runCli(
+      ['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--enforcement-only', '--yes'],
+      io,
+    )
+    assert.equal(code, 0)
+    assert.match(lines.join('\n'), /phase 1: skipped: test/)
+    assert.match(lines.join('\n'), /not prunable/)
+    // The worktree, and whatever uncommitted work is in it, is still there.
+    assert.match(g(['worktree', 'list']), /keep-me-t1/)
+    await stat(wtPath)
+  })
+})
+
+// The same phase, same manifest, WITHOUT the flag: the command check runs, fails, and the phase
+// is not prunable for that reason. This is the control — it shows the test above is about the
+// skipped checks and not about the phase being unprunable anyway.
+test('prune-run without --enforcement-only prunes the phase whose checks all actually ran', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [
+        { name: 'test', kind: 'command', run: 'node -e ""' },
+        { name: 'fileset', kind: 'fileset' },
+      ] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--no-ff', '--quiet', '-m', 'integrate T1', 'teammates/r1/T1'])
+    const wtPath = path.join(root, '.claude', 'worktrees', 'prune-me-t1')
+    g(['worktree', 'add', '--quiet', wtPath, 'teammates/r1/T1'])
+    lines.length = 0
+    const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
+    assert.equal(code, 0)
+    assert.doesNotMatch(g(['worktree', 'list']), /prune-me-t1/)
   })
 })
 
@@ -4579,6 +4728,62 @@ test('map-notes --write reports an unreadable source file rather than throwing',
     const code = await runCli(['map-notes', '--run', 'r1', '--root', root, '--write', path.join(root, 'nope.md')], io)
     assert.equal(code, 4)
     assert.match(lines.join('\n'), /cannot read the returned map at .*nope\.md: ENOENT/)
+  })
+})
+
+// The write goes through a temp file and a rename, so a reader must never find a half-written
+// map under a header vouching for the whole of it. The temp file is scaffolding: leaving one
+// behind litters the run directory with files a later reader has no way to interpret.
+test('map-notes --write leaves no temp file behind on success', async () => {
+  await withRepo(async ({ root, planPath, io, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const sha = g(['rev-parse', 'HEAD']).trim()
+    const returned = path.join(root, 'returned.md')
+    const body = `<!-- teammates-map run=r1 sha=${sha} -->\n\n# Map\n\nsrc owns orders.\n`
+    await writeFile(returned, body, 'utf8')
+    assert.equal(await runCli(['map-notes', '--run', 'r1', '--root', root, '--write', returned], io), 0)
+    const entries = await readdir(path.join(root, '.teammates', 'r1'))
+    assert.ok(entries.includes('map.md'), `map.md missing from ${JSON.stringify(entries)}`)
+    assert.deepEqual(entries.filter((e) => e.includes('.tmp')), [])
+    // The bytes are the agent's, unaltered: this path copies, it never authors.
+    assert.equal(await readFile(path.join(root, '.teammates', 'r1', 'map.md'), 'utf8'), body)
+  })
+})
+
+// The read path two blocks below already treats an unreadable map.md as "there is nothing here
+// you can use" and exits 4. The write path threw instead: `rename` onto a directory raises
+// EPERM/EISDIR, nothing caught it, and the CLI produced an unhandled-rejection stack and exit 1
+// — a code its documented 0/2/4 contract does not include — with the temp file left in place.
+test('map-notes --write reports an unwritable destination as a refusal, not a crash', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const sha = g(['rev-parse', 'HEAD']).trim()
+    // A directory where the notes file belongs: renaming onto it can never succeed.
+    await mkdir(path.join(root, '.teammates', 'r1', 'map.md'), { recursive: true })
+    const returned = path.join(root, 'returned.md')
+    await writeFile(returned, `<!-- teammates-map run=r1 sha=${sha} -->\n\n# Map\n\nbody\n`, 'utf8')
+    lines.length = 0
+    const code = await runCli(['map-notes', '--run', 'r1', '--root', root, '--write', returned], io)
+    assert.equal(code, 4)
+    assert.match(lines.join('\n'), /could not be written/)
+    // No scaffolding left in the run directory for a later reader to trip over.
+    assert.deepEqual((await readdir(path.join(root, '.teammates', 'r1'))).filter((e) => e.includes('.tmp')), [])
+  })
+})
+
+// A refusal must leave what is already there exactly as it was. Stale notes are still a record of
+// what some agent said about some commit; replacing them with a rejected map would lose that and
+// substitute something the validator just refused to vouch for.
+test('map-notes --write leaves existing notes byte-identical when it refuses', async () => {
+  await withRepo(async ({ root, planPath, io }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const notesPath = path.join(root, '.teammates', 'r1', 'map.md')
+    const before = '<!-- teammates-map run=r1 sha=0000000 -->\n\n# Map\n\nolder prose\n'
+    await writeFile(notesPath, before, 'utf8')
+    const returned = path.join(root, 'returned.md')
+    await writeFile(returned, '<!-- teammates-map run=r1 sha=1111111 -->\n\n# Map\n\nrejected prose\n', 'utf8')
+    assert.equal(await runCli(['map-notes', '--run', 'r1', '--root', root, '--write', returned], io), 4)
+    assert.equal(await readFile(notesPath, 'utf8'), before)
   })
 })
 

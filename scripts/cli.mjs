@@ -247,7 +247,38 @@ const RESULTS_COMMANDS = new Set(['gate', 'finish', 'prune-run'])
 // checks did not run is worse than a slow one. It follows that this flag can report PASS where a
 // full run would have reported FAIL: that is what it buys, and the printed skip list is the only
 // thing that says so.
+//
+// Two guards keep that trade from becoming a lie, because a `skip` result is still a result and
+// `aggregateVerdict` counts it toward the fail-closed "at least one check ran" clause that stops
+// a self-generated result reading as a verified phase:
+//
+//   - `enforcementOnlyRefusal` below refuses the whole invocation for a phase that declares no
+//     enforcement check at all. Without it, a manifest of nothing but a failing `command` check
+//     produced "phase 1 PASS   skipped: test" and then "the run branch is ready to land", exit 0,
+//     where the identical state without the flag exits 1 — a run declared landable having
+//     verified nothing.
+//   - `prune-run` below refuses to PRUNE any phase whose verdict rests on a skipped check. A
+//     cheap verdict is enough to report; it is never enough to run `git worktree remove --force`
+//     over a teammate's uncommitted work.
 const ENFORCEMENT_ONLY_SKIP = 'skipped by --enforcement-only: this verdict reports the enforcement checks, not whether the merged tree works'
+
+// The enforcement kinds a manifest can actually declare. `merge` is deliberately absent even
+// though it is enforced: the gate computes it for itself, `aggregateVerdict` excludes it from the
+// same "something was verified" clause for exactly that reason, and a manifest entry claiming it
+// finds no runner and lands as a blocking pending. So a phase whose only enforced kind were
+// `merge` has declared no enforcement, and counting it here would reopen the hole this closes.
+const MANIFEST_ENFORCED_KINDS = new Set(['fileset', 'ownership'])
+
+// Returns the refusal message when `--enforcement-only` cannot answer for some phase, or null.
+// Checked before a single check runs, so the caller learns the flag is the wrong tool for this
+// manifest rather than reading a verdict that was never grounded in anything.
+function enforcementOnlyRefusal(config, phases) {
+  const barren = phases.filter((p) => !checksForPhase(config, String(p)).some((c) => MANIFEST_ENFORCED_KINDS.has(c.kind)))
+  if (barren.length === 0) return null
+  return `--enforcement-only cannot answer for phase ${barren.join(', ')}: `
+    + `that phase's manifest declares no ${[...MANIFEST_ENFORCED_KINDS].join(' or ')} check, so dropping its command checks would leave nothing verified at all.`
+    + ' Re-run without --enforcement-only, or declare an enforcement check for it.'
+}
 
 function commandChecks(checks) {
   return checks.filter((c) => c.kind === 'command')
@@ -1372,7 +1403,10 @@ export async function runCli(argv, io = { out: console.log }) {
     // there is exactly how a fix round would lose the context it still needs.
     const enforcementOnly = flags['enforcement-only'] === true
     const phases = [...new Set((ctx.tasks ?? []).map((t) => t.phase))].sort((a, b) => a - b)
-    if (!enforcementOnly) {
+    if (enforcementOnly) {
+      const refusal = enforcementOnlyRefusal(config, phases)
+      if (refusal) { io.out(refusal); return 2 }
+    } else {
       const total = phases.reduce((n, p) => n + commandChecks(checksForPhase(config, String(p))).length, 0)
       announceCommandChecks(io, 'prune-run', total, phases.length)
     }
@@ -1388,7 +1422,24 @@ export async function runCli(argv, io = { out: console.log }) {
       // This command reports a verdict only as a phase's presence in the prune plan below, so
       // without this the checks that did not run would leave no trace in the output at all.
       reportSkipped(io, phase, verdict)
-      if (verdict.verdict === 'PASS') passedPhases.push(phase)
+      // A PASS resting on a skipped check does not authorise a deletion. `--yes` below runs
+      // `git worktree remove --force`, which discards whatever a teammate has not committed and
+      // removes the worktree a `retry` needs to resume that teammate — and unlike a wrong report,
+      // that is not recoverable by running the command again with better flags. The same rule
+      // that makes this command recompute rather than read `status.gates` (see above) applies to
+      // its own cheap mode: prune on evidence, never on an absence of it.
+      //
+      // This also catches the merge-conflict skips `runChecks` produces on its own, where the
+      // `merge` check fails and the phase was never prunable anyway — so it only ever narrows.
+      if (verdict.verdict !== 'PASS') continue
+      if ((verdict.skipped ?? []).length > 0) {
+        io.out(
+          `phase ${phase} is not prunable: its verdict rests on ${verdict.skipped.length} check(s) nobody ran`
+          + ` (${verdict.skipped.join(', ')}). Re-run without --enforcement-only to prune it.`,
+        )
+        continue
+      }
+      passedPhases.push(phase)
     }
 
     const git = createGit({ cwd: root })
@@ -1486,7 +1537,13 @@ export async function runCli(argv, io = { out: console.log }) {
     const phases = [...new Set((ctx.tasks ?? []).map((t) => t.phase))].sort((a, b) => a - b)
 
     const enforcementOnly = flags['enforcement-only'] === true
-    if (!enforcementOnly) {
+    if (enforcementOnly) {
+      // Before any check runs, and before any phase reaches the summary below: a phase with no
+      // enforcement check left to run would otherwise be summarised PASS on nothing but its own
+      // skips, and reported as "ready to land".
+      const refusal = enforcementOnlyRefusal(config, phases)
+      if (refusal) { io.out(refusal); return 2 }
+    } else {
       const total = phases.reduce((n, p) => n + commandChecks(checksForPhase(config, String(p))).length, 0)
       announceCommandChecks(io, 'finish', total, phases.length)
     }
@@ -1516,6 +1573,10 @@ export async function runCli(argv, io = { out: console.log }) {
     // 1 for a phase that was verified and failed; 4 for one that was never verified at all.
     // Same split the output makes, so a caller branching on the code and a human reading the
     // table reach the same conclusion.
+    //
+    // `--enforcement-only` cannot reach here with a phase in the second state wearing the first
+    // state's answer: the refusal above exits 2 unless every phase still has an enforcement check
+    // to run, so a phase summarised below always had something actually verify it.
     return summary.failedPhases.length > 0 ? 1 : 4
   }
 
@@ -1659,13 +1720,27 @@ export async function runCli(argv, io = { out: console.log }) {
       // which run, or a missing body — and that is what tells the caller whether to re-dispatch
       // the agent or to re-save what it already returned.
       if (refusal) { io.out(refusal); return 4 }
-      await mkdir(path.dirname(notesPath), { recursive: true })
       // Written through a uniquely-named temp file and renamed, the same way `writeState` writes
       // every other file under `.teammates/`: a reader must never find a half-written map under
       // a header that vouches for the whole of it.
       const tmp = `${notesPath}.${process.pid}.${Math.floor(performance.now() * 1000)}.tmp`
-      await writeFile(tmp, returned, 'utf8')
-      await rename(tmp, notesPath)
+      try {
+        await mkdir(path.dirname(notesPath), { recursive: true })
+        await writeFile(tmp, returned, 'utf8')
+        await rename(tmp, notesPath)
+      } catch (err) {
+        // The destination can be unwritable for the same reasons the read path two blocks below
+        // already handles deliberately — map.md is a directory (EISDIR, and EPERM out of
+        // `rename`), permissions (EACCES) — and from the caller's side they are one situation:
+        // the map did not land. Left to throw, this produced an unhandled-rejection stack and
+        // exit 1, a code this CLI's documented 0/2/4 contract does not include.
+        //
+        // The temp file goes with it. It is scaffolding for an operation that did not happen,
+        // and leaving it in the run directory hands a later reader a file it cannot interpret.
+        await unlink(tmp).catch(() => {})
+        io.out(`the map notes at ${notesPath} could not be written (${err.code ?? err.message}), so nothing was written`)
+        return 4
+      }
       io.out(`wrote the returned map to ${notesPath} for run ${runId} at commit ${sha}`)
       return 0
     }
