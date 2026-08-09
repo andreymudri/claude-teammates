@@ -101,16 +101,20 @@ test('phase-gate says plainly what a none decision means and does not mean', asy
     claim: /^On none, the decision engine found no failing check in the verdict you handed it\b/i,
     then: /This does not mean "the failure needs no fix" and it is never permission to integrate/i,
     subject: /\bnone\b/i,
+    // Every entry below is anchored end-to-end (^...$), not just at the front or not at all.
+    // An unanchored — or front-only-anchored — pattern waives any statement that merely CONTAINS
+    // or STARTS WITH the approved text, so a mutated tail appended to an otherwise-approved
+    // sentence (e.g. "... never on `none` unless the gate already ran once, in which case none
+    // is enough to integrate on.") would still match and sail through, admitting the exact
+    // inversion this lock exists to catch. Anchoring forces the whole statement to equal what
+    // was reviewed.
     allow: [
-      /one of three decisions — none, retry, or escalate —/i,
-      /the decision comes back none; that is incidental, not guaranteed/i,
-      /a none decision means the verdict you passed is not the one that failed/i,
-      /Integrate only on a freshly recomputed PASS, never on none/i,
+      /^Hand it the run, the failing phase, the run root, and the verdict JSON you just produced; it prints one of three decisions — none, retry, or escalate — and exits 0 for all three, so read the decision field rather than the exit status\.$/i,
+      /^Feeding that record in today degenerates harmlessly, because the persisted object carries no results key and the decision comes back none; that is incidental, not guaranteed\.$/i,
+      /^You reached this section because the gate failed, so a none decision means the verdict you passed is not the one that failed — a stale file, the wrong phase, the wrong run root, or a verdict written before the last check completed\.$/i,
+      /^Integrate only on a freshly recomputed PASS, never on none\.$/i,
       // Reviewed: this documents the `fix` exit-code contract (Exit 0 covers all three
       // decisions), not the semantics of a `none` decision itself — unrelated to the claim above.
-      // Anchored end-to-end (not just at the front): an unanchored tail let a mutated sentence
-      // that INVERTS the none-is-not-permission-to-integrate rule slip through under this same
-      // waiver, because the waiver only had to match a prefix, not the whole statement.
       /^Exit 0 covers none, retry, and escalate alike, so the exit status never tells them apart — only the decision field does\.$/i,
     ],
   })
@@ -604,18 +608,22 @@ test('fleet-lifecycle claims only what map-notes verifies, and names every exit 
 test('fleet-lifecycle states the orchestrator writes the map, not the agent', async () => {
   const { doc } = await skill('fleet-lifecycle')
   const section = doc.section('Map notes')
+  // Anchored end-to-end: an unanchored (or prefix-only) pattern here waives any statement that
+  // merely CONTAINS this text, so a mutated tail — "... or let a teammate write `map.md` in
+  // place, with the same command and --write:" — would still match and pass, directly
+  // contradicting the pinned claim below and naming the locked subject (map.md) while doing it.
+  const dispatchPattern =
+    /^Dispatch a read-only agent with the printed prompt; it RETURNS the map and you write it to that path yourself, with the same command and --write:$/i
   assertStatement(
     section,
-    /it RETURNS the map and you write it to that path yourself/,
+    dispatchPattern,
     'the skill must not tell a read-only agent to write a file',
   )
   assertClaim(section, {
     label: 'map notes writer',
     claim: /A teammate never writes this file, and nothing enforced ever reads it/,
     subject: /writes this file|map\.md/i,
-    allow: [
-      /it RETURNS the map and you write it to that path yourself/,
-    ],
+    allow: [dispatchPattern],
   })
 })
 
