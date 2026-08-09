@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile, readdir } from 'node:fs/promises'
 import {
   assertClaim,
+  assertNoStatement,
   assertStatement,
   parseDoc,
   splitFrontmatter,
@@ -161,6 +162,28 @@ test('the reviewer writes its findings to a file as well as returning them', asy
     section,
     /before you return, not after/i,
     'the write must happen while the reviewer is still alive to do it',
+  )
+})
+
+// review-dispatch appends `stampInstruction`, which tells a reviewer to write its stamp under a
+// "stamp" key; collect-reviews refuses a file whose top-level shape is a bare array, since a bare
+// array has nowhere to carry that stamp. Across two phases of run `gaps`, five reviewers produced
+// four different file shapes because this card described a different one than the collector
+// requires — this test is the one that would have caught the disagreement.
+test('the reviewer card names one findings-file shape and does not describe a bare array', async () => {
+  const { doc } = await agent('tm-reviewer.md')
+  const section = doc.section('Return value')
+  assert.match(section.text, /"stamp"/, 'reviewer card must name the stamp key')
+  assert.match(section.text, /"findings"/, 'reviewer card must name the findings key')
+  assertStatement(
+    section,
+    /copy it unchanged|copy the stamp verbatim|never construct or edit it/i,
+    'reviewer must be told to copy the stamp verbatim, not build one',
+  )
+  assertNoStatement(
+    section,
+    /^An array of findings/i,
+    'reviewer card must not describe returning a bare array of findings',
   )
 })
 
