@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises'
+import { readFile, lstat, readdir, unlink } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parsePlan } from './plan-parser.mjs'
@@ -16,14 +16,14 @@ import { decideFix } from './fix-loop.mjs'
 import { runChecks, aggregateVerdict } from './gate-runner.mjs'
 import { renderDigest } from './digest.mjs'
 import { collectDoctorReport, renderDoctor } from './doctor.mjs'
-import { collectReviewResults, reviewFileName } from './reviews.mjs'
+import { collectReviewResults, reviewFileName, reviewStamp } from './reviews.mjs'
 import { generateReviewDispatch } from './review-gen.mjs'
 import { resolveTaskBranch } from './enforce.mjs'
 import { tmpdir } from 'node:os'
 import { stat } from 'node:fs/promises'
 import { validateLinkPaths } from './preview-links.mjs'
 import { planDrift, renderDrift } from './plan-drift.mjs'
-import { summarizeRun, renderRunSummary } from './finish.mjs'
+import { summarizeRun, renderRunSummary, suppliedForPhase, validateSuppliedPhases } from './finish.mjs'
 import { selectPrunableWorktrees, renderPrunePlan } from './prune.mjs'
 import { rebuildRunState } from './rebuild.mjs'
 import { generatePhaseWorkflow } from './workflow-gen.mjs'
@@ -36,8 +36,8 @@ const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflo
 
   init-run <planPath> --run <id> [--root <path>]
   doctor   --run <id> --plan <path> [--base <branch>] [--run-branch <name>] [--root <path>]
-  finish   --run <id> --plan <path> [--base <branch>] [--root <path>]
-  prune-run --run <id> --plan <path> [--base <branch>] [--yes] [--root <path>]
+  finish   --run <id> --plan <path> [--base <branch>] [--root <path>] [--results <path>]
+  prune-run --run <id> --plan <path> [--base <branch>] [--yes] [--root <path>] [--results <path>]
   rebuild-state --run <id> --plan <path> [--base <branch>] [--force] [--root <path>]
   map      [--files <a,b>] [--commits <n>] [--top <n>] [--root <path>]
   map-notes --run <id> [--root <path>]
@@ -181,10 +181,54 @@ const REQUIRED = {
   config: [],
 }
 
+// Every flag each command actually reads. An unknown flag is refused rather than ignored: a
+// swallowed `workflow --commits 5000` exits 0 while the operator believes the coupling window
+// widened, which is the silent-wrong-answer class this CLI removes everywhere else. `parseFlags`
+// accepts any `--name`, so without this table a mistyped, renamed or hallucinated flag is
+// indistinguishable from one the command acts on.
+//
+// This is a WHITELIST, and a command absent from it is unchecked — so a new command must be
+// added here as well as to REQUIRED, or its flags go unvalidated. Every command this CLI
+// dispatches is listed, including the ones taking nothing at all.
+const UNIVERSAL_FLAGS = new Set(['root'])
+const KNOWN_FLAGS = {
+  'init-run': ['run'],
+  gate: ['run', 'plan', 'base', 'phase', 'no-fleet', 'results'],
+  doctor: ['run', 'plan', 'base', 'run-branch'],
+  digest: ['run'],
+  claim: ['run', 'task', 'by'],
+  unclaim: ['run', 'task'],
+  workflow: ['run', 'phase', 'models', 'plan', 'base'],
+  complete: ['run', 'task', 'plan', 'base', 'phase'],
+  fix: ['run', 'phase', 'verdict'],
+  'record-fix-round': ['run', 'phase', 'task'],
+  'review-dispatch': ['run', 'phase', 'models'],
+  'collect-reviews': ['run', 'phase'],
+  'preview-check': [],
+  'plan-drift': ['run', 'plan', 'base'],
+  finish: ['run', 'plan', 'base', 'results'],
+  'prune-run': ['run', 'plan', 'base', 'yes', 'results'],
+  'rebuild-state': ['run', 'plan', 'base', 'force'],
+  map: ['files', 'commits', 'top'],
+  'map-notes': ['run'],
+  config: ['local'],
+}
+
+function unknownFlags(command, flags) {
+  const known = KNOWN_FLAGS[command]
+  if (!known) return []
+  const allowed = new Set([...known, ...UNIVERSAL_FLAGS])
+  return Object.keys(flags).filter((f) => !allowed.has(f))
+}
+
 // Commands whose `--phase` names a numeric plan phase, not a manifest phase key. `gate` is
 // deliberately absent: its `--phase` is a NAME (`default`, `integration`) that selects a
 // block of checks from teammates.gate.json.
 const NUMERIC_PHASE_COMMANDS = new Set(['workflow', 'fix', 'record-fix-round'])
+
+// Every command that accepts caller-supplied check results. `gate` takes a flat list for the one
+// phase it computes; `finish` and `prune-run` recompute every phase, so theirs is keyed by phase.
+const RESULTS_COMMANDS = new Set(['gate', 'finish', 'prune-run'])
 
 // A skill branches on this CLI's exit code. A missing argument must produce the usage
 // message and exit 2, never an unhandled TypeError and a stack trace.
@@ -239,7 +283,11 @@ function missingArgs(command, flags, positional) {
   // the gate's own `if (flags.results)` truthiness test, which skipped the supplied-results
   // block entirely and exited 1 on the still-pending checks with nothing said about the flag.
   // Both spellings of one mistake now get one answer, exactly as `--root` already does.
-  if (command === 'gate'
+  //
+  // `finish` and `prune-run` take the same flag, in the same per-phase spelling, so they get the
+  // same refusal: three commands reading one flag must not disagree about what a valueless one
+  // means, or the two that skip it silently report a run finished on evidence nobody supplied.
+  if (RESULTS_COMMANDS.has(command)
     && (flags.results === true || (typeof flags.results === 'string' && flags.results.trim() === ''))) {
     missing.push('--results <path>')
   }
@@ -415,6 +463,111 @@ export function mergeSuppliedResults(rawResults, supplied) {
       source: s.source ?? 'response',
     }
   })
+}
+
+// The per-phase counterpart of `gate`'s `--results` read. Same three answers: no flag means no
+// supplied evidence, an unreadable or malformed file is refused BY NAME, and a shape that is not
+// `{ phases: { "<n>": { results: [...] } } }` is refused with the shape it expected. Only the
+// SHAPE is checked here — which results may be supplied at all is `validateSuppliedResults`'s
+// rule, and it is applied per phase against that phase's own manifest block.
+const SUPPLIED_REJECTED = Symbol('supplied phase results rejected')
+
+async function readSuppliedPhases(flags, io) {
+  // A valueless or empty `--results` never reaches here: missingArgs rejects it as the missing
+  // argument it is, rather than letting this truthiness test silently drop the flag.
+  if (!flags.results) return null
+  let parsed
+  try {
+    parsed = JSON.parse(await readFile(flags.results, 'utf8'))
+  } catch (err) {
+    io.out(`--results ${flags.results} could not be read as JSON: ${err.message}`)
+    return SUPPLIED_REJECTED
+  }
+  const invalid = validateSuppliedPhases(parsed)
+  if (invalid) {
+    io.out(invalid)
+    return SUPPLIED_REJECTED
+  }
+  return parsed
+}
+
+// How deep the link sweep below will walk. A `preview.link` entry is a repo-relative directory
+// path, so a handful of segments covers every shape the manifest can declare; reaching the limit
+// means a tree this cannot vouch for, and it THROWS rather than returning quietly — a partial
+// sweep followed by a removal is the exact failure the sweep exists to prevent.
+const PREVIEW_LINK_MAX_DEPTH = 12
+
+// Remove the links a merge preview was provisioned with, before the worktree itself is removed.
+//
+// `git worktree remove --force` FOLLOWS a junction: verified against a throwaway fixture on
+// Windows — a junction created inside a worktree with fs.symlink(target, link, 'junction'), which
+// is exactly what scripts/preview-links.mjs creates, exits 0 and deletes THE CONTENTS OF THE LINK
+// TARGET. On an operator's machine that target is the repository's real `node_modules`, wiped by
+// `prune-run --yes`. `rm -rf` has the same behaviour and is no safer.
+//
+// This is not a rare shape. A leaked preview is BY CONSTRUCTION one whose `teardownLinks` never
+// ran — scripts/merge-preview.mjs runs it in a `finally`, which a SIGKILL skips — so a leaked
+// preview is precisely the case most likely to still hold its junctions.
+//
+// The sweep is the caller's own: it never follows a link (every entry is `lstat`ed, and only a
+// real directory is descended into), so nothing outside the preview tree is ever read or written.
+// Any failure propagates, and the caller must leave that worktree in place: an unremovable link
+// is a reason not to remove the worktree, never a footnote under a removal that happened anyway.
+async function unlinkPreviewLinks(dir, depth = 0) {
+  if (depth > PREVIEW_LINK_MAX_DEPTH) {
+    throw new Error(`nested deeper than ${PREVIEW_LINK_MAX_DEPTH} levels at ${dir}, so its links cannot be accounted for`)
+  }
+  let removed = 0
+  for (const name of await readdir(dir)) {
+    const entry = path.join(dir, name)
+    // lstat, never stat: a junction or symlink must be seen as itself. `stat` reports the TARGET's
+    // type, which is how a link to a directory reads as a directory and gets descended into.
+    const info = await lstat(entry)
+    if (info.isSymbolicLink()) {
+      await unlink(entry)
+      removed += 1
+      continue
+    }
+    if (info.isDirectory()) removed += await unlinkPreviewLinks(entry, depth + 1)
+  }
+  return removed
+}
+
+// The task branches of a phase, resolved to the shas they stand at right now. This is what a
+// review stamp names: findings describe a diff, and a diff is only identified by its tips.
+function tasksOfPhase(plan, phaseName) {
+  // `--phase` names the MANIFEST key, as it does for `gate`. When it is also a plan phase number
+  // the branches narrow to that phase; when it is not, every task branch of the run is in scope,
+  // which is the honest reading of "this manifest phase's diff".
+  const phaseNumber = Number(phaseName)
+  return Number.isInteger(phaseNumber)
+    ? (plan.tasks ?? []).filter((t) => t.phase === phaseNumber)
+    : (plan.tasks ?? [])
+}
+
+async function resolveBranchShas(git, tasks, runId) {
+  const branchShas = {}
+  for (const task of tasks) {
+    const branch = resolveTaskBranch(task, runId)
+    // Through refs/heads/, so a tag named like a branch cannot stand in for one — the same
+    // resolution rule deriveContext uses for the anchor.
+    if (branch && await git.branchExists(branch)) branchShas[branch] = await git.resolveRef(`refs/heads/${branch}`)
+  }
+  return branchShas
+}
+
+// What the reviewer is told to carry back. The stamp is rendered into the prompt rather than left
+// implicit: a field the dispatch declares and the prompt never mentions is a field no reviewer
+// ever writes, and `collect-reviews` would then refuse every file for want of a stamp nobody
+// asked for.
+function stampInstruction(stamp) {
+  return [
+    'Include this exact object under a "stamp" key in the JSON you write and return:',
+    `    ${JSON.stringify(stamp)}`,
+    'It names the branch tips these findings judged. collect-reviews refuses a findings file whose'
+    + ' stamp names different tips: a fix round moves a branch, and findings about the old tree are'
+    + ' not findings about this one.',
+  ].join('\n')
 }
 
 async function derive(root, runId, flags) {
@@ -739,6 +892,17 @@ export async function runCli(argv, io = { out: console.log }) {
   const root = flags.root ?? process.cwd()
   const runId = flags.run
 
+  // Before the required-argument check and before any command body, for the same reason the
+  // rejected spellings are: a flag this command does not read must never reach a guard that
+  // acts on a DIFFERENT flag. Reported by name, so the caller sees which of its arguments the
+  // command was never going to act on rather than a bare usage dump.
+  const strays = unknownFlags(command, flags)
+  if (strays.length > 0) {
+    io.out(`${command} does not take ${strays.map((f) => `--${f}`).join(', ')}`)
+    io.out(USAGE)
+    return 2
+  }
+
   if (REQUIRED[command]) {
     const missing = missingArgs(command, flags, positional)
     if (missing.length > 0) {
@@ -1011,6 +1175,38 @@ export async function runCli(argv, io = { out: console.log }) {
       ? flags['run-branch']
       : await git.currentBranch()
 
+    // The anchor is what tells an INTEGRATED branch from an empty one: both have an empty diff
+    // against their own fork point, and only `past the anchor, on the run branch, and not the run
+    // tip itself` separates them. Without these two arguments `collectDoctorReport` leaves
+    // `landed` false for every task, so every merged branch is reported as NO CHANGES — the
+    // report's loudest problem, on the run's healthiest state.
+    //
+    // Taken from `derive`, so this reads the same anchor the gate enforces at rather than a
+    // second computation that could disagree with it. It is allowed to FAIL: `doctor` must keep
+    // working in the states the gate refuses to run in — the main worktree parked on the base
+    // branch, a plan not committed at the anchor — which are exactly the moments an operator
+    // needs it. When it fails, the report degrades to its previous behaviour and says so; a
+    // silent degradation would leave the reader believing an integrated branch carries nothing.
+    let anchorSha = null
+    let derivedRunSha = null
+    let anchorNote = null
+    const relPlan = path.isAbsolute(flags.plan)
+      ? path.relative(root, flags.plan).split(path.sep).join('/')
+      : flags.plan
+    try {
+      const derived = await derive(root, runId, { ...flags, plan: relPlan })
+      // `--run-branch` names a branch that may not be the one `derive` computed from, and an
+      // anchor for a different branch is not this report's anchor. Refused rather than mixed.
+      if (derived.runBranch === runBranch) {
+        anchorSha = derived.anchorSha
+        derivedRunSha = derived.runSha
+      } else {
+        anchorNote = `the report is about ${runBranch} but the main worktree is on ${derived.runBranch}`
+      }
+    } catch (err) {
+      anchorNote = err.message
+    }
+
     let report
     try {
       report = await collectDoctorReport({
@@ -1020,6 +1216,8 @@ export async function runCli(argv, io = { out: console.log }) {
         baseBranch: await resolveBaseBranch(git, flags.base),
         tasks,
         repoRoot: root,
+        anchorSha,
+        runSha: derivedRunSha,
       })
     } catch (err) {
       if (!(err instanceof GitError)) throw err
@@ -1027,6 +1225,12 @@ export async function runCli(argv, io = { out: console.log }) {
       return 2
     }
     io.out(renderDoctor(report))
+    if (anchorNote) {
+      io.out(
+        `note: could not derive the run anchor (${anchorNote}) — an integrated branch is reported`
+        + ' above as having no changes, because without the anchor nothing tells the two apart',
+      )
+    }
     // 1 on problems, mirroring the gate, so a caller can branch on the exit code. It is still
     // a report: nothing is recorded, and no verdict is issued or implied.
     return report.problems.length === 0 ? 0 : 1
@@ -1091,6 +1295,12 @@ export async function runCli(argv, io = { out: console.log }) {
     if (config === GATE_CONFIG_REJECTED) return 2
     if (!config) { io.out(`no ${GATE_FILE} — without a gate there is no passing phase, so nothing is prunable`); return 4 }
 
+    // The same evidence `finish` takes, for the same reason: a phase whose only outstanding check
+    // is a review no runner can run would otherwise never be prunable, however many times it was
+    // actually reviewed.
+    const supplied = await readSuppliedPhases(flags, io)
+    if (supplied === SUPPLIED_REJECTED) return 2
+
     let ctx
     try {
       ctx = { cwd: root, previewLink: previewLinks(config), ...(await derive(root, runId, flags)) }
@@ -1104,7 +1314,11 @@ export async function runCli(argv, io = { out: console.log }) {
     // there is exactly how a fix round would lose the context it still needs.
     const passedPhases = []
     for (const phase of [...new Set((ctx.tasks ?? []).map((t) => t.phase))].sort((a, b) => a - b)) {
-      const results = await runChecks(checksForPhase(config, String(phase)), { ...ctx, currentPhase: phase })
+      const checks = checksForPhase(config, String(phase))
+      const forPhase = suppliedForPhase(supplied, phase)
+      const invalid = validateSuppliedResults(forPhase, checks)
+      if (invalid) { io.out(`phase ${phase}: ${invalid}`); return 2 }
+      const results = mergeSuppliedResults(await runChecks(checks, { ...ctx, currentPhase: phase }), forPhase)
       if (aggregateVerdict(results).verdict === 'PASS') passedPhases.push(phase)
     }
 
@@ -1118,6 +1332,10 @@ export async function runCli(argv, io = { out: console.log }) {
       mainWorktree: worktrees[0]?.path ?? null,
       taskPhases: Object.fromEntries((ctx.tasks ?? []).map((t) => [t.id, t.phase])),
       passedPhases,
+      // The module stays pure and takes no view of where the system temp directory is, so the
+      // caller supplies the root it observed. Without it, NOTHING is identified as a leaked
+      // preview — a `tm-preview-*` worktree an operator keeps elsewhere on disk is theirs.
+      tempRoot: tmpdir(),
     })
     io.out(renderPrunePlan(plan))
 
@@ -1140,6 +1358,37 @@ export async function runCli(argv, io = { out: console.log }) {
         io.out(`could not remove ${w.path}: ${err.message}`)
       }
     }
+
+    // The leaked merge previews, reaped last and by a different route. They are NOT in `prunable`
+    // — the `continue` in selectPrunableWorktrees that keeps them out is a deliberate second
+    // barrier, so that a bug in this loop can never reach a worktree holding a task branch.
+    //
+    // Every one is stripped of its provisioned links FIRST. `git worktree remove --force` follows
+    // a junction into its target and deletes the contents (see unlinkPreviewLinks), and a leaked
+    // preview is exactly the one whose own teardown never ran, so it is exactly the one still
+    // holding those junctions. A preview whose links cannot be removed is LEFT IN PLACE and
+    // reported: an accumulated worktree costs disk, and the alternative costs the operator their
+    // repository's build inputs.
+    for (const p of plan.previews ?? []) {
+      try {
+        await unlinkPreviewLinks(p.path)
+      } catch (err) {
+        failed += 1
+        io.out(
+          `left ${p.path} in place: its provisioned links could not be removed (${err.message}),`
+          + ' and `git worktree remove --force` deletes the CONTENTS of a junction\'s target',
+        )
+        continue
+      }
+      try {
+        await git.removeWorktree(p.path)
+        io.out(`removed leaked preview ${p.path}`)
+      } catch (err) {
+        if (!(err instanceof GitError)) throw err
+        failed += 1
+        io.out(`could not remove ${p.path}: ${err.message}`)
+      }
+    }
     return failed > 0 ? 1 : 0
   }
 
@@ -1147,6 +1396,12 @@ export async function runCli(argv, io = { out: console.log }) {
     const config = await resolveGateConfig(root, io)
     if (config === GATE_CONFIG_REJECTED) return 2
     if (!config) { io.out(`no ${GATE_FILE} — there is nothing to verify a phase against`); return 4 }
+
+    // Read once, before any phase is computed, so a malformed file is refused before minutes of
+    // check-running rather than after. Never persisted and never read back from `.teammates/`:
+    // it fills in this run's pending checks and nothing else.
+    const supplied = await readSuppliedPhases(flags, io)
+    if (supplied === SUPPLIED_REJECTED) return 2
 
     let ctx
     try {
@@ -1169,8 +1424,15 @@ export async function runCli(argv, io = { out: console.log }) {
       // by `fileset`, and skipping is what "verify the whole run" must never do.
       const phaseCtx = { ...ctx, currentPhase: phase }
       const checks = checksForPhase(config, String(phase))
-      const results = await runChecks(checks, phaseCtx)
-      phaseResults.push({ phase, verdict: aggregateVerdict(results) })
+      // Per phase, against that phase's own manifest block — evidence for phase 1 can never
+      // satisfy phase 3, and a supplied result still may not name a computed check.
+      const forPhase = suppliedForPhase(supplied, phase)
+      const invalid = validateSuppliedResults(forPhase, checks)
+      if (invalid) { io.out(`phase ${phase}: ${invalid}`); return 2 }
+      const results = mergeSuppliedResults(await runChecks(checks, phaseCtx), forPhase)
+      // `supplied` is carried into the summary so a reader can tell a recomputed pass from a
+      // reported one. It changes no verdict: aggregateVerdict stays the only producer of those.
+      phaseResults.push({ phase, supplied: forPhase.length > 0, verdict: aggregateVerdict(results) })
     }
 
     io.out(renderRunSummary(runId, phaseResults))
@@ -1396,21 +1658,12 @@ export async function runCli(argv, io = { out: console.log }) {
 
     const plan = await readState(root, runId, 'plan')
     if (!plan) { io.out(`no plan for run ${runId}`); return 4 }
-    // `--phase` here names the MANIFEST key, as it does for `gate`. When it is also a plan
-    // phase number the branches narrow to that phase; when it is not (a named manifest phase),
-    // every task branch of the run is under review, which is the honest reading of "this
-    // manifest phase's diff".
-    const phaseNumber = Number(phaseName)
-    const planTasks = Number.isInteger(phaseNumber)
-      ? (plan.tasks ?? []).filter((t) => t.phase === phaseNumber)
-      : (plan.tasks ?? [])
 
     const git = createGit({ cwd: root })
-    const branches = []
-    for (const task of planTasks) {
-      const branch = resolveTaskBranch(task, runId)
-      if (branch && await git.branchExists(branch)) branches.push(branch)
-    }
+    // Resolved to shas as well as names: the stamp each reviewer carries back names the tips it
+    // judged, and `collect-reviews` compares that against the tips as they stand then.
+    const branchShas = await resolveBranchShas(git, tasksOfPhase(plan, phaseName), runId)
+    const branches = Object.keys(branchShas)
     if (branches.length === 0) {
       // Refused rather than emitted: reviewers dispatched over branches that do not exist grade
       // an empty diff and report no findings, which is indistinguishable from a clean review.
@@ -1439,7 +1692,13 @@ export async function runCli(argv, io = { out: console.log }) {
       io.out(err.message)
       return 4
     }
-    io.out(JSON.stringify(spec, null, 2))
+    // The stamp is per lens, because that is what identifies one reviewer's file: the same tips
+    // reviewed through two lenses produce two files, and each must be attributable to its own.
+    const reviewers = spec.reviewers.map((r) => {
+      const stamp = reviewStamp({ phase: phaseName, lens: r.lens, branchShas })
+      return { ...r, stamp, prompt: `${r.prompt}\n\n${stampInstruction(stamp)}` }
+    })
+    io.out(JSON.stringify({ ...spec, reviewers }, null, 2))
     return 0
   }
 
@@ -1478,7 +1737,9 @@ export async function runCli(argv, io = { out: console.log }) {
         // an empty review — the distinction this whole command exists to preserve.
         const found = Array.isArray(parsed) ? parsed : parsed?.findings
         if (!Array.isArray(found)) { unreadable.push(name); continue }
-        files.push({ lens, findings: found })
+        // The stamp travels with the findings. A file that carries none is not "probably
+        // current" — `reviewStale` refuses it, which is the whole point of stamping.
+        files.push({ lens, findings: found, stamp: Array.isArray(parsed) ? undefined : parsed?.stamp })
       } catch (err) {
         // ENOENT is a missing lens, reported below by name. Anything else is a file that
         // exists and cannot be trusted, which must never be read as "no findings".
@@ -1491,12 +1752,47 @@ export async function runCli(argv, io = { out: console.log }) {
       return 4
     }
 
+    // What the findings must have judged: the phase's task branches as they stand NOW. A fix
+    // round moves a branch, and findings about the old tree are not findings about this one —
+    // during run `codemap` that was worked around three times by deleting the files by hand
+    // between rounds.
+    const plan = await readState(root, runId, 'plan')
+    if (!plan) {
+      io.out(`no plan for run ${runId} — nothing says which branch tips this phase is at, and a findings file that cannot be vouched for is not a review`)
+      return 4
+    }
+    let branchShas
+    try {
+      branchShas = await resolveBranchShas(createGit({ cwd: root }), tasksOfPhase(plan, phaseName), runId)
+    } catch (err) {
+      if (!(err instanceof GitError)) throw err
+      io.out(`cannot read this phase's task branches: ${err.message}`)
+      return 4
+    }
+    if (Object.keys(branchShas).length === 0) {
+      // The mirror of `review-dispatch`'s refusal: with no branch there was no diff to review,
+      // so any file claiming to have reviewed one describes something else entirely.
+      io.out(`no task branch of phase ${phaseName} exists — there was no diff to review`)
+      return 4
+    }
+    const expected = reviewStamp({ phase: phaseName, lens: null, branchShas })
+
     const collected = collectReviewResults({
       checkName: check.name,
       lenses: check.lens,
       files,
       blockOn: check.blockOn ?? ['high'],
+      // `lens` is filled in per file by collectReviewResults; phase and branches are the run's.
+      expected: { phase: phaseName, branches: expected.branches },
     })
+    if (collected.stale.length > 0) {
+      // Reported the way `missing` is, and for the same reason: a stale review is a review this
+      // phase does not have. Recording a pass on it would be a verdict about another tree.
+      for (const s of collected.stale) {
+        io.out(`stale findings for lens ${s.lens}: ${s.reason} — respawn that review rather than recording a pass`)
+      }
+      return 4
+    }
     if (collected.unexpected.length > 0) {
       io.out(`ignored findings file(s) for lens(es) this phase did not dispatch: ${collected.unexpected.join(', ')}`)
     }
