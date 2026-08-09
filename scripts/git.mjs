@@ -250,6 +250,34 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
       if (code === 1) return false
       throw new GitError(`git ${args.join(' ')} failed: ${stderr.trim() || `exit ${code}`}`)
     },
+    // The set of shas the run branch merged IN as secondary parents, past the anchor — that is,
+    // the tips of the branches this run's integrator actually carried onto the run branch.
+    //
+    // Ancestry cannot answer that question. "Is this sha reachable from the run branch" is true
+    // of every commit the run branch has ever passed through, including the one a teammate's ref
+    // was parked at when it was created. Being NAMED as a merge parent is a fact about the merge
+    // that carried the branch, so a branch that was never merged cannot satisfy it by standing
+    // still.
+    //
+    // --parents prints "<commit> <parent1> <parent2>..."; everything past the first parent is a
+    // branch this merge carried in. --min-parents=2 keeps only merges. The anchor..run range
+    // bounds the walk to this run rather than the repository's whole history — the range form
+    // rather than "--not <anchor>", because git rejects "--not" after a non-option argument
+    // ("fatal: option '--not' must come before non-option arguments"), and the options have to
+    // precede --end-of-options. Trailing "--" for the same reason commitsBetween carries one: a
+    // file named exactly like the range must not be resolvable as a pathspec.
+    async mergedBranchTips({ runSha, anchorSha }) {
+      if (!isNonEmptyString(runSha) || !isNonEmptyString(anchorSha)) {
+        throw new GitError(`mergedBranchTips requires non-empty refs, got runSha=${JSON.stringify(runSha)} anchorSha=${JSON.stringify(anchorSha)}`)
+      }
+      const out = await run(['rev-list', '--min-parents=2', '--parents', '--end-of-options', `${anchorSha}..${runSha}`, '--'])
+      const tips = new Set()
+      for (const line of out.split(/\r?\n/)) {
+        const parts = line.trim().split(/\s+/).filter(Boolean)
+        for (const parent of parts.slice(2)) tips.add(parent)
+      }
+      return tips
+    },
     async commitsBetween({ from, to }) {
       if (!isNonEmptyString(from) || !isNonEmptyString(to)) {
         throw new GitError(`commitsBetween requires non-empty refs, got from=${JSON.stringify(from)} to=${JSON.stringify(to)}`)

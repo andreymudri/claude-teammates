@@ -284,6 +284,87 @@ test('isAncestor rejects an empty or non-string ref with GitError', async () => 
   assert.deepEqual(calls, [])
 })
 
+// --- mergedBranchTips ----------------------------------------------------------------------
+
+test('mergedBranchTips builds the argv with a bounded range and a trailing --', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: '', stderr: '' })
+  await createGit({ exec }).mergedBranchTips({ runSha: 'run', anchorSha: 'anchor' })
+  assert.deepEqual(calls[0], ['rev-list', '--min-parents=2', '--parents', '--end-of-options', 'anchor..run', '--'])
+})
+
+test('mergedBranchTips keeps every parent past the first and drops the merge commit itself', async () => {
+  const { exec } = recorder({ code: 0, stdout: 'mergeSha firstParent secondParent\n\n', stderr: '' })
+  const tips = await createGit({ exec }).mergedBranchTips({ runSha: 'run', anchorSha: 'anchor' })
+  assert.deepEqual([...tips].sort(), ['secondParent'])
+})
+
+test('mergedBranchTips rejects an empty or non-string ref with GitError', async () => {
+  const { calls, exec } = recorder()
+  await assert.rejects(() => createGit({ exec }).mergedBranchTips({ runSha: '', anchorSha: 'a' }), GitError)
+  await assert.rejects(() => createGit({ exec }).mergedBranchTips({ runSha: 'r', anchorSha: '' }), GitError)
+  await assert.rejects(() => createGit({ exec }).mergedBranchTips({ runSha: 'r', anchorSha: [] }), GitError)
+  assert.deepEqual(calls, [])
+})
+
+test('against a real repository, mergedBranchTips names what the run branch merged in', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-merged-'))
+  const git = createGit({ cwd: root })
+  const sh = (args) => defaultGitExec(args, root)
+  const revParse = async (ref) => (await sh(['rev-parse', ref])).stdout.trim()
+  try {
+    await sh(['init', '--initial-branch=run'])
+    await sh(['config', 'user.email', 'test@example.com'])
+    await sh(['config', 'user.name', 'test'])
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    const anchorSha = await revParse('HEAD')
+
+    // T1 is integrated with --no-ff: the merge commit names T1's tip as its second parent.
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 't1.txt'), 't1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 't1'])
+    const t1Sha = await revParse('HEAD')
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'merge: T1', 'teammates/r1/T1'])
+    const mergeSha = await revParse('HEAD')
+
+    // T2 is integrated by FAST-FORWARD: no merge commit exists, so no secondary parent does.
+    await sh(['checkout', '-b', 'teammates/r1/T2'])
+    await writeFile(path.join(root, 't2.txt'), 't2\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 't2'])
+    const t2Sha = await revParse('HEAD')
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--ff-only', 'teammates/r1/T2'])
+
+    // An octopus merge contributes every parent past the first.
+    await sh(['checkout', '-b', 'teammates/r1/T3', anchorSha])
+    await writeFile(path.join(root, 't3.txt'), 't3\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 't3'])
+    const t3Sha = await revParse('HEAD')
+    await sh(['checkout', '-b', 'teammates/r1/T4', anchorSha])
+    await writeFile(path.join(root, 't4.txt'), 't4\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 't4'])
+    const t4Sha = await revParse('HEAD')
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'merge: T3 and T4', 'teammates/r1/T3', 'teammates/r1/T4'])
+    const runSha = await revParse('HEAD')
+
+    const tips = await git.mergedBranchTips({ runSha, anchorSha })
+    assert.ok(tips.has(t1Sha), 'a --no-ff merged branch tip is in the set')
+    assert.ok(tips.has(t3Sha) && tips.has(t4Sha), 'every octopus parent past the first is in the set')
+    assert.ok(!tips.has(t2Sha), 'a fast-forwarded branch tip leaves no secondary parent')
+    assert.ok(!tips.has(mergeSha), 'a commit on the run branch that is not a merge parent is not in the set')
+    assert.ok(!tips.has(runSha), 'the run tip itself is not in the set')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 // --- commitsBetween ------------------------------------------------------------------------
 
 test('commitsBetween builds the argv with a trailing --, and drops blank lines', async () => {
