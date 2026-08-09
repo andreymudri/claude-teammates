@@ -174,15 +174,31 @@ test('the reviewer writes its findings to a file as well as returning them', asy
 // claim is a positive one ("exactly one shape ... never a bare array") and `subject` locks every
 // OTHER statement in the section that mentions "array", so a reworded revert or an added
 // bare-array escape hatch fails whichever words it uses.
+//
+// The claim alone does not bind the example a reviewer actually copies: `assertCode` below takes
+// the FIRST code block matching its pattern in the whole section, so a bare-array block inserted
+// ahead of the real one — as a new "longer form"/"older collectors" example, or promoted to the
+// head of the section — left the claim's prose intact and the subject lock silent, and still
+// showed a reviewer a bare array as the first example under the claim. `introduces` requires the
+// block immediately after the claim's own paragraph to be the stamped example, which adjacency
+// breaks no matter which side the extra block is inserted on; the code-block count closes the one
+// case adjacency alone cannot — a second example added after the real one, correct block still
+// first — since two examples in one section is itself the defect this pin exists to prevent.
 test('the reviewer card commits to one shape and locks out every other mention of an array', async () => {
   const { doc } = await agent('tm-reviewer.md')
   const section = doc.section('Return value')
   assertClaim(section, {
     label: 'one shape, never a bare array',
     claim: /exactly one shape[\s\S]*never a bare array of findings/i,
+    introduces: /"stamp"/,
     subject: /\barray\b/i,
     allow: [/an empty findings array is a real result/i],
   })
+  assert.equal(
+    section.code.length,
+    1,
+    'reviewer card must show exactly one findings-file example, not a second bare-array one',
+  )
 })
 
 // `assert.match(section.text, /"stamp"/)` proves the substring appears anywhere in the section's
@@ -202,6 +218,10 @@ test('the fenced findings-file example has stamp and findings as its only top-le
 // anywhere in Return value that quietly waives the rule (e.g. "the stamp key may be omitted when
 // the dispatch prompt does not supply one"), which a bare `assertStatement` cannot see because it
 // only checks that ITS OWN pattern matches somewhere, never that nothing else contradicts it.
+// The lock also covers "collect"/"collector" wording: an escape hatch can name the collector
+// without naming the stamp at all ("if collection fails, return whatever the collector accepts"),
+// and the only existing sentence in this section that says "collected" already names the stamp
+// too and is already on the allow list below — so widening costs no new entries.
 test('the reviewer card requires copying the stamp verbatim, with no unreviewed stamp caveat', async () => {
   const { doc } = await agent('tm-reviewer.md')
   const section = doc.section('Return value')
@@ -209,7 +229,7 @@ test('the reviewer card requires copying the stamp verbatim, with no unreviewed 
     label: 'copy the stamp verbatim',
     claim: /the stamp object is supplied verbatim in your dispatch prompt/i,
     then: /copy it unchanged into the JSON you write.*never construct or edit it yourself/i,
-    subject: /\bstamp\b/i,
+    subject: /\bstamp\b|\bcollect/i,
     allow: [
       /exactly one shape[\s\S]*never a bare array of findings/i,
       /if your dispatch prompt carries no stamp[\s\S]*inventing a stamp/i,
