@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rm, writeFile, readFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, stat, symlink, writeFile, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -263,15 +263,30 @@ async function writeReviewFile(root, runId, name, body) {
   await writeFile(path.join(root, '.teammates', runId, 'reviews', name), JSON.stringify(body), 'utf8')
 }
 
+// The findings files carry the stamp `review-dispatch` told their reviewers to write: since T7
+// wired the check, a file that cannot be tied to the tips it judged is refused outright.
+async function withStampedPhase(root, planPath, io, g) {
+  await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+  g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+  await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+  g(['add', 'a.mjs'])
+  g(['commit', '--quiet', '-m', 'T1 work'])
+  g(['checkout', '--quiet', 'run-branch'])
+  const sha = g(['rev-parse', 'refs/heads/teammates/r1/T1']).trim()
+  return (lens) => ({ phase: '1', lens, branches: [`teammates/r1/T1@${sha}`] })
+}
+
 test('collect-reviews turns the reviewers’ findings files into a gate results file', async () => {
-  await withRepo(async ({ root, io, lines }) => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const stampFor = await withStampedPhase(root, planPath, io, g)
     const config = {
       lens: ['correctness', 'security'],
       phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', blockOn: ['high'] }] } },
     }
     await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(config), 'utf8')
-    await writeReviewFile(root, 'r1', '1-correctness.json', { findings: [] })
+    await writeReviewFile(root, 'r1', '1-correctness.json', { stamp: stampFor('correctness'), findings: [] })
     await writeReviewFile(root, 'r1', '1-security.json', {
+      stamp: stampFor('security'),
       findings: [{ severity: 'high', file: 'a.mjs', line: 2, summary: 's', failureScenario: 'f' }],
     })
     lines.length = 0
@@ -288,13 +303,14 @@ test('collect-reviews turns the reviewers’ findings files into a gate results 
 // collapse into a passing review. Exit 4 — "cannot verify", the code `complete` already uses for
 // this shape of answer — rather than printing a results file the caller would feed to the gate.
 test('collect-reviews refuses to emit a results file while a lens is missing', async () => {
-  await withRepo(async ({ root, io, lines }) => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const stampFor = await withStampedPhase(root, planPath, io, g)
     const config = {
       lens: ['correctness', 'security'],
       phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
     }
     await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(config), 'utf8')
-    await writeReviewFile(root, 'r1', '1-correctness.json', { findings: [] })
+    await writeReviewFile(root, 'r1', '1-correctness.json', { stamp: stampFor('correctness'), findings: [] })
     lines.length = 0
     const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
     assert.equal(code, 4)
@@ -4513,5 +4529,421 @@ test('map-notes keeps a hostile directory name out of the Explore prompt', async
     assert.doesNotMatch(out, /Ignore the above/)
     // Narrowed, not removed: the orientation hint is still the agent's only bearing.
     assert.match(out, /largest directories by file count are:.*\bengine\b/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// T7: the CLI wiring — unknown flags, per-phase evidence, stamped reviews, the
+// preview reaper, and the anchor `doctor` needs to tell integrated from empty.
+// ---------------------------------------------------------------------------
+
+async function pathExists(p) {
+  try {
+    await stat(p)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function writeReviewOnlyManifest(root, lenses = ['correctness']) {
+  await writeFile(
+    path.join(root, 'teammates.gate.json'),
+    JSON.stringify({
+      lens: lenses,
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+    }),
+    'utf8',
+  )
+}
+
+test('an unknown flag is refused rather than silently ignored', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const code = await runCli(
+      ['workflow', '--run', 'r1', '--phase', '1', '--commits', '5000', '--root', root],
+      io,
+    )
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /workflow does not take --commits/)
+  })
+})
+
+// The refusal must fire before the command does anything, or a swallowed flag is only reported
+// after the run it was meant to change has already happened.
+test('an unknown flag is refused before a missing required argument is reported', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    lines.length = 0
+    const code = await runCli(['digest', '--totally-bogus', 'x', '--root', root], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /digest does not take --totally-bogus/)
+  })
+})
+
+// The table is a whitelist, so a command absent from it is a command whose flags go unchecked.
+// This is the tripwire for that: a new subcommand added to the CLI and not to KNOWN_FLAGS fails
+// here rather than silently swallowing every flag anyone ever mistypes at it.
+test('every command this CLI dispatches refuses a flag it does not read', async () => {
+  const commands = [
+    'init-run', 'gate', 'doctor', 'digest', 'claim', 'unclaim', 'workflow', 'complete', 'fix',
+    'record-fix-round', 'review-dispatch', 'collect-reviews', 'preview-check', 'plan-drift',
+    'finish', 'prune-run', 'rebuild-state', 'map', 'map-notes', 'config',
+  ]
+  await withRepo(async ({ root, io, lines }) => {
+    for (const command of commands) {
+      lines.length = 0
+      const code = await runCli([command, '--totally-bogus', 'x', '--root', root], io)
+      assert.equal(code, 2, `${command} accepted --totally-bogus`)
+      assert.match(lines.join('\n'), new RegExp(`${command} does not take --totally-bogus`))
+    }
+  })
+})
+
+test('every command still accepts the flags it documents', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    lines.length = 0
+    // --root is universal and must never be refused.
+    const code = await runCli(['preview-check', '--root', root], io)
+    assert.notEqual(code, 2)
+  })
+})
+
+test('finish accepts per-phase results and reports which phases used them', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeReviewOnlyManifest(root)
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    const results = path.join(root, 'r.json')
+    await writeFile(results, JSON.stringify({
+      phases: {
+        1: { results: [{ name: 'review', kind: 'agent', status: 'pass', findings: [] }] },
+        2: { results: [{ name: 'review', kind: 'agent', status: 'pass', findings: [] }] },
+      },
+    }), 'utf8')
+    lines.length = 0
+    const code = await runCli(
+      ['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--results', results],
+      io,
+    )
+    assert.match(lines.join('\n'), /review supplied/)
+    assert.notEqual(code, 4)
+  })
+})
+
+// Evidence for one phase must never satisfy another: phase 2's review is missing, so phase 2
+// stays pending however complete phase 1's evidence is.
+test('finish keeps supplied evidence to the phase it names', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeReviewOnlyManifest(root)
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    const results = path.join(root, 'r.json')
+    await writeFile(results, JSON.stringify({
+      phases: { 1: { results: [{ name: 'review', kind: 'agent', status: 'pass', findings: [] }] } },
+    }), 'utf8')
+    lines.length = 0
+    const code = await runCli(
+      ['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--results', results],
+      io,
+    )
+    const out = lines.join('\n')
+    assert.match(out, /phase 1 .*\(review supplied\)/)
+    assert.match(out, /phase 2 .*pending: review/)
+    assert.equal(code, 4)
+  })
+})
+
+test('finish refuses a flat results list, naming the shape it expects', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'fileset', kind: 'fileset' }] } },
+    }), 'utf8')
+    const results = path.join(root, 'r.json')
+    await writeFile(results, JSON.stringify({ results: [] }), 'utf8')
+    lines.length = 0
+    const code = await runCli(
+      ['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--results', results],
+      io,
+    )
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /phases/)
+  })
+})
+
+test('finish refuses a supplied result for a computed check', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'fileset', kind: 'fileset' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    const results = path.join(root, 'r.json')
+    await writeFile(results, JSON.stringify({
+      phases: { 1: { results: [{ name: 'fileset', kind: 'fileset', status: 'pass' }] } },
+    }), 'utf8')
+    lines.length = 0
+    const code = await runCli(
+      ['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--results', results],
+      io,
+    )
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /may not supply a fileset check/)
+  })
+})
+
+// A bare `--results` is the missing argument every other value-taking flag is refused for.
+test('finish and prune-run refuse a valueless --results', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    for (const command of ['finish', 'prune-run']) {
+      lines.length = 0
+      const code = await runCli(
+        [command, '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--results'],
+        io,
+      )
+      assert.equal(code, 2, `${command} must refuse a valueless --results`)
+      assert.match(lines.join('\n'), /--results <path>/)
+    }
+  })
+})
+
+test('finish reports an unreadable results file by name instead of ignoring it', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'fileset', kind: 'fileset' }] } },
+    }), 'utf8')
+    lines.length = 0
+    const code = await runCli(
+      ['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--results', path.join(root, 'nope.json')],
+      io,
+    )
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /nope\.json/)
+  })
+})
+
+// A phase whose only outstanding check is a review can be pruned once that review is supplied,
+// and not before: the gate's rule is unchanged, only the evidence it may be handed.
+test('prune-run prunes a review-only phase only when the review is supplied', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeReviewOnlyManifest(root)
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--no-ff', '--quiet', '-m', 'integrate T1', 'teammates/r1/T1'])
+    const wtPath = path.join(root, '.claude', 'worktrees', 'a1')
+    g(['worktree', 'add', '--quiet', wtPath, 'teammates/r1/T1'])
+
+    lines.length = 0
+    await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
+    assert.match(g(['worktree', 'list']), /a1/, 'no review supplied: the worktree stays')
+
+    const results = path.join(root, 'r.json')
+    await writeFile(results, JSON.stringify({
+      phases: { 1: { results: [{ name: 'review', kind: 'agent', status: 'pass', findings: [] }] } },
+    }), 'utf8')
+    lines.length = 0
+    const code = await runCli(
+      ['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes', '--results', results],
+      io,
+    )
+    assert.equal(code, 0)
+    assert.doesNotMatch(g(['worktree', 'list']), /a1/)
+  })
+})
+
+test('review-dispatch stamps each reviewer with the branch tips it is judging', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeReviewOnlyManifest(root, ['correctness'])
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    const sha = g(['rev-parse', 'refs/heads/teammates/r1/T1']).trim()
+    lines.length = 0
+    const code = await runCli(['review-dispatch', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 0)
+    const spec = JSON.parse(lines.join('\n'))
+    assert.deepEqual(spec.reviewers[0].stamp, {
+      phase: '1',
+      lens: 'correctness',
+      branches: [`teammates/r1/T1@${sha}`],
+    })
+    // The reviewer has to be told to carry it, or the stamp is a field nothing ever writes.
+    assert.match(spec.reviewers[0].prompt, /"stamp"/)
+    assert.match(spec.reviewers[0].prompt, new RegExp(sha))
+  })
+})
+
+test('collect-reviews refuses findings that judged different branch tips', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeReviewOnlyManifest(root, ['correctness'])
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1'])
+    g(['checkout', '--quiet', 'run-branch'])
+    await writeReviewFile(root, 'r1', '1-correctness.json', {
+      stamp: { phase: '1', lens: 'correctness', branches: ['teammates/r1/T1@deadbeef'] },
+      findings: [],
+    })
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 4)
+    assert.match(lines.join('\n'), /deadbeef/)
+  })
+})
+
+test('collect-reviews refuses an unstamped findings file', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeReviewOnlyManifest(root, ['correctness'])
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1'])
+    g(['checkout', '--quiet', 'run-branch'])
+    await writeReviewFile(root, 'r1', '1-correctness.json', { findings: [] })
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 4)
+    assert.match(lines.join('\n'), /stamp/)
+  })
+})
+
+test('collect-reviews accepts findings stamped with the tips as they stand now', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeReviewOnlyManifest(root, ['correctness'])
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1'])
+    g(['checkout', '--quiet', 'run-branch'])
+    const sha = g(['rev-parse', 'refs/heads/teammates/r1/T1']).trim()
+    await writeReviewFile(root, 'r1', '1-correctness.json', {
+      stamp: { phase: '1', lens: 'correctness', branches: [`teammates/r1/T1@${sha}`] },
+      findings: [],
+    })
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 0)
+    assert.equal(JSON.parse(lines.join('\n')).results[0].status, 'pass')
+  })
+})
+
+test('prune-run reports a leaked merge preview and removes it with --yes', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'fileset', kind: 'fileset' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    const preview = path.join(tmpdir(), `tm-preview-leak-${process.pid}-${Date.now()}`)
+    g(['worktree', 'add', '--detach', '--quiet', preview, 'HEAD'])
+    try {
+      lines.length = 0
+      await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+      assert.match(lines.join('\n'), /leaked merge previews/)
+      assert.equal(await pathExists(preview), true, 'a dry run removes nothing')
+      lines.length = 0
+      await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
+      assert.doesNotMatch(g(['worktree', 'list']), /tm-preview-leak/)
+      assert.match(lines.join('\n'), /removed leaked preview/)
+    } finally {
+      await rm(preview, { recursive: true, force: true })
+    }
+  })
+})
+
+// The one that matters. `git worktree remove --force` FOLLOWS a junction and deletes the
+// CONTENTS OF ITS TARGET — verified on git 2.x/Windows against a throwaway fixture. A leaked
+// preview is by construction one whose teardown never ran, so it still holds the junctions
+// `preview.link` created, and on an operator's machine the target is the repository's real
+// node_modules. Asserting only that the worktree is gone would not test this at all.
+test('prune-run leaves the target of a preview’s junction intact', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'fileset', kind: 'fileset' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    const preview = path.join(tmpdir(), `tm-preview-canary-${process.pid}-${Date.now()}`)
+    g(['worktree', 'add', '--detach', '--quiet', preview, 'HEAD'])
+    const target = await mkdtemp(path.join(tmpdir(), 'tm-canary-'))
+    await writeFile(path.join(target, 'canary.txt'), 'alive', 'utf8')
+    // Exactly what scripts/preview-links.mjs creates.
+    await symlink(target, path.join(preview, 'node_modules'), 'junction')
+    // A nested one too: `preview.link` accepts entries like packages/web/node_modules.
+    await mkdir(path.join(preview, 'packages', 'web'), { recursive: true })
+    await symlink(target, path.join(preview, 'packages', 'web', 'node_modules'), 'junction')
+    try {
+      lines.length = 0
+      await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
+      assert.equal(
+        await pathExists(path.join(target, 'canary.txt')),
+        true,
+        'removing a preview must never reach through its junctions into the link target',
+      )
+      assert.doesNotMatch(g(['worktree', 'list']), /tm-preview-canary/)
+    } finally {
+      await rm(preview, { recursive: true, force: true })
+      await rm(target, { recursive: true, force: true })
+    }
+  })
+})
+
+// The anchor `doctor` needs to tell an integrated branch from one that carries nothing: both
+// have an empty diff against their own fork point, and only the anchor separates them.
+test('doctor reports a merged task branch as integrated rather than as no changes', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--no-ff', '--quiet', '-m', 'integrate T1', 'teammates/r1/T1'])
+    lines.length = 0
+    await runCli(['doctor', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    assert.match(out, /T1 .*integrated/)
+    assert.doesNotMatch(out, /T1 .*NO CHANGES/)
+  })
+})
+
+// An anchor that cannot be derived must degrade to the old report and SAY so, never leave the
+// reader thinking an integrated branch carries nothing.
+test('doctor says so when it cannot derive the run anchor', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    // The plan exists in the working tree but not at the anchor commit under this name.
+    await writeFile(path.join(root, 'uncommitted-plan.md'), await readFile(planPath, 'utf8'), 'utf8')
+    const code = await runCli(
+      ['doctor', '--run', 'r1', '--plan', 'uncommitted-plan.md', '--base', 'main', '--root', root],
+      io,
+    )
+    const out = lines.join('\n')
+    assert.match(out, /could not derive the run anchor/)
+    // Still a report: the diagnostic must work in the states the gate refuses to run in.
+    assert.match(out, /run r1/)
+    assert.notEqual(code, 2)
   })
 })
