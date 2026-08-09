@@ -284,6 +284,170 @@ test('isAncestor rejects an empty or non-string ref with GitError', async () => 
   assert.deepEqual(calls, [])
 })
 
+// --- mergedBranchTips ----------------------------------------------------------------------
+
+// One walk, unfiltered by --min-parents: the same output has to carry both the range membership
+// and the merge parents, because a parent counts only if it is itself inside the range.
+test('mergedBranchTips builds the argv with a bounded range and a trailing --', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: '', stderr: '' })
+  await createGit({ exec }).mergedBranchTips({ runSha: 'run', anchorSha: 'anchor' })
+  assert.deepEqual(calls[0], ['rev-list', '--parents', '--end-of-options', 'anchor..run', '--'])
+})
+
+test('mergedBranchTips keeps every parent past the first and drops the merge commit itself', async () => {
+  const { exec } = recorder({
+    code: 0,
+    stdout: 'mergeSha firstParent secondParent\nsecondParent older\nfirstParent older\n\n',
+    stderr: '',
+  })
+  const tips = await createGit({ exec }).mergedBranchTips({ runSha: 'run', anchorSha: 'anchor' })
+  assert.deepEqual([...tips].sort(), ['secondParent'])
+})
+
+// A parent that the walk never printed as a commit of its own is outside anchor..run, which is
+// exactly "reachable from the anchor" — the base tip a plan amendment merge names, and every
+// older base tip behind it.
+test('mergedBranchTips drops a parent that lies outside the walked range', async () => {
+  const { exec } = recorder({ code: 0, stdout: 'mergeSha firstParent anchorSha\nfirstParent older\n', stderr: '' })
+  const tips = await createGit({ exec }).mergedBranchTips({ runSha: 'run', anchorSha: 'anchorSha' })
+  assert.deepEqual([...tips], [])
+})
+
+test('mergedBranchTips rejects an empty or non-string ref with GitError', async () => {
+  const { calls, exec } = recorder()
+  await assert.rejects(() => createGit({ exec }).mergedBranchTips({ runSha: '', anchorSha: 'a' }), GitError)
+  await assert.rejects(() => createGit({ exec }).mergedBranchTips({ runSha: 'r', anchorSha: '' }), GitError)
+  await assert.rejects(() => createGit({ exec }).mergedBranchTips({ runSha: 'r', anchorSha: [] }), GitError)
+  assert.deepEqual(calls, [])
+})
+
+test('against a real repository, mergedBranchTips names what the run branch merged in', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-merged-'))
+  const git = createGit({ cwd: root })
+  const sh = (args) => defaultGitExec(args, root)
+  const revParse = async (ref) => (await sh(['rev-parse', ref])).stdout.trim()
+  try {
+    await sh(['init', '--initial-branch=run'])
+    await sh(['config', 'user.email', 'test@example.com'])
+    await sh(['config', 'user.name', 'test'])
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    const anchorSha = await revParse('HEAD')
+
+    // T1 is integrated with --no-ff: the merge commit names T1's tip as its second parent.
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 't1.txt'), 't1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 't1'])
+    const t1Sha = await revParse('HEAD')
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'merge: T1', 'teammates/r1/T1'])
+    const mergeSha = await revParse('HEAD')
+
+    // T2 is integrated by FAST-FORWARD: no merge commit exists, so no secondary parent does.
+    await sh(['checkout', '-b', 'teammates/r1/T2'])
+    await writeFile(path.join(root, 't2.txt'), 't2\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 't2'])
+    const t2Sha = await revParse('HEAD')
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--ff-only', 'teammates/r1/T2'])
+
+    // An octopus merge contributes every parent past the first.
+    await sh(['checkout', '-b', 'teammates/r1/T3', anchorSha])
+    await writeFile(path.join(root, 't3.txt'), 't3\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 't3'])
+    const t3Sha = await revParse('HEAD')
+    await sh(['checkout', '-b', 'teammates/r1/T4', anchorSha])
+    await writeFile(path.join(root, 't4.txt'), 't4\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 't4'])
+    const t4Sha = await revParse('HEAD')
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'merge: T3 and T4', 'teammates/r1/T3', 'teammates/r1/T4'])
+    const runSha = await revParse('HEAD')
+
+    const tips = await git.mergedBranchTips({ runSha, anchorSha })
+    assert.ok(tips.has(t1Sha), 'a --no-ff merged branch tip is in the set')
+    assert.ok(tips.has(t3Sha) && tips.has(t4Sha), 'every octopus parent past the first is in the set')
+    assert.ok(!tips.has(t2Sha), 'a fast-forwarded branch tip leaves no secondary parent')
+    assert.ok(!tips.has(mergeSha), 'a commit on the run branch that is not a merge parent is not in the set')
+    assert.ok(!tips.has(runSha), 'the run tip itself is not in the set')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+// The set has to answer "which BRANCHES did the run branch merge in", and a plan amendment
+// merges the BASE into the run branch — so the base tip is a secondary parent of a merge inside
+// the range. For a run whose amendments have all landed, merge-base(base, run) IS that base tip,
+// which would put the anchor itself in the set. A task branch parked at the anchor (a teammate
+// that committed on another ref and left the conventional ref where `git checkout -B <task>
+// <base>` put it) would then read as merged, and the emptiness complaint it exists for would be
+// suppressed. Anything reachable from the anchor is likewise not a branch this run carried: an
+// older base tip reaches the set the same way, via a task branch that merged the base into
+// itself. The range bounds which MERGE COMMITS are walked; it does not filter their parents,
+// which is why the parents are filtered explicitly.
+test('against a real repository, mergedBranchTips excludes the anchor and everything behind it', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-amend-'))
+  const git = createGit({ cwd: root })
+  const sh = (args) => defaultGitExec(args, root)
+  const revParse = async (ref) => (await sh(['rev-parse', ref])).stdout.trim()
+  try {
+    await sh(['init', '--initial-branch=master'])
+    await sh(['config', 'user.email', 'test@example.com'])
+    await sh(['config', 'user.name', 'test'])
+    await writeFile(path.join(root, 'base.txt'), 'c1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'c1'])
+    const c1 = await revParse('HEAD')
+
+    // The run forks here, so neither later base commit is an ancestor of it.
+    await sh(['checkout', '-b', 'run'])
+    await writeFile(path.join(root, 'run.txt'), 'r1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'r1'])
+
+    await sh(['checkout', 'master'])
+    await writeFile(path.join(root, 'base.txt'), 'c2\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'c2'])
+    const c2 = await revParse('HEAD')
+    await writeFile(path.join(root, 'base.txt'), 'c3\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'c3'])
+    const c3 = await revParse('HEAD')
+
+    // A task branch that merged the base into itself: c2 becomes a printed secondary parent of
+    // a merge that is itself inside the range.
+    await sh(['checkout', '-b', 'teammates/r1/T1', 'run'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['merge', '--no-ff', '-m', 'merge base into T1', c2])
+    const t1Sha = await revParse('HEAD')
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'merge: T1', 'teammates/r1/T1'])
+
+    // The plan amendment: the base is merged into the run branch, so the base tip is a
+    // secondary parent and the anchor lands exactly on it.
+    await sh(['merge', '--no-ff', '-m', 'merge: plan amendment', 'master'])
+    const runSha = await revParse('HEAD')
+    const anchorSha = (await sh(['merge-base', 'master', 'run'])).stdout.trim()
+    assert.equal(anchorSha, c3, 'fixture: the anchor is the base tip once the amendment has landed')
+
+    const tips = await git.mergedBranchTips({ runSha, anchorSha })
+    assert.ok(tips.has(t1Sha), 'a genuinely merged task branch is still in the set')
+    assert.ok(!tips.has(anchorSha), 'the anchor is not a branch this run merged in')
+    assert.ok(!tips.has(c2), 'an older base tip, reachable from the anchor, is not either')
+    assert.ok(!tips.has(c1), 'nor is anything further behind it')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 // --- commitsBetween ------------------------------------------------------------------------
 
 test('commitsBetween builds the argv with a trailing --, and drops blank lines', async () => {
