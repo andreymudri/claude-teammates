@@ -71,5 +71,13 @@ export function mapNotesWritable(text, { runId, sha }) {
   if (!header) return 'the returned map does not begin with the teammates-map header it was given'
   if (header.sha !== sha) return `the returned map claims commit ${header.sha}, but the dispatch named ${sha}`
   if (header.runId !== runId) return `the returned map claims run ${header.runId}, but the dispatch named ${runId}`
+  // The header alone is not a map: an agent that echoes back only the line it was handed has
+  // produced nothing a reader can use, and that text still passes every check above, because
+  // the header IS the provenance it claims. Strip the matched header off the front and require
+  // something beyond blank lines or spaces to remain. No minimum length beyond that: a small
+  // repository can legitimately produce a short map, and this guard is about presence of a
+  // body, not its quality.
+  const afterHeader = body.trimStart().slice(HEADER.exec(body.trimStart())[0].length)
+  if (afterHeader.trim() === '') return 'the returned map has no body beyond the header, so there is nothing to write as a map'
   return null
 }

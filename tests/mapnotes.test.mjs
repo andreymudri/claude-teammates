@@ -101,6 +101,24 @@ test('an empty return is refused', () => {
   assert.match(mapNotesWritable('', { runId: 'r1', sha: 'abc' }), /returned nothing/)
 })
 
+// The finding this guard exists for: an agent that echoes back only the header line it was
+// handed has produced no map at all, yet the header alone used to pass every other check.
+test('a return consisting only of the header is refused', () => {
+  const text = mapNotesHeader({ runId: 'r1', sha: 'abc' })
+  assert.match(mapNotesWritable(text, { runId: 'r1', sha: 'abc' }), /no body/)
+})
+
+test('a return of the header plus only whitespace or a blank line is refused', () => {
+  const header = mapNotesHeader({ runId: 'r1', sha: 'abc' })
+  assert.match(mapNotesWritable(`${header}\n`, { runId: 'r1', sha: 'abc' }), /no body/)
+  assert.match(mapNotesWritable(`${header}\n\n   \n`, { runId: 'r1', sha: 'abc' }), /no body/)
+})
+
+test('a return of the header plus a real body is accepted, even a short one', () => {
+  const header = mapNotesHeader({ runId: 'r1', sha: 'abc' })
+  assert.equal(mapNotesWritable(`${header}\nSmall repo, one module: cli.js runs everything.\n`, { runId: 'r1', sha: 'abc' }), null)
+})
+
 test('non-hex shas like UNKNOWN are accepted and reported in mismatch messages', () => {
   const text = mapNotesHeader({ runId: 'r1', sha: 'UNKNOWN' })
   assert.equal(text, '<!-- teammates-map run=r1 sha=UNKNOWN -->')
