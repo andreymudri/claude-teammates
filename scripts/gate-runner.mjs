@@ -235,8 +235,19 @@ export async function runFilesetCheck(check, ctx = {}) {
         // that committed on the harness's own branch and left the conventional ref where it
         // started — would read as integrated and escape the very check this is. A landed branch
         // carries commits PAST the anchor, so it is not an ancestor of the anchor; a stale or
-        // phantom one is.
-        const landed = await git.isAncestor(sha, runSha) && !(await git.isAncestor(sha, anchorSha))
+        // phantom one is. Nor is "past the anchor" enough on its own: from phase 2 the run tip
+        // is itself past the anchor, so a branch left exactly where `git checkout -B <task>
+        // <run branch>` put it satisfies both halves while carrying nothing — hence the tip
+        // exclusion, which catches a branch parked EXACTLY at the run tip and nothing else.
+        //
+        // What is left uncaught: a branch parked at some intermediate post-anchor commit on the
+        // run branch, rather than at its tip, still reads as landed, because nothing here tells
+        // it apart from a genuinely merged branch. Closing that means walking the run branch's
+        // merge commits for one whose second parent is this branch. `scripts/doctor.mjs`
+        // computes this same `landed` test and carries the same residual limit.
+        const landed = await git.isAncestor(sha, runSha)
+          && !(await git.isAncestor(sha, anchorSha))
+          && sha !== runSha
         if (!landed) {
           problems.push(`${task.id}: branch ${branch} contributes no file changes past its fork point ${forkPoint} — the work is not on the conventional ref, and merging this task would be a no-op`)
         }

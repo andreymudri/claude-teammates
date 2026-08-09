@@ -352,6 +352,24 @@ test('runFilesetCheck does not report an already-integrated branch as contributi
   assert.deepEqual(res.branchShas, { [T1_BRANCH]: `refs/heads/${T1_BRANCH}-sha` })
 })
 
+// The enforcing counterpart of doctor's run-tip case. From phase 2 onward the run tip is past
+// the anchor, so a branch left exactly where `git checkout -B <task> <run branch>` put it
+// satisfies both halves of the landed test while carrying no work of its own — and this check
+// decides whether the phase may integrate.
+test('runFilesetCheck fails a branch parked at the run tip with no contribution', async () => {
+  const git = fakeGit({
+    branchExists: async () => true,
+    changedFiles: async () => [],
+    isAncestor: async (_sha, target) => target === 'runSha1',
+    resolveRef: async () => 'runSha1',
+  })
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = { git, runId: RUN_ID, runSha: 'runSha1', anchorSha: 'anchorSha1', tasks: [T1_TASK], currentPhase: 1, phaseError: null }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.match(res.output, /contributes no file changes/)
+})
+
 test('runFilesetCheck fails when a task branch contributes no file changes', async () => {
   const git = fakeGit({
     branchExists: async () => true,
