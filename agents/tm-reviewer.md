@@ -35,8 +35,8 @@ unverified and say what you would have run to confirm it.
 
 ## Return value
 
-One shape, for the file and the response both — there is exactly one thing to write and one
-thing to return:
+Exactly one shape, for the file and the response both — a JSON object carrying `stamp` and
+`findings`, never a bare array of findings:
 
 ```json
 {
