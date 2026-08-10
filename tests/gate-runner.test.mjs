@@ -391,6 +391,74 @@ test('runFilesetCheck fails with the git error when a run-wide task ref cannot b
   assert.match(res.output, /bad object/)
 })
 
+// Guard 1 of the duplicate rule: scoped to an empty diff. A branch whose diff is non-empty
+// cannot be the parked ref — it carries real content of its own — so the rule must not fire for
+// it even when its sha is shared with another branch. Fix-round finding: an earlier version ran
+// this check unconditionally, which failed the HONEST branch of a genuine sibling pair before
+// its own diff was even computed. Pinned with the shape that actually surfaced it: T2's ref is
+// pointed at T3's tip (same sha), and T3 — the one that did the real work — runs
+// `complete --task T3`. `taskScope: 'T3'` narrows the loop's SUBJECT to T3 alone, but
+// `allTaskShas` (built from the unfiltered `ctx.tasks`) still carries T2's entry with the
+// identical sha, so a version that moved the twin check outside the `changed.length === 0`
+// guard would fail T3 here even though T3's own diff (`c.mjs`) is exactly its declared file.
+test('runFilesetCheck does not apply the duplicate rule to a branch with a non-empty diff', async () => {
+  const T2_TASK = { id: 'T2', phase: 2, files: ['b.mjs'] }
+  const T3_TASK = { id: 'T3', phase: 2, files: ['c.mjs'] }
+  const T3_BRANCH = 'teammates/r1/T3'
+  const SHARED_SHA = 'sharedSha1'
+  const git = fakeGit({
+    branchExists: async () => true,
+    resolveRef: async (ref) => {
+      if (ref === `refs/heads/${T2_BRANCH}`) return SHARED_SHA
+      if (ref === `refs/heads/${T3_BRANCH}`) return SHARED_SHA
+      if (ref === 'refs/heads/run') return 'runSha1'
+      return `${ref}-sha`
+    },
+    // T3's own diff carries its real, declared content.
+    changedFiles: async () => ['c.mjs'],
+  })
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = {
+    git, runId: RUN_ID, runSha: 'runSha1', anchorSha: 'anchorSha1',
+    tasks: [T2_TASK, T3_TASK], currentPhase: 2, taskScope: 'T3', phaseError: null,
+  }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'pass')
+})
+
+// Guard 2 of the duplicate rule: scoped away from the run tip. Two branches sharing the sha
+// that IS the run tip are in the ordinary, benign state every fleet passes through between
+// `git checkout -B <task> <run branch>` and its first commit — dispatched siblings, or a
+// fix-round branch re-created there. Fix-round finding A: an earlier version had no such
+// exclusion and reported every freshly-dispatched phase as a pack of branches "parked at" each
+// other. Pinned by construction: T1 and T2 both resolve to the run tip sha with an empty diff,
+// so a version that dropped the `sha !== runSha` guard would report them as parked on each
+// other instead of the true, actionable "contributes no file changes ... no-op".
+test('runFilesetCheck does not apply the duplicate rule to two branches sharing the run tip', async () => {
+  const T2_TASK = { id: 'T2', phase: 1, files: ['b.mjs'] }
+  const git = fakeGit({
+    branchExists: async () => true,
+    resolveRef: async (ref) => {
+      if (ref === `refs/heads/${T1_BRANCH}`) return 'runSha1'
+      if (ref === `refs/heads/${T2_BRANCH}`) return 'runSha1'
+      if (ref === 'refs/heads/run') return 'runSha1'
+      return `${ref}-sha`
+    },
+    changedFiles: async () => [],
+    mergedBranchTips: async () => new Set(),
+  })
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = {
+    git, runId: RUN_ID, runSha: 'runSha1', anchorSha: 'anchorSha1',
+    tasks: [T1_TASK, T2_TASK], currentPhase: 1, phaseError: null,
+  }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.match(res.output, /T1: branch teammates\/r1\/T1 contributes no file changes/)
+  assert.match(res.output, /T2: branch teammates\/r1\/T2 contributes no file changes/)
+  assert.doesNotMatch(res.output, /parked at the other's tip/)
+})
+
 // A teammate that skips its `git checkout -B teammates/<run>/<task>` and commits on the
 // harness's own worktree branch leaves the conventional ref existing but empty: it points at
 // the run tip with no work on it. `filesetViolations` of an empty change list is empty, so the
@@ -1548,11 +1616,14 @@ test('a phase-2 branch parked at the run tip does not read as integrated (real r
 // inside anchor..run, so `ownWorkBase` would hand back T3's fork point for T2 too, crediting it
 // with `c.mjs` — and because T3 computes to the exact same answer (same sha, same call), phase 2
 // would read fully integrated on T3's legitimate merge alone, before `runFilesetCheck` (or even
-// `derivePhase`) ever sees T2's empty contribution. The shared-sha exclusion ahead of the
-// `integratedPhases` loop holds BOTH T2 and T3 out of it once their branches resolve to the
-// identical sha, so the phase keeps reading as not-yet-integrated and the fileset check keeps
-// running against it, where the duplicate rule names the pair.
-test('deriveContext does not credit either sibling once two task refs share a merged tip (real repo)', async () => {
+// `derivePhase`) ever sees T2's empty contribution.
+//
+// An earlier version of this fix silently withheld `integratedPhases` credit from both refs.
+// That broke a genuinely-integrated EARLIER phase whenever a duplicate touched a LATER one
+// (fix-round finding B1 — reproduced and pinned separately in `tests/adversarial.test.mjs`), so
+// `deriveContext` now short-circuits with a dedicated phaseError naming both refs and both task
+// ids, before `integratedPhases` is even computed, rather than guessing which phase broke.
+test('deriveContext fails with a specific error naming both refs when two task refs share a non-run-tip sha', async () => {
   await withRepo(async ({ root, sh, git }) => {
     await writeFile(path.join(root, 'plan.md'), twoInSecondPhasePlan(), 'utf8')
     await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
@@ -1575,22 +1646,66 @@ test('deriveContext does not credit either sibling once two task refs share a me
     await sh(['checkout', 'run'])
     await sh(['merge', '--no-ff', '-m', 'Merge T3', 'teammates/r1/T3'])
 
-    // T2 never commits: its ref is pointed straight at T3's own tip commit.
+    // T2 never commits: its ref is pointed straight at T3's own tip commit, which is NOT the
+    // run tip (the run tip is the "Merge T3" commit) — the parked shape, not the benign one.
     await sh(['branch', 'teammates/r1/T2', t3Tip])
 
     const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
 
-    // Phase 1 genuinely integrated. Phase 2 does NOT read as integrated even though T3's own
-    // merge is entirely legitimate — the shared sha with T2 withholds credit from both, because
-    // this mechanism cannot tell which of the two refs the merged work actually belongs to.
-    assert.deepEqual(ctx.integratedPhases, [1])
-    assert.equal(ctx.currentPhase, 2)
-    assert.equal(ctx.phaseError, null)
+    // Reported immediately, naming both refs and both task ids — not a silent exclusion, and
+    // not the generic "phase N is not integrated but a later phase is" ordering error, which
+    // would leave phase 1's genuine integration unexplained and point the operator at the
+    // wrong phase entirely.
+    assert.deepEqual(ctx.integratedPhases, [])
+    assert.equal(ctx.currentPhase, null)
+    assert.match(ctx.phaseError, /T2: branch teammates\/r1\/T2 and teammates\/r1\/T3 \(task T3\)/)
+    assert.match(ctx.phaseError, new RegExp(t3Tip))
+    assert.match(ctx.phaseError, /not the run tip/)
 
     const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
     assert.equal(res.status, 'fail')
-    assert.match(res.output, /T2: branch teammates\/r1\/T2 and teammates\/r1\/T3 \(task T3\)/)
-    assert.match(res.output, /T3: branch teammates\/r1\/T3 and teammates\/r1\/T2 \(task T2\)/)
+    assert.equal(res.output, ctx.phaseError)
+  })
+})
+
+// The discriminator's other half: two refs sharing the RUN TIP itself are the ordinary state
+// every fleet passes through between `git checkout -B <task> <run branch>` and its first
+// commit. Reproduced with the real CLI (fix-round finding A): a phase-1 plan with every task
+// branch freshly created and nothing committed used to report each task as "parked at" a
+// sibling; the true, actionable cause is that none of them has done any work yet.
+test('deriveContext does not treat siblings sharing the run tip as a violation (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'plan.md'), twoInSecondPhasePlan(), 'utf8')
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+
+    // T1 is the only phase-1 task in this plan; give it its own real, unmerged commit so the
+    // run tip advances past main, then park T2 and T3 (both phase 2, still un-started) exactly
+    // where `git checkout -B <task> <run branch>` would put them.
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+
+    const runTip = (await sh(['rev-parse', 'run'])).stdout.trim()
+    await sh(['branch', 'teammates/r1/T2', runTip])
+    await sh(['branch', 'teammates/r1/T3', runTip])
+
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+
+    assert.equal(ctx.phaseError, null)
+    assert.deepEqual(ctx.integratedPhases, [1])
+    assert.equal(ctx.currentPhase, 2)
+
+    const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
+    assert.equal(res.status, 'fail')
+    assert.match(res.output, /T2: branch teammates\/r1\/T2 contributes no file changes/)
+    assert.match(res.output, /T3: branch teammates\/r1\/T3 contributes no file changes/)
+    assert.doesNotMatch(res.output, /parked at the other's tip/)
   })
 })
 

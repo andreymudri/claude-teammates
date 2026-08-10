@@ -383,11 +383,11 @@ function commitPlanAtAnchor(root, planMarkdown) {
 // it, and the old `ownWorkBase` fork-point trick credited T2 with `c.mjs` in `deriveContext`
 // too, reading phase 2 as fully integrated and skipping the fileset check entirely.
 //
-// Both are now closed by the same shared-sha exclusion: `deriveContext` no longer credits
-// EITHER T2 or T3 as having done independent work once their branches resolve to the identical
-// sha, so phase 2 does not read as integrated on T3's legitimate merge alone, the gate keeps
-// checking it, and `runFilesetCheck`'s duplicate rule — which asks the same question over the
-// same run-wide set — rejects the pair by name.
+// Closed in `deriveContext`: a shared sha that is NOT the run tip (T3's tip is a fixed ancestor
+// once merged, never the run tip again) is reported as a dedicated phaseError naming both refs,
+// before either phase is even scored — see 'gate reports a specific error, not the generic
+// ordering error, when an already-integrated phase shares a non-run-tip sha with a later one'
+// below for the fix-round regression this replaced.
 test('gate fails when a task ref is parked at a merged SIBLING\'s tip', async () => {
   await withRepo(async (root) => {
     await commitPlanAtAnchor(root, SIBLING_TIP_PLAN)
@@ -407,10 +407,125 @@ test('gate fails when a task ref is parked at a merged SIBLING\'s tip', async ()
     assert.equal(code, 1)
     const parsed = JSON.parse(out)
     assert.equal(parsed.verdict, 'FAIL')
-    assert.equal(parsed.phase, 2)
+    // Reported at deriveContext's level, before any phase is scored: the ordinary
+    // `derivePhase` machinery never runs, so `phase` reads null the same way it would for any
+    // other early phaseError (compare the zero-task-plan case).
+    assert.equal(parsed.phase, null)
     const fileset = parsed.results.find((r) => r.name === 'fileset')
     assert.match(fileset.output, /T2: branch teammates\/r1\/T2 and teammates\/r1\/T3 \(task T3\)/)
-    assert.match(fileset.output, /are both at commit/)
+    assert.match(fileset.output, new RegExp(t3Tip))
+    assert.match(fileset.output, /not the run tip/)
+  })
+})
+
+// The pre-merge half of the SIBLING'S-tip shape. `deriveContext`'s dedicated phaseError fires
+// on sha equality alone — it does not diff anything to decide whether to fire, by design, so
+// the whole run's phase state can be short-circuited before `integratedPhases` is computed at
+// all — so it catches this BEFORE T3 is even merged, the same way it does after. T3's own
+// unmerged commit is not the run tip either, so the sha still satisfies the discriminator.
+// `runFilesetCheck`'s OWN duplicate rule, by contrast, is scoped to an empty diff and would NOT
+// fire here on its own (T2's diff off the run tip is T3's real `c.mjs`, non-empty) — but that
+// scoping is moot in the ordinary CLI flow, because `deriveContext`'s phaseError is already set
+// by the time `runFilesetCheck` runs, and it returns that phaseError immediately without
+// reaching its own duplicate-detection logic at all.
+test('gate catches a ref parked at an unmerged sibling\'s tip the same way as a merged one', async () => {
+  await withRepo(async (root) => {
+    await commitPlanAtAnchor(root, SIBLING_TIP_PLAN)
+
+    await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+
+    // T3 commits but is NOT yet merged.
+    const t3Branch = await taskBranch(root, 'r1', 'T3', { files: { 'c.mjs': 'x\n' } })
+    const t3Tip = git(root, ['rev-parse', t3Branch]).trim()
+
+    // T2 never commits: its ref is pointed straight at T3's own (still unmerged) tip.
+    git(root, ['branch', 'teammates/r1/T2', t3Tip])
+
+    const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(code, 1)
+    const parsed = JSON.parse(out)
+    assert.equal(parsed.verdict, 'FAIL')
+    assert.equal(parsed.phase, null)
+    const fileset = parsed.results.find((r) => r.name === 'fileset')
+    assert.match(fileset.output, /T2: branch teammates\/r1\/T2 and teammates\/r1\/T3 \(task T3\)/)
+    assert.match(fileset.output, new RegExp(t3Tip))
+    assert.match(fileset.output, /not the run tip/)
+  })
+})
+
+// Fix-round finding A: the ordinary, benign state every fleet passes through between
+// `git checkout -B <task> <run branch>` and its first commit — a phase's siblings freshly
+// created together, nothing committed yet. An earlier version of the duplicate rule had no
+// run-tip exclusion and reported every one of them as "parked at" the others; the true,
+// actionable cause is that none of them has done any work yet.
+test('gate does not treat freshly-dispatched siblings sharing the run tip as parked on each other', async () => {
+  await withRepo(async (root) => {
+    await commitPlanAtAnchor(root, SIBLING_TIP_PLAN)
+
+    const runTip = git(root, ['rev-parse', 'run-branch']).trim()
+    git(root, ['branch', 'teammates/r1/T1', runTip])
+    git(root, ['branch', 'teammates/r1/T2', runTip])
+    git(root, ['branch', 'teammates/r1/T3', runTip])
+
+    const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(code, 1)
+    const parsed = JSON.parse(out)
+    assert.equal(parsed.verdict, 'FAIL')
+    assert.equal(parsed.phase, 1)
+    const fileset = parsed.results.find((r) => r.name === 'fileset')
+    assert.match(fileset.output, /T1: branch teammates\/r1\/T1 contributes no file changes/)
+    assert.doesNotMatch(fileset.output, /parked at the other's tip/)
+  })
+})
+
+// Fix-round finding B1: a phase-3 teammate points its ref at an EARLIER, already-integrated
+// phase's own merged tip (not the run tip — T2's later merge has since moved the run tip past
+// it). An earlier version of the shared-sha exclusion applied to every phase silently, so this
+// stripped phase 1's genuine integration credit along with the parked ref's, and `derivePhase`
+// reported the generic "phase 1 is not integrated but a later phase is" ordering error —
+// technically true, but naming the wrong cause and never mentioning the parked ref at all.
+test('gate reports a specific error, not the generic ordering error, when an already-integrated phase shares a non-run-tip sha with a later one', async () => {
+  await withRepo(async (root) => {
+    const threePhasePlan = `### Task 1: A
+
+**Files:**
+- Create: \`a.mjs\`
+
+### Task 2: B
+
+**Files:**
+- Create: \`b.mjs\`
+
+**Depends:** T1
+
+### Task 3: C
+
+**Files:**
+- Create: \`c.mjs\`
+
+**Depends:** T2
+`
+    await commitPlanAtAnchor(root, threePhasePlan)
+
+    const t1Branch = await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+    const t1Tip = git(root, ['rev-parse', t1Branch]).trim()
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', t1Branch])
+    await taskBranch(root, 'r1', 'T2', { files: { 'b.mjs': 'x\n' } })
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T2', 'teammates/r1/T2'])
+
+    // T3 (phase 3) never commits: its ref is pointed at T1's own merged tip — a fixed,
+    // non-run-tip ancestor now that T2's merge has moved the run tip past it.
+    git(root, ['branch', 'teammates/r1/T3', t1Tip])
+
+    const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(code, 1)
+    const parsed = JSON.parse(out)
+    assert.equal(parsed.verdict, 'FAIL')
+    const fileset = parsed.results.find((r) => r.name === 'fileset')
+    assert.doesNotMatch(fileset.output, /refusing to guess which phase to enforce/)
+    assert.match(fileset.output, /T1: branch teammates\/r1\/T1 and teammates\/r1\/T3 \(task T3\)/)
+    assert.match(fileset.output, new RegExp(t1Tip))
   })
 })
 

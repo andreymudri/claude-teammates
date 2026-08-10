@@ -155,13 +155,52 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
 
   // Run-wide, the same set `runFilesetCheck` builds for the same reason: the sha a commit
   // carries is a fact about the whole run, not about one phase, and a parked ref's sibling is
-  // usually in an earlier, already-integrated phase. A sha shared by more than one task's
-  // branch cannot be independently confirmed as ANY of those tasks' own work — it is one commit,
-  // so at most one of the refs pointing at it did the work, and this mechanism cannot tell
-  // which. Both are held back from `integratedPhases` rather than guessed at.
+  // usually in an earlier, already-integrated phase.
+  //
+  // A shared sha is benign exactly when it IS the run tip. Every fleet passes through that
+  // state between `git checkout -B <task> <run branch>` and its first commit — a phase's
+  // siblings freshly dispatched together, or a fix-round branch re-created there — and it is
+  // not evidence of anything; each such branch already reads correctly as "no own work yet"
+  // below, on its own individual fork-point diff, with no cross-referencing needed. A shared
+  // sha that is NOT the run tip has no such innocent shape: after `tm-integrator` merges a
+  // branch with `--no-ff`, the run tip moves to the merge commit and the merged branch's own
+  // tip becomes a fixed, non-tip ancestor — the only thing left for a PARKED ref to be pointed
+  // at instead of committing. First reproduced and pinned as `gate fails when a task ref is
+  // parked at a merged SIBLING's tip` in `tests/adversarial.test.mjs`.
+  //
+  // An earlier version of this exclusion applied to shared shas run-wide regardless of
+  // whether the shared sha was the run tip, and silently withheld `integratedPhases` credit
+  // from BOTH refs whenever any two shared one — including the legitimate one. That broke a
+  // genuinely-integrated EARLIER phase whenever a LATER phase's parked ref happened to share
+  // its sha, which `derivePhase` then reported as the generic, misleading "phase N is not
+  // integrated but a later phase is" ordering error instead of naming the actual cause.
+  // Reproduced with the real CLI and pinned as `deriveContext fails with a specific error
+  // naming both refs when two task refs share a non-run-tip sha` below.
+  //
+  // Returned as a dedicated phaseError instead, naming both refs and both task ids, rather
+  // than folded into the states loop as a silent per-task exclusion: this shape means the RUN
+  // itself cannot be trusted to say which phase is current, not that one specific phase failed
+  // to integrate, so it is surfaced before `integratedPhases` is even computed, the same way
+  // the zero-task case below is.
   const allTaskShas = await runWideTaskShas(git, tasks, runId)
-  const shaCounts = new Map()
-  for (const [, rec] of allTaskShas) shaCounts.set(rec.sha, (shaCounts.get(rec.sha) ?? 0) + 1)
+  const byRunWideSha = new Map()
+  for (const [branch, rec] of allTaskShas) {
+    if (!byRunWideSha.has(rec.sha)) byRunWideSha.set(rec.sha, [])
+    byRunWideSha.get(rec.sha).push({ branch, taskId: rec.taskId })
+  }
+  for (const [sha, entries] of byRunWideSha) {
+    if (sha === runSha) continue
+    if (entries.length < 2) continue
+    const [a, b] = entries
+    return {
+      git, runId, runBranch, baseBranch, anchorSha, runSha,
+      planHash: planHash(planMarkdown),
+      tasks,
+      currentPhase: null,
+      phaseError: `${a.taskId}: branch ${a.branch} and ${b.branch} (task ${b.taskId}) are both at commit ${sha}, which is not the run tip — one is parked at the other's tip and this run cannot be phase-gated until it is fixed`,
+      integratedPhases: [],
+    }
+  }
 
   const integratedPhases = []
   for (const [phase, phaseTasks] of byPhase) {
@@ -170,7 +209,6 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
       const branch = resolveTaskBranch(t, runId)
       if (!branch || !(await git.branchExists(branch))) { states.push(false); continue }
       const sha = await git.resolveRef(`refs/heads/${branch}`)
-      if ((shaCounts.get(sha) ?? 0) > 1) { states.push(false); continue }
       // isAncestor(sha, runSha) alone is trivially true for a branch with zero commits past
       // the anchor: a branch created at the anchor, or created by pointing at the run tip
       // itself, is an ancestor by reflexivity or by definition, with no work required.
@@ -198,23 +236,32 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
       //   - A teammate that does the integrator's job — creating task branches that each carry
       //     real work and merging them itself. Indistinguishable here from legitimate
       //     integration, because at this level it IS the same shape. Still fully open.
-      //   - A ref parked at a merged SIBLING'S tip. Reproduced: T3 commits `c.mjs` and is merged
-      //     `--no-ff`; T2's ref is then pointed at T3's tip. T2's sha is a genuine secondary
-      //     parent of that merge and genuinely in range, so it is keyed in the index above, and
-      //     `ownWorkBase` would hand back T3's fork point — crediting T2 with `c.mjs` while T2's
-      //     own declared file never reaches the run branch. The range filter cannot help: the sha
-      //     really was merged, just not as this task. `runFilesetCheck` had the symmetric hole
-      //     through `mergedBranchTips`, which asks the same membership question.
+      //   - A ref parked at a merged SIBLING'S tip, AFTER the sibling is merged. Reproduced: T3
+      //     commits `c.mjs` and is merged `--no-ff`; T2's ref is then pointed at T3's tip
+      //     instead of committing. T2's sha is a genuine secondary parent of that merge and
+      //     genuinely in range, so it is keyed in the index above, and `ownWorkBase` would hand
+      //     back T3's fork point — crediting T2 with `c.mjs` while T2's own declared file never
+      //     reaches the run branch. The range filter cannot help: the sha really was merged,
+      //     just not as this task. `runFilesetCheck` had the symmetric hole through
+      //     `mergedBranchTips`, which asks the same membership question.
       //
-      //     Closed at the shared-sha step just above, for both this function and
-      //     `runFilesetCheck`: two task refs of one run resolving to the identical sha can be
-      //     confirmed at most one of them's own work, and this mechanism cannot tell which, so
-      //     neither reads as integrated here and `runFilesetCheck`'s duplicate rule rejects both
-      //     while the phase is still open. What remains open is the NEAR-sibling variant: a
-      //     distinct sha one empty commit above the sibling's tip does not trip the shared-sha
-      //     count here or `runFilesetCheck`'s duplicate rule, and whether either test still
-      //     catches it depends on the shape of what got merged where — see
-      //     `tests/adversarial.test.mjs`'s LIMIT (near-sibling) test for the case that survives.
+      //     Caught at the shared-sha step just above, on sha equality alone — it does not diff
+      //     anything to decide whether to fire, by design, so the whole run's phase state can be
+      //     short-circuited before this loop runs at all. T2's sha is not the run tip whether T3
+      //     is merged yet or not (an unmerged T3's own tip is just as much "not the run tip" as
+      //     its post-merge tip is), so the dedicated phaseError catches BOTH the pre-merge and
+      //     post-merge shape the same way, naming both refs. `runFilesetCheck`'s OWN duplicate
+      //     rule, scoped to an empty diff, would NOT catch the pre-merge shape on its own — T2's
+      //     diff off the run tip is T3's real `c.mjs`, non-empty, which the ordinary declared-set
+      //     violation would catch instead (T2 only declared `b.mjs`) — but that scoping is moot
+      //     in the ordinary CLI flow: this function's phaseError is set before `runFilesetCheck`
+      //     ever runs, and it returns that phaseError immediately without reaching its own
+      //     duplicate-detection logic. Pinned, both shapes, in `tests/adversarial.test.mjs`.
+      //     What remains open is the NEAR-sibling variant, after the merge: a distinct sha one
+      //     empty commit above the sibling's tip does not trip the shared-sha check here or
+      //     `runFilesetCheck`'s duplicate rule, and whether either test still catches it depends
+      //     on the shape of what got merged where — see `tests/adversarial.test.mjs`'s LIMIT
+      //     (near-sibling) test for the case that survives.
       //
       // The spec's "Not defended against" list still records the shared-sha shape as open; this
       // function and `tests/adversarial.test.mjs` are the more current source for what remains.
@@ -389,10 +436,24 @@ export async function runFilesetCheck(check, ctx = {}) {
         // failed the honest branch too: phase 2 has siblings T2 and T3, T3 commits `c.mjs`, T2's
         // ref is pointed at T3's tip, and T3's own `complete` run hit this test before its diff
         // was even computed and read as "credited with work it did not do" about T3 itself.
-        // Two task refs of one run resolving to the identical sha, while the diff is empty, has
-        // no legitimate shape once the phase is being gated: one of them was moved onto the
-        // other, and the one WITH the empty diff is the one that moved.
-        const twin = [...allTaskShas].find(([name, rec]) => name !== branch && rec.sha === sha)
+        //
+        // Also scoped away from the run tip: `sha === runSha` is the ordinary, benign state
+        // every fleet passes through between `git checkout -B <task> <run branch>` and its
+        // first commit — every sibling of a freshly-dispatched phase, or a fix-round branch
+        // re-created there, shares that exact sha with every other not-yet-started branch, and
+        // NONE of them is parked on any of the others. Reproduced with the real CLI: a
+        // three-task phase with every branch created and nothing committed reported each task
+        // as "parked at" a sibling instead of the true, actionable "contributes no file changes
+        // ... would be a no-op" the landed-tips test below gives it. A shared sha that is NOT
+        // the run tip has no such innocent shape — see the comment on this same discriminator
+        // in `deriveContext`, above `ownWorkBase`'s loop, for why.
+        //
+        // Two task refs of one run resolving to the identical NON-run-tip sha, while the diff
+        // is empty, has no legitimate shape once the phase is being gated: one of them was
+        // moved onto the other, and the one WITH the empty diff is the one that moved.
+        const twin = sha === runSha
+          ? null
+          : [...allTaskShas].find(([name, rec]) => name !== branch && rec.sha === sha)
         if (twin) {
           problems.push(`${task.id}: branch ${branch} and ${twin[0]} (task ${twin[1].taskId}) are both at commit ${sha} — one is parked at the other's tip and would be credited with work it did not do`)
           continue
@@ -438,20 +499,31 @@ export async function runFilesetCheck(check, ctx = {}) {
         //   - A SQUASH merge likewise carries no secondary parent. The plugin's integrator
         //     never squashes, so that is a statement about a repository someone else merged
         //     into, not about a run this tool drove.
-        //   - Two branches with an empty diff whose tips are the identical sha are rejected
-        //     before this test runs, by the duplicate-ref rule just above. That rule sees the
-        //     WHOLE run, not just this phase, so it still fires after the legitimate sibling has
-        //     been merged: `deriveContext`'s `integratedPhases` computation applies the same
-        //     shared-sha exclusion (see the comment at its own `ownWorkBase` loop) before this
-        //     function ever runs, so a phase containing a parked ref never falsely reads as fully
-        //     integrated and this loop keeps reaching it. Pinned as a FAIL in
-        //     `tests/adversarial.test.mjs` both while the sibling's phase is still open and after
-        //     its legitimate half has been merged. What that rule does NOT reject is a
-        //     NEAR-sibling: an empty commit on top of the sibling's tip is a distinct sha, so
-        //     neither the shared-sha exclusion nor the duplicate test fires, and whether this
-        //     test fires depends on whether that commit is itself a merge parent in range —
-        //     pinned as a LIMIT (near-sibling) test in the same file. Narrow, open, and recorded
-        //     here rather than rediscovered.
+        //   - Two branches with an empty diff whose tips are the identical NON-run-tip sha are
+        //     rejected before this test runs, by the duplicate-ref rule just above — this is the
+        //     shape a parked ref actually produces once its sibling is merged, and it is the
+        //     ONLY shape the duplicate rule reaches: before the merge, a ref pointed at the
+        //     sibling's own commit has a non-empty diff (the sibling's real files) and is caught
+        //     by the declared-set violation above instead, never reaching this branch at all.
+        //     Pinned as a FAIL, post-merge, in `tests/adversarial.test.mjs`.
+        //
+        //     `deriveContext` catches the same post-merge shape earlier and more directly: a
+        //     shared NON-run-tip sha is reported as a dedicated phaseError naming both refs, so
+        //     the phase this loop is even asked to check never gets computed from ambiguous
+        //     data. See the comment at that check, above `ownWorkBase`'s loop, for why it is a
+        //     phaseError and not a silent per-task exclusion.
+        //
+        //     Two branches sharing the RUN TIP are excluded from both rules — that is the
+        //     ordinary, benign state every fleet passes through between dispatch and first
+        //     commit, and treating it as a violation broke every not-yet-started phase; see the
+        //     same comment above for the reproduction and the discriminator.
+        //
+        //     What neither rule rejects is a NEAR-sibling: an empty commit on top of the
+        //     sibling's tip is a distinct, non-run-tip sha, so both rules' membership test
+        //     misses it by name, and whether the empty-diff test below still catches it depends
+        //     on whether that commit is itself a merge parent in range — pinned as a LIMIT
+        //     (near-sibling) test in the same file. Narrow, open, and recorded here rather than
+        //     rediscovered.
         //
         // `scripts/doctor.mjs` computes this same test the same way, over the same set, with
         // the same limits.
