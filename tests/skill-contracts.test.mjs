@@ -360,20 +360,26 @@ test('parallel-execution keeps a returned teammate’s worktree until its phase 
     then: /Remove the worktree once the phase has a recorded PASS \(git worktree remove <path>\), then git worktree prune/i,
     subject: /\bprun(e|es|ed|ing)\b/i,
     allow: [
-      /Only prune worktrees belonging to this run/i,
+      /^Only prune worktrees belonging to this run\.$/i,
+      // Left unanchored, unlike the rest of this list: this phrase is a substring in the middle
+      // of one long statement ("If a task must go to a fresh implementer instead — ... — prune
+      // that task's worktree first, since ... because none of that survives the handover.").
+      // Transcribing that whole sentence into an anchored pattern risks a silent mismatch that
+      // this comment alone would not catch; the substring already pins the one clause this test
+      // cares about, and the `assertStatement` below pins the same substring independently.
       /prune that task's worktree first/i,
       // Reviewed: the command bullet states the same rule mechanically — it recomputes each
       // phase's gate and removes only worktrees whose phase passes — so it reinforces the claim
       // rather than qualifying it.
-      /^Prune with the command rather than by hand:/i,
-      /It recomputes each phase's gate, removes only this run's worktrees whose phase passes/i,
-      /Without --yes it reports and removes nothing/i,
+      /^Prune with the command rather than by hand:$/i,
+      /^It recomputes each phase's gate, removes only this run's worktrees whose phase passes, and names every one it left alone and why\.$/i,
+      /^Without --yes it reports and removes nothing\.$/i,
       // Reviewed: `--enforcement-only` documentation below. Neither sentence qualifies this
       // claim — the first only names `prune-run` as one of the two callers the flag speeds up,
       // the second reinforces the same "PASS resting on a skipped check is not prunable" guardrail
       // in `--enforcement-only`'s own terms rather than contradicting it.
-      /^finish and prune-run otherwise recompute every command check of every phase/i,
-      /^And it will not let prune-run remove a worktree for a phase whose PASS rests on a check the flag skipped/i,
+      /^finish and prune-run otherwise recompute every command check of every phase — for a five-phase run, five full test suites — to answer a question that usually does not need them\.$/i,
+      /^And it will not let prune-run remove a worktree for a phase whose PASS rests on a check the flag skipped — a cheap verdict is enough to report, not enough to delete\.$/i,
     ],
   })
   assertStatement(
@@ -590,7 +596,22 @@ test('parallel-execution states --enforcement-only drops only command checks', a
   assertClaim(section, {
     label: 'enforcement-only scope',
     claim: /^It drops only command checks; fileset, ownership, and the merge check the gate computes for itself still run\.$/i,
-    subject: /\bdrops only\b/i,
+    // Widened from a phrase unique to this sentence ("drops only", which nothing else could ever
+    // repeat) to the check-kind nouns a contradicting neighbour would actually use. Proven by
+    // mutation: "It also skips the ownership check, and it refuses nothing when a phase declares
+    // no checks at all." is caught by this subject — it names "ownership check" — though it
+    // shares none of the claim's own wording.
+    subject: /\b(fileset|ownership|command check)/i,
+    allow: [
+      // Reviewed: the refusal claim below. It names fileset and ownership as what a manifest must
+      // declare for the flag to answer at all, consistent with — not qualifying — the claim that
+      // both checks still run.
+      /^It REFUSES with exit 2 when a phase's manifest declares no fileset and no ownership check, because with nothing else to verify the result would be meaningless\.$/i,
+      // Reviewed: the purpose sentence. It says finish/prune-run normally run every command
+      // check of every phase; it says nothing about what --enforcement-only itself drops or
+      // keeps, so it does not qualify this claim.
+      /^finish and prune-run otherwise recompute every command check of every phase — for a five-phase run, five full test suites — to answer a question that usually does not need them\.$/i,
+    ],
   })
 })
 
@@ -610,7 +631,10 @@ test('parallel-execution states --enforcement-only refuses a phase with no enfor
   assertClaim(section, {
     label: 'enforcement-only refusal',
     claim: /^It REFUSES with exit 2 when a phase's manifest declares no fileset and no ownership check, because with nothing else to verify the result would be meaningless\.$/i,
-    subject: /\bREFUSES\b/,
+    // Widened from the case-sensitive, claim-only /\bREFUSES\b/ (which even "refuses" missed) to
+    // every inflection of the verb, case-insensitively. Proven by mutation: "...and it refuses
+    // nothing when a phase declares no checks at all" is caught.
+    subject: /\brefus(e|es|ed|ing)\b/i,
   })
 })
 
@@ -620,7 +644,21 @@ test('parallel-execution states --enforcement-only never authorises a prune on a
   assertClaim(section, {
     label: 'enforcement-only prune guard',
     claim: /^And it will not let prune-run remove a worktree for a phase whose PASS rests on a check the flag skipped — a cheap verdict is enough to report, not enough to delete\.$/i,
-    subject: /\bnot enough to delete\b/i,
+    // Widened from "not enough to delete", a phrase unique to this sentence, to every inflection
+    // of remove/delete — the verbs a contradicting neighbour would actually use. Proven by
+    // mutation: "In practice, pass --yes as well and it will remove the worktree regardless." is
+    // caught, though it shares none of the claim's own wording.
+    subject: /\b(remov(e|es|ed|ing)|delet(e|es|ed|ing))\b/i,
+    allow: [
+      // Reviewed: the prune-run command bullet's own description of its ordinary removal
+      // behaviour, for a PASS it computed itself — a different claim than this flag's guardrail
+      // on a PASS resting on what the flag skipped.
+      /^It recomputes each phase's gate, removes only this run's worktrees whose phase passes, and names every one it left alone and why\.$/i,
+      /^Without --yes it reports and removes nothing\.$/i,
+      // Reviewed: the worktree-pruning bullet's own removal instruction for the ordinary case of
+      // a recorded PASS — again a different claim than this flag's guardrail.
+      /^Remove the worktree once the phase has a recorded PASS \(git worktree remove <path>\), then git worktree prune\.$/i,
+    ],
   })
 })
 
