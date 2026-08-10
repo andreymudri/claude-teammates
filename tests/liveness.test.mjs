@@ -35,6 +35,47 @@ test('a stale tip with a fresh worktree reads working', () => {
   assert.equal(row.state, 'working')
 })
 
+// A missing touch record is absence of evidence, not evidence of absence: no worktree is
+// registered for the branch, so nothing looked at whether files are being edited. Reported as a
+// measured stall it fired exit 1 on the first heartbeat of any phase dispatched without worktree
+// isolation, with both teammates actively working and simply not having committed yet.
+test('a stale tip with no worktree record reads unknown rather than a measured stall', () => {
+  const row = rowFor({ tip: { branch: 'teammates/r1/T1', at: NOW - 90 * MIN } })
+  assert.equal(row.state, 'unknown')
+  assert.equal(row.unknownReason, 'no-worktree-measurement')
+})
+
+// The walk ran and read nothing — a worktree directory deleted without `git worktree prune` is
+// the shape that produces it. Nothing was measured, so it is the same answer as no record at all.
+test('a touch record carrying no measurement reads unknown', () => {
+  const row = rowFor({
+    tip: { branch: 'teammates/r1/T1', at: NOW - 90 * MIN },
+    touch: { branch: 'teammates/r1/T1', at: null, floored: false },
+  })
+  assert.equal(row.state, 'unknown')
+  assert.equal(row.unknownReason, 'no-worktree-measurement')
+})
+
+test('a fresh tip with no worktree record still reads working', () => {
+  const row = rowFor({ tip: { branch: 'teammates/r1/T1', at: NOW - 1 * MIN } })
+  assert.equal(row.state, 'working')
+  assert.equal(row.unknownReason, null)
+})
+
+test('the two unmeasured shapes are told apart by unknownReason', () => {
+  const capped = rowFor({
+    tip: { branch: 'b', at: NOW - 90 * MIN },
+    touch: { branch: 'b', at: NOW - 90 * MIN, floored: true },
+  })
+  assert.equal(capped.unknownReason, 'walk-capped')
+  const measured = rowFor({
+    tip: { branch: 'b', at: NOW - 90 * MIN },
+    touch: { branch: 'b', at: NOW - 90 * MIN, floored: false },
+  })
+  assert.equal(measured.state, 'stalled')
+  assert.equal(measured.unknownReason, null)
+})
+
 test('a stale tip and a stale worktree read stalled', () => {
   const row = rowFor({
     tip: { branch: 'teammates/r1/T1', at: NOW - 90 * MIN },
@@ -94,12 +135,17 @@ test('hasUnknown is true only when some row was not measured', () => {
   assert.equal(hasUnknown(), false)
 })
 
+// Both signals measured and equally old, so the boundary is the only thing under test: a row that
+// left the touch signal unmeasured would read `unknown` on the far side and say nothing about
+// where the threshold falls.
 test('the threshold is inclusive at exactly staleMinutes and stalls one millisecond past it', () => {
-  const at = { staleMinutes: 20 }
-  const exact = rowFor({ tip: { branch: 'b', at: NOW - 20 * MIN }, ...at })
-  assert.equal(exact.state, 'working')
-  const past = rowFor({ tip: { branch: 'b', at: NOW - 20 * MIN - 1 }, ...at })
-  assert.equal(past.state, 'stalled')
+  const measured = (ageMs) => rowFor({
+    tip: { branch: 'b', at: NOW - ageMs },
+    touch: { branch: 'b', at: NOW - ageMs, floored: false },
+    staleMinutes: 20,
+  })
+  assert.equal(measured(20 * MIN).state, 'working')
+  assert.equal(measured(20 * MIN + 1).state, 'stalled')
 })
 
 test('livenessRows throws on a non-numeric clock rather than reporting every task stalled', () => {
@@ -110,7 +156,11 @@ test('livenessRows throws on a non-numeric clock rather than reporting every tas
 
 test('the default threshold applies when none is given', () => {
   assert.equal(DEFAULT_STALE_MINUTES, 20)
-  const row = rowFor({ tip: { branch: 'b', at: NOW - (DEFAULT_STALE_MINUTES + 1) * MIN } })
+  const age = (DEFAULT_STALE_MINUTES + 1) * MIN
+  const row = rowFor({
+    tip: { branch: 'b', at: NOW - age },
+    touch: { branch: 'b', at: NOW - age, floored: false },
+  })
   assert.equal(row.state, 'stalled')
 })
 

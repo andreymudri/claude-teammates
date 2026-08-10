@@ -6394,7 +6394,11 @@ test('liveness exits 0 when the current phase’s teammate has just committed', 
   })
 })
 
-test('liveness exits 1 when a teammate has neither committed nor touched its worktree', async () => {
+// An old tip and NO registered worktree is not a measured stall: nothing looked at whether files
+// are being edited. It happens on a dispatch made without `isolation: "worktree"`, and on a
+// teammate working in the main worktree — where reporting exit 1 fired the hang alarm on the first
+// heartbeat while the teammate was working and had simply not committed yet.
+test('liveness reports a branch with no registered worktree as unknown, not as a measured stall', async () => {
   await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
@@ -6404,8 +6408,11 @@ test('liveness exits 1 when a teammate has neither committed nor touched its wor
     g(['checkout', '--quiet', 'run-branch'])
     lines.length = 0
     const code = await runCli(['liveness', '--run', 'r1', '--plan', 'plan.md', '--root', root], io)
-    assert.match(lines.join('\n'), /T1.*stalled/)
-    assert.equal(code, 1)
+    const out = lines.join('\n')
+    assert.match(out, /T1.*unknown/)
+    assert.doesNotMatch(out, /stalled/)
+    assert.match(out, /no worktree/)
+    assert.equal(code, 2)
   })
 })
 
@@ -6800,6 +6807,88 @@ test('liveness refuses when the working-tree plan has no task in the derived pha
     assert.match(out, /phase 2/)
     assert.match(out, /no task/)
     assert.equal(code, 2)
+  })
+})
+
+// Every other --stale test feeds it a value it must refuse, which left the flag's one working
+// spelling unpinned: substituting DEFAULT_STALE_MINUTES for the parsed value inside livenessRows
+// kept the whole suite green while the header still printed the window the caller asked for.
+test('liveness measures against a valid --stale rather than the default window', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    // Three hours idle: stalled against the 20-minute default, working against a 10-hour window.
+    commitAt(root, 'T1 work', new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString())
+    g(['checkout', '--quiet', 'run-branch'])
+    const wt = path.join(root, 'wt-T1')
+    g(['worktree', 'add', '--quiet', wt, 'teammates/r1/T1'])
+    await ageTree(wt, Date.now() - 3 * 60 * 60 * 1000)
+
+    lines.length = 0
+    const wide = await runCli(
+      ['liveness', '--run', 'r1', '--plan', 'plan.md', '--stale', '600', '--root', root], io,
+    )
+    const wideOut = lines.join('\n')
+    assert.match(wideOut, /stale after 600m/)
+    assert.match(wideOut, /T1.*working/)
+    assert.equal(wide, 0, 'three hours idle is inside a ten-hour window')
+
+    // The same repository at the default window, so the difference is the flag and nothing else.
+    lines.length = 0
+    const narrow = await runCli(['liveness', '--run', 'r1', '--plan', 'plan.md', '--root', root], io)
+    assert.match(lines.join('\n'), /T1.*stalled/)
+    assert.equal(narrow, 1)
+    g(['worktree', 'remove', '--force', wt])
+  })
+})
+
+// Precedence, asserted in prose and pinned by nothing until now: a stall is a MEASUREMENT and the
+// one thing a supervisor must act on, so it must not be masked by an unrelated unmeasured row.
+// Swapping the two returns reports a measured hang as exit 2.
+test('a board carrying both a stalled and an unknown row exits 1, and still names the unmeasured task', async () => {
+  await withRepo(async ({ root, io, lines, git: g }) => {
+    // Two tasks with no dependency between them share phase 1, which is what puts both on one
+    // board. The plan is committed on the base branch so the anchor can read it.
+    g(['checkout', '--quiet', 'main'])
+    await writeFile(
+      path.join(root, 'pair.md'),
+      '### Task 1: A\n\n**Files:**\n- Create: `a.mjs`\n\n### Task 2: B\n\n**Files:**\n- Create: `b.mjs`\n',
+      'utf8',
+    )
+    g(['add', 'pair.md'])
+    g(['commit', '--quiet', '-m', 'pair plan'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--quiet', '--no-ff', '-m', 'carry the plan', 'main'])
+    await runCli(['init-run', path.join(root, 'pair.md'), '--run', 'r1', '--root', root], io)
+
+    // T1: measured and stale — a registered worktree whose every file is old.
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    commitAt(root, 'T1 work', '2001-02-03T04:05:06Z')
+    g(['checkout', '--quiet', 'run-branch'])
+    const wt = path.join(root, 'wt-T1')
+    g(['worktree', 'add', '--quiet', wt, 'teammates/r1/T1'])
+    await ageTree(wt, Date.now() - 6 * 60 * 60 * 1000)
+
+    // T2: unmeasured — a branch with no worktree registered for it at all.
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T2'])
+    await writeFile(path.join(root, 'b.mjs'), 'export const b = 1\n', 'utf8')
+    g(['add', 'b.mjs'])
+    commitAt(root, 'T2 work', '2001-02-03T04:05:06Z')
+    g(['checkout', '--quiet', 'run-branch'])
+
+    lines.length = 0
+    const code = await runCli(['liveness', '--run', 'r1', '--plan', 'pair.md', '--root', root], io)
+    const out = lines.join('\n')
+    assert.match(out, /T1.*stalled/)
+    assert.match(out, /T2.*unknown/)
+    // The note is printed whatever the exit code: precedence decides the code, never what is said.
+    assert.match(out, /freshness was not measured for T2/)
+    assert.equal(code, 1, 'a measured stall outranks an unmeasured row')
+    g(['worktree', 'remove', '--force', wt])
   })
 })
 

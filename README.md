@@ -122,10 +122,11 @@ Seeing what is actually there:
   worktrees, dirty paths. `digest` renders what the agents wrote; this asks git instead
 - `liveness --run <id> --plan <path>` — which of the current phase's teammates have committed or
   touched their worktree inside the window (20 minutes by default, `--stale` to change it). Exit 1
-  when one has done neither. Exit 2 whenever it did not measure what was asked: no current phase can
-  be named, the run id matches nothing, the working-tree plan has no task in that phase, or a
-  teammate's row reads `unknown` because the worktree walk hit its 5000-entry cap. The walk skips
-  what git ignores, so a generated directory in .gitignore keeps the report measurable. It is a
+  when one has done neither, and only when both signals were measured. Exit 2 whenever it did not
+  measure what was asked: no current phase can be named, the run id matches nothing, the
+  working-tree plan has no task in that phase, or a teammate's row reads `unknown` — no worktree of
+  its branch could be read, or the walk hit its 5000-entry cap. The walk skips what git ignores, so
+  a generated directory in .gitignore keeps the report measurable. It is a
   supervision report and nothing else reads it: both signals are forgeable by the teammate they
   describe, so a stalled row is a prompt to look, never gate evidence
 - `plan-drift --run <id> --plan <path>` — what changed in the plan since the anchor, and whether it

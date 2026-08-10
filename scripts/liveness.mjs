@@ -24,7 +24,7 @@ export function livenessRows({ tasks = [], tips = {}, touches = {}, now, staleMi
     const tipAgeMs = tip?.at == null ? null : now - tip.at
     const touchAgeMs = touch?.at == null ? null : now - touch.at
     if (tip == null && touch == null) {
-      return { taskId: task.id, branch: tip?.branch ?? null, tipAgeMs: null, touchAgeMs: null, floored: false, state: 'not started' }
+      return { taskId: task.id, branch: tip?.branch ?? null, tipAgeMs: null, touchAgeMs: null, floored: false, state: 'not started', unknownReason: null }
     }
     // A floored measurement is a LOWER bound on freshness: the walk stopped early, so the newest
     // file may be one it never reached. The task can only be more recently touched than reported,
@@ -40,12 +40,28 @@ export function livenessRows({ tasks = [], tips = {}, touches = {}, now, staleMi
     //
     // A fresh TIP still settles the row as working, because that signal was measured and a commit
     // inside the window is proof of work on its own. Only when nothing measured is fresh does the
-    // floor decide between `unknown` and `stalled`.
+    // touch signal decide between `unknown` and `stalled`.
+    //
+    // A capped walk is one of two ways the touch signal goes unmeasured, and the other is the more
+    // common: NO touch record at all, because no worktree is registered for the branch. That is
+    // absence of evidence, not evidence of absence — a teammate dispatched without worktree
+    // isolation, or working in the main worktree, is not observed by this signal at all. Reported
+    // as a measured stall it fired the hang alarm on the first heartbeat of such a phase, with
+    // every teammate working and simply not having committed yet. A record whose `at` is null is
+    // the same answer for the same reason: the walk read nothing, so nothing was measured.
+    //
+    // A missing TIP is deliberately NOT treated this way. `branchExists` returning false is a
+    // measured negative — git is authoritative that nothing has been committed on that ref — so a
+    // task with a stale worktree and no branch is a genuine measured stall.
     const floored = touch?.floored === true
+    const touchMeasured = touch != null && touch.at != null && !floored
     const ages = [tipAgeMs, touchAgeMs].filter((a) => a != null)
     const fresh = ages.some((age) => age <= thresholdMs)
-    const state = fresh ? 'working' : (floored ? 'unknown' : 'stalled')
-    return { taskId: task.id, branch: tip?.branch ?? touch?.branch ?? null, tipAgeMs, touchAgeMs, floored, state }
+    const unknownReason = fresh || touchMeasured
+      ? null
+      : (floored ? 'walk-capped' : 'no-worktree-measurement')
+    const state = fresh ? 'working' : (unknownReason ? 'unknown' : 'stalled')
+    return { taskId: task.id, branch: tip?.branch ?? touch?.branch ?? null, tipAgeMs, touchAgeMs, floored, state, unknownReason }
   })
 }
 

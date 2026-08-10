@@ -438,6 +438,18 @@ function numericWindow(value, fallback) {
 export const MAX_WALK_ENTRIES = 5000
 const WALK_SKIP = new Set(['.git'])
 
+// What each unmeasured row means and what to do about it. `livenessRows` names the reason and this
+// supplies the prose, so the pure module stays free of wording and the two cannot be conflated in
+// the output — they call for different actions, and "not measured" with no cause named is close to
+// useless to whoever is holding the heartbeat.
+const UNMEASURED_REASONS = [
+  ['walk-capped', `the worktree walk hit its ${MAX_WALK_ENTRIES}-entry cap, so the newest file may be one it never`
+    + ' reached. Add the generated directory to the project .gitignore — the walk skips what git ignores.'],
+  ['no-worktree-measurement', 'no worktree of that branch could be read, so nothing looked at whether files are'
+    + ' being edited. Either none is registered — a teammate dispatched without worktree isolation, or working in'
+    + ' the main worktree — or its directory is gone. This is not a stall; look at that teammate directly.'],
+]
+
 export async function newestMtime(dir, { ignored = new Set() } = {}) {
   let newest = null
   let visited = 0
@@ -1694,26 +1706,26 @@ export async function runCli(argv, io = { out: console.log }) {
     const rows = livenessRows({ tasks: subject, tips, touches, now: Date.now(), staleMinutes })
     io.out(renderLiveness(rows, { staleMinutes }))
 
+    // Said before the exit code is decided, and independently of it: precedence chooses the code,
+    // never what the operator is told. A board carrying both a stall and an unmeasured row reports
+    // both.
+    for (const [reason, explanation] of UNMEASURED_REASONS) {
+      const names = rows.filter((row) => row.unknownReason === reason).map((row) => row.taskId)
+      if (names.length > 0) io.out(`freshness was not measured for ${names.join(', ')}: ${explanation}`)
+    }
+
     // Precedence is deliberate, and the two codes answer different questions. A stall is a
     // MEASUREMENT and the one thing a supervisor must act on, so it wins outright: masking a
-    // measured hang behind an unrelated unmeasurable row would lose the signal this command
-    // exists for. Every row is printed either way, so nothing is hidden by the ordering.
+    // measured hang behind an unrelated unmeasured row would lose the signal this command exists
+    // for. Every row and every explanation is printed either way, so the ordering hides nothing.
     //
     // Exit 1 on a stall mirrors `doctor`. It remains a report: it records nothing, and no verdict
     // is issued or implied.
     if (hasStall(rows)) return 1
     // Freshness that was never measured is not an all-clear. Exit 2 is what this command already
     // returns wherever it could not measure, rather than 0, which would say every teammate is fine
-    // on the strength of a walk that stopped early.
-    if (hasUnknown(rows)) {
-      const names = rows.filter((row) => row.state === 'unknown').map((row) => row.taskId)
-      io.out(
-        `freshness was not measured for ${names.join(', ')}: the worktree walk hit its ${MAX_WALK_ENTRIES}-entry`
-        + ' cap, so the newest file may be one it never reached. Ignore the generated directories in'
-        + ' the project .gitignore, or look at those teammates directly.',
-      )
-      return 2
-    }
+    // on the strength of something nobody looked at.
+    if (hasUnknown(rows)) return 2
     return 0
   }
 

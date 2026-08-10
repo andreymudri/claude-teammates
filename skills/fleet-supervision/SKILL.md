@@ -44,12 +44,15 @@ what the message names and run it again. It reports that when:
   the anchor, or the phases integrated out of order;
 - the run id matches no run directory (a typo would otherwise report a board of "not started");
 - the plan in the working tree has no task in the derived phase, which an amendment mid-run causes;
-- a row reads `unknown`, meaning freshness was not measured for that teammate. The worktree walk
-  stops at 5000 entries, so the newest file may be one it never reached. It walks only what git
-  does not ignore, so the fix is usually to add the generated directory to the project .gitignore.
+- a row reads `unknown`, meaning freshness was not measured for that teammate. Two causes, and the
+  output names which: no worktree of that branch could be read — none is registered, because the
+  teammate was dispatched without worktree isolation or is working in the main worktree — or the
+  walk hit its 5000-entry cap, for which the fix is to add the generated directory to the project
+  .gitignore, since the walk skips what git ignores.
 
-A row is only `stalled` when it was measured, and a run whose phases are all integrated is
-finished — both at their own exit codes, 1 and 0.
+A row is only `stalled` when both signals were measured, and a measured stall outranks an unknown
+row: a board carrying both exits 1, and names the unmeasured task anyway. A run whose phases are
+all integrated is finished, at exit 0.
 
 It reports; it does not act. A stalled row is your cue to message that teammate or offer to stop
 it — the CLI has no handle on a subagent. Both of its signals are forgeable by the teammate they
