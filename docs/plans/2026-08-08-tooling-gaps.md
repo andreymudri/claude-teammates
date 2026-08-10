@@ -1106,20 +1106,24 @@ subsumes both exclusions already added rather than adding a third.
       if (!isNonEmptyString(runSha) || !isNonEmptyString(anchorSha)) {
         throw new GitError(`mergedBranchTips requires non-empty refs, got runSha=${JSON.stringify(runSha)} anchorSha=${JSON.stringify(anchorSha)}`)
       }
-      // --parents prints "<commit> <parent1> <parent2>..."; everything past the first parent is
-      // a branch this merge carried in. --min-parents=2 keeps only merges. The bounded range
-      // form `anchorSha..runSha` sidesteps ordering constraints: it works with --end-of-options,
-      // and --not does not have to precede all the commits it affects. Verified by execution:
-      // broken form (--not before --end-of-options) returned 0 commits; both correct forms
-      // returned identical non-empty output.
-      const args = ['rev-list', '--min-parents=2', '--parents', '--end-of-options', `${anchorSha}..${runSha}`]
-      const out = await run(args)
-      const tips = new Set()
-      for (const line of out.split('\n')) {
+      // The bounded range form `anchorSha..runSha` sidesteps ordering constraints: it works
+      // with --end-of-options and avoids --not entirely. The trailing -- is defensive: it
+      // prevents a path or ref name starting with - from being read as an option.
+      const out = await run(['rev-list', '--parents', '--end-of-options', `${anchorSha}..${runSha}`, '--'])
+      const inRange = new Set()
+      const parents = []
+      for (const line of out.split(/\r?\n/)) {
         const parts = line.trim().split(/\s+/).filter(Boolean)
-        for (const parent of parts.slice(2)) tips.add(parent)
+        if (parts.length === 0) continue
+        inRange.add(parts[0])
+        for (const parent of parts.slice(2)) parents.push(parent)
       }
-      return tips
+      // Filter is load-bearing: it removes merge parents that are not themselves commits in
+      // the range. Without it, commits from before the anchor can appear in the returned set,
+      // which would report an earlier-parked branch as merged. On this repository, unfiltered
+      // returns 20 tips; filtered returns 13. A task that duplicated this code but dropped the
+      // filter would reopen the parked-at-anchor hole that gate-runner explicitly warns about.
+      return new Set(parents.filter((parent) => inRange.has(parent)))
     },
 ```
 
