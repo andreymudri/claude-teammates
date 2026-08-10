@@ -420,10 +420,15 @@ function numericWindow(value, fallback) {
 // MAX_WALK_ENTRIES entries. `floored: true` means the cap stopped the walk, so the answer is a
 // lower bound on freshness rather than a measurement — `livenessRows` refuses to call a floored
 // row stalled for exactly that reason.
-const MAX_WALK_ENTRIES = 5000
+//
+// Both the cap and this function are exported so the suite walks a real tree of MAX_WALK_ENTRIES+1
+// entries rather than being told the flag: a floored row is never stalled, so a walk that floors
+// everything disarms `liveness`'s only failure signal while every unit test on the synthetic flag
+// stays green. That is not hypothetical — it is how the branch was found unpinned.
+export const MAX_WALK_ENTRIES = 5000
 const WALK_SKIP = new Set(['.git', 'node_modules'])
 
-async function newestMtime(dir) {
+export async function newestMtime(dir) {
   let newest = null
   let visited = 0
   const stack = [dir]
@@ -1568,12 +1573,50 @@ export async function runCli(argv, io = { out: console.log }) {
 
     // The current phase's tasks only. An earlier phase's teammates have returned, and a later
     // phase's have not been dispatched; reporting either as stalled would be noise on every run.
-    const derived = await derive(root, runId, { ...flags, plan: flags.plan }).catch(() => null)
-    const phase = derived?.currentPhase ?? null
-    const subject = phase == null ? tasks : tasks.filter((t) => t.phase === phase)
+    //
+    // There is deliberately no fallback to "every task in the run". Three states reach here with
+    // no phase to name, and rows for all of them is what made a finished run print a full board of
+    // stalls and exit 1 — the supervision skill's signal that a teammate has HUNG, raised on a run
+    // whose teammates all returned. None of the three is a hang, so each is stated instead:
+    //
+    //   - the derivation FAILED (the main worktree parked on the base branch, a plan absent from
+    //     the anchor). Surfaced the way `doctor` surfaces the same failure, not swallowed: without
+    //     it the output was byte-identical to a real stall report.
+    //   - `derivePhase` refused to name a phase (`phaseError`: phases integrated out of order, a
+    //     plan parsing to zero tasks at the anchor).
+    //   - every phase is integrated, which is a finished run and not a stall.
+    //
+    // The first two exit 2 — this report could not be produced — rather than 0 or 1, because both
+    // of those are assertions about teammates that nothing here measured.
+    let derived = null
+    let deriveError = null
+    try {
+      derived = await derive(root, runId, { ...flags, plan: flags.plan })
+    } catch (err) {
+      deriveError = err.message
+    }
+    const phaseProblem = deriveError ?? derived?.phaseError ?? null
+    if (phaseProblem) {
+      io.out(
+        `liveness could not derive the current phase: ${phaseProblem}`
+        + ' — without a current phase this report cannot tell a hung teammate from a finished one,'
+        + ' so it reports nothing rather than raising a stall it has not measured',
+      )
+      return 2
+    }
+    if (derived.currentPhase == null) {
+      io.out(`every phase of run ${runId} is integrated — no teammate of this run is expected to be working`)
+      return 0
+    }
+    const subject = tasks.filter((t) => t.phase === derived.currentPhase)
 
-    // Worktree paths come from git, never from `.teammates/`: a teammate that picked its own
-    // directory must not get to point this report at whatever looks busiest.
+    // Worktree paths come from git rather than from `.teammates/`, which is written by the very
+    // teammates being reported on. This is NOT a claim that the path is trustworthy: `git worktree
+    // list` reports whatever path was passed to `git worktree add`, so the directory is still the
+    // teammate's choice, and `liveness.mjs`'s header concedes both signals are forgeable anyway.
+    // What it buys is narrower and worth stating exactly — the report follows the directory git
+    // has checked out for that branch right now, so redirecting it means moving a real worktree
+    // rather than editing a JSON file the teammate already owns.
     const byBranch = new Map()
     for (const wt of await git.worktrees()) {
       if (wt.branch) byBranch.set(wt.branch, wt.path)

@@ -37,6 +37,11 @@ in a poll loop.
 Run it on the 20-30 minute heartbeat, not in a loop. Exit 1 means at least one teammate of the
 current phase has neither committed nor touched its worktree inside the window.
 
+Exit 2 means it could not name a current phase and so reported nothing — the main worktree is on
+the base branch, the plan is missing at the anchor, or the phases integrated out of order. It is
+not a stall and not an all-clear; fix what the message names, then run it again. A run whose
+phases are all integrated is finished, and says so at exit 0.
+
 It reports; it does not act. A stalled row is your cue to message that teammate or offer to stop
 it — the CLI has no handle on a subagent. Both of its signals are forgeable by the teammate they
 describe, so a stall is a prompt to look, never evidence for a gate.

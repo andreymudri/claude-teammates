@@ -122,8 +122,10 @@ Seeing what is actually there:
   worktrees, dirty paths. `digest` renders what the agents wrote; this asks git instead
 - `liveness --run <id> --plan <path>` — which of the current phase's teammates have committed or
   touched their worktree inside the window (20 minutes by default, `--stale` to change it). Exit 1
-  when one has done neither. It is a supervision report and nothing else reads it: both signals are
-  forgeable by the teammate they describe, so a stalled row is a prompt to look, never gate evidence
+  when one has done neither; exit 2 when no current phase can be named, in which case it reports
+  nothing rather than a stall it did not measure. It is a supervision report and nothing else reads
+  it: both signals are forgeable by the teammate they describe, so a stalled row is a prompt to
+  look, never gate evidence
 - `plan-drift --run <id> --plan <path>` — what changed in the plan since the anchor, and whether it
   changed too late to reach the work
 - `digest --run <id>` — the compact fleet status board
