@@ -138,7 +138,9 @@ async function livePreviewPaths(previewPaths) {
 
 **Files:**
 - Modify: `scripts/gate-runner.mjs`
+- Modify: `docs/specs/2026-08-05-tamper-evident-enforcement-design.md`
 - Test: `tests/gate-runner.test.mjs`
+- Test: `tests/adversarial.test.mjs`
 
 **Model:** capable
 
@@ -201,6 +203,50 @@ joins `integratedPhases`; the empty ref merges as a no-op behind a PASS.
 - [ ] **Step 5:** Confirm the existing tests that pin the two documented attacks still pass, and
       that a genuinely integrated phase still reads as integrated. Report the full-suite counts
       before and after.
+
+- [ ] **Step 6:** AMENDMENT, added after the first attempt. This change CLOSES a limitation the
+      project documents as accepted, so `tests/adversarial.test.mjs` now fails — it pins the old
+      behaviour deliberately. The failing test is `LIMIT (self-integration): fast-forwarding to your
+      own tip and pointing another task branch at it reads as integrated`, around
+      `tests/adversarial.test.mjs:318`, which asserts `code === 0` and a `PASS` for a fixture where
+      T2's ref sits at a run tip already carrying T1's real work. Confirmed failing: the adversarial
+      suite runs 43 tests, 42 pass, 1 fail.
+
+      Do NOT revert your fix or loosen your new test to make it green. The section comment above
+      that test says why those tests exist — "an untested limitation drifts into an implied
+      guarantee, which is the exact defect that started this work" — and the same reasoning runs in
+      reverse: a closed limitation still recorded as open understates the guarantee, and the next
+      reader will not know the gate now catches this.
+
+      Separate the two shapes the old test conflated:
+      - **Parked branch** — a teammate points a task ref at a run tip already carrying someone
+        else's real work and commits nothing itself. NOW DEFENDED by your change: it shows no own
+        work against its fork point, so the phase does not read as integrated and the check runs.
+      - **Self-integration proper** — a teammate creates its own branches, does real work on each,
+        and merges them itself, bypassing `tm-integrator`. STILL NOT DEFENDED, out of scope by
+        design: running a teammate's code is arbitrary execution.
+
+      Rewrite the failing test to pin the new behaviour for the parked-branch shape — same fixture,
+      now asserting the gate FAILs and that the output names the parked task as contributing no file
+      changes — and move it out of the "limits that are NOT defended" section, since it is no longer
+      one. Then add a test in that section for the variant that genuinely remains open, asserting
+      whatever the current behaviour actually is (run it; do not assume), with a comment naming the
+      limitation and pointing at the spec, matching the shape of its neighbours.
+
+- [ ] **Step 7:** Update the "Not defended against — the honest list" section of
+      `docs/specs/2026-08-05-tamper-evident-enforcement-design.md`. Its self-integration entry
+      covers both shapes in one bullet. Split it: say the parked-branch variant is now caught, name
+      the mechanism — `deriveContext` measures each branch against its own fork point, so a branch
+      that contributed nothing does not make its phase read as integrated — and keep the remaining
+      variant on the list with its reasoning intact.
+
+- [ ] **Step 8:** Search the rest of the repository for other prose describing the closed variant as
+      undefended: `docs/specs/`, `skills/`, and comments in `scripts/` are the likely places. Report
+      what you find. Anything outside your declared files is NOT yours to edit — list it so it can be
+      tasked separately.
+
+- [ ] **Step 9:** Run the full suite in the FOREGROUND and report the counts. The adversarial suite
+      must be fully green and no other suite may have regressed.
 
 ### Task 3: document the commands the skills do not mention
 
