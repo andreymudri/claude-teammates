@@ -104,6 +104,16 @@ test('phase-gate documents the two claims results that are not findings', async 
   )
   assertStatement(
     section,
+    /reads `?lens`?, `?stamp`? and `?findings`? and ignores every other key/i,
+    'phase-gate must say what collectReviewResults reads, in the verb that is true of it',
+  )
+  assertStatement(
+    section,
+    /`?stamp`? is consumed to reject a stale file and then dropped from the emitted result/i,
+    'phase-gate must not let "reads" be misread as "keeps" for stamp',
+  )
+  assertStatement(
+    section,
     /you must open the findings file yourself/i,
     'phase-gate must say who has to read the two keys, since the CLI does not',
   )
@@ -140,6 +150,11 @@ test('collect-reviews really does collect an unableToVerify claims review as a p
   // downstream of the CLI can recover it either.
   assert.equal('unableToVerify' in out.results[0], false)
   assert.equal('unprobed' in out.results[0], false)
+  // `stamp` is read — `reviewStale` consumes it — and then dropped from the result just like the
+  // two keys above. The skill said "keeps lens, stamp and findings", which overstated by one key
+  // in the very sentence written to correct an overstatement. This is what makes the corrected
+  // wording checkable rather than merely more careful.
+  assert.equal('stamp' in out.results[0], false)
 })
 
 test('phase-gate says plainly what a none decision means and does not mean', async () => {

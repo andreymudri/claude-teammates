@@ -582,6 +582,39 @@ test('review-dispatch refuses to guess between command checks for the claims len
   )
 })
 
+// Two checks both named `test` fell into the "none named test" branch, whose message told the
+// operator to name one of them `test` — a remedy already satisfied, so the only stated fix was a
+// no-op. The verdict was right and the diagnosis was not.
+test('two command checks named test are diagnosed as duplicates, not as none', async () => {
+  await withClaimsPhase(
+    [
+      { name: 'test', kind: 'command', run: 'npm test' },
+      { name: 'test', kind: 'command', run: 'npm run test:e2e' },
+      CLAIMS_CHECK,
+    ],
+    ({ code, out }) => {
+      assert.equal(code, 4)
+      assert.match(out, /2 command checks named "test"/)
+      assert.match(out, /rename the one that is not the suite/i)
+      // The false remedy must be gone, not merely joined by a true one.
+      assert.doesNotMatch(out, /none named "test"/)
+    },
+  )
+})
+
+// `testCommandName` is what turns "the command check this phase declares" into a check an
+// operator can go and look at. Replacing the wiring with '' left the whole suite green.
+test('a refused run string names the command check it came from, end to end', async () => {
+  await withClaimsPhase(
+    [{ name: 'suite', kind: 'command', run: 'npm test`x' }, CLAIMS_CHECK],
+    ({ code, out }) => {
+      assert.equal(code, 4)
+      assert.match(out, /"suite"/)
+      assert.match(out, /refused rather than emitted/)
+    },
+  )
+})
+
 // The ambiguity only matters to the lens that runs the command. Refusing a correctness dispatch
 // over it would block a phase on a question that dispatch never asks.
 test('an ambiguous command list does not refuse a dispatch without the claims lens', async () => {

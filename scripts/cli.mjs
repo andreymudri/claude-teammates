@@ -2360,10 +2360,18 @@ export async function runCli(argv, io = { out: console.log }) {
     // other lens reads this value and blocking their dispatch over it would answer a question
     // they never ask. Zero command checks is not ambiguity: it falls through to
     // `generateReviewDispatch`, whose message says the phase declares no command check.
+    //
+    // The two ambiguous shapes get different sentences because they have different remedies, and
+    // one message covering both told an operator with two checks named `test` to name one of them
+    // `test` — a fix already applied, so the only instruction offered was a no-op.
     if (!commandCheck && commandChecks.length > 1 && (check.lens ?? []).includes('claims')) {
-      io.out(`the claims lens needs one command check to baseline against and this phase declares ${commandChecks.length}`
-        + ` with none named "test": ${commandChecks.map((c) => c.name).join(', ')}.`
-        + ' Name the one that runs the suite "test", or drop the claims lens from this phase')
+      const preamble = 'the claims lens needs one command check to baseline against and this phase declares'
+      io.out(namedTest.length > 1
+        ? `${preamble} ${namedTest.length} command checks named "test": `
+          + `${commandChecks.map((c) => c.name).join(', ')}. Rename the one that is not the suite`
+        : `${preamble} ${commandChecks.length} with none named "test": `
+          + `${commandChecks.map((c) => c.name).join(', ')}. `
+          + 'Name the one that runs the suite "test", or drop the claims lens from this phase')
       return 4
     }
     const testCommand = commandCheck?.run ?? ''

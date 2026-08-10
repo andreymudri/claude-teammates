@@ -87,9 +87,10 @@ those you execute:
   fix.
 
   A `claims` reviewer also writes two keys that are not findings, and `collect-reviews` reads
-  neither: `collectReviewResults` keeps `lens`, `stamp` and `findings` and drops every other key.
-  So the CLI cannot tell you about them, and you must open the findings file yourself before
-  treating a clean claims lens as a clean claims lens.
+  neither: `collectReviewResults` reads `lens`, `stamp` and `findings` and ignores every other
+  key. It does not *keep* all three — `stamp` is consumed to reject a stale file and then dropped
+  from the emitted result, exactly like the two keys below. So the CLI cannot tell you about them,
+  and you must open the findings file yourself before treating a clean claims lens as a clean one.
 
   - `unableToVerify` means the reviewer could not build the phase's tree or get a green baseline
     in its scratch worktree, so it probed nothing. It is collected today as `status: "pass"` with
