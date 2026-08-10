@@ -90,6 +90,34 @@ test('phase-gate documents the fix decision and the cost-bound framing', async (
   })
 })
 
+// `unableToVerify` and `unprobed` are the two `claims` results that are not findings. An
+// orchestrator that never learns of them reads a bounded, or an unrun, review as a clean one —
+// which is the same class of defect the lens exists to catch, one level up.
+test('phase-gate documents the two claims results that are not findings', async () => {
+  const { doc } = await skill('phase-gate')
+  const section = doc.section('Finish the pending checks')
+  assertStatement(
+    section,
+    /unableToVerify means the reviewer could not get a green baseline/i,
+    'phase-gate must say what unableToVerify means',
+  )
+  assertStatement(
+    section,
+    /Treat it as the check not having run/i,
+    'phase-gate must say an unableToVerify claims review did not run',
+  )
+  assertStatement(
+    section,
+    /unprobed lists claims it enumerated and did not reach/i,
+    'phase-gate must say what unprobed lists',
+  )
+  assertStatement(
+    section,
+    /must not be read as a clean review/i,
+    'phase-gate must state that neither result is a clean review',
+  )
+})
+
 test('phase-gate says plainly what a none decision means and does not mean', async () => {
   const { doc } = await skill('phase-gate')
   const onFail = doc.section('On FAIL')

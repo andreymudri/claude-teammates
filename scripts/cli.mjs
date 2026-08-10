@@ -2338,6 +2338,16 @@ export async function runCli(argv, io = { out: console.log }) {
       return 4
     }
 
+    // The phase's own command check is where the suite lives. Taken from the TRACKED manifest for
+    // the same reason the reviewer tier is: the party being judged must not pick the command its
+    // judge runs. Absent, `generateReviewDispatch` refuses a `claims` lens rather than emitting a
+    // mutation method with nothing to run.
+    const commandCheck = checksForPhase(config, phaseName).find((c) => c.kind === 'command')
+    const testCommand = commandCheck?.run ?? ''
+    // The same paths the merge preview links in, for the same reason: a scratch worktree has no
+    // untracked build inputs, and the suite cannot run without them.
+    const linkPaths = previewLinks(config)
+
     let spec
     try {
       spec = generateReviewDispatch({
@@ -2354,6 +2364,8 @@ export async function runCli(argv, io = { out: console.log }) {
         branches,
         findingsDir: `.teammates/${runId}/reviews`,
         scratchRoot: tmpdir(),
+        testCommand,
+        linkPaths,
       })
     } catch (err) {
       io.out(err.message)

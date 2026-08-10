@@ -89,3 +89,71 @@ test('a phase with no lenses is refused', () => {
 test('a lens that cannot be a filename is refused before it reaches a path', () => {
   assert.throws(() => generateReviewDispatch({ ...BASE, lenses: ['../escape'] }), /lens/i)
 })
+
+// The generic prompt, byte for byte, for the three lenses that had one before `claims` existed.
+// A substring check would still pass if the method text leaked into every lens; these are the
+// whole string, so any addition to the shared prompt shows up here and has to be intended.
+const GENERIC_PROMPTS = {
+  correctness: 'Review the phase 1 diff of teammates run r1 through exactly one lens: correctness.\n\nThe diff under review is these task branches against the run branch run/r1:\n  teammates/r1/T1\n  teammates/r1/T2\nDiff each against its own fork point (git merge-base run/r1 <branch>), never tip against tip.\n\nReport only correctness defects you can tie to a concrete failure: specific input or state producing a specific wrong result. Rate each finding high, medium or low. Findings rated high block this phase, so reserve those. Cite file:line for every finding. No findings is a valid and common result.\n\nYou are read-only. Never write to any ref — no commit, merge, rebase, reset, push or update-ref — on the base branch, the run branch, or any task branch, and never run git checkout in the main worktree. If you need to execute code across branches, create your scratch worktree at /tmp/tm-review-r1-1-correctness, which is outside the repository, and remove it when you are done. If you cannot verify a finding without writing to a shared ref, report it unverified and say what you would have run.\n\nWrite your findings JSON to .teammates/r1/reviews/1-correctness.json before you return, then return the same JSON as your final output. The response is the interface; the file is what makes your review recoverable if you go idle before emitting it.',
+  security: 'Review the phase 1 diff of teammates run r1 through exactly one lens: security.\n\nThe diff under review is these task branches against the run branch run/r1:\n  teammates/r1/T1\n  teammates/r1/T2\nDiff each against its own fork point (git merge-base run/r1 <branch>), never tip against tip.\n\nReport only security defects you can tie to a concrete failure: specific input or state producing a specific wrong result. Rate each finding high, medium or low. Findings rated high block this phase, so reserve those. Cite file:line for every finding. No findings is a valid and common result.\n\nYou are read-only. Never write to any ref — no commit, merge, rebase, reset, push or update-ref — on the base branch, the run branch, or any task branch, and never run git checkout in the main worktree. If you need to execute code across branches, create your scratch worktree at /tmp/tm-review-r1-1-security, which is outside the repository, and remove it when you are done. If you cannot verify a finding without writing to a shared ref, report it unverified and say what you would have run.\n\nWrite your findings JSON to .teammates/r1/reviews/1-security.json before you return, then return the same JSON as your final output. The response is the interface; the file is what makes your review recoverable if you go idle before emitting it.',
+  tests: 'Review the phase 1 diff of teammates run r1 through exactly one lens: tests.\n\nThe diff under review is these task branches against the run branch run/r1:\n  teammates/r1/T1\n  teammates/r1/T2\nDiff each against its own fork point (git merge-base run/r1 <branch>), never tip against tip.\n\nReport only tests defects you can tie to a concrete failure: specific input or state producing a specific wrong result. Rate each finding high, medium or low. Findings rated high block this phase, so reserve those. Cite file:line for every finding. No findings is a valid and common result.\n\nYou are read-only. Never write to any ref — no commit, merge, rebase, reset, push or update-ref — on the base branch, the run branch, or any task branch, and never run git checkout in the main worktree. If you need to execute code across branches, create your scratch worktree at /tmp/tm-review-r1-1-tests, which is outside the repository, and remove it when you are done. If you cannot verify a finding without writing to a shared ref, report it unverified and say what you would have run.\n\nWrite your findings JSON to .teammates/r1/reviews/1-tests.json before you return, then return the same JSON as your final output. The response is the interface; the file is what makes your review recoverable if you go idle before emitting it.',
+}
+
+test('a lens with no method produces the generic prompt byte for byte', () => {
+  const out = generateReviewDispatch({ ...BASE, lenses: ['correctness', 'security', 'tests'] })
+  for (const r of out.reviewers) assert.equal(r.prompt, GENERIC_PROMPTS[r.lens])
+})
+
+// Adding a method to one lens must not add a byte to any other, including when they are
+// dispatched together — the method is appended per reviewer, not to the shared prompt.
+test('dispatching claims alongside the generic lenses leaves their prompts untouched', () => {
+  const out = generateReviewDispatch({
+    ...BASE,
+    lenses: ['correctness', 'security', 'tests', 'claims'],
+    testCommand: 'npm test',
+  })
+  for (const r of out.reviewers) {
+    if (r.lens === 'claims') continue
+    assert.equal(r.prompt, GENERIC_PROMPTS[r.lens])
+  }
+})
+
+const CLAIMS = { ...BASE, lenses: ['claims'], testCommand: 'npm test' }
+
+test('the claims prompt carries the test command, the cap, the baseline and the unprobed list', () => {
+  const prompt = generateReviewDispatch(CLAIMS).reviewers[0].prompt
+  // The generic prompt is still the head of it: the method is an addition, not a replacement.
+  assert.ok(prompt.startsWith(GENERIC_PROMPTS.tests.replace(/\btests\b/g, 'claims')))
+  assert.match(prompt, /npm test/)
+  assert.match(prompt, /green baseline BEFORE mutating/)
+  assert.match(prompt, /top 8\b/)
+  assert.match(prompt, /"unprobed"/)
+  assert.match(prompt, /"unableToVerify"/)
+})
+
+// Degrading to a weaker prompt would leave a lens named for mutation doing static reading, which
+// is the review it exists to replace.
+test('claims without a test command is refused rather than degraded', () => {
+  assert.throws(() => generateReviewDispatch({ ...BASE, lenses: ['claims'] }), /claims/)
+  assert.throws(() => generateReviewDispatch({ ...BASE, lenses: ['correctness', 'claims'] }), /claims/)
+})
+
+test('a missing test command does not refuse a dispatch without the claims lens', () => {
+  assert.doesNotThrow(() => generateReviewDispatch({ ...BASE, lenses: ['correctness'] }))
+})
+
+test('the mutation cap is configurable and the configured value reaches the prompt', () => {
+  const prompt = generateReviewDispatch({ ...CLAIMS, mutationCap: 3 }).reviewers[0].prompt
+  assert.match(prompt, /top 3\b/)
+  assert.match(prompt, /at most 3 of what you found/)
+  assert.doesNotMatch(prompt, /top 8\b/)
+})
+
+test('link paths appear in the baseline step when supplied and the clause is absent when not', () => {
+  const withLinks = generateReviewDispatch({ ...CLAIMS, linkPaths: ['node_modules', '.env'] }).reviewers[0].prompt
+  assert.match(withLinks, /link these paths in from the repository root/)
+  assert.match(withLinks, /node_modules, \.env/)
+
+  const without = generateReviewDispatch(CLAIMS).reviewers[0].prompt
+  assert.doesNotMatch(without, /link these paths in from the repository root/)
+})

@@ -473,6 +473,71 @@ test('review-dispatch refuses a phase whose task branches do not exist', async (
   })
 })
 
+// The `claims` reviewer runs the suite in its own worktree, and the command it runs comes from
+// the phase's own command check in the TRACKED manifest — the same reason its tier does: the
+// party being judged must not pick the command its judge runs.
+test('review-dispatch gives the claims lens the command check from the manifest', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeReviewManifest(root, {
+      preview: { link: ['node_modules'] },
+      phases: {
+        default: {
+          checks: [
+            { name: 'test', kind: 'command', run: 'npm test --silent' },
+            { name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: ['claims'], blockOn: ['high'] },
+          ],
+        },
+      },
+    })
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'T1.mjs'), 'export const x = 1\n', 'utf8')
+    g(['add', 'T1.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    lines.length = 0
+    const code = await runCli(['review-dispatch', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 0)
+    const spec = JSON.parse(lines.join('\n'))
+    assert.equal(spec.reviewers.length, 1)
+    assert.equal(spec.reviewers[0].lens, 'claims')
+    assert.match(spec.reviewers[0].prompt, /npm test --silent/)
+    assert.match(spec.reviewers[0].prompt, /green baseline BEFORE mutating/)
+    assert.match(spec.reviewers[0].prompt, /"unprobed"/)
+    // `preview.link` is what the merge preview links in to make the suite runnable, and the
+    // reviewer's scratch worktree needs the same paths for the same reason.
+    assert.match(spec.reviewers[0].prompt, /node_modules/)
+  })
+})
+
+// A dispatch emitted anyway would carry a mutation method with no command to run it, and the
+// reviewer would fall back to reading — a static review reported under a lens whose whole value
+// is that it is not one.
+test('review-dispatch refuses a claims lens on a phase with no command check', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeReviewManifest(root, {
+      phases: {
+        default: {
+          checks: [
+            { name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: ['correctness', 'claims'], blockOn: ['high'] },
+          ],
+        },
+      },
+    })
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'T1.mjs'), 'export const x = 1\n', 'utf8')
+    g(['add', 'T1.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    lines.length = 0
+    const code = await runCli(['review-dispatch', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 4)
+    assert.match(lines.join('\n'), /claims lens/)
+    assert.match(lines.join('\n'), /test command/)
+  })
+})
+
 // The merge check already reports a bad link, but only once a phase is ready to gate — after
 // every teammate has run. This answers the same question before the run starts, when the fix is
 // a one-line manifest edit rather than a re-dispatch.
