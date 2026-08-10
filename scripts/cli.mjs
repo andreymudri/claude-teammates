@@ -25,7 +25,8 @@ import { stat } from 'node:fs/promises'
 import { validateLinkPaths } from './preview-links.mjs'
 import { planDrift, renderDrift } from './plan-drift.mjs'
 import { summarizeRun, renderRunSummary, suppliedForPhase, validateSuppliedPhases } from './finish.mjs'
-import { selectPrunableWorktrees, renderPrunePlan } from './prune.mjs'
+import { selectPrunableWorktrees, renderPrunePlan, leakedPreviews } from './prune.mjs'
+import { previewOwnerMarkerPath } from './merge-preview.mjs'
 import { rebuildRunState } from './rebuild.mjs'
 import { generatePhaseWorkflow } from './workflow-gen.mjs'
 import { createGit, GitError, defaultGitExec } from './git.mjs'
@@ -712,6 +713,62 @@ async function unlinkPreviewLinks(dir, depth = 0) {
   return removed
 }
 
+// Which of these previews an owner is still HOLDING.
+//
+// scripts/merge-preview.mjs writes a marker BESIDE the preview directory before it calls
+// `git worktree add`, and releases it only after `removeWorktree` has deregistered the worktree.
+// Git registers a worktree at the START of the add and deregisters it at the end of the removal,
+// so the span over which the marker is held contains the span over which the preview is
+// observable here — which is what makes this different in kind from an mtime or a registration
+// age. Those are sampled by the reaper and only narrow the window; this is held by the owner, so
+// there is no instant at which a living owner reads as absent.
+//
+// THREE FAIL-SAFE BRANCHES, all deliberate, all saying the same thing: an owner that cannot be
+// RULED OUT is an owner.
+//
+//   1. A marker that cannot be READ for any reason other than ENOENT — EACCES, EBUSY, EIO. The
+//      file is there and could not be opened, so its pid is unknown.
+//   2. A marker that will not PARSE as a positive integer.
+//   3. A probe that fails with anything other than ESRCH — EPERM means the pid exists and
+//      belongs to another OS user, which is a gate this process may not signal, not one that
+//      is gone.
+//
+// An unreaped preview costs the operator a directory; a followed junction costs them their
+// repository's build inputs. Only ENOENT and ESRCH — the two answers that positively mean "no
+// owner" — let a preview through.
+//
+// `read` and `probe` are injectable because two of those three branches cannot be staged end to
+// end: EPERM needs a process owned by another user, and EACCES needs a file this user cannot
+// read. Exported for the same reason `isMissingPreviewRoot` is — each branch is on the
+// destructive path and has to be pinned on its own.
+export async function livePreviewPaths(previewPaths, {
+  read = (p) => readFile(p, 'utf8'),
+  // Signal 0 sends nothing: it only asks whether the pid can be signalled at all.
+  probe = (pid) => process.kill(pid, 0),
+} = {}) {
+  const live = new Set()
+  for (const dir of previewPaths) {
+    let raw
+    try {
+      raw = await read(previewOwnerMarkerPath(dir))
+    } catch (err) {
+      // ENOENT is the only "no marker": a preview from before markers existed, or one whose
+      // owner has already released it. Every other failure leaves the owner unknown.
+      if (err?.code !== 'ENOENT') live.add(dir)
+      continue
+    }
+    const pid = Number.parseInt(String(raw).trim(), 10)
+    if (!Number.isInteger(pid) || pid <= 0) { live.add(dir); continue }
+    try {
+      probe(pid)
+      live.add(dir)
+    } catch (err) {
+      if (err?.code !== 'ESRCH') live.add(dir)
+    }
+  }
+  return live
+}
+
 // "The preview root is not there at all", told apart from every other sweep failure.
 //
 // It is a state that really occurs: scripts/merge-preview.mjs removes the directory after
@@ -1388,10 +1445,12 @@ export async function runCli(argv, io = { out: console.log }) {
       : await git.currentBranch()
 
     // The anchor is what tells an INTEGRATED branch from an empty one: both have an empty diff
-    // against their own fork point, and only `past the anchor, on the run branch, and not the run
-    // tip itself` separates them. Without these two arguments `collectDoctorReport` leaves
-    // `landed` false for every task, so every merged branch is reported as NO CHANGES — the
-    // report's loudest problem, on the run's healthiest state.
+    // against their own fork point, and what separates them is membership in the run branch's
+    // `mergedBranchTips` — the shas a merge commit in anchor..run names as a parent other than
+    // its first. Computing that set needs both the anchor and the run sha, and without these two
+    // arguments `collectDoctorReport` leaves `landed` false for every task, so every merged
+    // branch is reported as NO CHANGES — the report's loudest problem, on the run's healthiest
+    // state.
     //
     // Taken from `derive`, so this reads the same anchor the gate enforces at rather than a
     // second computation that could disagree with it. It is allowed to FAIL: `doctor` must keep
@@ -1574,9 +1633,27 @@ export async function runCli(argv, io = { out: console.log }) {
 
     const git = createGit({ cwd: root })
     const worktrees = await git.worktrees()
+    // Liveness is read here and handed to the pure module as data. The candidates have to be
+    // identified before their markers can be read, so `leakedPreviews` is called twice: once
+    // with no live set to learn which paths are preview-shaped, and once inside
+    // `selectPrunableWorktrees` with the answer. The first call is what decides which
+    // directories are opened at all — no path outside a detached, branchless tm-preview-* under
+    // the temp root is ever read.
+    //
+    // ONE root for both calls, resolved once. The two passes are the same identification run
+    // twice, so disagreeing on the temp root is not a narrower result — it is the destructive
+    // one. With the raw spelling here and the resolved one below, the candidate list came back
+    // EMPTY on macOS and Windows, so no marker was read, so the live set was empty, and then the
+    // resolved pass identified the preview and found nothing claiming it: a preview whose owner
+    // is alive was reaped with its junctions still in place. Resolving in only one of the two
+    // places is strictly worse than resolving in neither.
+    const tempRoot = resolvedTempRoot()
+    const previewCandidates = leakedPreviews(worktrees, { tempRoot }).map((p) => p.path)
+    const livePreviews = await livePreviewPaths(previewCandidates)
     const plan = selectPrunableWorktrees({
       runId,
       worktrees,
+      livePreviews,
       // git lists the main worktree first, always. Naming it explicitly beats matching it
       // against `root`, which can differ by symlink, drive-letter case, or trailing separator.
       mainWorktree: worktrees[0]?.path ?? null,
@@ -1586,8 +1663,8 @@ export async function runCli(argv, io = { out: console.log }) {
       // caller supplies the root it observed. Without it, NOTHING is identified as a leaked
       // preview — a `tm-preview-*` worktree an operator keeps elsewhere on disk is theirs.
       // Resolved, not raw: git reports real paths, and the raw spelling misses every preview on
-      // macOS and Windows. See resolvedTempRoot.
-      tempRoot: resolvedTempRoot(),
+      // macOS and Windows. See resolvedTempRoot. The SAME value the candidate pass above used.
+      tempRoot,
     })
     io.out(renderPrunePlan(plan))
 
@@ -1624,12 +1701,30 @@ export async function runCli(argv, io = { out: console.log }) {
     //
     // WHAT THIS SWEEP DOES AND DOES NOT CLOSE. It closes the junction hazard for a preview whose
     // owner is DEAD — the links it finds are the ones a killed gate's `finally` never tore down,
-    // and they are gone before anything is removed. It does NOT close it for a LIVE preview: a
-    // gate running right now holds a detached, branchless tm-preview-* worktree that is
-    // indistinguishable by name and location from a leaked one (see scripts/prune.mjs), so a
-    // live preview is classified as leaked, and a junction its owner creates in the window
-    // BETWEEN this sweep and the removal below is still followed. Satisfying "no gate is
-    // running" remains the caller's precondition, unchecked here.
+    // and they are gone before anything is removed. For a LIVE preview the sweep alone could
+    // never close it, because a junction the owner creates in the window BETWEEN this sweep and
+    // the removal below would still be followed. What closes that window is that a live preview
+    // does not reach this loop at all: `livePreviewPaths` above found the marker its owner holds
+    // from before `git worktree add` registers the preview until after `removeWorktree`
+    // deregisters it, and the preview is excluded from `plan.previews` and reported as owned
+    // instead. The teardown is inside that span, not after it: a preview mid-teardown still
+    // holds its junctions, and reading it as unowned there would follow them.
+    //
+    // THE RESIDUALS, stated as what is true rather than as what would be convenient.
+    //
+    //   - A pid can be RECYCLED. A marker naming a pid an unrelated process has since taken
+    //     makes a dead preview read as live. That direction only leaves a directory on disk; it
+    //     never destroys data, and `prune-run` can be run again once the pid is free.
+    //   - A preview created by a gate from BEFORE this marker existed carries none, and is
+    //     reaped as leaked. That is the pre-existing hazard, unchanged and no worse.
+    //   - The worktree list and the markers are read once, above, and acted on here. A preview
+    //     that appears in between is not in the list at all, so it cannot be reaped; a preview
+    //     already in the list cannot acquire an owner, because its owner would have had to write
+    //     the marker before the add that put it there.
+    //
+    // The destructive direction — a live preview read as dead — is closed by construction rather
+    // than narrowed, because the marker is HELD across a span that contains the whole span over
+    // which the preview is observable, instead of being sampled at one instant.
     //
     // WHAT THE PATTERN MATCHES, since the reaper is force-removing directories nobody named:
     // every detached, branchless worktree registered in this repository whose path lies under

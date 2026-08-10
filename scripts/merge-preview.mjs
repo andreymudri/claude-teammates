@@ -1,7 +1,39 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { validateLinkPaths, linkInto } from './preview-links.mjs'
+
+// The liveness marker a preview's owner HOLDS for as long as it owns the preview.
+//
+// The leaked-preview reaper in scripts/cli.mjs classifies a preview by name and location alone,
+// which cannot tell a preview a gate is using right now from one a killed gate abandoned. That
+// is destructive rather than merely untidy: `git worktree remove --force` FOLLOWS a junction and
+// deletes the CONTENTS of the link target, and `preview.link` provisions exactly such junctions
+// into the repository's real node_modules.
+//
+// Anything the reaper SAMPLES — an mtime, a registration age — is check-then-act and only
+// narrows the window. This marker is different in kind because the owner holds it for a span
+// that CONTAINS the span over which the preview is observable at all: written before
+// `git worktree add` is called, released only after `removeWorktree` has deregistered the
+// worktree. Both ends are load-bearing and both are pinned by tests. A killed gate skips the
+// whole `finally`, so its marker survives; the reaper reads the pid out of it and finds nobody
+// home.
+//
+// WHY A SIBLING RATHER THAN A FILE INSIDE THE PREVIEW. `git worktree add` requires its directory
+// to be empty or absent, so a marker inside the preview could only be written once the add
+// RETURNS — and git registers the worktree in `git worktree list` at the START of the add. On a
+// 3000-file fixture the registration was visible at t=83ms and the add returned at t=3868ms:
+// for those seconds the preview is listed, unmarked, and reaped as leaked, with its junctions
+// followed. A sibling path is not the add's to own, so it can be written first, which is what
+// turns "the window is narrow" into "there is no window".
+export const PREVIEW_OWNER_MARKER = '.tm-preview-owner'
+
+// Keyed to the preview's own directory name, so concurrent gates hold distinct markers and no
+// marker can answer for a preview other than its own. The reaper derives the same path from the
+// preview path `git worktree list` reports, which is the only thing the two sides share.
+export function previewOwnerMarkerPath(dir) {
+  return path.join(path.dirname(dir), `${PREVIEW_OWNER_MARKER}-${path.basename(dir)}`)
+}
 
 // The worktree lives under the system temp directory, never inside the repository. An
 // in-repo worktree is untracked, so `git status --porcelain` reports it and the ownership
@@ -20,8 +52,13 @@ export async function withMergePreview({ git, base, branches = [], link = [], re
   }
   if (branches.length === 0) return run({ path: null, merged: [] })
   const dir = await mkdtemp(path.join(tmpdir(), 'tm-preview-'))
+  // Claimed BEFORE the worktree is added, because git registers the worktree at the start of the
+  // add and not at its end (see previewOwnerMarkerPath). Inside the `try`, so a write that fails
+  // still reaches the `finally` that cleans the directory up.
+  const marker = previewOwnerMarkerPath(dir)
   let teardownLinks = null
   try {
+    await writeFile(marker, `${process.pid}\n`, 'utf8')
     await git.addWorktreeDetached(dir, base)
     const conflict = await git.mergeInto(dir, branches)
     if (conflict) {
@@ -41,12 +78,32 @@ export async function withMergePreview({ git, base, branches = [], link = [], re
     teardownLinks = await linkInto(dir, repoRoot, link)
     return await run({ path: dir, merged: branches })
   } finally {
-    // Before removeWorktree: `git worktree remove` run against a tree still containing a
-    // junction into the repository's real node_modules is not a behaviour to discover in
-    // production.
-    if (teardownLinks) await teardownLinks()
-    await git.removeWorktree(dir).catch(() => {})
-    await rm(dir, { recursive: true, force: true }).catch(() => {})
+    // Links gone, then worktree gone, then MARKER gone — released last, and that order is the
+    // guarantee rather than a detail.
+    //
+    // Releasing the marker first left a window with teeth: between the release and
+    // `removeWorktree`, the preview is still registered in `git worktree list` and still holds
+    // its junctions, so the reaper would see a live preview reading as unowned and follow those
+    // junctions into the repository's real node_modules. Measured by instrumenting
+    // removeWorktree: one candidate, LIVE=1 during the callback, LIVE=0 at that instant.
+    //
+    // Held to the end, the owner's claim covers a span that CONTAINS the span over which the
+    // preview is observable at all — marked before `git worktree add` registers it, still marked
+    // when the removal deregisters it. That is what lets scripts/cli.mjs say the destructive
+    // direction is closed rather than narrowed.
+    try {
+      // Before removeWorktree: `git worktree remove` run against a tree still containing a
+      // junction into the repository's real node_modules is not a behaviour to discover in
+      // production.
+      if (teardownLinks) await teardownLinks()
+      await git.removeWorktree(dir).catch(() => {})
+      await rm(dir, { recursive: true, force: true }).catch(() => {})
+    } finally {
+      // Its own `finally`, so release-last never becomes release-never: `teardownLinks()`
+      // propagates its failures on purpose, and a marker stranded by one would claim an owner
+      // forever for a preview nothing will clear.
+      await rm(marker, { force: true }).catch(() => {})
+    }
   }
 }
 

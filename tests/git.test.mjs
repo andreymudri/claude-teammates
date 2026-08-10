@@ -259,6 +259,29 @@ test('mergeBase rejects an empty or non-string ref with GitError', async () => {
   assert.deepEqual(calls, [])
 })
 
+// The stderr an old git (< 2.24) produces for --end-of-options, which it does not recognise:
+// parse-options.c's generic "unknown option" rejection, confirmed against real git by
+// substituting an unrecognised long option for --end-of-options and reading its stderr and
+// exit code, since the git available to run this suite already accepts --end-of-options and so
+// cannot be made to fail this way directly.
+const OLD_GIT_STDERR = "error: unknown option `end-of-options'\nusage: git merge-base [-a|--all] <commit> <commit>...\n"
+
+test('mergeBase on a too-old git raises a GitError naming the 2.24 floor, not the raw stderr', async () => {
+  const { exec } = recorder({ code: 129, stdout: '', stderr: OLD_GIT_STDERR })
+  await assert.rejects(
+    () => createGit({ exec }).mergeBase('a', 'b'),
+    (err) => err instanceof GitError && /2\.24/.test(err.message) && /too old/.test(err.message),
+  )
+})
+
+test('a failure unrelated to --end-of-options still reports git\'s raw stderr, not the old-git message', async () => {
+  const { exec } = recorder({ code: 128, stdout: '', stderr: 'fatal: not a git repository' })
+  await assert.rejects(
+    () => createGit({ exec }).mergeBase('a', 'b'),
+    (err) => err instanceof GitError && !/2\.24/.test(err.message) && /not a git repository/.test(err.message),
+  )
+})
+
 // --- isAncestor --------------------------------------------------------------------------
 
 test('isAncestor builds the argv exactly, with no trailing --, and returns true on exit 0', async () => {
@@ -275,6 +298,14 @@ test('isAncestor returns false on exit 1', async () => {
 test('isAncestor throws GitError on exit 128 rather than reporting false', async () => {
   const { exec } = recorder({ code: 128, stdout: '', stderr: 'bad revision' })
   await assert.rejects(() => createGit({ exec }).isAncestor('a', 'b'), GitError)
+})
+
+test('isAncestor on a too-old git raises a GitError naming the 2.24 floor', async () => {
+  const { exec } = recorder({ code: 129, stdout: '', stderr: OLD_GIT_STDERR })
+  await assert.rejects(
+    () => createGit({ exec }).isAncestor('a', 'b'),
+    (err) => err instanceof GitError && /2\.24/.test(err.message),
+  )
 })
 
 test('isAncestor rejects an empty or non-string ref with GitError', async () => {
@@ -510,6 +541,22 @@ test('fileAtCommit rejects an empty or non-string sha/path with GitError', async
   await assert.rejects(() => createGit({ exec }).fileAtCommit('', 'a.md'), GitError)
   await assert.rejects(() => createGit({ exec }).fileAtCommit('sha1', ''), GitError)
   assert.deepEqual(calls, [])
+})
+
+test('fileAtCommit on a too-old git raises a GitError naming the 2.24 floor', async () => {
+  const { exec } = recorder({ code: 128, stdout: '', stderr: 'fatal: unrecognized argument: --end-of-options\n' })
+  await assert.rejects(
+    () => createGit({ exec }).fileAtCommit('sha1', 'docs/plan.md'),
+    (err) => err instanceof GitError && /2\.24/.test(err.message) && /too old/.test(err.message),
+  )
+})
+
+test('a failure unrelated to --end-of-options in the "unrecognized argument" family still reports git\'s raw stderr', async () => {
+  const { exec } = recorder({ code: 128, stdout: '', stderr: 'fatal: bad object sha1' })
+  await assert.rejects(
+    () => createGit({ exec }).fileAtCommit('sha1', 'docs/plan.md'),
+    (err) => err instanceof GitError && !/2\.24/.test(err.message) && /bad object sha1/.test(err.message),
+  )
 })
 
 // --- resolveRef ------------------------------------------------------------------------------
@@ -761,6 +808,17 @@ test('mergeInto throws a GitError carrying stderr when a merge fails with nothin
       assert.match(err.message, /\ba\b/)
       return true
     },
+  )
+})
+
+test('mergeInto on a too-old git raises a GitError naming the 2.24 floor instead of a bare merge failure', async () => {
+  const { exec } = mergeMock({
+    mergeResults: { 'sha-a': { code: 129, stdout: '', stderr: OLD_GIT_STDERR } },
+    unmerged: '',
+  })
+  await assert.rejects(
+    () => createGit({ exec }).mergeInto('/tmp/wt', ['a', 'b']),
+    (err) => err instanceof GitError && /2\.24/.test(err.message) && /too old/.test(err.message),
   )
 })
 
@@ -1043,6 +1101,21 @@ test('commitSubject rejects an empty ref rather than reporting HEAD', async () =
   const { calls, exec } = recorder()
   await assert.rejects(() => createGit({ exec }).commitSubject(''), GitError)
   assert.deepEqual(calls, [])
+})
+
+// The stderr an old git (< 2.24) produces for --end-of-options on `log` and `show` specifically:
+// not the "unknown option" line merge-base/fetch/worktree/merge use, but parse-options.c's
+// other rejection shape, `fatal: unrecognized argument: <name>`, exit 128 — confirmed against
+// real git the same way as OLD_GIT_STDERR, substituting an unrecognised long option into `git
+// log` and `git show` at this module's exact call shape and reading the real result.
+const OLD_GIT_LOG_SHOW_STDERR = 'fatal: unrecognized argument: --end-of-options\n'
+
+test('commitSubject on a too-old git raises a GitError naming the 2.24 floor', async () => {
+  const { exec } = recorder({ code: 128, stdout: '', stderr: OLD_GIT_LOG_SHOW_STDERR })
+  await assert.rejects(
+    () => createGit({ exec }).commitSubject('refs/heads/teammates/r1/T1'),
+    (err) => err instanceof GitError && /2\.24/.test(err.message) && /too old/.test(err.message),
+  )
 })
 
 test('tracks reports whether the repository has any tracked file under a path', async () => {

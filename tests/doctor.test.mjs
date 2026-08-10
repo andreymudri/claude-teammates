@@ -319,7 +319,9 @@ test('a branch parked at the anchor is reported as a problem after a plan amendm
     })
 
     assert.equal(report.tasks[0].landed, false)
-    assert.match(report.problems.join('\n'), /T14: branch teammates\/r1\/T14 has no file changes/)
+    assert.equal(report.problems.length, 1)
+    assert.match(report.problems[0], /T14: branch teammates\/r1\/T14 has no file changes/)
+    assert.doesNotMatch(report.problems[0], /could not determine which branches/i)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

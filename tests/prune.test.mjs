@@ -301,3 +301,92 @@ test('the previews line qualifies its safety claim instead of asserting it', () 
   assert.match(out, /safe to remove only when no gate is running/i)
   assert.doesNotMatch(out, /safe to remove(?!\s+only when no gate is running)/i)
 })
+
+// ---------------------------------------------------------------------------
+// Liveness as caller-supplied DATA. This module is pure and cannot stat a marker file, so the
+// caller — scripts/cli.mjs — reads the markers and hands in the set of paths it found an owner
+// for. What this module owes in return is that a path in that set is never offered for removal
+// and never silently dropped.
+// ---------------------------------------------------------------------------
+
+const LIVE_REASON = /a gate owns this preview right now/
+
+test('a preview the caller reports as live is not offered for removal', () => {
+  assert.deepEqual(
+    leakedPreviews([preview('/tmp/tm-preview-live')], { tempRoot: TEMP, livePreviews: new Set(['/tmp/tm-preview-live']) }),
+    [],
+  )
+  // The same worktree with an empty live set is still leaked: the exclusion is the set's doing
+  // and not a match that got looser.
+  assert.deepEqual(
+    leakedPreviews([preview('/tmp/tm-preview-live')], { tempRoot: TEMP, livePreviews: new Set() }).map((p) => p.path),
+    ['/tmp/tm-preview-live'],
+  )
+})
+
+// Excluded from `previews` and reported in `skipped`: a worktree named in neither list is one
+// the operator was never told about, and this one is the case they most need to see.
+test('a live preview is reported as skipped with the reason, not dropped', () => {
+  const plan = selectPrunableWorktrees({
+    runId: RUN_ID,
+    worktrees: [wt('/repo', 'run/r1'), preview('/tmp/tm-preview-live')],
+    mainWorktree: '/repo',
+    tempRoot: TEMP,
+    livePreviews: new Set(['/tmp/tm-preview-live']),
+  })
+  assert.deepEqual(plan.previews, [])
+  assert.deepEqual(plan.prunable, [])
+  assert.match(plan.skipped.find((s) => s.path === '/tmp/tm-preview-live').reason, LIVE_REASON)
+  assert.match(renderPrunePlan(plan), LIVE_REASON)
+})
+
+// One live, one leaked. A live entry must not suppress its neighbour, and a leaked one must not
+// drag the live one along with it.
+test('a live preview and a leaked one are separated, not batched', () => {
+  const plan = selectPrunableWorktrees({
+    runId: RUN_ID,
+    worktrees: [wt('/repo', 'run/r1'), preview('/tmp/tm-preview-live'), preview('/tmp/tm-preview-dead')],
+    mainWorktree: '/repo',
+    tempRoot: TEMP,
+    livePreviews: new Set(['/tmp/tm-preview-live']),
+  })
+  assert.deepEqual(plan.previews.map((p) => p.path), ['/tmp/tm-preview-dead'])
+  assert.match(plan.skipped.find((s) => s.path === '/tmp/tm-preview-live').reason, LIVE_REASON)
+  assert.equal(plan.skipped.some((s) => s.path === '/tmp/tm-preview-dead'), false)
+})
+
+// Omitting the set entirely is the pre-existing behaviour, unchanged: every identified preview
+// is leaked. A default that guessed "live" would deadlock the reaper forever.
+test('no live set at all leaves every identified preview leaked', () => {
+  for (const opts of [{ tempRoot: TEMP }, { tempRoot: TEMP, livePreviews: null }, { tempRoot: TEMP, livePreviews: undefined }]) {
+    assert.deepEqual(leakedPreviews([preview('/tmp/tm-preview-q')], opts).map((p) => p.path), ['/tmp/tm-preview-q'])
+  }
+})
+
+// The caller hands back the very paths this module reported, so the set is compared the same way
+// every other path in this module is: separators and trailing slashes normalised, nothing else.
+// Case is NOT folded — claiming a case-insensitive match here would be claiming to know the
+// filesystem, which a pure module does not.
+test('a live path is matched under the same normalisation the rest of the module uses', () => {
+  assert.deepEqual(
+    leakedPreviews([preview('C:\\Temp\\tm-preview-a')], { tempRoot: 'C:/Temp', livePreviews: new Set(['C:/Temp/tm-preview-a/']) }),
+    [],
+  )
+})
+
+// A live path naming something that is not a preview here changes nothing: the set narrows what
+// is reaped and can never widen it, so a stale entry cannot turn a task worktree into a refusal
+// with the wrong reason.
+test('a live path that names no identified preview is inert', () => {
+  const plan = selectPrunableWorktrees({
+    runId: RUN_ID,
+    worktrees: [wt('/repo', 'run/r1'), wt('/repo/wt/a1', 'teammates/r1/T1')],
+    mainWorktree: '/repo',
+    taskPhases: { T1: 1 },
+    passedPhases: [1],
+    tempRoot: TEMP,
+    livePreviews: new Set(['/repo/wt/a1', '/tmp/tm-preview-nothere']),
+  })
+  assert.deepEqual(plan.prunable.map((p) => p.path), ['/repo/wt/a1'])
+  assert.deepEqual(plan.previews, [])
+})

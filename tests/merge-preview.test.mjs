@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs'
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { withMergePreview, conflictPairs } from '../scripts/merge-preview.mjs'
+import { withMergePreview, conflictPairs, previewOwnerMarkerPath } from '../scripts/merge-preview.mjs'
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..')
 
@@ -328,4 +328,189 @@ test('conflictPairs returns one pair naming every branch and path otherwise', ()
   const branches = ['teammates/r1/T3', 'teammates/r1/T8']
   const paths = ['scripts/cli.mjs', 'scripts/gate-runner.mjs']
   assert.deepEqual(conflictPairs(branches, paths), [{ branches, paths }])
+})
+
+// ---------------------------------------------------------------------------
+// The liveness marker. The reaper in scripts/cli.mjs classifies a preview by name and
+// location alone, so a preview a gate is holding RIGHT NOW is indistinguishable from a leaked
+// one — and `git worktree remove --force` follows the junctions `preview.link` provisioned and
+// deletes the CONTENTS of their targets.
+//
+// The marker is a SIBLING of the preview directory, not a file inside it, and that placement is
+// the whole point rather than a detail. `git worktree add` needs the directory empty, so a
+// marker inside it could only be written after the add RETURNS — while git registers the
+// worktree in `git worktree list` at the START of the add. Measured on a 3000-file fixture, the
+// registration was visible at t=83ms and the add returned at t=3868ms: for those seconds a live
+// preview would be listed and unmarked, which is exactly the interval the reaper must never see.
+// A sibling path is not the add's to own, so it can be written BEFORE the add is called at all.
+// ---------------------------------------------------------------------------
+
+test('the marker is written before the worktree is added, not after', async () => {
+  const seen = []
+  let markerPath = null
+  const git = {
+    async addWorktreeDetached(dir) {
+      // git registers the worktree at the START of this call. Whatever is true here is what the
+      // reaper can observe for the whole duration of the add.
+      markerPath = previewOwnerMarkerPath(dir)
+      seen.push(existsSync(markerPath))
+      return dir
+    },
+    async mergeInto() { return null },
+    async removeWorktree() { return true },
+  }
+  await withMergePreview({ git, base: 'main', branches: ['T1'], run: async () => {} })
+  assert.deepEqual(seen, [true], 'the preview was observable and unmarked while it was being added')
+  assert.equal(existsSync(markerPath), false, 'the marker outlived the preview')
+})
+
+test('the marker names the owning pid and lives beside the preview, not inside it', async () => {
+  const git = fakeGit()
+  let contents = null
+  let insidePreview = null
+  await withMergePreview({
+    git, base: 'main', branches: ['T1'],
+    run: async ({ path: dir }) => {
+      contents = await readFile(previewOwnerMarkerPath(dir), 'utf8')
+      // A file inside the tree would also be a file `git worktree add` refuses to create the
+      // tree around, and one `git worktree remove --force` would count as untracked content.
+      insidePreview = existsSync(path.join(dir, '.tm-preview-owner'))
+    },
+  })
+  assert.equal(contents.trim(), String(process.pid))
+  assert.equal(insidePreview, false)
+})
+
+// Keyed to the preview's own directory name, so two gates running at once hold two markers and
+// neither can answer for the other's preview.
+test('two previews under the same root get two distinct markers', () => {
+  const a = previewOwnerMarkerPath(path.join(tmpdir(), 'tm-preview-aaa'))
+  const b = previewOwnerMarkerPath(path.join(tmpdir(), 'tm-preview-bbb'))
+  assert.notEqual(a, b)
+  assert.equal(path.dirname(a), tmpdir())
+  assert.ok(path.basename(a).includes('tm-preview-aaa'))
+})
+
+// The other end of the span, and the mirror of the add test above. The marker is released LAST
+// in the `finally` — after the links are torn down and after `removeWorktree` deregisters the
+// worktree — so it is still held at the moment `git worktree list` can still report the preview
+// and the preview can still hold junctions. Releasing it first left a window in which a preview
+// that was registered, linked, and mid-teardown read as UNOWNED, and the reaper would follow
+// those junctions.
+//
+// Observed from inside removeWorktree, which is the last instant the preview is still
+// registered — the same technique the add test uses at the other end.
+test('the marker is still held while the worktree is being removed', async () => {
+  const seen = []
+  let markerPath = null
+  const git = {
+    async addWorktreeDetached(dir) { markerPath = previewOwnerMarkerPath(dir); return dir },
+    async mergeInto() { return null },
+    async removeWorktree(dir) { seen.push(existsSync(previewOwnerMarkerPath(dir))); return true },
+  }
+  await withMergePreview({ git, base: 'main', branches: ['T1'], run: async () => {} })
+  assert.deepEqual(seen, [true], 'the preview was registered and unowned while it was being torn down')
+  // And released once there is nothing left to own: a marker outliving its preview would claim
+  // an owner forever for a path the reaper can never clear.
+  assert.equal(existsSync(markerPath), false, 'a clean run must not leave its own marker behind')
+})
+
+// A gate whose CALLBACK threw still ran its `finally`, so it leaves nothing behind. Only a
+// killed gate — which skips the `finally` entirely — leaves the marker, which is the case the
+// reaper must read as live.
+test('a callback that throws still removes the marker, and holds it until the removal', async () => {
+  const seen = []
+  let markerPath = null
+  const git = {
+    async addWorktreeDetached(dir) { markerPath = previewOwnerMarkerPath(dir); return dir },
+    async mergeInto() { return null },
+    async removeWorktree(dir) { seen.push(existsSync(previewOwnerMarkerPath(dir))); return true },
+  }
+  await assert.rejects(
+    withMergePreview({ git, base: 'main', branches: ['T1'], run: async () => { throw new Error('boom') } }),
+    /boom/,
+  )
+  assert.deepEqual(seen, [true])
+  assert.equal(existsSync(markerPath), false)
+})
+
+// Release-last must not become release-never. Both teardown steps are made to fail: the marker
+// is the last thing released, so it is the first thing a naive ordering would strand, and a
+// marker outliving its preview claims an owner for a path nothing will ever clear.
+test('a teardown that throws still releases the marker', async () => {
+  const root = await fakeRepoRoot()
+  let markerPath = null
+  const git = {
+    async addWorktreeDetached(dir) { markerPath = previewOwnerMarkerPath(dir); return dir },
+    async mergeInto() { return null },
+    async removeWorktree() { throw new Error('worktree is locked') },
+  }
+  try {
+    // removeWorktree's own rejection is swallowed by withMergePreview, so this resolves; what is
+    // under test is that the release happened anyway.
+    await withMergePreview({ git, base: 'main', branches: ['T1'], link: ['deps'], repoRoot: root, run: async () => {} })
+    assert.equal(existsSync(markerPath), false, 'a failed removeWorktree stranded the marker')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a link teardown that throws propagates and still releases the marker', async () => {
+  let markerPath = null
+  const git = {
+    async addWorktreeDetached(dir) { markerPath = previewOwnerMarkerPath(dir); return dir },
+    async mergeInto() { return null },
+    async removeWorktree() { return true },
+  }
+  // A preview whose declared link target does not exist: linkInto succeeds against a directory
+  // it creates, and the teardown then fails on a tree removed out from under it. Staged by
+  // removing the preview directory from inside the callback, which is the only hook there is.
+  const root = await fakeRepoRoot()
+  try {
+    await withMergePreview({
+      git, base: 'main', branches: ['T1'], link: ['deps'], repoRoot: root,
+      run: async ({ path: dir }) => {
+        markerPath = previewOwnerMarkerPath(dir)
+        // Leave the junction dangling by removing what it points at, so teardown has something
+        // to fail on. The target is this test's own throwaway fixture, never a real directory.
+        await rm(path.join(root, 'deps'), { recursive: true, force: true })
+      },
+    }).catch(() => {})
+    assert.equal(existsSync(markerPath), false, 'the marker must be released whatever teardown did')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+// An add that FAILS still registered the worktree before it failed, and may leave it registered.
+// The marker must not outlive the attempt, or a preview nobody owns reads as live forever.
+test('an addWorktreeDetached that throws still removes the marker', async () => {
+  let markerPath = null
+  const git = {
+    async addWorktreeDetached(dir) { markerPath = previewOwnerMarkerPath(dir); throw new Error('add failed') },
+    async mergeInto() { return null },
+    async removeWorktree() { return true },
+  }
+  await assert.rejects(
+    withMergePreview({ git, base: 'main', branches: ['T1'], run: async () => {} }),
+    /add failed/,
+  )
+  assert.equal(existsSync(markerPath), false)
+})
+
+// The conflict path hands the callback `path: null` and provisions no links, but the worktree
+// it created is registered and just as reapable, so it is marked for the whole of its life.
+test('a conflicting merge still marks the preview it created', async () => {
+  const seen = []
+  let markerPath = null
+  const git = {
+    async addWorktreeDetached(dir) { markerPath = previewOwnerMarkerPath(dir); seen.push(existsSync(markerPath)); return dir },
+    async mergeInto(dir) { seen.push(existsSync(previewOwnerMarkerPath(dir))); return ['a.mjs'] },
+    async removeWorktree(dir) { seen.push(existsSync(previewOwnerMarkerPath(dir))); return true },
+  }
+  await withMergePreview({ git, base: 'main', branches: ['T1'], run: async () => {} })
+  // Marked before the add, through the merge, and still marked at the removal — the whole of the
+  // span over which this preview is observable.
+  assert.deepEqual(seen, [true, true, true])
+  assert.equal(existsSync(markerPath), false)
 })

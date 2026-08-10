@@ -360,14 +360,20 @@ test('parallel-execution keeps a returned teammate’s worktree until its phase 
     then: /Remove the worktree once the phase has a recorded PASS \(git worktree remove <path>\), then git worktree prune/i,
     subject: /\bprun(e|es|ed|ing)\b/i,
     allow: [
-      /Only prune worktrees belonging to this run/i,
-      /prune that task's worktree first/i,
+      /^Only prune worktrees belonging to this run\.$/i,
+      /^If a task must go to a fresh implementer instead — because resuming stalled — prune that task's worktree first, since a returned teammate's worktree keeps its branch checked out and the new dispatch would fail with "already used by worktree"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover\.$/i,
       // Reviewed: the command bullet states the same rule mechanically — it recomputes each
       // phase's gate and removes only worktrees whose phase passes — so it reinforces the claim
       // rather than qualifying it.
-      /^Prune with the command rather than by hand:/i,
-      /It recomputes each phase's gate, removes only this run's worktrees whose phase passes/i,
-      /Without --yes it reports and removes nothing/i,
+      /^Prune with the command rather than by hand:$/i,
+      /^It recomputes each phase's gate, removes only this run's worktrees whose phase passes, and names every one it left alone and why\.$/i,
+      /^Without --yes it reports and removes nothing\.$/i,
+      // Reviewed: `--enforcement-only` documentation below. Neither sentence qualifies this
+      // claim — the first only names `prune-run` as one of the two callers the flag speeds up,
+      // the second reinforces the same "PASS resting on a skipped check is not prunable" guardrail
+      // in `--enforcement-only`'s own terms rather than contradicting it.
+      /^finish and prune-run otherwise recompute every command check of every phase — for a five-phase run, five full test suites — to answer a question that usually does not need them\.$/i,
+      /^And it will not let prune-run remove a worktree for a phase whose PASS rests on a check the flag skipped — a cheap verdict is enough to report, not enough to delete\.$/i,
     ],
   })
   assertStatement(
@@ -563,6 +569,99 @@ test('parallel-execution states the coupling window is bounded, not the whole hi
     /a declared file needs at least three commits of its own history before coupling counts it/i,
     'the skill must name the support floor so a section-less brief does not read as a broken dispatch',
   )
+})
+
+test('parallel-execution documents --enforcement-only and what it is for', async () => {
+  const { doc } = await skill('parallel-execution')
+  const section = doc.section('Worktree mechanics')
+  // Why the flag exists at all. Without this a reader sees the guardrails below but never learns
+  // what the flag buys — the whole reason `finish` and `prune-run` recompute every command check
+  // of every phase in the first place.
+  assertStatement(
+    section,
+    /^finish and prune-run otherwise recompute every command check of every phase — for a five-phase run, five full test suites — to answer a question that usually does not need them\.$/i,
+    '--enforcement-only must state what it is for',
+  )
+})
+
+// The three `subject:` locks below (scope, refusal, prune guard) each catch a contradicting
+// neighbour that uses the vocabulary the subject names — "ownership check", "refus-", "remove" /
+// "delete". A sentence that negates the pinned claim without using any of that vocabulary passes
+// unreviewed, the same limit `tests/md-contract.mjs:41-52` documents for this whole module: this
+// is a vocabulary lock, not a semantic one, and no amount of widening turns it into one. Piling on
+// more subject words to chase completeness is the wrong fix — it only pulls more legitimate
+// neighbours into each `allow` list, which is how a lock stops locking. An accurate note about a
+// partial lock, not a wider vocabulary, is the stable end state.
+test('parallel-execution states --enforcement-only drops only command checks', async () => {
+  const { doc } = await skill('parallel-execution')
+  const section = doc.section('Worktree mechanics')
+  assertClaim(section, {
+    label: 'enforcement-only scope',
+    claim: /^It drops only command checks; fileset, ownership, and the merge check the gate computes for itself still run\.$/i,
+    // Widened from a phrase unique to this sentence ("drops only", which nothing else could ever
+    // repeat) to the check-kind nouns a contradicting neighbour would actually use. Proven by
+    // mutation: "It also skips the ownership check, and it refuses nothing when a phase declares
+    // no checks at all." is caught by this subject — it names "ownership check" — though it
+    // shares none of the claim's own wording.
+    subject: /\b(fileset|ownership|command check)/i,
+    allow: [
+      // Reviewed: the refusal claim below. It names fileset and ownership as what a manifest must
+      // declare for the flag to answer at all, consistent with — not qualifying — the claim that
+      // both checks still run.
+      /^It REFUSES with exit 2 when a phase's manifest declares no fileset and no ownership check, because with nothing else to verify the result would be meaningless\.$/i,
+      // Reviewed: the purpose sentence. It says finish/prune-run normally run every command
+      // check of every phase; it says nothing about what --enforcement-only itself drops or
+      // keeps, so it does not qualify this claim.
+      /^finish and prune-run otherwise recompute every command check of every phase — for a five-phase run, five full test suites — to answer a question that usually does not need them\.$/i,
+    ],
+  })
+})
+
+test('parallel-execution states every check --enforcement-only drops is reported as skip', async () => {
+  const { doc } = await skill('parallel-execution')
+  const section = doc.section('Worktree mechanics')
+  assertStatement(
+    section,
+    /^Every dropped check is reported as skip, never silently omitted\.$/i,
+    '--enforcement-only must state dropped checks are always reported, never silently omitted',
+  )
+})
+
+test('parallel-execution states --enforcement-only refuses a phase with no enforcement check', async () => {
+  const { doc } = await skill('parallel-execution')
+  const section = doc.section('Worktree mechanics')
+  assertClaim(section, {
+    label: 'enforcement-only refusal',
+    claim: /^It REFUSES with exit 2 when a phase's manifest declares no fileset and no ownership check, because with nothing else to verify the result would be meaningless\.$/i,
+    // Widened from the case-sensitive, claim-only /\bREFUSES\b/ (which even "refuses" missed) to
+    // every inflection of the verb, case-insensitively. Proven by mutation: "...and it refuses
+    // nothing when a phase declares no checks at all" is caught.
+    subject: /\brefus(e|es|ed|ing)\b/i,
+  })
+})
+
+test('parallel-execution states --enforcement-only never authorises a prune on a skipped check', async () => {
+  const { doc } = await skill('parallel-execution')
+  const section = doc.section('Worktree mechanics')
+  assertClaim(section, {
+    label: 'enforcement-only prune guard',
+    claim: /^And it will not let prune-run remove a worktree for a phase whose PASS rests on a check the flag skipped — a cheap verdict is enough to report, not enough to delete\.$/i,
+    // Widened from "not enough to delete", a phrase unique to this sentence, to every inflection
+    // of remove/delete — the verbs a contradicting neighbour would actually use. Proven by
+    // mutation: "In practice, pass --yes as well and it will remove the worktree regardless." is
+    // caught, though it shares none of the claim's own wording.
+    subject: /\b(remov(e|es|ed|ing)|delet(e|es|ed|ing))\b/i,
+    allow: [
+      // Reviewed: the prune-run command bullet's own description of its ordinary removal
+      // behaviour, for a PASS it computed itself — a different claim than this flag's guardrail
+      // on a PASS resting on what the flag skipped.
+      /^It recomputes each phase's gate, removes only this run's worktrees whose phase passes, and names every one it left alone and why\.$/i,
+      /^Without --yes it reports and removes nothing\.$/i,
+      // Reviewed: the worktree-pruning bullet's own removal instruction for the ordinary case of
+      // a recorded PASS — again a different claim than this flag's guardrail.
+      /^Remove the worktree once the phase has a recorded PASS \(git worktree remove <path>\), then git worktree prune\.$/i,
+    ],
+  })
 })
 
 test('fleet-lifecycle states who writes the map notes and that nothing enforced reads them', async () => {
