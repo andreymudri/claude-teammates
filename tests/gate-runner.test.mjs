@@ -365,6 +365,45 @@ test('runFilesetCheck names both refs and both task ids in a duplicate failure',
   assert.match(res.output, new RegExp(SHARED_SHA))
 })
 
+// Fix-round finding 3: with three or more refs sharing a sha, naming only the FIRST match found
+// (`.find` instead of `.filter`) lets the actually-parked ref go unnamed while two innocent
+// teammates are named instead — and lets an attacker pick a task id that sorts past two idle
+// siblings to stay out of the message entirely. T1, T2 and T4 all share a merged sha; T4 sorts
+// last, so a version using `.find` (which stops at the first OTHER match, T2) would never
+// mention T4 in either T1's or T2's own failure line.
+test('runFilesetCheck names every ref sharing a sha, not just the first found', async () => {
+  const T2_TASK = { id: 'T2', phase: 2, files: ['b.mjs'] }
+  const T4_TASK = { id: 'T4', phase: 2, files: ['d.mjs'] }
+  const T4_BRANCH = 'teammates/r1/T4'
+  const SHARED_SHA = 'sharedSha1'
+  const git = fakeGit({
+    branchExists: async () => true,
+    resolveRef: async (ref) => {
+      if (ref === `refs/heads/${T1_BRANCH}`) return SHARED_SHA
+      if (ref === `refs/heads/${T2_BRANCH}`) return SHARED_SHA
+      if (ref === `refs/heads/${T4_BRANCH}`) return SHARED_SHA
+      if (ref === 'refs/heads/run') return 'runSha1'
+      return `${ref}-sha`
+    },
+    changedFiles: async () => [],
+    mergedBranchTips: async () => new Set([SHARED_SHA]),
+  })
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = {
+    git, runId: RUN_ID, runSha: 'runSha1', anchorSha: 'anchorSha1',
+    tasks: [T1_TASK, T2_TASK, T4_TASK], currentPhase: 2, phaseError: null,
+  }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  // T2's own failure line must name BOTH other siblings sharing the sha, T1 and T4.
+  const t2Line = res.output.split('\n').find((l) => l.startsWith('T2:'))
+  assert.ok(t2Line, 'expected a failure line for T2')
+  assert.match(t2Line, new RegExp(T1_BRANCH.replace(/\//g, '\\/')))
+  assert.match(t2Line, new RegExp(T4_BRANCH.replace(/\//g, '\\/')))
+  assert.match(t2Line, /task T1/)
+  assert.match(t2Line, /task T4/)
+})
+
 // `runWideTaskShas` walks every task ref in the run, not just this phase's, so a corrupted ref
 // anywhere in the run — not necessarily one of this phase's own tasks — must fail the check
 // cleanly rather than let the GitError propagate as an uncaught throw where a FAIL verdict
@@ -426,14 +465,45 @@ test('runFilesetCheck does not apply the duplicate rule to a branch with a non-e
   assert.equal(res.status, 'pass')
 })
 
-// Guard 2 of the duplicate rule: scoped away from the run tip. Two branches sharing the sha
-// that IS the run tip are in the ordinary, benign state every fleet passes through between
-// `git checkout -B <task> <run branch>` and its first commit — dispatched siblings, or a
-// fix-round branch re-created there. Fix-round finding A: an earlier version had no such
-// exclusion and reported every freshly-dispatched phase as a pack of branches "parked at" each
-// other. Pinned by construction: T1 and T2 both resolve to the run tip sha with an empty diff,
-// so a version that dropped the `sha !== runSha` guard would report them as parked on each
-// other instead of the true, actionable "contributes no file changes ... no-op".
+// Guard 2 of the duplicate rule: scoped to a sha that was actually merged as somebody's branch
+// — `landedTips()` / `git.mergedBranchTips`, not "is this the run tip". Two fix-round versions
+// of this guard were tried and both were wrong: unguarded, every freshly-dispatched phase read
+// as a pack of branches "parked at" each other (fix-round finding A); guarded by `sha !==
+// runSha` instead of by merge membership, two entirely idle refs sharing a sha that simply
+// stopped being the run tip — because anything else landed on the run branch, not because
+// either of them did anything — read the same way (fix-round finding 1, security HIGH). Pinned
+// here with `mergedBranchTips` returning empty regardless of what the shas are, so this test
+// exercises the membership gate directly rather than only its most common (run-tip) case.
+test('runFilesetCheck does not apply the duplicate rule to a sha that was never merged as anyone\'s branch', async () => {
+  const T2_TASK = { id: 'T2', phase: 1, files: ['b.mjs'] }
+  const git = fakeGit({
+    branchExists: async () => true,
+    resolveRef: async (ref) => {
+      if (ref === `refs/heads/${T1_BRANCH}`) return 'sharedSha1'
+      if (ref === `refs/heads/${T2_BRANCH}`) return 'sharedSha1'
+      if (ref === 'refs/heads/run') return 'runSha1'
+      return `${ref}-sha`
+    },
+    changedFiles: async () => [],
+    // Neither T1's nor T2's shared sha was ever merged as anyone's branch — regardless of
+    // whether it happens to equal the run tip, which it does NOT here.
+    mergedBranchTips: async () => new Set(),
+  })
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = {
+    git, runId: RUN_ID, runSha: 'runSha1', anchorSha: 'anchorSha1',
+    tasks: [T1_TASK, T2_TASK], currentPhase: 1, phaseError: null,
+  }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.match(res.output, /T1: branch teammates\/r1\/T1 contributes no file changes/)
+  assert.match(res.output, /T2: branch teammates\/r1\/T2 contributes no file changes/)
+  assert.doesNotMatch(res.output, /parked at another's tip/)
+})
+
+// The run-tip case specifically: a shared sha that IS the run tip can never be a member of
+// `mergedBranchTips` either (nothing in `anchor..run` can have the tip itself as a parent), so
+// the same guard covers it without a separate check.
 test('runFilesetCheck does not apply the duplicate rule to two branches sharing the run tip', async () => {
   const T2_TASK = { id: 'T2', phase: 1, files: ['b.mjs'] }
   const git = fakeGit({
@@ -456,7 +526,7 @@ test('runFilesetCheck does not apply the duplicate rule to two branches sharing 
   assert.equal(res.status, 'fail')
   assert.match(res.output, /T1: branch teammates\/r1\/T1 contributes no file changes/)
   assert.match(res.output, /T2: branch teammates\/r1\/T2 contributes no file changes/)
-  assert.doesNotMatch(res.output, /parked at the other's tip/)
+  assert.doesNotMatch(res.output, /parked at another's tip/)
 })
 
 // A teammate that skips its `git checkout -B teammates/<run>/<task>` and commits on the
@@ -1621,9 +1691,13 @@ test('a phase-2 branch parked at the run tip does not read as integrated (real r
 // An earlier version of this fix silently withheld `integratedPhases` credit from both refs.
 // That broke a genuinely-integrated EARLIER phase whenever a duplicate touched a LATER one
 // (fix-round finding B1 — reproduced and pinned separately in `tests/adversarial.test.mjs`), so
-// `deriveContext` now short-circuits with a dedicated phaseError naming both refs and both task
-// ids, before `integratedPhases` is even computed, rather than guessing which phase broke.
-test('deriveContext fails with a specific error naming both refs when two task refs share a non-run-tip sha', async () => {
+// `deriveContext` now short-circuits with a dedicated phaseError naming every ref sharing the
+// sha, before `integratedPhases` is even computed, rather than guessing which phase broke. The
+// gate is `git.mergedBranchTips` membership, not "is this the run tip" — see
+// `deriveContext does not treat two idle siblings as parked when an unrelated commit moves the
+// run tip past them` below for the fix-round regression a "not the run tip" version of this
+// check introduced.
+test('deriveContext fails with a specific error naming every ref when task refs share a merged sibling\'s tip', async () => {
   await withRepo(async ({ root, sh, git }) => {
     await writeFile(path.join(root, 'plan.md'), twoInSecondPhasePlan(), 'utf8')
     await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
@@ -1652,19 +1726,68 @@ test('deriveContext fails with a specific error naming both refs when two task r
 
     const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
 
-    // Reported immediately, naming both refs and both task ids — not a silent exclusion, and
-    // not the generic "phase N is not integrated but a later phase is" ordering error, which
-    // would leave phase 1's genuine integration unexplained and point the operator at the
-    // wrong phase entirely.
+    // Reported immediately, naming every ref sharing the sha and every task id — not a silent
+    // exclusion, and not the generic "phase N is not integrated but a later phase is" ordering
+    // error, which would leave phase 1's genuine integration unexplained and point the operator
+    // at the wrong phase entirely.
     assert.deepEqual(ctx.integratedPhases, [])
     assert.equal(ctx.currentPhase, null)
-    assert.match(ctx.phaseError, /T2: branch teammates\/r1\/T2 and teammates\/r1\/T3 \(task T3\)/)
+    assert.match(ctx.phaseError, /T2, T3: branches teammates\/r1\/T2 \(task T2\), teammates\/r1\/T3 \(task T3\)/)
     assert.match(ctx.phaseError, new RegExp(t3Tip))
-    assert.match(ctx.phaseError, /not the run tip/)
+    assert.match(ctx.phaseError, /merged sibling's tip/)
 
     const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
     assert.equal(res.status, 'fail')
     assert.equal(res.output, ctx.phaseError)
+  })
+})
+
+// Fix-round finding 3: with three refs sharing a merged sha, `deriveContext`'s phaseError must
+// name every one, not just the first two found — a version that destructured `const [a, b] =
+// entries` would leave T4 (which sorts last) out of the message while naming T2 and T3, letting
+// an attacker's actually-parked ref hide behind two named, unrelated ones.
+test('deriveContext names every ref sharing a merged tip, not just the first two', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    const threeParkedPlan = [
+      '### Task 1: first task', '', '**Files:**', '- Create: `a.mjs`', '', '**Depends:** none', '',
+      '### Task 2: parked task', '', '**Files:**', '- Create: `b.mjs`', '', '**Depends:** T1', '',
+      '### Task 3: sibling task', '', '**Files:**', '- Create: `c.mjs`', '', '**Depends:** T1', '',
+      '### Task 4: also parked', '', '**Files:**', '- Create: `d.mjs`', '', '**Depends:** T1', '',
+    ].join('\n')
+    await writeFile(path.join(root, 'plan.md'), threeParkedPlan, 'utf8')
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+
+    await sh(['checkout', '-b', 'teammates/r1/T3'])
+    await writeFile(path.join(root, 'c.mjs'), 'export const c = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T3 work'])
+    const t3Tip = (await sh(['rev-parse', 'teammates/r1/T3'])).stdout.trim()
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T3', 'teammates/r1/T3'])
+
+    // T2 and T4 both never commit: both refs are pointed straight at T3's own tip commit.
+    await sh(['branch', 'teammates/r1/T2', t3Tip])
+    await sh(['branch', 'teammates/r1/T4', t3Tip])
+
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+
+    assert.ok(ctx.phaseError, 'expected a phaseError')
+    assert.match(ctx.phaseError, /teammates\/r1\/T2/)
+    assert.match(ctx.phaseError, /teammates\/r1\/T3/)
+    assert.match(ctx.phaseError, /teammates\/r1\/T4/)
+    assert.match(ctx.phaseError, /task T2/)
+    assert.match(ctx.phaseError, /task T3/)
+    assert.match(ctx.phaseError, /task T4/)
   })
 })
 
