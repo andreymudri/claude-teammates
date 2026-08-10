@@ -502,6 +502,28 @@ test('with caveman omitted the full brief and a false CAVEMAN marker are emitted
   assert.ok(!prompt.includes('STYLE.'), 'no style section without a caveman level')
 })
 
+test('the full brief requires the baseline test run to happen in the foreground', async () => {
+  // A backgrounded baseline stalls with the work uncommitted and nothing notifies the teammate
+  // when it finishes. This line is the rule that prevents that, so the full (non-caveman) brief
+  // must carry it verbatim, not just the terse variant covered by the load-bearing list above.
+  const src = await generatePhaseWorkflow({
+    runId: 'r1',
+    phase: 1,
+    tasks: [{ id: 'T1', title: 'auth middleware', files: ['src/auth.ts'], phase: 1 }],
+    maxParallel: 2,
+    baseBranch: 'main',
+  })
+  const [prompt] = await captureAgentPrompts(src)
+  assert.ok(
+    prompt.includes('Run the project\'s test command once, IN THE FOREGROUND, and confirm it is green.'),
+    'the full brief must instruct the baseline test run to happen in the foreground',
+  )
+  assert.ok(
+    prompt.includes('Never background it: nothing notifies you when a backgrounded command finishes.'),
+    'the full brief must state why backgrounding the baseline run is unsafe',
+  )
+})
+
 test('a caveman brief keeps every load-bearing instruction verbatim', async () => {
   // Compressing a brief is compressing a specification. The gate enforces the file set and the
   // checkout, so those sentences are the last thing that may be shortened away.
@@ -526,6 +548,8 @@ test('a caveman brief keeps every load-bearing instruction verbatim', async () =
     'GLOBAL CONSTRAINTS:',
     '- Node >= 24.2.0',
     'PLAN. Read docs/plans/p.md',
+    'Run the project\'s test command once, IN THE FOREGROUND, and confirm it is green.',
+    'Never background it: nothing notifies you when a backgrounded command finishes.',
   ]) {
     assert.ok(prompt.includes(required), `caveman brief dropped a load-bearing line: ${required}`)
   }
@@ -584,6 +608,116 @@ test('a caveman level containing a quote is escaped rather than breaking the sou
   } finally {
     delete globalThis.PWNED
   }
+})
+
+// blastRadius(t) is called at generated-workflow run time, so its rendered output — the
+// percentage and the section's presence or absence — only exists once the workflow body is
+// evaluated, never in the raw generated source: the static function definition that decides
+// whether to render it is always present in the source text regardless of neighbours. These
+// content assertions therefore run against the rendered prompt via captureAgentPrompts, exactly
+// as the checkout and baseline sections above are asserted.
+test('a task with neighbours renders a blast radius naming each file and its percentage', async () => {
+  const src = await generatePhaseWorkflow({
+    runId: 'r1', phase: 1, maxParallel: 2,
+    tasks: [{ id: 'T1', title: 'a', files: ['src/a.ts'] }],
+    neighbours: { T1: [{ path: 'src/b.ts', confidence: 0.82 }] },
+  })
+  // Static source text: the blastRadius function definition (and its literal 'BLAST RADIUS'
+  // string) is always present in the generated module regardless of neighbours, so this only
+  // pins that the neighbour's path made it into the TASKS literal, never that the section
+  // renders. The rendering claim is asserted below via captureAgentPrompts.
+  assert.match(src, /src\/b\.ts/)
+  const [prompt] = await captureAgentPrompts(src)
+  assert.match(prompt, /BLAST RADIUS/)
+  assert.match(prompt, /82%/)
+  assert.match(prompt, /src\/b\.ts/)
+})
+
+// A task with several neighbours must show every one, not just the first. Rendering only
+// t.neighbours[0] would leave this test's earlier single-neighbour sibling green, since that
+// one only ever supplies one entry — the mutation is only visible with more than one.
+test('a task with several neighbours renders every one, not just the first', async () => {
+  const src = await generatePhaseWorkflow({
+    runId: 'r1', phase: 1, maxParallel: 2,
+    tasks: [{ id: 'T1', title: 'a', files: ['src/a.ts'] }],
+    neighbours: {
+      T1: [
+        { path: 'src/b.ts', confidence: 0.9 },
+        { path: 'src/c.ts', confidence: 0.6 },
+        { path: 'src/d.ts', confidence: 0.3 },
+      ],
+    },
+  })
+  const [prompt] = await captureAgentPrompts(src)
+  assert.match(prompt, /90%\s+src\/b\.ts/)
+  assert.match(prompt, /60%\s+src\/c\.ts/)
+  assert.match(prompt, /30%\s+src\/d\.ts/)
+})
+
+// neighbours is keyed by task id, so each task in a multi-task phase must see only its own
+// entry. Resolving neighbours by position (e.g. the first value in the map) rather than by
+// the task's own id would hand every teammate the first task's coupled files instead of its
+// own — a real hazard once a phase has more than one task, which every other blast-radius
+// test above avoids by using a single-task phase.
+test('in a multi-task phase, each brief names only its own task neighbours', async () => {
+  const src = await generatePhaseWorkflow({
+    runId: 'r1', phase: 1, maxParallel: 2,
+    tasks: [
+      { id: 'T1', title: 'a', files: ['src/a.ts'] },
+      { id: 'T2', title: 'b', files: ['src/x.ts'] },
+    ],
+    neighbours: {
+      T1: [{ path: 'src/a-neighbour.ts', confidence: 0.7 }],
+      T2: [{ path: 'src/x-neighbour.ts', confidence: 0.4 }],
+    },
+  })
+  const [promptT1, promptT2] = await captureAgentPrompts(src)
+  assert.match(promptT1, /src\/a-neighbour\.ts/)
+  assert.doesNotMatch(promptT1, /src\/x-neighbour\.ts/)
+  assert.match(promptT2, /src\/x-neighbour\.ts/)
+  assert.doesNotMatch(promptT2, /src\/a-neighbour\.ts/)
+})
+
+test('a task with no neighbours renders no blast radius section', async () => {
+  const src = await generatePhaseWorkflow({
+    runId: 'r1', phase: 1, maxParallel: 2,
+    tasks: [{ id: 'T1', title: 'a', files: ['src/a.ts'] }],
+    neighbours: { T1: [] },
+  })
+  const [prompt] = await captureAgentPrompts(src)
+  assert.doesNotMatch(prompt, /BLAST RADIUS/)
+})
+
+test('omitting neighbours entirely renders no blast radius and no undefined', async () => {
+  const src = await generatePhaseWorkflow({
+    runId: 'r1', phase: 1, maxParallel: 2,
+    tasks: [{ id: 'T1', title: 'a', files: ['src/a.ts'] }],
+  })
+  const [prompt] = await captureAgentPrompts(src)
+  assert.doesNotMatch(prompt, /BLAST RADIUS/)
+  assert.doesNotMatch(prompt, /undefined/)
+})
+
+// The brief is the specification the gate then enforces, so the caveman variant keeps it for the
+// same reason it keeps the FILES list.
+test('the caveman brief keeps the blast radius', async () => {
+  const src = await generatePhaseWorkflow({
+    runId: 'r1', phase: 1, maxParallel: 2, caveman: 'full',
+    tasks: [{ id: 'T1', title: 'a', files: ['src/a.ts'] }],
+    neighbours: { T1: [{ path: 'src/b.ts', confidence: 0.5 }] },
+  })
+  const [prompt] = await captureAgentPrompts(src)
+  assert.match(prompt, /BLAST RADIUS/)
+})
+
+test('the blast radius tells a teammate to report blocked rather than edit a neighbour', async () => {
+  const src = await generatePhaseWorkflow({
+    runId: 'r1', phase: 1, maxParallel: 2,
+    tasks: [{ id: 'T1', title: 'a', files: ['src/a.ts'] }],
+    neighbours: { T1: [{ path: 'src/b.ts', confidence: 0.5 }] },
+  })
+  const [prompt] = await captureAgentPrompts(src)
+  assert.match(prompt, /report status "blocked" naming it rather than editing it/)
 })
 
 test('the generated source parses as a real module', async () => {

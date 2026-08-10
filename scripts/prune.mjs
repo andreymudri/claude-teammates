@@ -16,8 +16,46 @@
 
 const TASK_BRANCH = /^teammates\/([^/]+)\/([^/]+)$/
 
+// A merge preview is a detached worktree under the system temp directory, named tm-preview-*.
+// Its own cleanup runs in a `finally`, which a SIGKILL skips — so these accumulate, and every
+// one of them shows up in `doctor` as a worktree the operator never created. They belong to no
+// run and hold no branch, so reaping one strands no ref and loses no task context.
+//
+// TWO THINGS THIS CANNOT TELL, both of which the wording of any report must respect:
+//
+// 1. The name alone is not evidence. An operator may keep a deliberate detached worktree called
+//    tm-preview-notes anywhere on disk. Only location makes it ours, so the temp root is a
+//    required input: no temp root means identify NOTHING, never identify everything. The module
+//    stays pure — it does not import `node:os` — so the caller supplies the root it observed.
+// 2. Liveness is invisible in a worktree list. A gate running in another process RIGHT NOW holds
+//    a detached, branchless tm-preview-* worktree indistinguishable from a leaked one. Removing
+//    it under the running check fails that gate with missing files rather than a real verdict.
+//    No heuristic here can fix that — a mtime or a lock file would be a guess dressed as a fact.
+//    So what is identified is: belongs to no run, holds no branch, and is safe to remove ONLY
+//    when no gate is running. That last clause is the caller's to satisfy, and the rendered
+//    output says so rather than claiming a plain "safe to remove" it cannot verify.
+const PREVIEW_DIR = /[\\/]tm-preview-[^\\/]+$/
+
 function norm(p) {
   return String(p ?? '').replace(/\\/g, '/').replace(/\/+$/, '')
+}
+
+// Strictly inside, by whole segments: `/tmpx/...` is not under `/tmp`. An empty or missing root
+// is inside nothing, which is what turns a missing temp root into "identify nothing".
+function under(path, root) {
+  const r = norm(root)
+  if (!r) return false
+  return norm(path).startsWith(`${r}/`)
+}
+
+function isLeakedPreview(w, tempRoot) {
+  return Boolean(w) && Boolean(w.detached) && !w.branch && PREVIEW_DIR.test(norm(w.path)) && under(w.path, tempRoot)
+}
+
+export function leakedPreviews(worktrees = [], { tempRoot = null } = {}) {
+  return worktrees
+    .filter((w) => isLeakedPreview(w, tempRoot))
+    .map((w) => ({ path: w.path, head: w.head ?? null }))
 }
 
 export function selectPrunableWorktrees({
@@ -26,6 +64,7 @@ export function selectPrunableWorktrees({
   mainWorktree = null,
   taskPhases = null,
   passedPhases = [],
+  tempRoot = null,
 } = {}) {
   const prunable = []
   const skipped = []
@@ -39,6 +78,10 @@ export function selectPrunableWorktrees({
       skipped.push({ path: wt.path, reason: 'this is the main worktree; it is never pruned' })
       continue
     }
+    // Reported in `previews` instead, so it is not also reported as a refusal. Anything NOT
+    // identified as a preview keeps falling through to the refusals below — a worktree this
+    // command mentions in neither list is one the operator was never told about.
+    if (isLeakedPreview(wt, tempRoot)) continue
     if (!wt.branch) {
       skipped.push({ path: wt.path, reason: 'no branch checked out (detached); this run does not own it' })
       continue
@@ -71,15 +114,26 @@ export function selectPrunableWorktrees({
     prunable.push({ path: wt.path, branch: wt.branch, taskId })
   }
 
-  return { runId, prunable, skipped }
+  return { runId, prunable, skipped, previews: leakedPreviews(worktrees, { tempRoot }) }
 }
 
 export function renderPrunePlan(plan) {
   const lines = []
-  if (plan.prunable.length === 0) lines.push('nothing to prune')
-  else {
+  const previews = plan.previews ?? []
+  if (plan.prunable.length === 0) {
+    // "nothing to prune" above a list of worktrees `--yes` is about to remove is a summary that
+    // states as fact something false. When previews are present, say what is actually there.
+    lines.push(previews.length ? 'no run worktrees to prune; leaked merge previews were found:' : 'nothing to prune')
+  } else {
     lines.push(`prunable (${plan.prunable.length}):`)
     for (const w of plan.prunable) lines.push(`  ${w.taskId}  ${w.branch}  ${w.path}`)
+  }
+  if (previews.length) {
+    // Deliberately not "safe to remove". A worktree list cannot distinguish a leaked preview from
+    // the one a gate is using in another process right now, and removing that one fails the gate
+    // with missing files instead of a verdict. The condition is stated so the caller can check it.
+    lines.push(`leaked merge previews (${previews.length}) — each belongs to no run and holds no branch, and a killed gate skips its own cleanup, which is how they accumulate. Liveness cannot be told from a worktree list, so these are safe to remove only when no gate is running:`)
+    for (const p of plan.previews) lines.push(`  ${p.path}`)
   }
   if (plan.skipped.length) {
     lines.push('left alone:')

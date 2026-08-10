@@ -146,6 +146,7 @@ function fakeGit(overrides = {}) {
     commitsBetween: async () => [],
     commitParents: async () => [],
     isDirty: async () => false,
+    mergedBranchTips: async () => new Set(),
   }
   const git = { ...defaults, ...overrides }
   git.resolveRefCalls = resolveRefCalls
@@ -342,14 +343,103 @@ test('runFilesetCheck does not report an already-integrated branch as contributi
   const git = fakeGit({
     branchExists: async () => true,
     changedFiles: async () => [],
-    // Landed: on the run branch, and past the anchor rather than sitting at it.
     isAncestor: async (_sha, target) => target === 'runSha1',
+    // Landed: the run branch merged this branch in, naming its tip as a secondary parent.
+    // That, not ancestry, is what makes a branch integrated.
+    mergedBranchTips: async () => new Set([`refs/heads/${T1_BRANCH}-sha`]),
   })
   const check = { name: 'fileset', kind: 'fileset' }
   const ctx = { git, runId: RUN_ID, runSha: 'runSha1', anchorSha: 'anchorSha1', tasks: [T1_TASK], currentPhase: 1, phaseError: null }
   const res = await runFilesetCheck(check, ctx)
   assert.equal(res.status, 'pass')
   assert.deepEqual(res.branchShas, { [T1_BRANCH]: `refs/heads/${T1_BRANCH}-sha` })
+})
+
+// The enforcing counterpart of doctor's run-tip case. From phase 2 onward the run tip is past
+// the anchor, so a branch left exactly where `git checkout -B <task> <run branch>` put it
+// satisfies both halves of the landed test while carrying no work of its own — and this check
+// decides whether the phase may integrate.
+test('runFilesetCheck fails a branch parked at the run tip with no contribution', async () => {
+  const git = fakeGit({
+    branchExists: async () => true,
+    changedFiles: async () => [],
+    isAncestor: async (_sha, target) => target === 'runSha1',
+    resolveRef: async () => 'runSha1',
+  })
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = { git, runId: RUN_ID, runSha: 'runSha1', anchorSha: 'anchorSha1', tasks: [T1_TASK], currentPhase: 1, phaseError: null }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.match(res.output, /contributes no file changes/)
+})
+
+// The case the tip exclusion cannot see. The integrator merged a sibling after this branch was
+// created, so the run tip moved past the commit the branch is parked at: it is past the anchor,
+// it is not the tip, and it carries nothing. Only "was this branch merged in" tells it apart.
+test('runFilesetCheck fails a branch parked at an intermediate post-anchor commit', async () => {
+  const git = fakeGit({
+    branchExists: async () => true,
+    changedFiles: async () => [],
+    // Past the anchor and on the run branch, but NOT at its tip — so neither the anchor
+    // exclusion nor the tip exclusion fires, and only the merged-tips set tells it apart.
+    isAncestor: async (_sha, target) => target === 'runSha2',
+    resolveRef: async (ref) => (ref === 'refs/heads/run' ? 'runSha2' : 'midSha'),
+    mergedBranchTips: async () => new Set(['someOtherBranchTip']),
+  })
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = { git, runId: RUN_ID, runSha: 'runSha2', anchorSha: 'anchorSha1', tasks: [T1_TASK], currentPhase: 1, phaseError: null }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.match(res.output, /contributes no file changes/)
+})
+
+// One rev-list for the phase, not one per task.
+test('runFilesetCheck computes the merged-tips set once for the whole phase', async () => {
+  let calls = 0
+  const git = fakeGit({
+    branchExists: async () => true,
+    changedFiles: async () => [],
+    mergedBranchTips: async () => { calls += 1; return new Set() },
+  })
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = {
+    git, runId: RUN_ID, runSha: 'runSha1', anchorSha: 'anchorSha1',
+    tasks: [T1_TASK, { id: 'T2', phase: 1, files: ['b.mjs'] }], currentPhase: 1, phaseError: null,
+  }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.equal(calls, 1)
+})
+
+// The walk is only needed to excuse an empty diff. A phase where every branch carries work must
+// not pay for it, and must not be failed by it.
+test('runFilesetCheck does not walk the merged tips when every branch carries changes', async () => {
+  let calls = 0
+  const git = fakeGit({
+    branchExists: async () => true,
+    changedFiles: async () => ['a.mjs'],
+    mergedBranchTips: async () => { calls += 1; throw new GitError('must not be called') },
+  })
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = { git, runId: RUN_ID, runSha: 'runSha1', anchorSha: 'anchorSha1', tasks: [T1_TASK], currentPhase: 1, phaseError: null }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'pass')
+  assert.equal(calls, 0)
+})
+
+// Fail closed: with no answer about what the run branch merged, an empty branch must not be
+// excused as integrated.
+test('runFilesetCheck fails with the git error when the merged-tips walk fails', async () => {
+  const git = fakeGit({
+    branchExists: async () => true,
+    changedFiles: async () => [],
+    mergedBranchTips: async () => { throw new GitError('bad revision anchorSha1..runSha1') },
+  })
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = { git, runId: RUN_ID, runSha: 'runSha1', anchorSha: 'anchorSha1', tasks: [T1_TASK], currentPhase: 1, phaseError: null }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.match(res.output, /bad revision/)
 })
 
 test('runFilesetCheck fails when a task branch contributes no file changes', async () => {
@@ -820,7 +910,7 @@ function shaFor(ref) {
 }
 
 function refShapedFakeGit() {
-  const calls = { resolveRef: [], mergeBase: [], isAncestor: [], commitsBetween: [], changedFiles: [], commitParents: [], fileAtCommit: [] }
+  const calls = { resolveRef: [], mergeBase: [], isAncestor: [], commitsBetween: [], changedFiles: [], commitParents: [], fileAtCommit: [], mergedBranchTips: [] }
   const git = {
     async mergeBase(a, b) { calls.mergeBase.push([a, b]); return shaFor(`merge-base:${a}:${b}`) },
     async fileAtCommit(sha, filePath) { calls.fileAtCommit.push(sha); void filePath; return planMarkdown() },
@@ -830,6 +920,7 @@ function refShapedFakeGit() {
     async changedFiles({ base, branch }) { calls.changedFiles.push({ base, branch }); return [] },
     async commitsBetween({ from, to }) { calls.commitsBetween.push({ from, to }); return [shaFor('commit1')] },
     async commitParents(sha) { calls.commitParents.push(sha); return [shaFor('parent0'), shaFor('parent1')] },
+    async mergedBranchTips({ runSha, anchorSha }) { calls.mergedBranchTips.push({ runSha, anchorSha }); return new Set() },
     async isDirty() { return false },
   }
   return { git, calls }
@@ -859,6 +950,7 @@ test('every ref-shaped argument reaching git is a sha or a fully-qualified ref',
   assertAllShaped('commitsBetween', calls.commitsBetween.flatMap(({ from, to }) => [from, to]))
   assertAllShaped('changedFiles', calls.changedFiles.flatMap(({ base, branch }) => [base, branch]))
   assertAllShaped('commitParents', calls.commitParents)
+  assertAllShaped('mergedBranchTips', calls.mergedBranchTips.flatMap(({ runSha, anchorSha }) => [runSha, anchorSha]))
 
   assert.ok(calls.mergeBase.length > 0, 'mergeBase was never called')
   assert.ok(calls.isAncestor.length > 0, 'isAncestor was never called')
@@ -866,6 +958,7 @@ test('every ref-shaped argument reaching git is a sha or a fully-qualified ref',
   assert.ok(calls.changedFiles.length > 0, 'changedFiles was never called')
   assert.ok(calls.commitParents.length >= 0)
   assert.ok(calls.fileAtCommit.length > 0, 'fileAtCommit was never called')
+  assert.ok(calls.mergedBranchTips.length > 0, 'mergedBranchTips was never called')
 })
 
 // --- real-repo regressions: H2 (evil merge) and H3 (empty task branch) ----------------------
@@ -1019,6 +1112,137 @@ test('an empty task branch at the run tip does not read as integrated (real repo
 
     const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
     assert.notEqual(res.output, 'every phase in the plan is integrated')
+  })
+})
+
+// The shape no ancestry exclusion could see, against real git. T2 is parked at a commit that is
+// past the anchor, on the run branch, and no longer its tip — because the run tip moved on after
+// T2's ref was created. Ancestry says "landed" for all three of those facts; only the merge that
+// carried T1 (and never carried T2) tells them apart.
+test('a phase-1 branch parked at an intermediate post-anchor commit fails the fileset check (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+    const afterT1 = (await sh(['rev-parse', 'run'])).stdout.trim()
+
+    // T2's ref is created here and never moves — the stale-base shape.
+    await sh(['branch', 'teammates/r1/T2', afterT1])
+
+    // The run tip then moves past it: a sibling branch, outside the plan, is merged in. T2 is
+    // now parked at an INTERMEDIATE post-anchor commit — afterT1 is the FIRST parent of this
+    // merge, so nothing names it as a branch the run branch carried.
+    await sh(['checkout', '-b', 'sibling', afterT1])
+    await writeFile(path.join(root, 'c.txt'), 'c\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'sibling work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge sibling', 'sibling'])
+    assert.notEqual((await sh(['rev-parse', 'run'])).stdout.trim(), afterT1)
+
+    // The context is built directly rather than through deriveContext: deriveContext decides
+    // which phases are integrated by diffing each branch against the run ANCHOR, so a branch
+    // parked downstream of a sibling's merge shows that sibling's files and reads as integrated
+    // there. That is a separate question in a separate function, and this task does not change
+    // it; what is under test here is the fileset check's own landed test against real git.
+    const anchorSha = (await sh(['merge-base', 'main', 'run'])).stdout.trim()
+    const runSha = (await sh(['rev-parse', 'run'])).stdout.trim()
+    const ctx = {
+      git,
+      runId: 'r1',
+      runSha,
+      anchorSha,
+      tasks: [{ id: 'T1', phase: 1, files: ['a.mjs'] }, { id: 'T2', phase: 1, files: ['b.mjs'] }],
+      currentPhase: 1,
+      phaseError: null,
+    }
+    const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
+
+    assert.equal(res.status, 'fail')
+    assert.match(res.output, /T2: branch teammates\/r1\/T2 contributes no file changes/)
+    // T1 was genuinely merged in, so its empty diff is still excused.
+    assert.doesNotMatch(res.output, /T1:/)
+  })
+})
+
+// The merge-parent test subsumes the TIP exclusion but NOT the anchor exclusion, because this
+// plugin's own plan-amendment procedure merges the base branch into the run branch — so the base
+// tip is a secondary parent of a merge inside the range, and for a run whose amendments have all
+// landed, merge-base(base, run) IS that base tip. Without filtering, the anchor is a member of
+// the merged set, and a task branch parked at the anchor — a teammate that ran
+// `git checkout -B <task> <base>`, committed on some other ref, and left the conventional ref
+// empty — reads as merged and the phase integrates a no-op. This is the shape the old
+// `!isAncestor(sha, anchorSha)` clause caught, and an enforcing check must never get less strict.
+test('a task branch parked at the anchor still fails after a plan amendment merged the base in (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+    await writeFile(path.join(root, 'run.txt'), 'r1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'r1'])
+
+    // The plan amendment: the base advances, and the run branch merges it in.
+    await sh(['checkout', 'main'])
+    await writeFile(path.join(root, 'plan.md'), 'amended\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'amend the plan'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'merge: plan amendment', 'main'])
+
+    const anchorSha = (await sh(['merge-base', 'main', 'run'])).stdout.trim()
+    const runSha = (await sh(['rev-parse', 'run'])).stdout.trim()
+    assert.equal(anchorSha, (await sh(['rev-parse', 'main'])).stdout.trim(), 'fixture: the anchor is the base tip')
+
+    // The stale ref: created off the base, never moved, carrying nothing.
+    await sh(['branch', 'teammates/r1/T14', anchorSha])
+
+    const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, {
+      git, runId: 'r1', runSha, anchorSha,
+      tasks: [{ id: 'T14', phase: 1, files: ['a.mjs'] }], currentPhase: 1, phaseError: null,
+    })
+
+    assert.equal(res.status, 'fail')
+    assert.match(res.output, /T14: branch teammates\/r1\/T14 contributes no file changes/)
+  })
+})
+
+// The limit the comment above the landed test states, pinned so the comment is checkable rather
+// than merely plausible. A branch integrated by FAST-FORWARD carries real work, but leaves no
+// merge commit to name it and no diff past its own fork point, so it is indistinguishable from a
+// branch parked at that same commit and is failed. `tm-integrator`'s contract is `--no-ff` for
+// exactly this reason. If this test ever starts failing, the comment is what needs revisiting.
+test('a fast-forward-integrated branch is failed, not excused — the stated limit (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--ff-only', 'teammates/r1/T1'])
+
+    const anchorSha = (await sh(['merge-base', 'main', 'run'])).stdout.trim()
+    const runSha = (await sh(['rev-parse', 'run'])).stdout.trim()
+    const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, {
+      git, runId: 'r1', runSha, anchorSha,
+      tasks: [{ id: 'T1', phase: 1, files: ['a.mjs'] }], currentPhase: 1, phaseError: null,
+    })
+
+    assert.equal(res.status, 'fail')
+    assert.match(res.output, /contributes no file changes/)
   })
 })
 

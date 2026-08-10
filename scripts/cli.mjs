@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, rename, lstat, readdir, unlink } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parsePlan } from './plan-parser.mjs'
@@ -16,27 +16,62 @@ import { decideFix } from './fix-loop.mjs'
 import { runChecks, aggregateVerdict } from './gate-runner.mjs'
 import { renderDigest } from './digest.mjs'
 import { collectDoctorReport, renderDoctor } from './doctor.mjs'
-import { collectReviewResults, reviewFileName } from './reviews.mjs'
+import { collectReviewResults, reviewFileName, reviewStamp } from './reviews.mjs'
 import { generateReviewDispatch } from './review-gen.mjs'
 import { resolveTaskBranch } from './enforce.mjs'
 import { tmpdir } from 'node:os'
+import { realpathSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { validateLinkPaths } from './preview-links.mjs'
 import { planDrift, renderDrift } from './plan-drift.mjs'
-import { summarizeRun, renderRunSummary } from './finish.mjs'
+import { summarizeRun, renderRunSummary, suppliedForPhase, validateSuppliedPhases } from './finish.mjs'
 import { selectPrunableWorktrees, renderPrunePlan } from './prune.mjs'
 import { rebuildRunState } from './rebuild.mjs'
 import { generatePhaseWorkflow } from './workflow-gen.mjs'
 import { createGit, GitError, defaultGitExec } from './git.mjs'
+import { buildCoupling, neighboursOf, inventory, hotPairs, renderMap } from './codemap.mjs'
+import { mapNotesStale, mapNotesPrompt, mapNotesWritable } from './mapnotes.mjs'
 import { deriveContext } from './gate-runner.mjs'
 
-const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|config> [options]
+// The temp root as GIT would spell it, which is not what `os.tmpdir()` returns.
+//
+// `git worktree list` reports a worktree's resolved real path. `os.tmpdir()` reports whatever
+// TMPDIR/TEMP/TMP holds, and on both non-Linux CI runners those are a DIFFERENT spelling of the
+// same directory: macOS `/var` is a symlink to `/private/var`, and a Windows `TEMP` can be an 8.3
+// short name (`C:\Users\RUNNER~1\...`) for a path git names in long form. `under()` in prune.mjs
+// is a whole-segment string comparison over paths it cannot stat — deliberately, since that
+// module is pure — so a disagreeing spelling identified NO preview at all, and every preview test
+// went red on macOS and windows-latest while ubuntu passed.
+//
+// Resolving belongs here, in the caller, because here there is a filesystem to ask.
+//
+// `.native` and not the JS `realpathSync`: measured on Windows 10, the JS implementation returns
+// an 8.3 component unchanged (`...\Temp\LONGDI~1`) while `.native` expands it to the long name
+// git reports. `.native` is realpath(3) off Windows, so it resolves the macOS symlink too. The JS
+// one would have fixed macOS only, while reading as though it had fixed both.
+//
+// A failed resolution falls back to the unresolved value rather than throwing. The cost of not
+// resolving is that a preview goes UNIDENTIFIED, which leaves it on disk and reports it among the
+// refusals — the same non-destructive outcome as before this fix, and never a wider delete.
+// Aborting the whole prune because a temp directory could not be statted would be the worse trade.
+function resolvedTempRoot() {
+  const raw = tmpdir()
+  try {
+    return realpathSync.native(raw)
+  } catch {
+    return raw
+  }
+}
+
+const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|config> [options]
 
   init-run <planPath> --run <id> [--root <path>]
   doctor   --run <id> --plan <path> [--base <branch>] [--run-branch <name>] [--root <path>]
-  finish   --run <id> --plan <path> [--base <branch>] [--root <path>]
-  prune-run --run <id> --plan <path> [--base <branch>] [--yes] [--root <path>]
+  finish   --run <id> --plan <path> [--base <branch>] [--root <path>] [--results <path>] [--enforcement-only]
+  prune-run --run <id> --plan <path> [--base <branch>] [--yes] [--root <path>] [--results <path>] [--enforcement-only]
   rebuild-state --run <id> --plan <path> [--base <branch>] [--force] [--root <path>]
+  map      [--files <a,b>] [--commits <n>] [--top <n>] [--root <path>]
+  map-notes --run <id> [--root <path>] [--write <path>]
   plan-drift --run <id> --plan <path> [--base <branch>] [--root <path>]
   preview-check [--root <path>]
   review-dispatch --run <id> [--phase <name>] [--models <json>] [--root <path>]
@@ -62,7 +97,7 @@ const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflo
 // presence is the whole signal, so any value written after one is a spelling this CLI cannot
 // act on — see the refusal in parseFlags. Kept as a named set so the advice printed for a
 // rejected spelling can name a form that actually works, per flag.
-const VALUELESS_FLAGS = new Set(['no-fleet', 'local', 'yes', 'force'])
+const VALUELESS_FLAGS = new Set(['no-fleet', 'local', 'yes', 'force', 'enforcement-only'])
 
 // What to tell a caller who wrote a spelling this CLI does not take. It must never name a form
 // that fails — and for `--no-fleet` it must never name one that does the OPPOSITE of what the
@@ -146,7 +181,11 @@ async function readPackage(root) {
   }
 }
 
-const REQUIRED = {
+// Exported so the suite can DERIVE the command list rather than restate it. A hardcoded list
+// catches a command REMOVED from these tables and not one ADDED without an entry — and adding is
+// the direction that happens, which is how a 21st subcommand could swallow an unknown flag and
+// exit 0 with the suite green.
+export const REQUIRED = {
   'init-run': ['run'],
   gate: ['run', 'plan'],
   doctor: ['run', 'plan'],
@@ -160,6 +199,10 @@ const REQUIRED = {
   finish: ['run', 'plan'],
   'prune-run': ['run', 'plan'],
   'rebuild-state': ['run', 'plan'],
+  // Belongs to no run: it reads git history and the working tree, and answers a question about
+  // the repository rather than about a fleet.
+  map: [],
+  'map-notes': ['run'],
   digest: ['run'],
   claim: ['run', 'task', 'by'],
   unclaim: ['run', 'task'],
@@ -173,10 +216,178 @@ const REQUIRED = {
   config: [],
 }
 
+// Every flag each command actually reads. An unknown flag is refused rather than ignored: a
+// swallowed `workflow --commits 5000` exits 0 while the operator believes the coupling window
+// widened, which is the silent-wrong-answer class this CLI removes everywhere else. `parseFlags`
+// accepts any `--name`, so without this table a mistyped, renamed or hallucinated flag is
+// indistinguishable from one the command acts on.
+//
+// This is a WHITELIST, and a command absent from it is unchecked — so a new command must be
+// added here as well as to REQUIRED, or its flags go unvalidated. Every command this CLI
+// dispatches is listed, including the ones taking nothing at all.
+export const UNIVERSAL_FLAGS = new Set(['root'])
+export const KNOWN_FLAGS = {
+  'init-run': ['run'],
+  gate: ['run', 'plan', 'base', 'phase', 'no-fleet', 'results'],
+  doctor: ['run', 'plan', 'base', 'run-branch'],
+  digest: ['run'],
+  claim: ['run', 'task', 'by'],
+  unclaim: ['run', 'task'],
+  workflow: ['run', 'phase', 'models', 'plan', 'base'],
+  complete: ['run', 'task', 'plan', 'base', 'phase'],
+  fix: ['run', 'phase', 'verdict'],
+  'record-fix-round': ['run', 'phase', 'task'],
+  'review-dispatch': ['run', 'phase', 'models'],
+  'collect-reviews': ['run', 'phase'],
+  'preview-check': [],
+  'plan-drift': ['run', 'plan', 'base'],
+  finish: ['run', 'plan', 'base', 'results', 'enforcement-only'],
+  'prune-run': ['run', 'plan', 'base', 'yes', 'results', 'enforcement-only'],
+  'rebuild-state': ['run', 'plan', 'base', 'force'],
+  map: ['files', 'commits', 'top'],
+  'map-notes': ['run', 'write'],
+  config: ['local'],
+}
+
+function unknownFlags(command, flags) {
+  const known = KNOWN_FLAGS[command]
+  if (!known) return []
+  const allowed = new Set([...known, ...UNIVERSAL_FLAGS])
+  return Object.keys(flags).filter((f) => !allowed.has(f))
+}
+
 // Commands whose `--phase` names a numeric plan phase, not a manifest phase key. `gate` is
 // deliberately absent: its `--phase` is a NAME (`default`, `integration`) that selects a
 // block of checks from teammates.gate.json.
 const NUMERIC_PHASE_COMMANDS = new Set(['workflow', 'fix', 'record-fix-round'])
+
+// Every command that accepts caller-supplied check results. `gate` takes a flat list for the one
+// phase it computes; `finish` and `prune-run` recompute every phase, so theirs is keyed by phase.
+const RESULTS_COMMANDS = new Set(['gate', 'finish', 'prune-run'])
+
+// `finish` and `prune-run` recompute every phase, and a `command` check is the expensive part of
+// every one of them: on a run with three phases and a test suite per phase, `finish` costs three
+// full suites to answer "is this run finished", and `prune-run` has timed out at 120s deciding
+// whether a directory could be deleted. `--enforcement-only` asks the narrower question those
+// two callers usually mean — does the enforcement still hold — and pays only for the checks that
+// answer it.
+//
+// Only `command` checks are dropped. Everything else runs exactly as it otherwise would: the
+// always-enforced kinds (`fileset`, `ownership`, and the `merge` result `runChecks` computes for
+// itself) are the point of the flag, and a manifest kind with no runner must still land as the
+// blocking `pending` it always was rather than disappear from the list.
+//
+// Every dropped check is recorded as `skip` — never omitted, and never `pass`. `aggregateVerdict`
+// collects skips and both callers below print them by name, because a verdict that hides which
+// checks did not run is worse than a slow one. It follows that this flag can report PASS where a
+// full run would have reported FAIL: that is what it buys, and the printed skip list is the only
+// thing that says so.
+//
+// Two guards keep that trade from becoming a lie, because a `skip` result is still a result and
+// `aggregateVerdict` counts it toward the fail-closed "at least one check ran" clause that stops
+// a self-generated result reading as a verified phase:
+//
+//   - `enforcementOnlyRefusal` below refuses the whole invocation for a phase that declares no
+//     enforcement check at all. Without it, a manifest of nothing but a failing `command` check
+//     produced "phase 1 PASS   skipped: test" and then "the run branch is ready to land", exit 0,
+//     where the identical state without the flag exits 1 — a run declared landable having
+//     verified nothing.
+//   - `prune-run` below refuses to PRUNE any phase whose verdict rests on a check THIS FLAG
+//     skipped. A cheap verdict is enough to report; it is never enough to run
+//     `git worktree remove --force` over a teammate's uncommitted work.
+const ENFORCEMENT_ONLY_SKIP = 'skipped by --enforcement-only: this verdict reports the enforcement checks, not whether the merged tree works'
+
+// Marks a `skip` this flag synthesised, as opposed to one that arrived any other way. Three
+// sources produce a `skip`, and they are not the same act:
+//
+//   - this flag, which drops a check the caller did not ask about and nobody ran;
+//   - `--results`, where `skip` is one of the three statuses a caller may supply — a deliberate
+//     assertion that the check did not run and that they accept it, which is evidence given, not
+//     evidence missing;
+//   - `runChecks` itself, which skips `command` checks when the phase does not merge; there the
+//     `merge` check fails, so the phase never reaches a PASS to be pruned on anyway.
+//
+// Only the first is this flag's business. Refusing to prune on any of the three made a supplied
+// `skip` unprunable with no remedy the caller could follow — they never passed the flag they were
+// told to drop, and the only way forward would have been rewriting their `skip` as a `pass`.
+const ENFORCEMENT_ONLY_SKIPPED = Symbol('skipped by --enforcement-only')
+
+// The enforcement kinds a manifest can actually declare. `merge` is deliberately absent even
+// though it is enforced: the gate computes it for itself, `aggregateVerdict` excludes it from the
+// same "something was verified" clause for exactly that reason, and a manifest entry claiming it
+// finds no runner and lands as a blocking pending. So a phase whose only enforced kind were
+// `merge` has declared no enforcement, and counting it here would reopen the hole this closes.
+const MANIFEST_ENFORCED_KINDS = new Set(['fileset', 'ownership'])
+
+// Returns the refusal message when `--enforcement-only` cannot answer for some phase, or null.
+// Checked before a single check runs, so the caller learns the flag is the wrong tool for this
+// manifest rather than reading a verdict that was never grounded in anything.
+function enforcementOnlyRefusal(config, phases) {
+  const barren = phases.filter((p) => !checksForPhase(config, String(p)).some((c) => MANIFEST_ENFORCED_KINDS.has(c.kind)))
+  if (barren.length === 0) return null
+  return `--enforcement-only cannot answer for phase ${barren.join(', ')}: `
+    + `that phase's manifest declares no ${[...MANIFEST_ENFORCED_KINDS].join(' or ')} check, so dropping its command checks would leave nothing verified at all.`
+    + ' Re-run without --enforcement-only, or declare an enforcement check for it.'
+}
+
+function commandChecks(checks) {
+  return checks.filter((c) => c.kind === 'command')
+}
+
+async function runPhaseChecks(checks, ctx, enforcementOnly) {
+  if (!enforcementOnly) return runChecks(checks, ctx)
+  const results = await runChecks(checks.filter((c) => c.kind !== 'command'), ctx)
+  return [
+    ...results,
+    // `optional` is read off the manifest exactly as gate-runner's own `checkResult` reads it, so
+    // every result in the list has the same shape whoever built it. It changes no verdict here:
+    // `aggregateVerdict` reads `optional` only for `fail` and `pending`, never for `skip`.
+    // Set for consistency, not for consequence.
+    ...commandChecks(checks).map((c) => ({
+      name: c.name,
+      kind: c.kind,
+      status: 'skip',
+      output: ENFORCEMENT_ONLY_SKIP,
+      optional: c.optional === true,
+      // A symbol, not a string field: `--results` is parsed from JSON, which cannot express one,
+      // so no supplied result can ever claim to be a skip this flag synthesised. `aggregateVerdict`
+      // reports skips by name only, so the marker is read off the results list directly.
+      [ENFORCEMENT_ONLY_SKIPPED]: true,
+    })),
+  ]
+}
+
+// Printed once, before the first check runs, when the command checks are NOT being skipped. An
+// operator about to wait several minutes should be told that is what is happening and that a
+// cheaper answer exists, rather than watching a silent process and reaching for the timeout.
+//
+// Two independent conditions, kept separate because they answer different questions:
+//
+//   - `checkCount === 0` silences the line entirely. It exists to explain a wait, and with
+//     nothing to wait for it explained nothing. This is not the "a skipped check is always
+//     reported" rule — no check is being hidden here; there is no check.
+//   - `recommendEnforcementOnly` decides only the tail. Whether the wait is worth explaining and
+//     whether the cheaper route exists are unrelated: a manifest of nothing but `command` checks
+//     has a real wait to explain AND is exactly the barren shape `enforcementOnlyRefusal` exits 2
+//     on, so it must be told about the wait and not sent to a flag that would refuse it. Gating
+//     the recommendation on the count instead only reached manifests with no command checks,
+//     which is the one case where the line is never printed at all.
+function announceCommandChecks(io, command, checkCount, phaseCount, recommendEnforcementOnly) {
+  if (checkCount === 0) return
+  io.out(
+    `${command}: running ${checkCount} command check${checkCount === 1 ? '' : 's'}`
+    + ` across ${phaseCount} phase${phaseCount === 1 ? '' : 's'} — this is the slow part;`
+    + (recommendEnforcementOnly
+      ? ' pass --enforcement-only to skip them and report the enforcement checks alone'
+      : ' --enforcement-only cannot shorten it, because no phase declares an enforcement check to report instead'),
+  )
+}
+
+// A phase reports the checks it did not run, every time, whatever put them in that state:
+// `--enforcement-only` here, and the merge-conflict skip `runChecks` produces on its own.
+function reportSkipped(io, phase, verdict) {
+  for (const name of verdict.skipped ?? []) io.out(`phase ${phase}: skipped: ${name}`)
+}
 
 // A skill branches on this CLI's exit code. A missing argument must produce the usage
 // message and exit 2, never an unhandled TypeError and a stack trace.
@@ -189,6 +400,17 @@ const NUMERIC_PHASE_COMMANDS = new Set(['workflow', 'fix', 'record-fix-round'])
 // `gate --no-fleet` never derives anything from git, so it never reads `--plan` and never
 // records anything under `--run` — requiring either would only teach a caller to invent a
 // throwaway value to get past this check. Solo drops both from the requirement.
+// A window flag written with no value parses as boolean `true`, and `Number(true)` is 1 — so
+// `map --commits` would answer, exit 0, and have read a ONE-COMMIT history. Everywhere else in
+// this CLI `flags[f] === true` means "the argument is missing" (see missingArgs, and --models);
+// this keeps that rule intact by refusing anything that is not a string before coercing, and
+// returning NaN so the caller's single positive-integer guard reports it like any other typo.
+function numericWindow(value, fallback) {
+  if (value === undefined) return fallback
+  if (typeof value !== 'string') return NaN
+  return Number(value)
+}
+
 function missingArgs(command, flags, positional) {
   // `=== true`, not `!== undefined`: solo mode is entered only by the one spelling that means
   // it. parseFlags already refuses `--no-fleet <value>` outright, and this is the second half
@@ -220,7 +442,11 @@ function missingArgs(command, flags, positional) {
   // the gate's own `if (flags.results)` truthiness test, which skipped the supplied-results
   // block entirely and exited 1 on the still-pending checks with nothing said about the flag.
   // Both spellings of one mistake now get one answer, exactly as `--root` already does.
-  if (command === 'gate'
+  //
+  // `finish` and `prune-run` take the same flag, in the same per-phase spelling, so they get the
+  // same refusal: three commands reading one flag must not disagree about what a valueless one
+  // means, or the two that skip it silently report a run finished on evidence nobody supplied.
+  if (RESULTS_COMMANDS.has(command)
     && (flags.results === true || (typeof flags.results === 'string' && flags.results.trim() === ''))) {
     missing.push('--results <path>')
   }
@@ -396,6 +622,164 @@ export function mergeSuppliedResults(rawResults, supplied) {
       source: s.source ?? 'response',
     }
   })
+}
+
+// The per-phase counterpart of `gate`'s `--results` read. Same three answers: no flag means no
+// supplied evidence, an unreadable or malformed file is refused BY NAME, and a shape that is not
+// `{ phases: { "<n>": { results: [...] } } }` is refused with the shape it expected. Only the
+// SHAPE is checked here — which results may be supplied at all is `validateSuppliedResults`'s
+// rule, and it is applied per phase against that phase's own manifest block.
+const SUPPLIED_REJECTED = Symbol('supplied phase results rejected')
+
+async function readSuppliedPhases(flags, io) {
+  // A valueless or empty `--results` never reaches here: missingArgs rejects it as the missing
+  // argument it is, rather than letting this truthiness test silently drop the flag.
+  if (!flags.results) return null
+  let parsed
+  try {
+    parsed = JSON.parse(await readFile(flags.results, 'utf8'))
+  } catch (err) {
+    io.out(`--results ${flags.results} could not be read as JSON: ${err.message}`)
+    return SUPPLIED_REJECTED
+  }
+  const invalid = validateSuppliedPhases(parsed)
+  if (invalid) {
+    io.out(invalid)
+    return SUPPLIED_REJECTED
+  }
+  return parsed
+}
+
+// A supplied block keyed to a phase the run does not have is read by NOBODY: evidence is looked
+// up with `suppliedForPhase(supplied, phase)` for phases taken from the plan, so a key naming no
+// real phase is never consulted — including one carrying a `command` result, which under a real
+// phase is refused with exit 2. An operator with a typo'd phase key would otherwise get a pending
+// report and no hint their evidence was discarded.
+//
+// Reported, never refused. Dropping the block is already the safe direction — unmatched evidence
+// changes no verdict — so this exists only so the output stops lying by omission.
+function reportUnmatchedSuppliedPhases(io, supplied, phases) {
+  const byPhase = supplied?.phases
+  if (!byPhase || typeof byPhase !== 'object') return
+  const real = new Set(phases.map((p) => String(p)))
+  const unmatched = Object.keys(byPhase).filter((key) => !real.has(key))
+  if (unmatched.length === 0) return
+  io.out(
+    `--results supplies evidence for phase ${unmatched.join(', ')}, which this run does not have`
+    + ` (its phases are ${phases.join(', ') || 'none'}) — that evidence was not used`,
+  )
+}
+
+// How deep the link sweep below will walk. A `preview.link` entry is a repo-relative directory
+// path, so a handful of segments covers every shape the manifest can declare; reaching the limit
+// means a tree this cannot vouch for, and it THROWS rather than returning quietly — a partial
+// sweep followed by a removal is the exact failure the sweep exists to prevent.
+const PREVIEW_LINK_MAX_DEPTH = 12
+
+// Remove the links a merge preview was provisioned with, before the worktree itself is removed.
+//
+// `git worktree remove --force` FOLLOWS a junction: verified against a throwaway fixture on
+// Windows — a junction created inside a worktree with fs.symlink(target, link, 'junction'), which
+// is exactly what scripts/preview-links.mjs creates, exits 0 and deletes THE CONTENTS OF THE LINK
+// TARGET. On an operator's machine that target is the repository's real `node_modules`, wiped by
+// `prune-run --yes`. `rm -rf` has the same behaviour and is no safer.
+//
+// This is not a rare shape. A leaked preview is BY CONSTRUCTION one whose `teardownLinks` never
+// ran — scripts/merge-preview.mjs runs it in a `finally`, which a SIGKILL skips — so a leaked
+// preview is precisely the case most likely to still hold its junctions.
+//
+// The sweep is the caller's own: it never follows a link (every entry is `lstat`ed, and only a
+// real directory is descended into), so nothing outside the preview tree is ever read or written.
+// Any failure propagates, and the caller must leave that worktree in place: an unremovable link
+// is a reason not to remove the worktree, never a footnote under a removal that happened anyway.
+async function unlinkPreviewLinks(dir, depth = 0) {
+  if (depth > PREVIEW_LINK_MAX_DEPTH) {
+    throw new Error(`nested deeper than ${PREVIEW_LINK_MAX_DEPTH} levels at ${dir}, so its links cannot be accounted for`)
+  }
+  let removed = 0
+  for (const name of await readdir(dir)) {
+    const entry = path.join(dir, name)
+    // lstat, never stat: a junction or symlink must be seen as itself. `stat` reports the TARGET's
+    // type, which is how a link to a directory reads as a directory and gets descended into.
+    const info = await lstat(entry)
+    if (info.isSymbolicLink()) {
+      await unlink(entry)
+      removed += 1
+      continue
+    }
+    if (info.isDirectory()) removed += await unlinkPreviewLinks(entry, depth + 1)
+  }
+  return removed
+}
+
+// "The preview root is not there at all", told apart from every other sweep failure.
+//
+// It is a state that really occurs: scripts/merge-preview.mjs removes the directory after
+// `git.removeWorktree(dir).catch(() => {})`, so a removal that failed leaves the worktree
+// registered with its directory gone, and a temp cleaner produces the same state unaided.
+// `git worktree list --porcelain` still reports that path, so it still enters `plan.previews`,
+// and the sweep's `readdir` then throws ENOENT. Treated as a failed sweep, that deadlocks:
+// `prune-run --yes` exits 1 on every subsequent run and the stale registration — which
+// `git worktree remove --force` clears happily, missing directory and all — can never be
+// cleared. The printed reason would be false as well: a directory that is not there holds no
+// links to sweep, so nothing is being left in place to protect a link target.
+//
+// Narrow on purpose, and BOTH clauses carry weight — each is on the destructive path, because a
+// `true` here skips the `continue` and lets `git worktree remove --force` run with the preview's
+// junctions still in place, which deletes the CONTENTS of their targets:
+//
+//   - only ENOENT. An EACCES, EPERM or EBUSY `readdir` on the preview root is a directory that IS
+//     there and could not be read, so its links are unaccounted for and it must block.
+//   - only on the ROOT the sweep was asked to walk. An ENOENT deeper in the tree is a directory
+//     disappearing mid-sweep — exactly the concurrent mutation a worktree must not be removed on
+//     top of — and it says nothing about whether the root's own links were swept.
+//
+// Exported so each clause can be pinned on its own. The end-to-end tests can only construct a
+// sweep failure that trips one clause at a time by accident (the depth guard's plain Error has no
+// `.path`; an ENOENT deep in the tree is a race no test can stage deterministically), so deleting
+// either clause left the whole suite green — a test passing for the wrong reason.
+export function isMissingPreviewRoot(err, dir) {
+  return Boolean(err)
+    && err.code === 'ENOENT'
+    && typeof err.path === 'string'
+    && path.resolve(err.path) === path.resolve(dir)
+}
+
+// The task branches of a phase, resolved to the shas they stand at right now. This is what a
+// review stamp names: findings describe a diff, and a diff is only identified by its tips.
+function tasksOfPhase(plan, phaseName) {
+  // `--phase` names the MANIFEST key, as it does for `gate`. When it is also a plan phase number
+  // the branches narrow to that phase; when it is not, every task branch of the run is in scope,
+  // which is the honest reading of "this manifest phase's diff".
+  const phaseNumber = Number(phaseName)
+  return Number.isInteger(phaseNumber)
+    ? (plan.tasks ?? []).filter((t) => t.phase === phaseNumber)
+    : (plan.tasks ?? [])
+}
+
+async function resolveBranchShas(git, tasks, runId) {
+  const branchShas = {}
+  for (const task of tasks) {
+    const branch = resolveTaskBranch(task, runId)
+    // Through refs/heads/, so a tag named like a branch cannot stand in for one — the same
+    // resolution rule deriveContext uses for the anchor.
+    if (branch && await git.branchExists(branch)) branchShas[branch] = await git.resolveRef(`refs/heads/${branch}`)
+  }
+  return branchShas
+}
+
+// What the reviewer is told to carry back. The stamp is rendered into the prompt rather than left
+// implicit: a field the dispatch declares and the prompt never mentions is a field no reviewer
+// ever writes, and `collect-reviews` would then refuse every file for want of a stamp nobody
+// asked for.
+function stampInstruction(stamp) {
+  return [
+    'Include this exact object under a "stamp" key in the JSON you write and return:',
+    `    ${JSON.stringify(stamp)}`,
+    'It names the branch tips these findings judged. collect-reviews refuses a findings file whose'
+    + ' stamp names different tips: a fix round moves a branch, and findings about the old tree are'
+    + ' not findings about this one.',
+  ].join('\n')
 }
 
 async function derive(root, runId, flags) {
@@ -639,7 +1023,59 @@ async function isTracked(root, file) {
   }
 }
 
+// `git ls-files` reports paths relative to the CURRENT DIRECTORY, while `git log --name-only`
+// reports them relative to the REPOSITORY ROOT. `map` reads both and keys one against the other,
+// so run anywhere below the root the two halves stopped being the same namespace: a file 100%
+// coupled by history was reported as "no coupled files found", and the overview printed
+// root-relative pairs beside cwd-relative directory rows. The prefix that reconciles them is what
+// git itself calls it — `rev-parse --show-prefix` — and everything cwd-relative, including the
+// caller's own --files argument, is lifted through it before any key is compared.
+//
+// This lives here rather than in scripts/git.mjs deliberately: it is a fix to how `map` composes
+// two existing primitives, not a new primitive.
+async function repoPrefix(root) {
+  const { code, stdout, stderr } = await defaultGitExec(['rev-parse', '--show-prefix'], root)
+  if (code !== 0) {
+    throw new GitError(`git rev-parse --show-prefix failed: ${stderr.trim() || `exit ${code}`}`)
+  }
+  // Exactly one trailing newline is git's framing; a directory name may legally end in
+  // whitespace, so nothing else is trimmed.
+  return stdout.replace(/\n$/, '')
+}
+
+function toRepoPath(prefix, p) {
+  const joined = `${prefix}${String(p).replace(/\\/g, '/')}`
+  if (joined === '') return joined
+  const normalized = path.posix.normalize(joined)
+  return normalized.startsWith('./') ? normalized.slice(2) : normalized
+}
+
+// A directory name taken from the repository is attacker-controlled data — a branch, a PR, a
+// vendored dependency can all introduce one — and `map-notes` interpolates it into a prompt under
+// the line "dispatch an Explore agent with exactly this prompt". Unlike the implementer brief,
+// nothing downstream bounds what that agent then does, so the hint is restricted to what a
+// directory name in a normal repository actually looks like: '/'-separated plain path segments.
+// A name carrying a newline, a control character, quoting, or the whitespace and punctuation that
+// let it read as a new instruction is DROPPED rather than escaped — the hint is orientation, and
+// orientation is worth exactly nothing next to a prompt-injection foothold. Surviving names still
+// render, so the signal is narrowed, never removed.
+const PLAIN_SEGMENT = /^[A-Za-z0-9._+@-]+$/
+export function promptSafeDirectories(dirs = []) {
+  return dirs.filter((dir) => {
+    if (typeof dir !== 'string' || dir === '' || dir.length > 120) return false
+    const segments = dir.split('/')
+    return segments.length <= 8 && segments.every((s) => PLAIN_SEGMENT.test(s))
+  })
+}
+
 export async function runCli(argv, io = { out: console.log }) {
+  // Two channels, not one. `io.out` carries the ANSWER a command was asked for — and for
+  // `workflow` that answer is a JavaScript module a caller redirects into a file. Anything
+  // that is commentary about how the answer was produced has to leave by another door, or a
+  // single advisory line becomes the first statement of the generated source and the command
+  // that promised never to fail the dispatch is what fails it. A caller supplying only `out`
+  // keeps working: `err` defaults to console.error, exactly as `out` defaults to console.log.
+  io = { err: console.error, ...io }
   const [command, ...rest] = argv
   const { flags, positional, rejected } = parseFlags(rest)
   // Refused before EVERYTHING else — before the required-argument check, before any command
@@ -667,6 +1103,17 @@ export async function runCli(argv, io = { out: console.log }) {
   }
   const root = flags.root ?? process.cwd()
   const runId = flags.run
+
+  // Before the required-argument check and before any command body, for the same reason the
+  // rejected spellings are: a flag this command does not read must never reach a guard that
+  // acts on a DIFFERENT flag. Reported by name, so the caller sees which of its arguments the
+  // command was never going to act on rather than a bare usage dump.
+  const strays = unknownFlags(command, flags)
+  if (strays.length > 0) {
+    io.out(`${command} does not take ${strays.map((f) => `--${f}`).join(', ')}`)
+    io.out(USAGE)
+    return 2
+  }
 
   if (REQUIRED[command]) {
     const missing = missingArgs(command, flags, positional)
@@ -881,10 +1328,30 @@ export async function runCli(argv, io = { out: console.log }) {
     }
     if (retier) await writeState(root, runId, 'plan', plan)
 
+    // Coupling is recomputed here rather than read from anywhere: it is a statistic about the
+    // repository as it stands, and a stored one would be a second source of truth about a number
+    // nobody can check. A failure to read history is not a failure to dispatch — a brief without
+    // a blast radius is the brief this command emitted until now, so it degrades to that and says so.
+    const neighbours = {}
+    try {
+      const coupling = buildCoupling(await createGit({ cwd: root }).commitFileSets({ limit: 500 }))
+      for (const task of phaseTasks) {
+        const near = neighboursOf(coupling, task.files ?? [], { top: 5 })
+        if (near.length > 0) neighbours[task.id] = near
+      }
+    } catch (err) {
+      if (!(err instanceof GitError)) throw err
+      // stderr, not stdout: stdout is the generated workflow source, and a caller redirects it
+      // straight into a file it then runs. A notice printed there would be a syntax error in the
+      // dispatch — turning "a history failure never fails the dispatch" into its exact opposite.
+      io.err(`could not compute the blast radius (${err.message}); briefs will carry no coupling section`)
+    }
+
     const src = await generatePhaseWorkflow({
       runId,
       phase,
       tasks: phaseTasks,
+      neighbours,
       maxParallel: resolved.maxParallel,
       tierModels,
       planPath,
@@ -920,6 +1387,38 @@ export async function runCli(argv, io = { out: console.log }) {
       ? flags['run-branch']
       : await git.currentBranch()
 
+    // The anchor is what tells an INTEGRATED branch from an empty one: both have an empty diff
+    // against their own fork point, and only `past the anchor, on the run branch, and not the run
+    // tip itself` separates them. Without these two arguments `collectDoctorReport` leaves
+    // `landed` false for every task, so every merged branch is reported as NO CHANGES — the
+    // report's loudest problem, on the run's healthiest state.
+    //
+    // Taken from `derive`, so this reads the same anchor the gate enforces at rather than a
+    // second computation that could disagree with it. It is allowed to FAIL: `doctor` must keep
+    // working in the states the gate refuses to run in — the main worktree parked on the base
+    // branch, a plan not committed at the anchor — which are exactly the moments an operator
+    // needs it. When it fails, the report degrades to its previous behaviour and says so; a
+    // silent degradation would leave the reader believing an integrated branch carries nothing.
+    let anchorSha = null
+    let derivedRunSha = null
+    let anchorNote = null
+    const relPlan = path.isAbsolute(flags.plan)
+      ? path.relative(root, flags.plan).split(path.sep).join('/')
+      : flags.plan
+    try {
+      const derived = await derive(root, runId, { ...flags, plan: relPlan })
+      // `--run-branch` names a branch that may not be the one `derive` computed from, and an
+      // anchor for a different branch is not this report's anchor. Refused rather than mixed.
+      if (derived.runBranch === runBranch) {
+        anchorSha = derived.anchorSha
+        derivedRunSha = derived.runSha
+      } else {
+        anchorNote = `the report is about ${runBranch} but the main worktree is on ${derived.runBranch}`
+      }
+    } catch (err) {
+      anchorNote = err.message
+    }
+
     let report
     try {
       report = await collectDoctorReport({
@@ -929,6 +1428,8 @@ export async function runCli(argv, io = { out: console.log }) {
         baseBranch: await resolveBaseBranch(git, flags.base),
         tasks,
         repoRoot: root,
+        anchorSha,
+        runSha: derivedRunSha,
       })
     } catch (err) {
       if (!(err instanceof GitError)) throw err
@@ -936,6 +1437,12 @@ export async function runCli(argv, io = { out: console.log }) {
       return 2
     }
     io.out(renderDoctor(report))
+    if (anchorNote) {
+      io.out(
+        `note: could not derive the run anchor (${anchorNote}) — an integrated branch is reported`
+        + ' above as having no changes, because without the anchor nothing tells the two apart',
+      )
+    }
     // 1 on problems, mirroring the gate, so a caller can branch on the exit code. It is still
     // a report: nothing is recorded, and no verdict is issued or implied.
     return report.problems.length === 0 ? 0 : 1
@@ -1000,6 +1507,12 @@ export async function runCli(argv, io = { out: console.log }) {
     if (config === GATE_CONFIG_REJECTED) return 2
     if (!config) { io.out(`no ${GATE_FILE} — without a gate there is no passing phase, so nothing is prunable`); return 4 }
 
+    // The same evidence `finish` takes, for the same reason: a phase whose only outstanding check
+    // is a review no runner can run would otherwise never be prunable, however many times it was
+    // actually reviewed.
+    const supplied = await readSuppliedPhases(flags, io)
+    if (supplied === SUPPLIED_REJECTED) return 2
+
     let ctx
     try {
       ctx = { cwd: root, previewLink: previewLinks(config), ...(await derive(root, runId, flags)) }
@@ -1011,10 +1524,52 @@ export async function runCli(argv, io = { out: console.log }) {
     // Which phases hold a passing gate is RECOMPUTED, never read from `status.gates`. That file
     // is written by the agents whose worktrees are about to be removed, and a phase marked PASS
     // there is exactly how a fix round would lose the context it still needs.
+    const enforcementOnly = flags['enforcement-only'] === true
+    const phases = [...new Set((ctx.tasks ?? []).map((t) => t.phase))].sort((a, b) => a - b)
+    reportUnmatchedSuppliedPhases(io, supplied, phases)
+    // Computed either way: it decides whether the flag is refused, and — when it was not passed —
+    // whether the announcement should recommend it at all.
+    const refusal = enforcementOnlyRefusal(config, phases)
+    if (enforcementOnly) {
+      if (refusal) { io.out(refusal); return 2 }
+    } else {
+      const total = phases.reduce((n, p) => n + commandChecks(checksForPhase(config, String(p))).length, 0)
+      announceCommandChecks(io, 'prune-run', total, phases.length, refusal === null)
+    }
+
     const passedPhases = []
-    for (const phase of [...new Set((ctx.tasks ?? []).map((t) => t.phase))].sort((a, b) => a - b)) {
-      const results = await runChecks(checksForPhase(config, String(phase)), { ...ctx, currentPhase: phase })
-      if (aggregateVerdict(results).verdict === 'PASS') passedPhases.push(phase)
+    for (const phase of phases) {
+      const checks = checksForPhase(config, String(phase))
+      const forPhase = suppliedForPhase(supplied, phase)
+      const invalid = validateSuppliedResults(forPhase, checks)
+      if (invalid) { io.out(`phase ${phase}: ${invalid}`); return 2 }
+      const results = mergeSuppliedResults(await runPhaseChecks(checks, { ...ctx, currentPhase: phase }, enforcementOnly), forPhase)
+      const verdict = aggregateVerdict(results)
+      // This command reports a verdict only as a phase's presence in the prune plan below, so
+      // without this the checks that did not run would leave no trace in the output at all.
+      reportSkipped(io, phase, verdict)
+      // A PASS resting on a check THIS FLAG dropped does not authorise a deletion. `--yes` below
+      // runs `git worktree remove --force`, which discards whatever a teammate has not committed
+      // and removes the worktree a `retry` needs to resume that teammate — and unlike a wrong
+      // report, that is not recoverable by running the command again with better flags. The same
+      // rule that makes this command recompute rather than read `status.gates` (see above)
+      // applies to its own cheap mode: prune on evidence, never on an absence of it.
+      //
+      // Scoped to this flag's own skips, and to nothing else. A `skip` supplied through
+      // `--results` is evidence the caller gave deliberately, and blocking on it offered a remedy
+      // they could not follow — see ENFORCEMENT_ONLY_SKIPPED for the three sources and why only
+      // one of them is this command's business.
+      if (verdict.verdict !== 'PASS') continue
+      const flagSkipped = results.filter((r) => r[ENFORCEMENT_ONLY_SKIPPED] === true).map((r) => r.name)
+      if (flagSkipped.length > 0) {
+        io.out(
+          `phase ${phase} is not prunable: --enforcement-only left ${flagSkipped.length} check(s) unrun`
+          + ` (${flagSkipped.join(', ')}), and a worktree is removed only on checks that ran.`
+          + ' Re-run without --enforcement-only to prune it.',
+        )
+        continue
+      }
+      passedPhases.push(phase)
     }
 
     const git = createGit({ cwd: root })
@@ -1027,6 +1582,12 @@ export async function runCli(argv, io = { out: console.log }) {
       mainWorktree: worktrees[0]?.path ?? null,
       taskPhases: Object.fromEntries((ctx.tasks ?? []).map((t) => [t.id, t.phase])),
       passedPhases,
+      // The module stays pure and takes no view of where the system temp directory is, so the
+      // caller supplies the root it observed. Without it, NOTHING is identified as a leaked
+      // preview — a `tm-preview-*` worktree an operator keeps elsewhere on disk is theirs.
+      // Resolved, not raw: git reports real paths, and the raw spelling misses every preview on
+      // macOS and Windows. See resolvedTempRoot.
+      tempRoot: resolvedTempRoot(),
     })
     io.out(renderPrunePlan(plan))
 
@@ -1049,6 +1610,59 @@ export async function runCli(argv, io = { out: console.log }) {
         io.out(`could not remove ${w.path}: ${err.message}`)
       }
     }
+
+    // The leaked merge previews, reaped last and by a different route. They are NOT in `prunable`
+    // — the `continue` in selectPrunableWorktrees that keeps them out is a deliberate second
+    // barrier, so that a bug in this loop can never reach a worktree holding a task branch.
+    //
+    // Every one is stripped of its provisioned links FIRST. `git worktree remove --force` follows
+    // a junction into its target and deletes the contents (see unlinkPreviewLinks), and a leaked
+    // preview is exactly the one whose own teardown never ran, so it is exactly the one still
+    // holding those junctions. A preview whose links cannot be removed is LEFT IN PLACE and
+    // reported: an accumulated worktree costs disk, and the alternative costs the operator their
+    // repository's build inputs.
+    //
+    // WHAT THIS SWEEP DOES AND DOES NOT CLOSE. It closes the junction hazard for a preview whose
+    // owner is DEAD — the links it finds are the ones a killed gate's `finally` never tore down,
+    // and they are gone before anything is removed. It does NOT close it for a LIVE preview: a
+    // gate running right now holds a detached, branchless tm-preview-* worktree that is
+    // indistinguishable by name and location from a leaked one (see scripts/prune.mjs), so a
+    // live preview is classified as leaked, and a junction its owner creates in the window
+    // BETWEEN this sweep and the removal below is still followed. Satisfying "no gate is
+    // running" remains the caller's precondition, unchecked here.
+    //
+    // WHAT THE PATTERN MATCHES, since the reaper is force-removing directories nobody named:
+    // every detached, branchless worktree registered in this repository whose path lies under
+    // the system temp root and whose final segment begins `tm-preview-`. That includes one an
+    // operator created deliberately and left uncommitted work in — the leaf name is the whole
+    // test. The dry run is the default and the plan is printed before anything is removed, so
+    // the operator sees each path before `--yes`.
+    for (const p of plan.previews ?? []) {
+      try {
+        await unlinkPreviewLinks(p.path)
+      } catch (err) {
+        // Registered but not on disk: no links exist to sweep, and the removal below is what
+        // clears the registration. Blocking on it would deadlock the command forever — see
+        // isMissingPreviewRoot.
+        if (!isMissingPreviewRoot(err, p.path)) {
+          failed += 1
+          io.out(
+            `left ${p.path} in place: its provisioned links could not be removed (${err.message}),`
+            + ' and `git worktree remove --force` deletes the CONTENTS of a junction\'s target',
+          )
+          continue
+        }
+        io.out(`${p.path} is registered but its directory is gone: nothing to sweep, clearing the registration`)
+      }
+      try {
+        await git.removeWorktree(p.path)
+        io.out(`removed leaked preview ${p.path}`)
+      } catch (err) {
+        if (!(err instanceof GitError)) throw err
+        failed += 1
+        io.out(`could not remove ${p.path}: ${err.message}`)
+      }
+    }
     return failed > 0 ? 1 : 0
   }
 
@@ -1056,6 +1670,12 @@ export async function runCli(argv, io = { out: console.log }) {
     const config = await resolveGateConfig(root, io)
     if (config === GATE_CONFIG_REJECTED) return 2
     if (!config) { io.out(`no ${GATE_FILE} — there is nothing to verify a phase against`); return 4 }
+
+    // Read once, before any phase is computed, so a malformed file is refused before minutes of
+    // check-running rather than after. Never persisted and never read back from `.teammates/`:
+    // it fills in this run's pending checks and nothing else.
+    const supplied = await readSuppliedPhases(flags, io)
+    if (supplied === SUPPLIED_REJECTED) return 2
 
     let ctx
     try {
@@ -1069,6 +1689,21 @@ export async function runCli(argv, io = { out: console.log }) {
     // written by the agents being enforced, so a phase deleted from that file would simply not
     // be verified — the check would report on whatever remained and call the run finished.
     const phases = [...new Set((ctx.tasks ?? []).map((t) => t.phase))].sort((a, b) => a - b)
+    reportUnmatchedSuppliedPhases(io, supplied, phases)
+
+    const enforcementOnly = flags['enforcement-only'] === true
+    // Computed either way: it decides whether the flag is refused, and — when it was not passed —
+    // whether the announcement should recommend it at all.
+    const refusal = enforcementOnlyRefusal(config, phases)
+    if (enforcementOnly) {
+      // Before any check runs, and before any phase reaches the summary below: a phase with no
+      // enforcement check left to run would otherwise be summarised PASS on nothing but its own
+      // skips, and reported as "ready to land".
+      if (refusal) { io.out(refusal); return 2 }
+    } else {
+      const total = phases.reduce((n, p) => n + commandChecks(checksForPhase(config, String(p))).length, 0)
+      announceCommandChecks(io, 'finish', total, phases.length, refusal === null)
+    }
 
     const phaseResults = []
     for (const phase of phases) {
@@ -1078,8 +1713,15 @@ export async function runCli(argv, io = { out: console.log }) {
       // by `fileset`, and skipping is what "verify the whole run" must never do.
       const phaseCtx = { ...ctx, currentPhase: phase }
       const checks = checksForPhase(config, String(phase))
-      const results = await runChecks(checks, phaseCtx)
-      phaseResults.push({ phase, verdict: aggregateVerdict(results) })
+      // Per phase, against that phase's own manifest block — evidence for phase 1 can never
+      // satisfy phase 3, and a supplied result still may not name a computed check.
+      const forPhase = suppliedForPhase(supplied, phase)
+      const invalid = validateSuppliedResults(forPhase, checks)
+      if (invalid) { io.out(`phase ${phase}: ${invalid}`); return 2 }
+      const results = mergeSuppliedResults(await runPhaseChecks(checks, phaseCtx, enforcementOnly), forPhase)
+      // `supplied` is carried into the summary so a reader can tell a recomputed pass from a
+      // reported one. It changes no verdict: aggregateVerdict stays the only producer of those.
+      phaseResults.push({ phase, supplied: forPhase.length > 0, verdict: aggregateVerdict(results) })
     }
 
     io.out(renderRunSummary(runId, phaseResults))
@@ -1088,6 +1730,10 @@ export async function runCli(argv, io = { out: console.log }) {
     // 1 for a phase that was verified and failed; 4 for one that was never verified at all.
     // Same split the output makes, so a caller branching on the code and a human reading the
     // table reach the same conclusion.
+    //
+    // `--enforcement-only` cannot reach here with a phase in the second state wearing the first
+    // state's answer: the refusal above exits 2 unless every phase still has an enforcement check
+    // to run, so a phase summarised below always had something actually verify it.
     return summary.failedPhases.length > 0 ? 1 : 4
   }
 
@@ -1121,6 +1767,172 @@ export async function runCli(argv, io = { out: console.log }) {
     // how a plan is meant to evolve mid-run, and exiting 1 for it would train a caller to
     // ignore the exit code for the case that actually costs something.
     return report.tooLate.length > 0 ? 1 : 0
+  }
+
+  if (command === 'map') {
+    const git = createGit({ cwd: root })
+    // Both windows are validated the same way and for the same reason: `Number('lots')` is NaN,
+    // and NaN reaching either `--max-count` or `slice` produces a plausible-looking answer to a
+    // question nobody asked. A typo must exit, never quietly change the result.
+    const limit = numericWindow(flags.commits, 500)
+    if (!Number.isInteger(limit) || limit <= 0) {
+      io.out('--commits takes a positive whole number of commits to read')
+      return 2
+    }
+    const top = numericWindow(flags.top, 5)
+    if (!Number.isInteger(top) || top <= 0) {
+      io.out('--top takes a positive whole number of files to report')
+      return 2
+    }
+    // `--files` written with no value is `true`, not a string — the same orchestrator mistake
+    // `--commits` and `--top` already refuse, and refused here for a stronger reason than theirs:
+    // falling through, it asked git a question with `flags.files.split` and died with a raw
+    // TypeError, and once that was guarded by truthiness alone it fell through to the WHOLE-
+    // REPOSITORY OVERVIEW and exited 0. A caller that asked "what does my file set put at risk"
+    // must never be answered with a repository summary and a success code.
+    let requestedFiles = null
+    if (typeof flags.files !== 'undefined') {
+      requestedFiles = typeof flags.files === 'string'
+        ? flags.files.split(',').map((f) => f.trim()).filter(Boolean)
+        : []
+      if (requestedFiles.length === 0) {
+        io.out('--files takes a comma-separated list of paths to report the blast radius for')
+        return 2
+      }
+    }
+    let sets
+    let paths
+    let prefix
+    try {
+      sets = await git.commitFileSets({ limit })
+      prefix = await repoPrefix(root)
+      paths = (await git.listFiles()).map((p) => toRepoPath(prefix, p))
+    } catch (err) {
+      if (!(err instanceof GitError)) throw err
+      io.out(`cannot read the repository: ${err.message}`)
+      return 2
+    }
+    const coupling = buildCoupling(sets)
+
+    // A file set turns this from an overview into the one question an implementer has: what does
+    // my change put at risk. Answered for the whole set at once, because that is what a task holds.
+    if (requestedFiles !== null) {
+      // Lifted into the same repo-root namespace the coupling keys live in, so a path the caller
+      // wrote relative to --root still matches the history when --root is not the repository root.
+      const files = requestedFiles.map((f) => toRepoPath(prefix, f))
+      const near = neighboursOf(coupling, files, { top })
+      if (near.length === 0) {
+        io.out(`no coupled files found for ${files.join(', ')} in the last ${limit} commits — new files, or a shallow history`)
+        return 0
+      }
+      for (const n of near) io.out(`${String(Math.round(n.confidence * 100)).padStart(3)}%  ${n.path}`)
+      return 0
+    }
+
+    io.out(renderMap({ inventory: inventory(paths), hotPairs: hotPairs(coupling), usedCommits: coupling.usedCommits }))
+    return 0
+  }
+
+  if (command === 'map-notes') {
+    const git = createGit({ cwd: root })
+    const notesPath = path.join(runDir(root, runId), 'map.md')
+    let sha
+    try {
+      sha = await git.headSha()
+    } catch (err) {
+      if (!(err instanceof GitError)) throw err
+      io.out(`cannot read the repository: ${err.message}`)
+      return 2
+    }
+
+    // The orchestrator's half of the inverted map-notes contract: the dispatched agent is
+    // read-only and RETURNS the map, the caller saves that text somewhere, and this is the one
+    // path that turns it into `.teammates/<runId>/map.md`. Without it the orchestrator writes
+    // that file by hand and `mapNotesWritable` — the validator that exists precisely so the
+    // stamped file can be vouched for — is never called by anything.
+    //
+    // Still not a path by which this CLI authors a map: it copies text an agent produced, after
+    // checking the header the agent was handed still names this run and this commit. A map that
+    // fails that check must not land at all, because every later reader treats the header as
+    // provenance, and a file written past a failed validation would manufacture exactly the
+    // fact this design refuses to fake.
+    if (flags.write !== undefined) {
+      // Valueless `--write` is the missing argument it looks like, not a request to write
+      // nothing. Same rule as everywhere else in this CLI: `flags[f] === true` means the value
+      // was omitted. REQUIRED cannot express "required only when present", so it is checked here.
+      if (flags.write === true) {
+        io.out('--write takes the path of the file holding the map the agent returned')
+        return 2
+      }
+      const source = path.resolve(root, flags.write)
+      let returned
+      try {
+        returned = await readFile(source, 'utf8')
+      } catch (err) {
+        io.out(`cannot read the returned map at ${source}: ${err.code ?? err.message}`)
+        return 4
+      }
+      const refusal = mapNotesWritable(returned, { runId, sha })
+      // Verbatim, and nothing is written. The reason names the mismatch it found — which commit,
+      // which run, or a missing body — and that is what tells the caller whether to re-dispatch
+      // the agent or to re-save what it already returned.
+      if (refusal) { io.out(refusal); return 4 }
+      // Written through a uniquely-named temp file and renamed, the same way `writeState` writes
+      // every other file under `.teammates/`: a reader must never find a half-written map under
+      // a header that vouches for the whole of it.
+      const tmp = `${notesPath}.${process.pid}.${Math.floor(performance.now() * 1000)}.tmp`
+      try {
+        await mkdir(path.dirname(notesPath), { recursive: true })
+        await writeFile(tmp, returned, 'utf8')
+        await rename(tmp, notesPath)
+      } catch (err) {
+        // The destination can be unwritable for the same reasons the read path two blocks below
+        // already handles deliberately — map.md is a directory (EISDIR, and EPERM out of
+        // `rename`), permissions (EACCES) — and from the caller's side they are one situation:
+        // the map did not land. Left to throw, this produced an unhandled-rejection stack and
+        // exit 1, a code this CLI's documented 0/2/4 contract does not include.
+        //
+        // The temp file goes with it. It is scaffolding for an operation that did not happen,
+        // and leaving it in the run directory hands a later reader a file it cannot interpret.
+        await unlink(tmp).catch(() => {})
+        io.out(`the map notes at ${notesPath} could not be written (${err.code ?? err.message}), so nothing was written`)
+        return 4
+      }
+      io.out(`wrote the returned map to ${notesPath} for run ${runId} at commit ${sha}`)
+      return 0
+    }
+
+    // ENOENT is the ordinary case — no notes yet. But every other read failure (map.md is a
+    // directory: EISDIR; permissions: EACCES) is the SAME situation from the caller's side:
+    // there are no notes it can use. Rethrowing produced a raw stack and exit 1, which is not a
+    // code any caller branches on, so an unusable file has to arrive as the documented 4 with
+    // the prompt — naming the read failure, so an operator can tell it from an empty file.
+    let text = null
+    let readFailure = null
+    try {
+      text = await readFile(notesPath, 'utf8')
+    } catch (err) {
+      if (err.code !== 'ENOENT') readFailure = `the map notes at ${notesPath} could not be read (${err.code ?? err.message}), so nothing says which commit they describe`
+    }
+
+    const stale = readFailure ?? mapNotesStale(text, { runId, sha })
+    if (!stale) { io.out(`current map notes: ${notesPath}`); return 0 }
+
+    // 4, matching `complete` and `collect-reviews`: this cannot verify what it was asked about.
+    // The prompt is printed so the caller dispatches an Explore agent rather than writing prose
+    // itself — and a teammate never writes this file.
+    io.out(stale)
+    io.out('')
+    io.out('dispatch an Explore agent with exactly this prompt:')
+    io.out('')
+    let topDirectories = []
+    try {
+      topDirectories = promptSafeDirectories(inventory(await git.listFiles(), { top: 8 }).rows.map((r) => r.dir))
+    } catch (err) {
+      if (!(err instanceof GitError)) throw err
+    }
+    io.out(mapNotesPrompt({ runId, sha, notesPath, topDirectories }))
+    return 4
   }
 
   if (command === 'preview-check') {
@@ -1196,21 +2008,12 @@ export async function runCli(argv, io = { out: console.log }) {
 
     const plan = await readState(root, runId, 'plan')
     if (!plan) { io.out(`no plan for run ${runId}`); return 4 }
-    // `--phase` here names the MANIFEST key, as it does for `gate`. When it is also a plan
-    // phase number the branches narrow to that phase; when it is not (a named manifest phase),
-    // every task branch of the run is under review, which is the honest reading of "this
-    // manifest phase's diff".
-    const phaseNumber = Number(phaseName)
-    const planTasks = Number.isInteger(phaseNumber)
-      ? (plan.tasks ?? []).filter((t) => t.phase === phaseNumber)
-      : (plan.tasks ?? [])
 
     const git = createGit({ cwd: root })
-    const branches = []
-    for (const task of planTasks) {
-      const branch = resolveTaskBranch(task, runId)
-      if (branch && await git.branchExists(branch)) branches.push(branch)
-    }
+    // Resolved to shas as well as names: the stamp each reviewer carries back names the tips it
+    // judged, and `collect-reviews` compares that against the tips as they stand then.
+    const branchShas = await resolveBranchShas(git, tasksOfPhase(plan, phaseName), runId)
+    const branches = Object.keys(branchShas)
     if (branches.length === 0) {
       // Refused rather than emitted: reviewers dispatched over branches that do not exist grade
       // an empty diff and report no findings, which is indistinguishable from a clean review.
@@ -1239,7 +2042,13 @@ export async function runCli(argv, io = { out: console.log }) {
       io.out(err.message)
       return 4
     }
-    io.out(JSON.stringify(spec, null, 2))
+    // The stamp is per lens, because that is what identifies one reviewer's file: the same tips
+    // reviewed through two lenses produce two files, and each must be attributable to its own.
+    const reviewers = spec.reviewers.map((r) => {
+      const stamp = reviewStamp({ phase: phaseName, lens: r.lens, branchShas })
+      return { ...r, stamp, prompt: `${r.prompt}\n\n${stampInstruction(stamp)}` }
+    })
+    io.out(JSON.stringify({ ...spec, reviewers }, null, 2))
     return 0
   }
 
@@ -1278,7 +2087,9 @@ export async function runCli(argv, io = { out: console.log }) {
         // an empty review — the distinction this whole command exists to preserve.
         const found = Array.isArray(parsed) ? parsed : parsed?.findings
         if (!Array.isArray(found)) { unreadable.push(name); continue }
-        files.push({ lens, findings: found })
+        // The stamp travels with the findings. A file that carries none is not "probably
+        // current" — `reviewStale` refuses it, which is the whole point of stamping.
+        files.push({ lens, findings: found, stamp: Array.isArray(parsed) ? undefined : parsed?.stamp })
       } catch (err) {
         // ENOENT is a missing lens, reported below by name. Anything else is a file that
         // exists and cannot be trusted, which must never be read as "no findings".
@@ -1291,12 +2102,47 @@ export async function runCli(argv, io = { out: console.log }) {
       return 4
     }
 
+    // What the findings must have judged: the phase's task branches as they stand NOW. A fix
+    // round moves a branch, and findings about the old tree are not findings about this one —
+    // during run `codemap` that was worked around three times by deleting the files by hand
+    // between rounds.
+    const plan = await readState(root, runId, 'plan')
+    if (!plan) {
+      io.out(`no plan for run ${runId} — nothing says which branch tips this phase is at, and a findings file that cannot be vouched for is not a review`)
+      return 4
+    }
+    let branchShas
+    try {
+      branchShas = await resolveBranchShas(createGit({ cwd: root }), tasksOfPhase(plan, phaseName), runId)
+    } catch (err) {
+      if (!(err instanceof GitError)) throw err
+      io.out(`cannot read this phase's task branches: ${err.message}`)
+      return 4
+    }
+    if (Object.keys(branchShas).length === 0) {
+      // The mirror of `review-dispatch`'s refusal: with no branch there was no diff to review,
+      // so any file claiming to have reviewed one describes something else entirely.
+      io.out(`no task branch of phase ${phaseName} exists — there was no diff to review`)
+      return 4
+    }
+    const expected = reviewStamp({ phase: phaseName, lens: null, branchShas })
+
     const collected = collectReviewResults({
       checkName: check.name,
       lenses: check.lens,
       files,
       blockOn: check.blockOn ?? ['high'],
+      // `lens` is filled in per file by collectReviewResults; phase and branches are the run's.
+      expected: { phase: phaseName, branches: expected.branches },
     })
+    if (collected.stale.length > 0) {
+      // Reported the way `missing` is, and for the same reason: a stale review is a review this
+      // phase does not have. Recording a pass on it would be a verdict about another tree.
+      for (const s of collected.stale) {
+        io.out(`stale findings for lens ${s.lens}: ${s.reason} — respawn that review rather than recording a pass`)
+      }
+      return 4
+    }
     if (collected.unexpected.length > 0) {
       io.out(`ignored findings file(s) for lens(es) this phase did not dispatch: ${collected.unexpected.join(', ')}`)
     }

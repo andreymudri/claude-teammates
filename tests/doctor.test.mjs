@@ -1,6 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import { collectDoctorReport, renderDoctor } from '../scripts/doctor.mjs'
+import { GitError, createGit, defaultGitExec } from '../scripts/git.mjs'
 
 const RUN_ID = 'r1'
 const RUN_BRANCH = 'run/r1'
@@ -22,9 +26,14 @@ function fakeGit(overrides = {}) {
     changedFiles: async () => ['a.mjs'],
     commitSubject: async () => 'abc1234 did the work',
     isAncestor: async () => false,
+    mergedBranchTips: async () => new Set(),
   }
   return { ...defaults, ...overrides }
 }
+
+// The tip the default resolveRef gives T1's branch, which is what a merge of T1 would name as
+// its secondary parent.
+const T1_TIP = 'refs/heads/teammates/r1/T1-sha'
 
 test('a healthy run reports every task as contributing and finds no problems', async () => {
   const report = await collectDoctorReport({
@@ -145,4 +154,184 @@ test('renderDoctor says so plainly when nothing is wrong', () => {
     dirty: [], worktrees: [], tasks: [], problems: [],
   })
   assert.match(out, /no problems/i)
+})
+
+test('a branch that landed on the run branch is reported integrated, not as contributing nothing', async () => {
+  const report = await collectDoctorReport({
+    git: fakeGit({
+      changedFiles: async () => [],
+      isAncestor: async (_sha, target) => target === 'runSha1',
+      // The run branch merged this branch in: its tip is named as a secondary parent. That,
+      // not ancestry, is now what makes a branch integrated.
+      mergedBranchTips: async () => new Set([T1_TIP]),
+    }),
+    runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, tasks: [T1],
+    runSha: 'runSha1', anchorSha: 'anchorSha1',
+  })
+  assert.equal(report.tasks[0].landed, true)
+  assert.deepEqual(report.problems, [])
+})
+
+// The distinction the landed test exists for: a branch sitting AT the anchor is an ancestor of
+// the run branch too, and it is exactly the stale-base shape.
+test('a branch parked at the anchor is still reported as contributing nothing', async () => {
+  const report = await collectDoctorReport({
+    git: fakeGit({ changedFiles: async () => [], isAncestor: async () => true }),
+    runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, tasks: [T1],
+    runSha: 'runSha1', anchorSha: 'anchorSha1',
+  })
+  assert.equal(report.tasks[0].landed, false)
+  assert.match(report.problems.join('\n'), /no file changes/)
+})
+
+// From phase 2 onward the run tip is past the anchor, so a branch parked at the tip satisfies
+// both halves of the landed test while carrying no work of its own. This is the shape the
+// emptiness complaint exists for, and it must not read as integrated.
+test('a branch parked at the current run tip is not landed', async () => {
+  const report = await collectDoctorReport({
+    git: fakeGit({
+      changedFiles: async () => [],
+      // Ancestor of the run tip, not of the anchor: the run-tip-parked shape.
+      isAncestor: async (_sha, target) => target === 'runSha1',
+      resolveRef: async () => 'runSha1',
+    }),
+    runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, tasks: [T1],
+    runSha: 'runSha1', anchorSha: 'anchorSha1',
+  })
+  assert.equal(report.tasks[0].landed, false)
+  assert.match(report.problems.join('\n'), /no file changes/)
+})
+
+// The case neither ancestry exclusion could see. The integrator merged a sibling after this
+// branch was created, so the run tip moved past the commit the branch is parked at: it is past
+// the anchor, it is not the tip, and it carries nothing. Only "was this branch merged in" tells
+// it apart from a genuinely integrated branch.
+test('a branch parked at an intermediate post-anchor commit is not landed', async () => {
+  const report = await collectDoctorReport({
+    git: fakeGit({
+      changedFiles: async () => [],
+      resolveRef: async (ref) => (ref === `refs/heads/${RUN_BRANCH}` ? 'runSha2' : 'midSha'),
+      // Past the anchor and on the run branch, but not its tip.
+      isAncestor: async (_sha, target) => target === 'runSha2',
+      mergedBranchTips: async () => new Set(['someOtherBranchTip']),
+    }),
+    runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, tasks: [T1],
+    runSha: 'runSha2', anchorSha: 'anchorSha1',
+  })
+  assert.equal(report.tasks[0].landed, false)
+  assert.match(report.problems.join('\n'), /no file changes/)
+})
+
+test('a caller may supply the merged-tips set as data, and then no git call is made for it', async () => {
+  const git = fakeGit({
+    changedFiles: async () => [],
+    mergedBranchTips: async () => { throw new Error('must not be called when the caller supplies the set') },
+  })
+  const report = await collectDoctorReport({
+    git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, tasks: [T1],
+    runSha: 'runSha1', anchorSha: 'anchorSha1', mergedTips: new Set([T1_TIP]),
+  })
+  assert.equal(report.tasks[0].landed, true)
+  assert.deepEqual(report.problems, [])
+})
+
+// One rev-list for the whole run. Asking per task turns a report over ten tasks into ten walks.
+test('the merged-tips set is computed once per report, not once per task', async () => {
+  let calls = 0
+  const report = await collectDoctorReport({
+    git: fakeGit({
+      changedFiles: async () => [],
+      mergedBranchTips: async () => { calls += 1; return new Set() },
+    }),
+    runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, tasks: [T1, T2],
+    runSha: 'runSha1', anchorSha: 'anchorSha1',
+  })
+  assert.equal(calls, 1)
+  assert.equal(report.tasks.length, 2)
+})
+
+// An un-wired caller supplies no anchor. It must keep getting the old behaviour rather than a
+// walk against a missing bound.
+test('with no anchorSha nothing is landed and the merged-tips walk is never run', async () => {
+  let calls = 0
+  const report = await collectDoctorReport({
+    git: fakeGit({
+      changedFiles: async () => ['a.mjs'],
+      mergedBranchTips: async () => { calls += 1; return new Set([T1_TIP]) },
+    }),
+    runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, tasks: [T1],
+    runSha: 'runSha1',
+  })
+  assert.equal(calls, 0)
+  assert.equal(report.tasks[0].landed, false)
+})
+
+// A failed walk is a GitError like any other: it becomes a reported problem, not a crash, and
+// not a silent "nothing landed" that would turn every integrated task into a false complaint.
+test('a failing merged-tips walk is reported as a problem rather than thrown', async () => {
+  const report = await collectDoctorReport({
+    git: fakeGit({
+      changedFiles: async () => [],
+      mergedBranchTips: async () => { throw new GitError('bad revision anchorSha1..runSha1') },
+    }),
+    runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, tasks: [T1],
+    runSha: 'runSha1', anchorSha: 'anchorSha1',
+  })
+  assert.match(report.problems.join('\n'), /bad revision/)
+})
+
+// Against real git rather than a fake, because the defect this pins lives in what real rev-list
+// output CONTAINS: a plan amendment merges the base into the run branch, so the base tip is a
+// secondary parent of a merge inside the range, and for a run whose amendments have landed the
+// anchor IS that base tip. A branch parked at the anchor must still be reported as contributing
+// nothing — the counterpart of the same fixture in tests/gate-runner.test.mjs, kept in step
+// because the two files compute this the same way.
+test('a branch parked at the anchor is reported as a problem after a plan amendment (real repo)', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-doctor-'))
+  const sh = (args) => defaultGitExec(args, root)
+  try {
+    await sh(['init', '--initial-branch=main'])
+    await sh(['config', 'user.email', 'test@example.com'])
+    await sh(['config', 'user.name', 'test'])
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+    await writeFile(path.join(root, 'run.txt'), 'r1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'r1'])
+    await sh(['checkout', 'main'])
+    await writeFile(path.join(root, 'plan.md'), 'amended\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'amend the plan'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'merge: plan amendment', 'main'])
+
+    const anchorSha = (await sh(['merge-base', 'main', 'run'])).stdout.trim()
+    const runSha = (await sh(['rev-parse', 'run'])).stdout.trim()
+    await sh(['branch', 'teammates/r1/T14', anchorSha])
+
+    const report = await collectDoctorReport({
+      git: createGit({ cwd: root }),
+      runId: RUN_ID, runBranch: 'run', baseBranch: 'main',
+      tasks: [{ id: 'T14', phase: 1, files: ['a.mjs'] }],
+      anchorSha, runSha,
+    })
+
+    assert.equal(report.tasks[0].landed, false)
+    assert.match(report.problems.join('\n'), /T14: branch teammates\/r1\/T14 has no file changes/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('renderDoctor prints integrated rather than NO CHANGES for a landed task', () => {
+  const out = renderDoctor({
+    runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, mainBranch: RUN_BRANCH,
+    dirty: [], worktrees: [],
+    tasks: [{ id: 'T1', branch: 'teammates/r1/T1', exists: true, tip: 'abc work', changed: [], sideDoor: false, landed: true }],
+    problems: [],
+  })
+  assert.match(out, /integrated/)
+  assert.doesNotMatch(out, /NO CHANGES/)
 })

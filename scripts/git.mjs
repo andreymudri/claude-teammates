@@ -5,6 +5,17 @@ export class GitError extends Error {}
 // Where the Claude Code harness creates agent worktrees, relative to the repo root.
 const HARNESS_WORKTREES = /^\.claude\//
 
+// Record separator for commitFileSets' `git log --name-only -z` stream. It has to be a token no
+// tracked path can ever equal, because the paths and the separator arrive in the same NUL-framed
+// stream with nothing else to tell them apart. A bare word cannot do it: with "commit" as the
+// marker, a repository tracking a file literally named "commit" reported that one commit as two,
+// dropped the path, and truncated the path that followed it (git prefixes the first path of each
+// commit with "\n", so the next token got its first character eaten). A trailing slash makes the
+// marker unforgeable by construction rather than by luck: a git tree entry name cannot contain
+// "/" at all, so no path git ever reports ends with one. Exported so the tests assert against
+// this exact token instead of restating it.
+export const COMMIT_MARKER = 'commit/'
+
 // argv array, shell: false. Branch names reach git as a single argv entry, so a name
 // containing shell metacharacters is data, never a command.
 export function defaultGitExec(args, cwd) {
@@ -152,6 +163,57 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
       if (code === 1) return false
       throw new GitError(`git ${args.join(' ')} failed: ${stderr.trim() || `exit ${code}`}`)
     },
+    // Every tracked path, for the inventory half of the map. `-z` with core.quotePath=false so a
+    // path containing a space, a quote or a non-ASCII character comes back as written rather than
+    // as git's escaped display form.
+    async listFiles() {
+      const out = await run(['-c', 'core.quotePath=false', 'ls-files', '-z'])
+      return out.split('\0').filter(Boolean)
+    },
+    // One entry per commit, each the list of paths that commit touched, newest first. The record
+    // separator is an explicit marker rather than a blank line: a commit that touched no file at
+    // all (an empty commit, a pure merge) would otherwise be indistinguishable from the gap
+    // between two commits, and dropping it silently changes every support count derived from it.
+    //
+    // --no-renames for the same reason changedFiles uses it: with rename detection on, git reports
+    // only the post-image, so the pre-image path looks untouched in the commit that removed it.
+    //
+    // Confirmed against real `git log -z --name-only --format=%x00commit%x00` output (see
+    // scripts/git.mjs test fixtures): with -z, git NUL-delimits paths rather than joining them
+    // with newlines. Splitting on '\0' therefore already yields one token per path, verbatim and
+    // unquoted (core.quotePath=false), with two exceptions that are artifacts of git's own framing,
+    // not part of any path: (1) every token between one commit's NUL-delimited path list and the
+    // next '\0commit\0' marker is an empty string — a real path is never empty, so empty tokens are
+    // always framing and are dropped; (2) git prepends a single literal '\n' before the FIRST path
+    // of a commit's name-list only (a stand-in for the blank line that separates the commit header
+    // from its file list when -z is not used) — subsequent paths in the same commit carry no such
+    // prefix. Stripping exactly that one leading character from exactly the first path token — never
+    // trimming, never splitting on interior newlines — is what lets a path with a leading or
+    // trailing space, or an embedded newline, round-trip byte for byte, matching listFiles().
+    async commitFileSets({ limit = 500 } = {}) {
+      if (!Number.isInteger(limit) || limit <= 0) {
+        throw new GitError(`commitFileSets requires a positive integer limit, got ${JSON.stringify(limit)}`)
+      }
+      const out = await run([
+        '-c', 'core.quotePath=false', 'log', `--max-count=${limit}`,
+        '--no-renames', '--name-only', `--format=%x00${COMMIT_MARKER}%x00`, '-z', 'HEAD', '--',
+      ])
+      const sets = []
+      let current = null
+      let atFirstPath = false
+      for (const token of out.split('\0')) {
+        if (token === COMMIT_MARKER) { if (current) sets.push(current); current = []; atFirstPath = true; continue }
+        if (current === null) continue
+        if (token === '') continue
+        // Only the first path of a commit carries git's synthetic leading "\n", and only when it
+        // is really there: a path may itself begin with "\n", and stripping unconditionally would
+        // corrupt it. Every later path in the commit is passed through untouched.
+        current.push(atFirstPath && token.startsWith('\n') ? token.slice(1) : token)
+        atFirstPath = false
+      }
+      if (current) sets.push(current)
+      return sets
+    },
     async commitSubject(ref) {
       if (!isNonEmptyString(ref)) {
         throw new GitError(`commitSubject requires a non-empty ref, got ${JSON.stringify(ref)}`)
@@ -187,6 +249,56 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
       // for instance) is a failure and must not read as a clean "no".
       if (code === 1) return false
       throw new GitError(`git ${args.join(' ')} failed: ${stderr.trim() || `exit ${code}`}`)
+    },
+    // The set of shas the run branch merged IN as secondary parents, past the anchor — that is,
+    // the tips of the branches this run's integrator actually carried onto the run branch.
+    //
+    // Ancestry cannot answer that question. "Is this sha reachable from the run branch" is true
+    // of every commit the run branch has ever passed through, including the one a teammate's ref
+    // was parked at when it was created. Being NAMED as a merge parent is a fact about the merge
+    // that carried the branch, so a branch that was never merged cannot satisfy it by standing
+    // still.
+    //
+    // --parents prints "<commit> <parent1> <parent2>..."; everything past the first parent is a
+    // branch that merge carried in. The anchor..run range bounds the walk to this run rather
+    // than the repository's whole history — the range form rather than "--not <anchor>", because
+    // git rejects "--not" after a non-option argument ("fatal: option '--not' must come before
+    // non-option arguments"), and the options have to precede --end-of-options. Trailing "--"
+    // for the same reason commitsBetween carries one: a file named exactly like the range must
+    // not be resolvable as a pathspec.
+    //
+    // The range bounds which MERGE COMMITS are walked. It does NOT filter the parents they
+    // print, and that distinction is the whole reason this method filters them itself. This
+    // plugin's plan-amendment procedure merges the BASE branch into the run branch, so the base
+    // tip is printed as a secondary parent of a merge inside the range — and for a run whose
+    // amendments have all landed, merge-base(base, run) IS that base tip. Left in, the anchor
+    // would be a member of this set, and a task branch parked at the anchor (a teammate that
+    // committed on another ref and left the conventional ref where `git checkout -B <task>
+    // <base>` put it) would read as merged, suppressing the very emptiness complaint that shape
+    // exists to trigger. The same route admits older base tips, via a task branch that merged
+    // the base into itself.
+    //
+    // So a parent counts only if it is itself inside the range. Every parent of a commit on the
+    // run branch is reachable from the run branch by construction, so "inside anchor..run" is
+    // exactly "not reachable from the anchor" — the filter expressed as a bound rather than as
+    // an isAncestor call per parent. Dropping --min-parents=2 is what makes it one walk instead
+    // of two: the unfiltered walk prints every commit in the range, so the same output carries
+    // both the range membership and the merge parents. Non-merge lines contribute no parents,
+    // since everything past the first is empty for them.
+    async mergedBranchTips({ runSha, anchorSha }) {
+      if (!isNonEmptyString(runSha) || !isNonEmptyString(anchorSha)) {
+        throw new GitError(`mergedBranchTips requires non-empty refs, got runSha=${JSON.stringify(runSha)} anchorSha=${JSON.stringify(anchorSha)}`)
+      }
+      const out = await run(['rev-list', '--parents', '--end-of-options', `${anchorSha}..${runSha}`, '--'])
+      const inRange = new Set()
+      const parents = []
+      for (const line of out.split(/\r?\n/)) {
+        const parts = line.trim().split(/\s+/).filter(Boolean)
+        if (parts.length === 0) continue
+        inRange.add(parts[0])
+        for (const parent of parts.slice(2)) parents.push(parent)
+      }
+      return new Set(parents.filter((parent) => inRange.has(parent)))
     },
     async commitsBetween({ from, to }) {
       if (!isNonEmptyString(from) || !isNonEmptyString(to)) {

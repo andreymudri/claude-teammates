@@ -35,11 +35,30 @@ unverified and say what you would have run to confirm it.
 
 ## Return value
 
-An array of findings, each with `severity`, `file`, `line`, `summary`, and
-`failureScenario` (the concrete inputs and the wrong output they produce).
+Exactly one shape, for the file and the response both — a JSON object carrying `stamp` and
+`findings`, never a bare array of findings:
+
+```json
+{
+  "stamp": { "phase": "1", "lens": "correctness", "branches": ["teammates/<run>/T1@<sha>"] },
+  "findings": [
+    { "severity": "high|medium|low", "file": "...", "line": 0, "summary": "...", "failureScenario": "..." }
+  ]
+}
+```
+
+The `stamp` object is supplied verbatim in your dispatch prompt. Copy it unchanged into the
+JSON you write — never construct or edit it yourself. If your dispatch prompt carries no stamp
+(a hand-written dispatch, or an older CLI build), the file cannot be collected; say so in your
+response rather than inventing a stamp. A reviewer that fabricates a stamp asserts it judged
+tips it may never have read.
 
 Write that same JSON to the findings path your prompt names, then return it as your final
 output. Write it before you return, not after — a reviewer that goes idle before emitting
 takes its whole review with it, and the file is the only thing left to recover it from. The
-returned array stays the interface; the file exists so a lost review does not have to be paid
-for twice. An empty array is a real result and is written like any other.
+returned object stays the interface; the file exists so a lost review does not have to be paid
+for twice. An empty `findings` array is a real result and is written like any other.
+
+The stamp is tamper-evident, not proof of review: you stamp your own file, so a well-formed
+stamp only shows the file was not left over from a different diff — it does not show that you
+actually judged the tips it names.

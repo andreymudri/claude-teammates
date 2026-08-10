@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile, readdir } from 'node:fs/promises'
 import {
   assertClaim,
+  assertCode,
   assertStatement,
   parseDoc,
   splitFrontmatter,
@@ -39,6 +40,39 @@ test('the implementer is bound to its declared files and the result schema', asy
   for (const key of ['status', 'branch', 'filesChanged', 'summary', 'blockers']) {
     assert.ok(doc.text.includes(key), `implementer does not document ${key}`)
   }
+})
+
+test('the implementer must run its tests in the foreground', async () => {
+  const { doc } = await agent('tm-implementer.md')
+  assertStatement(
+    doc,
+    /Run the test command in the FOREGROUND and wait for it/,
+    'implementer must be told to wait on its own test run',
+  )
+  assertStatement(
+    doc,
+    /nothing notifies you when a backgrounded command finishes/,
+    'the reason must be stated, not just the rule',
+  )
+})
+
+test('the implementer reports blocked rather than improvising a branch', async () => {
+  const { doc } = await agent('tm-implementer.md')
+  assertStatement(
+    doc,
+    /If your task's branch is checked out in another worktree, report status: "blocked" naming it/,
+    'implementer must not invent a branch when its own is held',
+  )
+  assertStatement(
+    doc,
+    /work anywhere but teammates\/<runId>\/<taskId> is invisible to it and merges as a no-op/,
+    'the consequence of working on the wrong ref must be stated',
+  )
+})
+
+test('the implementer returns repo-relative paths', async () => {
+  const { doc } = await agent('tm-implementer.md')
+  assert.match(doc.text, /repo-relative, never absolute worktree paths/)
 })
 
 // The read-only rule is prose, and prose is not enforcement: a reviewer holding the full tool
@@ -129,6 +163,104 @@ test('the reviewer writes its findings to a file as well as returning them', asy
     /before you return, not after/i,
     'the write must happen while the reviewer is still alive to do it',
   )
+})
+
+// review-dispatch appends `stampInstruction`, which tells a reviewer to write its stamp under a
+// "stamp" key; collect-reviews refuses a file whose top-level shape is a bare array, since a bare
+// array has nowhere to carry that stamp. Across two phases of run `gaps`, five reviewers produced
+// four different file shapes because this card described a different one than the collector
+// requires. `forbid`ing one exact sentence opening is the wrong shape for this pin — a reword
+// that avoids that literal phrase but keeps prescribing a bare array would still pass — so the
+// claim is a positive one ("exactly one shape ... never a bare array").
+//
+// `subject` is a VOCABULARY lock, not a semantic one: it fires only on a statement naming one of
+// the specific nouns below, and a hatch that avoids every one of them passes silently — e.g.
+// "when the wrapper object is awkward, emit the findings themselves as the whole document" names
+// no shape at all and is not caught by this test. `array`, `list`, and `sequence` are the nouns
+// checked; each was chosen because it is a plausible synonym a reworded escape hatch would reach
+// for, and none of them forced a new `allow` entry for a sentence the card legitimately carries —
+// widening further risks that trade and was not done here, so this is a deliberately bounded net,
+// not a claim of catching every wording. `BACK_REFERENCE` (see tests/md-contract.mjs) is a second,
+// independent net for the same insertion class and shares the same limitation: it is a lexicon,
+// not a guarantee, and its own header says so.
+//
+// The claim alone does not bind the example a reviewer actually copies: `assertCode` below takes
+// the FIRST code block matching its pattern in the whole section, so a bare-array block inserted
+// ahead of the real one — as a new "longer form"/"older collectors" example, or promoted to the
+// head of the section — left the claim's prose intact and the subject lock silent, and still
+// showed a reviewer a bare array as the first example under the claim. `introduces` requires the
+// block immediately after the claim's own paragraph to be the stamped example, which adjacency
+// breaks no matter which side the extra block is inserted on. Adjacency alone misses a SECOND
+// example appended after the correct one, so every code block in the section is checked directly
+// below instead of counting them: none may parse as a bare top-level JSON array, and every one
+// that parses as JSON must carry exactly `stamp` and `findings` as its top-level keys. A code
+// block that is not JSON at all — a file path, a shell command — fails to parse, is skipped, and
+// does not trip this check.
+test('the reviewer card commits to one shape and locks out every other array/list/sequence mention', async () => {
+  const { doc } = await agent('tm-reviewer.md')
+  const section = doc.section('Return value')
+  assertClaim(section, {
+    label: 'one shape, never a bare array',
+    claim: /exactly one shape[\s\S]*never a bare array of findings/i,
+    introduces: /"stamp"/,
+    subject: /\barray\b|\blist\b|\bsequence\b/i,
+    allow: [/an empty findings array is a real result/i],
+  })
+  for (const block of section.code) {
+    let parsed
+    try {
+      parsed = JSON.parse(block.code)
+    } catch {
+      continue // not JSON — e.g. a file path or shell example — out of scope for this check
+    }
+    assert.ok(
+      !Array.isArray(parsed),
+      `reviewer card must not show a bare top-level JSON array as a findings-file example, found: ${block.code}`,
+    )
+    assert.deepEqual(
+      Object.keys(parsed).sort(),
+      ['findings', 'stamp'],
+      `every JSON example in Return value must have exactly stamp and findings as its top-level keys, found: ${JSON.stringify(Object.keys(parsed))}`,
+    )
+  }
+})
+
+// `assert.match(section.text, /"stamp"/)` proves the substring appears anywhere in the section's
+// concatenated text — including inside a fenced example where "stamp" was moved to sit under each
+// finding instead of at the top level, which a reviewer copying the example would reproduce and
+// collect-reviews would then refuse. Parse the fenced example itself and check its top-level keys.
+test('the fenced findings-file example has stamp and findings as its only top-level keys', async () => {
+  const { doc } = await agent('tm-reviewer.md')
+  const section = doc.section('Return value')
+  const block = assertCode(section, /"stamp"/, 'reviewer card must show a JSON example carrying a stamp')
+  const example = JSON.parse(block.code)
+  assert.deepEqual(Object.keys(example).sort(), ['findings', 'stamp'])
+})
+
+// The prose instruction to copy the stamp verbatim, with an inventory lock over every other
+// sentence in the section that mentions "stamp" — the defence against a sentence appended
+// anywhere in Return value that quietly waives the rule (e.g. "the stamp key may be omitted when
+// the dispatch prompt does not supply one"), which a bare `assertStatement` cannot see because it
+// only checks that ITS OWN pattern matches somewhere, never that nothing else contradicts it.
+// The lock also covers "collect"/"collector" wording: an escape hatch can name the collector
+// without naming the stamp at all ("if collection fails, return whatever the collector accepts"),
+// and the only existing sentence in this section that says "collected" already names the stamp
+// too and is already on the allow list below — so widening costs no new entries.
+test('the reviewer card requires copying the stamp verbatim, with no unreviewed stamp caveat', async () => {
+  const { doc } = await agent('tm-reviewer.md')
+  const section = doc.section('Return value')
+  assertClaim(section, {
+    label: 'copy the stamp verbatim',
+    claim: /the stamp object is supplied verbatim in your dispatch prompt/i,
+    then: /copy it unchanged into the JSON you write.*never construct or edit it yourself/i,
+    subject: /\bstamp\b|\bcollect/i,
+    allow: [
+      /exactly one shape[\s\S]*never a bare array of findings/i,
+      /if your dispatch prompt carries no stamp[\s\S]*inventing a stamp/i,
+      /a reviewer that fabricates a stamp asserts it judged tips it may never have read/i,
+      /the stamp is tamper-evident, not proof of review/i,
+    ],
+  })
 })
 
 test('the integrator is declared the sole writer to the run branch', async () => {

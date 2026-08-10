@@ -197,6 +197,15 @@ export async function runFilesetCheck(check, ctx = {}) {
 
   const problems = []
   const branchShas = {}
+  // One walk for the whole phase, and only if some branch's diff comes up empty: the set is a
+  // fact about the run, not about any single branch, and a phase where every branch carries work
+  // never needs it. Memoised rather than hoisted so a phase that does not need it does not pay
+  // for it, and so a walk that fails is reported against the task that asked for it.
+  let mergedTips = null
+  const landedTips = async () => {
+    if (!mergedTips) mergedTips = await git.mergedBranchTips({ runSha, anchorSha })
+    return mergedTips
+  }
   for (const task of phaseTasks) {
     const branch = resolveTaskBranch(task, runId)
     if (!branch) { problems.push(`${task.id}: no branch could be resolved`); continue }
@@ -230,13 +239,47 @@ export async function runFilesetCheck(check, ctx = {}) {
         // otherwise fail every one of them. What the branch contributed after integration is
         // `ownership`'s question, and it asks it of every commit on the run branch, every run.
         //
-        // "On the run branch" is not enough on its own: the anchor and every commit before it
-        // are ancestors of the run branch too, so a branch parked at the anchor — a teammate
+        // What decides it is whether the run branch MERGED THIS BRANCH: whether a merge commit
+        // past the anchor names this sha as a parent other than its first, AND that sha is
+        // itself past the anchor. `mergedBranchTips` enforces the second half — it returns only
+        // parents inside the anchor..run range — so this reads as a single membership test. The
+        // second half is not decoration: a plan amendment merges the BASE into the run branch,
+        // which names the base tip as a secondary parent, and for a run whose amendments have
+        // landed the anchor IS the base tip. Anything that weakens that filter puts the anchor
+        // back in the set and re-opens the parked-at-the-anchor hole below.
+        //
+        // Ancestry alone cannot decide it, and each exclusion bolted onto ancestry left the next
+        // hole. "On the run branch" is satisfied by a branch parked at the anchor — a teammate
         // that committed on the harness's own branch and left the conventional ref where it
-        // started — would read as integrated and escape the very check this is. A landed branch
-        // carries commits PAST the anchor, so it is not an ancestor of the anchor; a stale or
-        // phantom one is.
-        const landed = await git.isAncestor(sha, runSha) && !(await git.isAncestor(sha, anchorSha))
+        // started. Adding "past the anchor" is satisfied, from phase 2 onward, by a branch left
+        // exactly where `git checkout -B <task> <run branch>` put it. Adding "not the run tip"
+        // is still satisfied by a branch parked at an INTERMEDIATE post-anchor commit, which is
+        // what a branch becomes as soon as the integrator merges a sibling and the run tip moves
+        // past it. All three carry no work, and none can be reached by standing still: being
+        // named as a merge parent is a fact about the merge that carried the branch, and the
+        // range filter keeps the amendment merges from vouching for the first of them.
+        //
+        // What this does NOT distinguish, stated as what is true rather than as what would be
+        // convenient:
+        //   - A branch integrated by FAST-FORWARD leaves no merge commit and so no secondary
+        //     parent. Its diff is empty too (a fast-forward also makes merge-base(run, branch)
+        //     the branch's own tip), so it reaches this test and fails it — with a message that
+        //     names a cause that is not the one, since the work IS on the run branch. Nothing
+        //     here can separate that branch from one merely parked at the same commit: both are
+        //     post-anchor commits on the run branch that no merge names. `tm-integrator`'s
+        //     contract is `--no-ff` for exactly this reason, and no other check covers the gap
+        //     — `ownership` explains a fast-forwarded branch's commits by their ancestry from
+        //     the task branch, so it reports nothing. Failing closed is the intended direction;
+        //     the misleading wording is the price.
+        //   - A SQUASH merge likewise carries no secondary parent. The plugin's integrator
+        //     never squashes, so that is a statement about a repository someone else merged
+        //     into, not about a run this tool drove.
+        //   - Two branches whose tips are the identical sha are indistinguishable here, because
+        //     there is nothing to tell apart.
+        //
+        // `scripts/doctor.mjs` computes this same test the same way, over the same set, with
+        // the same limits.
+        const landed = (await landedTips()).has(sha)
         if (!landed) {
           problems.push(`${task.id}: branch ${branch} contributes no file changes past its fork point ${forkPoint} — the work is not on the conventional ref, and merging this task would be a no-op`)
         }

@@ -1,6 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile, readdir } from 'node:fs/promises'
+import { readFile, readdir, mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { runCli } from '../scripts/cli.mjs'
 import {
   assertClaim,
   assertCode,
@@ -95,14 +98,30 @@ test('phase-gate says plainly what a none decision means and does not mean', asy
   // sentence about `none` fails whatever it says — no vocabulary of negations is consulted.
   assertClaim(onFail, {
     label: 'the none decision',
-    claim: /^On none, the decision engine found no failing check in the verdict you handed it\b/i,
-    then: /This does not mean "the failure needs no fix" and it is never permission to integrate/i,
+    // Both `claim:` and `then:` are anchored end-to-end for the same reason as the `allow`
+    // entries below: `assertClaim`'s subject screen exempts BOTH the claim statement and its
+    // `then` consequence from the inventory check (it would otherwise flag itself), so an
+    // unanchored pattern on either one is the one place a clause appended to that exact sentence
+    // — e.g. turning "it is never permission to integrate" into "... unless the gate already ran
+    // once" — goes unscreened everywhere else in this test.
+    claim: /^On none, the decision engine found no failing check in the verdict you handed it\.$/i,
+    then: /^This does not mean "the failure needs no fix" and it is never permission to integrate\.$/i,
     subject: /\bnone\b/i,
+    // Every entry below is anchored end-to-end (^...$), not just at the front or not at all.
+    // An unanchored — or front-only-anchored — pattern waives any statement that merely CONTAINS
+    // or STARTS WITH the approved text, so a mutated tail appended to an otherwise-approved
+    // sentence (e.g. "... never on `none` unless the gate already ran once, in which case none
+    // is enough to integrate on.") would still match and sail through, admitting the exact
+    // inversion this lock exists to catch. Anchoring forces the whole statement to equal what
+    // was reviewed.
     allow: [
-      /one of three decisions — none, retry, or escalate —/i,
-      /the decision comes back none; that is incidental, not guaranteed/i,
-      /a none decision means the verdict you passed is not the one that failed/i,
-      /Integrate only on a freshly recomputed PASS, never on none/i,
+      /^Hand it the run, the failing phase, the run root, and the verdict JSON you just produced; it prints one of three decisions — none, retry, or escalate — and exits 0 for all three, so read the decision field rather than the exit status\.$/i,
+      /^Feeding that record in today degenerates harmlessly, because the persisted object carries no results key and the decision comes back none; that is incidental, not guaranteed\.$/i,
+      /^You reached this section because the gate failed, so a none decision means the verdict you passed is not the one that failed — a stale file, the wrong phase, the wrong run root, or a verdict written before the last check completed\.$/i,
+      /^Integrate only on a freshly recomputed PASS, never on none\.$/i,
+      // Reviewed: this documents the `fix` exit-code contract (Exit 0 covers all three
+      // decisions), not the semantics of a `none` decision itself — unrelated to the claim above.
+      /^Exit 0 covers none, retry, and escalate alike, so the exit status never tells them apart — only the decision field does\.$/i,
     ],
   })
   assertStatement(
@@ -158,13 +177,54 @@ test('phase-gate requires the fix decision to use this pass’s verdict, never t
   })
 })
 
-test('phase-gate marks the fix-decision invocation as pending, not missing', async () => {
+test('phase-gate documents the real fix invocation and its exit-code contract', async () => {
   const { doc } = await skill('phase-gate')
-  assertClaim(doc.section('On FAIL'), {
-    label: 'pending invocation',
-    claim: /The exact invocation and that exit-0-for-all-three contract are specified by the task that adds the decision subcommand/i,
-    then: /Until then the command is not there to run: pending, not missing/i,
+  const section = doc.section('On FAIL')
+  assertCode(section, /fix --run <runId> --phase <n> --verdict <path>/, 'phase-gate must show the fix invocation')
+  assertClaim(section, {
+    label: 'fix exit codes',
+    // Anchored end-to-end, both patterns: the subject screen exempts the claim statement AND its
+    // `then` consequence from the inventory check, so leaving either open at the end lets a
+    // clause appended to that exact sentence pass unscreened, the same hole the `allow` entry
+    // below was fixed for.
+    claim: /^--verdict names a file holding that same JSON, and --phase must match its own phase field — a mismatch exits 2 rather than adjudicating the wrong phase's findings, and so does a malformed teammates\.gate\.json\.$/i,
+    then: /^Exit 1 means the run has no plan at all or the verdict file could not be read: an argument error, not a decision\.$/i,
+    subject: /\bexit 0\b|\bexit 1\b|\bexit 2\b/i,
+    allow: [
+      /^Exit 0 covers none, retry, and escalate alike, so the exit status never tells them apart — only the decision field does\.$/i,
+    ],
   })
+})
+
+// The skill's exit-1 sentence names two distinct causes ("no plan at all" and "the verdict file
+// could not be read"); the other two documented codes (0 and 2) are pinned by `decideFix`'s own
+// unit tests and by the derived-context / gateConfig plumbing elsewhere, but nothing previously
+// ran `fix` through the CLI itself to pin exit 1. Invoking `runCli` directly, the same pattern
+// `tests/cli.test.mjs` uses, so a rename of either `return 1` in scripts/cli.mjs's `fix` handler
+// breaks this test rather than only the prose.
+test('the CLI actually exits 1 for both causes phase-gate documents under exit 1 for fix', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-skill-fix-'))
+  const io = { out: () => {}, err: () => {} }
+  try {
+    // No `init-run` has happened for this run id at all: no plan exists.
+    const noPlanCode = await runCli(
+      ['fix', '--run', 'ghost-run', '--phase', '1', '--verdict', path.join(root, 'verdict.json'), '--root', root],
+      io,
+    )
+    assert.equal(noPlanCode, 1, 'fix must exit 1 when the run has no plan')
+
+    // A run WITH a plan, but a --verdict path that cannot be read.
+    const planPath = path.join(root, 'plan.md')
+    await writeFile(planPath, '### Task 1: A\n\n**Files:**\n- Create: `a.mjs`\n', 'utf8')
+    assert.equal(await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io), 0)
+    const badVerdictCode = await runCli(
+      ['fix', '--run', 'r1', '--phase', '1', '--verdict', path.join(root, 'missing-verdict.json'), '--root', root],
+      io,
+    )
+    assert.equal(badVerdictCode, 1, 'fix must exit 1 when the verdict file cannot be read')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('tm-implementer forbids weakening a test to satisfy a fix-round finding', async () => {
@@ -449,4 +509,171 @@ test('phase-gate states reviewers are dispatched without a name and a named one 
     ],
     forbid: [/dispatch one tm-reviewer per lens[^.]*with a name/i],
   })
+})
+
+test('parallel-execution states the blast radius is context, not an enforced file set', async () => {
+  const { doc } = await skill('parallel-execution')
+  const section = doc.section('The map')
+  // The no-edit rule needs its own inventory lock: as a bare assertStatement it stayed green
+  // while a later sentence in the same section granted the permission back ("when the task
+  // requires it, a teammate should go ahead and edit those files too"). Locking on `edit` makes
+  // any second sentence in this section about editing a reviewed decision.
+  assertClaim(section, {
+    label: 'blast radius files are not editable',
+    claim: /they are outside the file set, so the teammate may not edit them/i,
+    subject: /\bedit(s|ed|ing)?\b/i,
+  })
+  assertClaim(section, {
+    label: 'coupling is correlation, not enforcement',
+    claim: /^Coupling is correlation in history, not a dependency\b/i,
+    then: /Nothing enforces it and no gate reads it/i,
+    // The subject must name what is being claimed about, not repeat the `then` pattern — a
+    // subject copied from `then` can only ever match the statement `then` already exempts, so it
+    // locks nothing and deleting it changes no outcome.
+    subject: /coupling|blast radius/i,
+    allow: [
+      /^Every generated brief carries a blast radius/i,
+      /^Coupling for a brief is computed over a fixed window/i,
+      /^A brief with no blast radius section usually means new files/i,
+    ],
+  })
+})
+
+test('parallel-execution states the coupling window is bounded, not the whole history', async () => {
+  const { doc } = await skill('parallel-execution')
+  const section = doc.section('The map')
+  // Correction to the plan: the brief's window is not a default and not settable — the workflow
+  // path hardcodes 500 and `--commits` reaches only the standalone `map` command. Two contiguous
+  // patterns, no `.*` between the halves of either claim: a character gap is exactly the hole
+  // md-contract.mjs exists to close, and a single sentence spanning it can keep both anchor
+  // phrases while cancelling the claim in between.
+  assertStatement(
+    section,
+    /Coupling for a brief is computed over a fixed window of the last 500 commits, which the workflow path hardcodes and no flag changes/i,
+    'the skill must state the brief window is fixed at 500 commits, not a settable default',
+  )
+  assertStatement(
+    section,
+    /--commits sets the window for the standalone map command only, and workflow --commits is swallowed without complaint/i,
+    'the skill must confine --commits to the map command and say workflow silently ignores it',
+  )
+  // The support floor, not an empty repository, is the ordinary reason a brief has no section.
+  assertStatement(
+    section,
+    /a declared file needs at least three commits of its own history before coupling counts it/i,
+    'the skill must name the support floor so a section-less brief does not read as a broken dispatch',
+  )
+})
+
+test('fleet-lifecycle states who writes the map notes and that nothing enforced reads them', async () => {
+  const { doc } = await skill('fleet-lifecycle')
+  const section = doc.section('Map notes')
+  assertStatement(
+    section,
+    /a teammate never writes this file, and nothing enforced ever reads it/i,
+    'the skill must keep map notes out of both the write path and the enforcement path',
+  )
+})
+
+test('fleet-lifecycle states the Explore prompt filters directory names before they render', async () => {
+  const { doc } = await skill('fleet-lifecycle')
+  const section = doc.section('Map notes')
+  // Correction to the plan: the Explore prompt is handed to an agent with Bash and no gate, so
+  // the skill has to say the directory names it carries are filtered, not merely listed. The
+  // claim is anchored end-to-end AND subject-locked: an unanchored substring stayed green while
+  // the same sentence trailed off into "…but the filter is advisory and the raw names are used
+  // when it returns nothing".
+  assertClaim(section, {
+    label: 'carried directory names are filtered',
+    claim: /^The directory names that prompt carries are filtered — anything that is not a plain path segment is dropped — because that prompt is handed to an agent that has Bash and is gated by nothing\.$/i,
+    subject: /filter(s|ed|ing)?\b|directory names/i,
+  })
+})
+
+test('fleet-lifecycle claims only what map-notes verifies, and names every exit code', async () => {
+  const { doc } = await skill('fleet-lifecycle')
+  const section = doc.section('Map notes')
+  // mapNotesStale compares a header the writing agent was TOLD to copy against HEAD. Nothing
+  // observes which tree that agent read and nothing detects a later edit, so exit 0 is evidence
+  // of provenance, not proof — the same tamper-evident/tamper-proof distinction SECURITY.md and
+  // phase-gate keep elsewhere.
+  assertClaim(section, {
+    label: 'exit 0 is provenance, not proof',
+    claim: /^Exit 0 means the stored notes declare the commit the repository is on; the header is a string the writing agent was told to copy, so this is tamper-evident provenance and not proof/i,
+    subject: /\bexit 0\b/i,
+  })
+  // An orchestrator branching on `code === 4` alone reads the exit-2 git failure as "current".
+  assertStatement(
+    section,
+    /^Exit 4 means there are none, they carry no header at all, they name a different commit, they were written for a different run, or the file could not be read/i,
+    'the skill must name every condition that produces exit 4, not only the missing-notes case',
+  )
+  assertClaim(section, {
+    label: 'exit 2 is unknown, not current',
+    claim: /^Exit 2 means git could not be read, so no comparison happened at all — read that as unknown, never as current\.$/i,
+    subject: /\bexit 2\b/i,
+  })
+})
+
+test('fleet-lifecycle states the orchestrator writes the map, not the agent', async () => {
+  const { doc } = await skill('fleet-lifecycle')
+  const section = doc.section('Map notes')
+  // Anchored end-to-end: an unanchored (or prefix-only) pattern here waives any statement that
+  // merely CONTAINS this text, so a mutated tail — "... or let a teammate write `map.md` in
+  // place, with the same command and --write:" — would still match and pass, directly
+  // contradicting the pinned claim below and naming the locked subject (map.md) while doing it.
+  const dispatchPattern =
+    /^Dispatch a read-only agent with the printed prompt; it RETURNS the map and you write it to that path yourself, with the same command and --write:$/i
+  assertStatement(
+    section,
+    dispatchPattern,
+    'the skill must not tell a read-only agent to write a file',
+  )
+  assertClaim(section, {
+    label: 'map notes writer',
+    // Anchored end-to-end: `assertClaim`'s `subject:` inventory screen exempts the claim
+    // statement itself (it would otherwise flag itself), so an unanchored `claim:` is the one
+    // pattern nothing else in this check screens — a clause appended to this exact sentence
+    // ("... unless you dispatch one with Bash and tell it to.") still matches an unanchored
+    // pattern as a substring and passes uncaught. Anchoring forces the whole statement to equal
+    // what was reviewed, the same fix already applied to the `allow` entries in this file.
+    claim: /^A teammate never writes this file, and nothing enforced ever reads it\.$/,
+    subject: /writes this file|map\.md/i,
+    allow: [dispatchPattern],
+  })
+})
+
+test('phase-gate states that findings are stamped with the tips they judged', async () => {
+  const { doc } = await skill('phase-gate')
+  const section = doc.section('Finish the pending checks')
+  assertStatement(
+    section,
+    /refuses a file whose stamp names different tips/,
+    'the skill must state that stale findings are refused',
+  )
+  assertStatement(
+    section,
+    /findings about the old tree are not findings about this one/,
+    'the reason must be stated, not just the rule',
+  )
+})
+
+test('phase-gate documents finish taking per-phase results', async () => {
+  const { doc } = await skill('phase-gate')
+  const section = doc.section('Finish the pending checks')
+  // A whole-document regex with `.*` gaps is exactly what tests/md-contract.mjs exists to
+  // replace: /phases.*1.*results/s is satisfied by "results" drifting in from an unrelated later
+  // sentence, so mutating the documented shape to { "phases": { "1": [...] } } — which `finish`
+  // itself rejects with "--results phase 1 must be an object with a results array" — stayed
+  // green. Lock the one statement that carries the shape instead.
+  assertStatement(
+    section,
+    /^Hand it the same results, keyed by phase: \{ "phases": \{ "1": \{ "results": \[\.\.\.\] \} \} \}\.$/i,
+    'the skill must state the exact --results shape finish expects, keyed by phase',
+  )
+  assertStatement(
+    section,
+    /A phase that passed on supplied results is marked \(review supplied\) in its output/,
+    'a reader must be able to tell a recomputed pass from a reported one',
+  )
 })
