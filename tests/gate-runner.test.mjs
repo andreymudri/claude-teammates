@@ -988,6 +988,35 @@ function singleTaskPlan() {
   ].join('\n')
 }
 
+// Three tasks over two phases, with TWO tasks in phase 2 — the shape the anchor-based
+// "integrated" test could not judge, because it needs a sibling whose merge moves the run tip
+// past a branch parked in that same phase.
+function twoInSecondPhasePlan() {
+  return [
+    '### Task 1: first task',
+    '',
+    '**Files:**',
+    '- Create: `a.mjs`',
+    '',
+    '**Depends:** none',
+    '',
+    '### Task 2: parked task',
+    '',
+    '**Files:**',
+    '- Create: `b.mjs`',
+    '',
+    '**Depends:** T1',
+    '',
+    '### Task 3: sibling task',
+    '',
+    '**Files:**',
+    '- Create: `c.mjs`',
+    '',
+    '**Depends:** T1',
+    '',
+  ].join('\n')
+}
+
 // H2: a merge commit's --no-ff shape is not proof its tree carries only what its second
 // parent contributed. Reproduced with `git merge --no-ff --no-commit`, then adding an
 // out-of-band file before completing the commit.
@@ -1346,6 +1375,60 @@ test('runFilesetCheck does not blame a phase-2 branch for phase-1 files merged o
     assert.equal(res2.status, 'fail')
     assert.match(res2.output, /stray\.mjs/)
     assert.doesNotMatch(res2.output, /a\.mjs/)
+  })
+})
+
+// The same stale base, one function earlier: `deriveContext` decided whether a phase was
+// integrated by diffing each task branch against the run ANCHOR. From phase 2 onward the run tip
+// is past the anchor, so a branch parked at the run tip and never committed to shows the SIBLING'S
+// merged files as its own work; the phase reads integrated, `derivePhase` advances past it, and
+// `runFilesetCheck` takes its "every phase in the plan is integrated" fast path — so the landed
+// test below never runs for that task at all and the empty ref merges as a no-op behind a PASS.
+// A fake git cannot exhibit this: it lives in what real `merge-base` and `changedFiles` return.
+test('a phase-2 branch parked at the run tip does not read as integrated (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'plan.md'), twoInSecondPhasePlan(), 'utf8')
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+
+    // Phase 1: real work, merged --no-ff, so the run tip is now past the anchor.
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+    const afterT1 = (await sh(['rev-parse', 'run'])).stdout.trim()
+
+    // Phase 2, T2: the ref is created at the run tip as it stands right now and never moves —
+    // the teammate committed on some other branch, or never committed at all.
+    await sh(['branch', 'teammates/r1/T2', afterT1])
+
+    // Phase 2, T3: real work, merged --no-ff, so the run tip moves past where T2 is parked.
+    await sh(['checkout', '-b', 'teammates/r1/T3', afterT1])
+    await writeFile(path.join(root, 'c.mjs'), 'export const c = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T3 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T3', 'teammates/r1/T3'])
+    assert.notEqual((await sh(['rev-parse', 'run'])).stdout.trim(), afterT1)
+
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+
+    // Phase 1 genuinely integrated; phase 2 is not, because T2 contributed nothing of its own.
+    assert.deepEqual(ctx.integratedPhases, [1])
+    assert.equal(ctx.currentPhase, 2)
+    assert.equal(ctx.phaseError, null)
+
+    // And because phase 2 is still the current phase, the landed test is actually reached:
+    // T2 is reported as contributing nothing, while T3's merged (and therefore empty) diff is
+    // still excused.
+    const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
+    assert.equal(res.status, 'fail')
+    assert.match(res.output, /T2: branch teammates\/r1\/T2 contributes no file changes/)
+    assert.doesNotMatch(res.output, /T3:/)
   })
 })
 

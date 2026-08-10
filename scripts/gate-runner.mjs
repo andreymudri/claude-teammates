@@ -83,6 +83,53 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
     if (!byPhase.has(task.phase)) byPhase.set(task.phase, [])
     byPhase.get(task.phase).push(task)
   }
+  // Lazily built, then shared by every task branch of every phase: for each commit on the run
+  // branch since the anchor that is a merge, the first parent of that merge, indexed by each
+  // of its NON-first parents. Only a branch already on the run branch needs it (see
+  // `ownWorkBase`), so a run whose branches all still carry unmerged work never pays for the
+  // walk, and a run that does pays for it once.
+  let mergeFirstParents = null
+  const firstParentOfMergeNaming = async (sha) => {
+    if (!mergeFirstParents) {
+      mergeFirstParents = new Map()
+      for (const commit of await git.commitsBetween({ from: anchorSha, to: runSha })) {
+        const parents = await git.commitParents(commit)
+        if (parents.length < 2) continue
+        // Non-first parents only. The first parent is the run branch's own prior history, so
+        // treating it as "the branch this merge carried" would let any commit already on the
+        // run branch vouch for itself — the same reason `runOwnershipCheck` slices it off.
+        for (const parent of parents.slice(1)) {
+          if (!mergeFirstParents.has(parent)) mergeFirstParents.set(parent, parents[0])
+        }
+      }
+    }
+    return mergeFirstParents.get(sha) ?? null
+  }
+
+  // The base a branch's own work is measured from, which is never the run anchor. The anchor
+  // is fixed at the start of the whole run, so from phase 2 onward it sits behind everything
+  // earlier phases merged, and an anchor-based diff credits a branch with THOSE files.
+  // Confirmed: a phase-2 branch created by `git checkout -B <task> <run branch>` and never
+  // committed to reads as "changed a.mjs" once a sibling's merge moves the run tip past it,
+  // the phase reads integrated, `derivePhase` advances past it, and `runFilesetCheck` takes
+  // its `currentPhase === null` fast path — so the landed test never runs for that task at all.
+  //
+  // Before the branch is on the run branch, its fork point off that branch is the answer, and
+  // it is the same base `runFilesetCheck` diffs from, so the two stop disagreeing about what a
+  // branch contributed. Once the branch IS on the run branch, merge-base(run, branch) is the
+  // branch's own tip and every diff from it is empty however much work the branch carried; the
+  // base that still answers "what did THIS branch contribute" is the fork point the branch had
+  // at the moment it was merged, i.e. merge-base(first parent of the merge that named it,
+  // branch). A branch on the run branch that no merge names is left measuring against itself,
+  // which reads as no work — that is the parked-branch case, and it must read that way.
+  const ownWorkBase = async (sha) => {
+    const forkPoint = await git.mergeBase(runSha, sha)
+    if (forkPoint !== sha) return forkPoint
+    const firstParent = await firstParentOfMergeNaming(sha)
+    if (!firstParent) return sha
+    return await git.mergeBase(firstParent, sha)
+  }
+
   const integratedPhases = []
   for (const [phase, phaseTasks] of byPhase) {
     const states = []
@@ -97,12 +144,29 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
       // anywhere, and every phase reads integrated. Counting commits is not enough either —
       // confirmed separately: a single `git commit --allow-empty` satisfies "has a commit"
       // while changing no file at all. Requiring at least one *file* changed between the
-      // anchor and the branch means "integrated" implies "did work", not just "points at
-      // something already on the run branch" or "has a commit". This does not close
-      // self-integration in general — a phantom branch pointed at a run tip that already
-      // carries someone else's real commits still passes this check — that remains the
-      // documented, accepted limitation (see the spec's "Not defended against" list).
-      const ownChanges = await git.changedFiles({ base: anchorSha, branch: sha })
+      // branch's own work base and the branch means "integrated" implies "did work", not just
+      // "points at something already on the run branch" or "has a commit".
+      //
+      // Both of those attacks are still defeated once the base is the fork point rather than
+      // the anchor, and the second is defeated MORE completely than before: a branch created
+      // at the run tip measures against its own tip and shows nothing, and a branch of empty
+      // commits measures against the fork point it was merged from and still shows nothing.
+      // What the fork-point base adds is that "did work" now means the branch's OWN work,
+      // rather than anything that was already on the run branch when the branch was created.
+      //
+      // It also closes one variant of self-integration that the anchor base left open and the
+      // spec's "Not defended against" list still records: a phantom branch pointed at a run
+      // tip that already carries someone ELSE'S real commits used to show those commits as its
+      // own work, and now measures against its own tip and shows nothing. What remains open is
+      // the variant where a teammate does the integrator's job — creating task branches that
+      // each carry real work and merging them itself — which is indistinguishable here from
+      // legitimate integration, because at this level it IS the same shape.
+      //
+      // A branch integrated by FAST-FORWARD leaves no merge commit to name it, so it measures
+      // against its own tip and reads as no work even though the work is on the run branch.
+      // That is the same limit `runFilesetCheck` states for the same reason, and it fails
+      // closed: `tm-integrator`'s contract is `--no-ff`, so the state is out-of-contract.
+      const ownChanges = await git.changedFiles({ base: await ownWorkBase(sha), branch: sha })
       states.push(ownChanges.length > 0 && await git.isAncestor(sha, runSha))
     }
     if (states.length > 0 && states.every(Boolean)) integratedPhases.push(phase)
