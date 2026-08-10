@@ -1118,6 +1118,46 @@ test('commitSubject on a too-old git raises a GitError naming the 2.24 floor', a
   )
 })
 
+test('commitTime returns the committer date in milliseconds for a resolved sha', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: '1700000000\n', stderr: '' })
+  const at = await createGit({ exec }).commitTime('abc1234abc1234abc1234abc1234abc1234abcd')
+  assert.deepEqual(calls[0], [
+    'log', '-n', '1', '--format=%ct', '--end-of-options', 'abc1234abc1234abc1234abc1234abc1234abcd', '--',
+  ])
+  assert.equal(at, 1700000000000)
+})
+
+test('commitTime rejects an empty sha rather than reporting HEAD', async () => {
+  const { calls, exec } = recorder()
+  await assert.rejects(() => createGit({ exec }).commitTime(''), GitError)
+  assert.deepEqual(calls, [])
+})
+
+test('commitTime rejects a non-string sha rather than stringifying it', async () => {
+  const { calls, exec } = recorder()
+  await assert.rejects(() => createGit({ exec }).commitTime(null), GitError)
+  await assert.rejects(() => createGit({ exec }).commitTime(['refs/heads/x']), GitError)
+  assert.deepEqual(calls, [])
+})
+
+// An unparseable date must not become NaN and travel on: a caller subtracting it from the clock
+// gets NaN, which compares false against every threshold, so a stall would read as fresh.
+test('commitTime rejects a non-numeric committer date instead of returning NaN', async () => {
+  const { exec } = recorder({ code: 0, stdout: 'not-a-date\n', stderr: '' })
+  await assert.rejects(
+    () => createGit({ exec }).commitTime('abc1234'),
+    (err) => err instanceof GitError && /non-numeric committer date/.test(err.message),
+  )
+})
+
+test('commitTime on a too-old git raises a GitError naming the 2.24 floor', async () => {
+  const { exec } = recorder({ code: 128, stdout: '', stderr: OLD_GIT_LOG_SHOW_STDERR })
+  await assert.rejects(
+    () => createGit({ exec }).commitTime('abc1234'),
+    (err) => err instanceof GitError && /2\.24/.test(err.message) && /too old/.test(err.message),
+  )
+})
+
 test('tracks reports whether the repository has any tracked file under a path', async () => {
   const { calls, exec } = recorder({ code: 0, stdout: 'scripts/cli.mjs\nscripts/git.mjs\n', stderr: '' })
   const yes = await createGit({ exec }).tracks('scripts')

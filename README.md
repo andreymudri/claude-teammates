@@ -120,6 +120,10 @@ Seeing what is actually there:
 
 - `doctor --run <id> --plan <path>` — the run as git describes it: branch tips, real contributions,
   worktrees, dirty paths. `digest` renders what the agents wrote; this asks git instead
+- `liveness --run <id> --plan <path>` — which of the current phase's teammates have committed or
+  touched their worktree inside the window (20 minutes by default, `--stale` to change it). Exit 1
+  when one has done neither. It is a supervision report and nothing else reads it: both signals are
+  forgeable by the teammate they describe, so a stalled row is a prompt to look, never gate evidence
 - `plan-drift --run <id> --plan <path>` — what changed in the plan since the anchor, and whether it
   changed too late to reach the work
 - `digest --run <id>` — the compact fleet status board
@@ -129,6 +133,12 @@ Reviews:
 - `review-dispatch --run <id>` — generate the reviewer dispatches from the manifest, with the tier,
   findings path and scratch worktree already resolved
 - `collect-reviews --run <id>` — rebuild a `gate --results` file from the reviewers' findings drops
+
+One lens carries a method of its own. `claims` reads the diff for sentences asserting a guarantee —
+a comment, a skill line, a spec line — then breaks what each one protects and runs the suite: a
+claim whose mutation leaves the suite green is a finding. It is bounded, not exhaustive. It probes a
+capped number of the claims it enumerates and reports the rest under an `unprobed` key, and it
+returns nothing at all when it cannot get a green baseline first.
 
 Housekeeping:
 

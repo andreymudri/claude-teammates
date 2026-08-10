@@ -264,6 +264,20 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
       }
       return (await run(['log', '-n', '1', '--format=%h %s', '--end-of-options', ref, '--'])).trim()
     },
+    // Committer date, in milliseconds, of a sha the caller already resolved. %ct rather than %at:
+    // the author date survives a rebase and would report a teammate's work as older than the
+    // commit that carries it.
+    async commitTime(sha) {
+      if (!isNonEmptyString(sha)) {
+        throw new GitError(`commitTime requires a non-empty sha, got ${JSON.stringify(sha)}`)
+      }
+      const out = (await run(['log', '-n', '1', '--format=%ct', '--end-of-options', sha, '--'])).trim()
+      const seconds = Number(out)
+      if (!Number.isFinite(seconds)) {
+        throw new GitError(`commitTime read a non-numeric committer date for ${sha}: ${JSON.stringify(out)}`)
+      }
+      return seconds * 1000
+    },
     async branchExists(name) {
       const args = ['rev-parse', '--verify', '--quiet', `refs/heads/${name}`]
       const { code, stderr } = await runRaw(args)

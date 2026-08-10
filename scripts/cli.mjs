@@ -1,4 +1,5 @@
 import { readFile, writeFile, mkdir, rename, lstat, readdir, unlink } from 'node:fs/promises'
+import { livenessRows, renderLiveness, hasStall, DEFAULT_STALE_MINUTES } from './liveness.mjs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parsePlan } from './plan-parser.mjs'
@@ -18,7 +19,7 @@ import { renderDigest } from './digest.mjs'
 import { collectDoctorReport, renderDoctor } from './doctor.mjs'
 import { collectReviewResults, reviewFileName, reviewStamp } from './reviews.mjs'
 import { generateReviewDispatch } from './review-gen.mjs'
-import { resolveTaskBranch } from './enforce.mjs'
+import { resolveTaskBranch, taskBranchName } from './enforce.mjs'
 import { tmpdir } from 'node:os'
 import { realpathSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
@@ -64,10 +65,11 @@ function resolvedTempRoot() {
   }
 }
 
-const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|config> [options]
+const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclaim|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|config> [options]
 
   init-run <planPath> --run <id> [--root <path>]
   doctor   --run <id> --plan <path> [--base <branch>] [--run-branch <name>] [--root <path>]
+  liveness --run <id> --plan <path> [--stale <minutes>] [--root <path>]
   finish   --run <id> --plan <path> [--base <branch>] [--root <path>] [--results <path>] [--enforcement-only]
   prune-run --run <id> --plan <path> [--base <branch>] [--yes] [--root <path>] [--results <path>] [--enforcement-only]
   rebuild-state --run <id> --plan <path> [--base <branch>] [--force] [--root <path>]
@@ -190,6 +192,7 @@ export const REQUIRED = {
   'init-run': ['run'],
   gate: ['run', 'plan'],
   doctor: ['run', 'plan'],
+  liveness: ['run', 'plan'],
   // `--phase` is the manifest phase key, not a plan phase number, so it stays out of
   // NUMERIC_PHASE_COMMANDS and defaults to `default` exactly as `gate`'s does.
   'collect-reviews': ['run'],
@@ -231,6 +234,7 @@ export const KNOWN_FLAGS = {
   'init-run': ['run'],
   gate: ['run', 'plan', 'base', 'phase', 'no-fleet', 'results'],
   doctor: ['run', 'plan', 'base', 'run-branch'],
+  liveness: ['run', 'plan', 'stale'],
   digest: ['run'],
   claim: ['run', 'task', 'by'],
   unclaim: ['run', 'task'],
@@ -410,6 +414,42 @@ function numericWindow(value, fallback) {
   if (value === undefined) return fallback
   if (typeof value !== 'string') return NaN
   return Number(value)
+}
+
+// Newest mtime under a directory, skipping `.git` and `node_modules` and visiting at most
+// MAX_WALK_ENTRIES entries. `floored: true` means the cap stopped the walk, so the answer is a
+// lower bound on freshness rather than a measurement — `livenessRows` refuses to call a floored
+// row stalled for exactly that reason.
+const MAX_WALK_ENTRIES = 5000
+const WALK_SKIP = new Set(['.git', 'node_modules'])
+
+async function newestMtime(dir) {
+  let newest = null
+  let visited = 0
+  const stack = [dir]
+  while (stack.length > 0) {
+    const current = stack.pop()
+    let entries
+    try {
+      entries = await readdir(current, { withFileTypes: true })
+    } catch {
+      // A worktree removed mid-walk is not an error worth failing the report over; it is the
+      // absence of evidence, which the caller already represents as a missing touch record.
+      continue
+    }
+    for (const entry of entries) {
+      if (visited >= MAX_WALK_ENTRIES) return { at: newest, floored: true }
+      visited += 1
+      if (WALK_SKIP.has(entry.name)) continue
+      const full = path.join(current, entry.name)
+      if (entry.isDirectory()) { stack.push(full); continue }
+      try {
+        const st = await stat(full)
+        if (newest == null || st.mtimeMs > newest) newest = st.mtimeMs
+      } catch { /* vanished mid-walk; same reasoning as above */ }
+    }
+  }
+  return { at: newest, floored: false }
 }
 
 function missingArgs(command, flags, positional) {
@@ -1505,6 +1545,60 @@ export async function runCli(argv, io = { out: console.log }) {
     // 1 on problems, mirroring the gate, so a caller can branch on the exit code. It is still
     // a report: nothing is recorded, and no verdict is issued or implied.
     return report.problems.length === 0 ? 0 : 1
+  }
+
+  if (command === 'liveness') {
+    const git = createGit({ cwd: root })
+    // Same reasoning as `doctor`: the plan is read from the working tree, because a report that
+    // enforces nothing has no reason to read it at the anchor, and a diagnostic that needs a
+    // committed plan is useless at the moment a run is going wrong.
+    let tasks = []
+    try {
+      tasks = assignPhases(parsePlan(await readFile(path.resolve(root, flags.plan), 'utf8')))
+    } catch (err) {
+      io.out(`cannot read the plan at ${flags.plan}: ${err.message}`)
+      return 2
+    }
+
+    const staleMinutes = numericWindow(flags.stale, DEFAULT_STALE_MINUTES)
+    if (!Number.isFinite(staleMinutes) || staleMinutes <= 0) {
+      io.out(`--stale takes a positive number of minutes, got ${JSON.stringify(flags.stale)}`)
+      return 2
+    }
+
+    // The current phase's tasks only. An earlier phase's teammates have returned, and a later
+    // phase's have not been dispatched; reporting either as stalled would be noise on every run.
+    const derived = await derive(root, runId, { ...flags, plan: flags.plan }).catch(() => null)
+    const phase = derived?.currentPhase ?? null
+    const subject = phase == null ? tasks : tasks.filter((t) => t.phase === phase)
+
+    // Worktree paths come from git, never from `.teammates/`: a teammate that picked its own
+    // directory must not get to point this report at whatever looks busiest.
+    const byBranch = new Map()
+    for (const wt of await git.worktrees()) {
+      if (wt.branch) byBranch.set(wt.branch, wt.path)
+    }
+
+    const tips = {}
+    const touches = {}
+    for (const task of subject) {
+      const branch = taskBranchName(runId, task.id)
+      if (await git.branchExists(branch)) {
+        const sha = await git.resolveRef(`refs/heads/${branch}`)
+        tips[task.id] = { branch, at: await git.commitTime(sha) }
+      }
+      const dir = byBranch.get(branch)
+      if (dir) {
+        const walked = await newestMtime(dir)
+        touches[task.id] = { branch, at: walked.at, floored: walked.floored }
+      }
+    }
+
+    const rows = livenessRows({ tasks: subject, tips, touches, now: Date.now(), staleMinutes })
+    io.out(renderLiveness(rows, { staleMinutes }))
+    // Exit 1 on a stall, mirroring `doctor`, so a caller can branch on it. Still a report: it
+    // records nothing and no verdict is issued or implied.
+    return hasStall(rows) ? 1 : 0
   }
 
   if (command === 'rebuild-state') {

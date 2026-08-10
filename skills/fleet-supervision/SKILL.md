@@ -30,6 +30,17 @@ Background teammates notify on completion — react to those notifications. The 
 long heartbeat (20-30 minutes) to catch a teammate that hangs and never notifies. Do not sit
 in a poll loop.
 
+## The heartbeat
+
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" liveness --run <runId> --plan <planPath> --root <project root>
+
+Run it on the 20-30 minute heartbeat, not in a loop. Exit 1 means at least one teammate of the
+current phase has neither committed nor touched its worktree inside the window.
+
+It reports; it does not act. A stalled row is your cue to message that teammate or offer to stop
+it — the CLI has no handle on a subagent. Both of its signals are forgeable by the teammate they
+describe, so a stall is a prompt to look, never evidence for a gate.
+
 ## Failure handling
 
 | Symptom | Response |
@@ -38,7 +49,7 @@ in a poll loop.
 | Teammate blocked on another task | Missing edge in `plan.json`. Record it, requeue after the blocker. |
 | Files touched outside the declared set | Gate failure. Report the stray paths with the owning task. |
 | Merge conflict | Escalated by `tm-integrator` with both hunks. Do not resolve semantics yourself. |
-| Silent past the heartbeat | Surface it; offer stop or wait. Never assume progress. |
+| Silent past the heartbeat | Detected by `liveness` above (exit 1). Surface it; offer stop or wait. Never assume progress. |
 
 ## Scaling suggestions
 

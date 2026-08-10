@@ -1964,7 +1964,7 @@ async function writeVerdict(root, verdict) {
 test('usage lists the fix subcommand', async () => {
   await withRepo(async ({ io, lines }) => {
     assert.equal(await runCli(['nope'], io), 2)
-    assert.match(lines.join('\n'), /init-run\|gate\|doctor\|digest\|claim\|unclaim\|workflow\|complete\|fix/)
+    assert.match(lines.join('\n'), /init-run\|gate\|doctor\|liveness\|digest\|claim\|unclaim\|workflow\|complete\|fix/)
     assert.match(lines.join('\n'), /fix\s+--run <id> --phase <n> --verdict <path>/)
   })
 })
@@ -6358,5 +6358,130 @@ test('prune-run’s dry run reports a live preview as owned, not as leaked', asy
       assert.match(out, /a gate owns this preview right now/)
       assert.doesNotMatch(out, /leaked merge previews/)
     })
+  })
+})
+
+// `liveness` reads two signals off git and the filesystem — a branch tip's committer date and the
+// newest mtime under the worktree holding that branch. A commit dated in the past is how a stalled
+// teammate is reproduced without waiting for one.
+function commitAt(root, message, isoDate) {
+  execFileSync('git', ['commit', '--quiet', '-m', message], {
+    cwd: root,
+    encoding: 'utf8',
+    env: { ...process.env, GIT_COMMITTER_DATE: isoDate, GIT_AUTHOR_DATE: isoDate },
+  })
+}
+
+test('liveness exits 0 when the current phase’s teammate has just committed', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    lines.length = 0
+    const code = await runCli(['liveness', '--run', 'r1', '--plan', 'plan.md', '--root', root], io)
+    const out = lines.join('\n')
+    assert.match(out, /liveness \(stale after 20m\)/)
+    assert.match(out, /T1.*working/)
+    // Phase 2 is not dispatched yet, so T2 is not a row: reporting an undispatched task at all
+    // would put "not started" beside every teammate on every heartbeat of a phased run.
+    assert.doesNotMatch(out, /^T2/m)
+    assert.equal(code, 0)
+  })
+})
+
+test('liveness exits 1 when a teammate has neither committed nor touched its worktree', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    commitAt(root, 'T1 work', '2001-02-03T04:05:06Z')
+    g(['checkout', '--quiet', 'run-branch'])
+    lines.length = 0
+    const code = await runCli(['liveness', '--run', 'r1', '--plan', 'plan.md', '--root', root], io)
+    assert.match(lines.join('\n'), /T1.*stalled/)
+    assert.equal(code, 1)
+  })
+})
+
+test('liveness reads a fresh worktree as working even when the tip is old', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    commitAt(root, 'T1 work', '2001-02-03T04:05:06Z')
+    g(['checkout', '--quiet', 'run-branch'])
+    // The worktree holding the branch is where a mid-edit teammate's freshness lives; the branch
+    // tip says nothing about it.
+    const wt = path.join(root, 'wt-T1')
+    g(['worktree', 'add', '--quiet', wt, 'teammates/r1/T1'])
+    await writeFile(path.join(wt, 'a.mjs'), 'export const a = 2\n', 'utf8')
+    lines.length = 0
+    const code = await runCli(['liveness', '--run', 'r1', '--plan', 'plan.md', '--root', root], io)
+    assert.match(lines.join('\n'), /T1.*working/)
+    assert.equal(code, 0)
+    g(['worktree', 'remove', '--force', wt])
+  })
+})
+
+test('liveness exits 2 on a --stale that is not a positive number', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    for (const value of ['0', '-5', 'soon']) {
+      lines.length = 0
+      const code = await runCli(
+        ['liveness', '--run', 'r1', '--plan', 'plan.md', '--stale', value, '--root', root],
+        io,
+      )
+      assert.equal(code, 2, `--stale ${value} must be refused`)
+      assert.match(lines.join('\n'), /--stale takes a positive number of minutes/)
+    }
+  })
+})
+
+// A bare `--stale` parses as boolean true, and `Number(true)` is 1 — a one-minute window would
+// call every teammate stalled while reading as a deliberate setting.
+test('liveness refuses a bare --stale rather than reading it as one minute', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const code = await runCli(['liveness', '--run', 'r1', '--plan', 'plan.md', '--stale', '--root', root], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /--stale takes a positive number of minutes/)
+  })
+})
+
+test('liveness exits 2 when the plan cannot be read', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const code = await runCli(['liveness', '--run', 'r1', '--plan', 'nope.md', '--root', root], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /cannot read the plan at nope\.md/)
+  })
+})
+
+test('liveness requires --run and --plan', async () => {
+  await withRepo(async ({ io, lines }) => {
+    const code = await runCli(['liveness'], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /missing required argument/)
+    assert.match(lines.join('\n'), /--run/)
+    assert.match(lines.join('\n'), /--plan/)
+  })
+})
+
+test('liveness refuses an unknown flag rather than ignoring it', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const code = await runCli(
+      ['liveness', '--run', 'r1', '--plan', 'plan.md', '--stail', '30', '--root', root],
+      io,
+    )
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /stail/)
   })
 })
