@@ -1106,17 +1106,24 @@ subsumes both exclusions already added rather than adding a third.
       if (!isNonEmptyString(runSha) || !isNonEmptyString(anchorSha)) {
         throw new GitError(`mergedBranchTips requires non-empty refs, got runSha=${JSON.stringify(runSha)} anchorSha=${JSON.stringify(anchorSha)}`)
       }
-      // --parents prints "<commit> <parent1> <parent2>..."; everything past the first parent is
-      // a branch this merge carried in. --min-parents=2 keeps only merges, and --not <anchor>
-      // bounds the walk to this run rather than the repository's whole history.
-      const args = ['rev-list', '--min-parents=2', '--parents', '--end-of-options', runSha, '--not', anchorSha]
-      const out = await run(args)
-      const tips = new Set()
-      for (const line of out.split('\n')) {
+      // The bounded range form `anchorSha..runSha` sidesteps ordering constraints: it works
+      // with --end-of-options and avoids --not entirely. The trailing -- is defensive: it
+      // prevents a path or ref name starting with - from being read as an option.
+      const out = await run(['rev-list', '--parents', '--end-of-options', `${anchorSha}..${runSha}`, '--'])
+      const inRange = new Set()
+      const parents = []
+      for (const line of out.split(/\r?\n/)) {
         const parts = line.trim().split(/\s+/).filter(Boolean)
-        for (const parent of parts.slice(2)) tips.add(parent)
+        if (parts.length === 0) continue
+        inRange.add(parts[0])
+        for (const parent of parts.slice(2)) parents.push(parent)
       }
-      return tips
+      // Filter is load-bearing: it removes merge parents that are not themselves commits in
+      // the range. Without it, commits from before the anchor can appear in the returned set,
+      // which would report an earlier-parked branch as merged. On this repository, unfiltered
+      // returns 20 tips; filtered returns 13. A task that duplicated this code but dropped the
+      // filter would reopen the parked-at-anchor hole that gate-runner explicitly warns about.
+      return new Set(parents.filter((parent) => inRange.has(parent)))
     },
 ```
 
@@ -1148,11 +1155,14 @@ subsumes both exclusions already added rather than adding a third.
       claiming a hole that is now closed. State what the new test decides, and state what remains
       genuinely open, which is now a different and much narrower list:
 
-      - A branch integrated by FAST-FORWARD leaves no merge commit and so no secondary parent,
-        and reads as not landed. That is correct for this check's purpose — a fast-forwarded
-        branch with real work has a non-empty diff and never reaches the landed test at all — and
-        `scripts/enforce.mjs` already reports fast-forward integration of a task branch as a
-        violation in its own right. Say both halves; do not imply this check detects it.
+      - **CORRECTION:** A branch integrated by FAST-FORWARD leaves no merge commit and so no
+        secondary parent, and reads as not landed. Its diff IS empty (because `merge-base(run,
+        branch)` becomes the branch's own tip), and it DOES reach the landed test — and now fails
+        it with a message naming a cause that is not the one. `ownershipViolations` flags commits
+        reachable from no task branch of this run; a fast-forwarded branch's commits ARE reachable
+        from that branch, so ownership stays silent (read `scripts/enforce.mjs:94-114`). The reason
+        this is acceptable is that `tm-integrator`'s contract is `--no-ff`, so the state is
+        out-of-contract rather than undetected.
       - A SQUASH merge likewise carries no secondary parent. The plugin's integrator never
         squashes, so this is a statement about a repository someone else merged into, not about a
         run this tool drove.
@@ -1178,7 +1188,10 @@ test('runFilesetCheck fails a branch parked at an intermediate post-anchor commi
     branchExists: async () => true,
     changedFiles: async () => [],
     isAncestor: async (_sha, target) => target === 'runSha2',
-    resolveRef: async () => 'runSha2',
+    // CORRECTION: the original fixture set resolveRef to 'runSha2' (the run tip), which the
+    // tip exclusion already caught. Changed to 'runSha1' to test the intermediate case this
+    // test was written for: a branch parked at a post-anchor commit that is not the tip.
+    resolveRef: async () => 'runSha1',
     mergedBranchTips: async () => new Set(['someOtherBranchTip']),
   })
   const check = { name: 'fileset', kind: 'fileset' }
