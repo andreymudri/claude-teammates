@@ -368,6 +368,12 @@ test('parallel-execution keeps a returned teammate’s worktree until its phase 
       /^Prune with the command rather than by hand:/i,
       /It recomputes each phase's gate, removes only this run's worktrees whose phase passes/i,
       /Without --yes it reports and removes nothing/i,
+      // Reviewed: `--enforcement-only` documentation below. Neither sentence qualifies this
+      // claim — the first only names `prune-run` as one of the two callers the flag speeds up,
+      // the second reinforces the same "PASS resting on a skipped check is not prunable" guardrail
+      // in `--enforcement-only`'s own terms rather than contradicting it.
+      /^finish and prune-run otherwise recompute every command check of every phase/i,
+      /^And it will not let prune-run remove a worktree for a phase whose PASS rests on a check the flag skipped/i,
     ],
   })
   assertStatement(
@@ -563,6 +569,59 @@ test('parallel-execution states the coupling window is bounded, not the whole hi
     /a declared file needs at least three commits of its own history before coupling counts it/i,
     'the skill must name the support floor so a section-less brief does not read as a broken dispatch',
   )
+})
+
+test('parallel-execution documents --enforcement-only and what it is for', async () => {
+  const { doc } = await skill('parallel-execution')
+  const section = doc.section('Worktree mechanics')
+  // Why the flag exists at all. Without this a reader sees the guardrails below but never learns
+  // what the flag buys — the whole reason `finish` and `prune-run` recompute every command check
+  // of every phase in the first place.
+  assertStatement(
+    section,
+    /^finish and prune-run otherwise recompute every command check of every phase — for a five-phase run, five full test suites — to answer a question that usually does not need them\.$/i,
+    '--enforcement-only must state what it is for',
+  )
+})
+
+test('parallel-execution states --enforcement-only drops only command checks', async () => {
+  const { doc } = await skill('parallel-execution')
+  const section = doc.section('Worktree mechanics')
+  assertClaim(section, {
+    label: 'enforcement-only scope',
+    claim: /^It drops only command checks; fileset, ownership, and the merge check the gate computes for itself still run\.$/i,
+    subject: /\bdrops only\b/i,
+  })
+})
+
+test('parallel-execution states every check --enforcement-only drops is reported as skip', async () => {
+  const { doc } = await skill('parallel-execution')
+  const section = doc.section('Worktree mechanics')
+  assertStatement(
+    section,
+    /^Every dropped check is reported as skip, never silently omitted\.$/i,
+    '--enforcement-only must state dropped checks are always reported, never silently omitted',
+  )
+})
+
+test('parallel-execution states --enforcement-only refuses a phase with no enforcement check', async () => {
+  const { doc } = await skill('parallel-execution')
+  const section = doc.section('Worktree mechanics')
+  assertClaim(section, {
+    label: 'enforcement-only refusal',
+    claim: /^It REFUSES with exit 2 when a phase's manifest declares no fileset and no ownership check, because with nothing else to verify the result would be meaningless\.$/i,
+    subject: /\bREFUSES\b/,
+  })
+})
+
+test('parallel-execution states --enforcement-only never authorises a prune on a skipped check', async () => {
+  const { doc } = await skill('parallel-execution')
+  const section = doc.section('Worktree mechanics')
+  assertClaim(section, {
+    label: 'enforcement-only prune guard',
+    claim: /^And it will not let prune-run remove a worktree for a phase whose PASS rests on a check the flag skipped — a cheap verdict is enough to report, not enough to delete\.$/i,
+    subject: /\bnot enough to delete\b/i,
+  })
 })
 
 test('fleet-lifecycle states who writes the map notes and that nothing enforced reads them', async () => {
