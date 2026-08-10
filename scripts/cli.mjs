@@ -2338,14 +2338,40 @@ export async function runCli(argv, io = { out: console.log }) {
       return 4
     }
 
-    // The phase's own command check is where the suite lives. Taken from the TRACKED manifest for
-    // the same reason the reviewer tier is: the party being judged must not pick the command its
-    // judge runs. Absent, `generateReviewDispatch` refuses a `claims` lens rather than emitting a
-    // mutation method with nothing to run.
-    const commandCheck = checksForPhase(config, phaseName).find((c) => c.kind === 'command')
+    // Which command check is the suite, chosen by a stated rule rather than by position. The
+    // first command check in the list is NOT it: `inferGateConfig` emits typecheck, lint, test,
+    // build in that order, and that inferred config is what `gate` prints for an operator to
+    // save — so positionally the claims reviewer would baseline on `npm run typecheck`, which
+    // survives deleting a filter or widening a guard, and every probed claim would read as
+    // unpinned. The rule is: the check named `test` if there is exactly one; otherwise the sole
+    // command check if there is exactly one; otherwise no choice is made here.
+    //
+    // This comes from `teammates.gate.json` in the WORKING TREE — `resolveGateConfig` reads it
+    // through `readLayer`, not out of the index — so an enforced agent can edit it. Reading the
+    // manifest rather than the resolved config keeps the gitignored local layer out of the
+    // choice; it does not make the value trusted, which is why `generateReviewDispatch` screens
+    // the run string for control characters before interpolating it.
+    const commandChecks = checksForPhase(config, phaseName).filter((c) => c.kind === 'command')
+    const namedTest = commandChecks.filter((c) => c.name === 'test')
+    const commandCheck = namedTest.length === 1
+      ? namedTest[0]
+      : (namedTest.length === 0 && commandChecks.length === 1 ? commandChecks[0] : null)
+    // Refused, not guessed — and only for the lens that actually runs the command, since no
+    // other lens reads this value and blocking their dispatch over it would answer a question
+    // they never ask. Zero command checks is not ambiguity: it falls through to
+    // `generateReviewDispatch`, whose message says the phase declares no command check.
+    if (!commandCheck && commandChecks.length > 1 && (check.lens ?? []).includes('claims')) {
+      io.out(`the claims lens needs one command check to baseline against and this phase declares ${commandChecks.length}`
+        + ` with none named "test": ${commandChecks.map((c) => c.name).join(', ')}.`
+        + ' Name the one that runs the suite "test", or drop the claims lens from this phase')
+      return 4
+    }
     const testCommand = commandCheck?.run ?? ''
+    const testCommandName = commandCheck?.name ?? ''
     // The same paths the merge preview links in, for the same reason: a scratch worktree has no
-    // untracked build inputs, and the suite cannot run without them.
+    // untracked build inputs, and the suite cannot run without them. `previewLinks` normalises a
+    // non-array to []; `config.mjs`'s `preview` validator has already refused one by here, so
+    // that normalisation is a second net rather than the one that catches it.
     const linkPaths = previewLinks(config)
 
     let spec
@@ -2365,6 +2391,7 @@ export async function runCli(argv, io = { out: console.log }) {
         findingsDir: `.teammates/${runId}/reviews`,
         scratchRoot: tmpdir(),
         testCommand,
+        testCommandName,
         linkPaths,
       })
     } catch (err) {

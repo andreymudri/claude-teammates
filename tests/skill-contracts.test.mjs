@@ -4,6 +4,7 @@ import { readFile, readdir, mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { runCli } from '../scripts/cli.mjs'
+import { collectReviewResults } from '../scripts/reviews.mjs'
 import {
   assertClaim,
   assertCode,
@@ -98,24 +99,47 @@ test('phase-gate documents the two claims results that are not findings', async 
   const section = doc.section('Finish the pending checks')
   assertStatement(
     section,
-    /unableToVerify means the reviewer could not get a green baseline/i,
+    /collect-reviews reads neither/i,
+    'phase-gate must say collect-reviews does not read either key',
+  )
+  assertStatement(
+    section,
+    /you must open the findings file yourself/i,
+    'phase-gate must say who has to read the two keys, since the CLI does not',
+  )
+  assertStatement(
+    section,
+    /unableToVerify means the reviewer could not build the phase.s tree or get a green baseline/i,
     'phase-gate must say what unableToVerify means',
   )
   assertStatement(
     section,
-    /Treat it as the check not having run/i,
-    'phase-gate must say an unableToVerify claims review did not run',
+    /collected today as `?status: "pass"`? with zero findings/i,
+    'phase-gate must say how an unableToVerify claims review is actually collected',
   )
   assertStatement(
     section,
     /unprobed lists claims it enumerated and did not reach/i,
     'phase-gate must say what unprobed lists',
   )
-  assertStatement(
-    section,
-    /must not be read as a clean review/i,
-    'phase-gate must state that neither result is a clean review',
-  )
+})
+
+// The statement above is a claim about code, so it is pinned against the code rather than only
+// against itself. If `collectReviewResults` ever starts reading `unableToVerify`, this fails and
+// the skill sentence saying it does not has to be rewritten — which is the direction of drift
+// that produced this finding in the first place.
+test('collect-reviews really does collect an unableToVerify claims review as a pass', async () => {
+  const out = collectReviewResults({
+    lenses: ['claims'],
+    files: [{ lens: 'claims', findings: [], unableToVerify: 'the baseline suite was red', unprobed: ['a.mjs:1'] }],
+  })
+  assert.equal(out.results.length, 1)
+  assert.equal(out.results[0].status, 'pass')
+  assert.deepEqual(out.results[0].findings, [])
+  // Not merely absent from the verdict — absent from the emitted result entirely, so nothing
+  // downstream of the CLI can recover it either.
+  assert.equal('unableToVerify' in out.results[0], false)
+  assert.equal('unprobed' in out.results[0], false)
 })
 
 test('phase-gate says plainly what a none decision means and does not mean', async () => {

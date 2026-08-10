@@ -510,6 +510,142 @@ test('review-dispatch gives the claims lens the command check from the manifest'
   })
 })
 
+// A helper so each case below differs only in its check list. The task branch has to exist or
+// review-dispatch refuses before it ever resolves a command.
+async function withClaimsPhase(checks, body, extra = {}) {
+  await withRepo(async (ctx) => {
+    const { root, planPath, io, lines, git: g } = ctx
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeReviewManifest(root, {
+      ...extra,
+      phases: { default: { checks } },
+    })
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'T1.mjs'), 'export const x = 1\n', 'utf8')
+    g(['add', 'T1.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    lines.length = 0
+    const code = await runCli(['review-dispatch', '--run', 'r1', '--phase', '1', '--root', root], io)
+    await body({ code, out: lines.join('\n'), ...ctx })
+  })
+}
+
+const CLAIMS_CHECK = { name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: ['claims'], blockOn: ['high'] }
+
+// `inferGateConfig` emits typecheck, lint, test, build IN THAT ORDER, and that inferred config is
+// what `gate` prints for an operator to save. Taking the first command check positionally would
+// have the reviewer baseline on `npm run typecheck`, which survives every mutation the method
+// describes — eight fabricated high findings, and the suite never runs.
+test('review-dispatch prefers the command check named test over an earlier one', async () => {
+  await withClaimsPhase(
+    [
+      { name: 'typecheck', kind: 'command', run: 'npm run typecheck' },
+      { name: 'lint', kind: 'command', run: 'npm run lint' },
+      { name: 'test', kind: 'command', run: 'npm test' },
+      { name: 'build', kind: 'command', run: 'npm run build' },
+      CLAIMS_CHECK,
+    ],
+    ({ code, out }) => {
+      assert.equal(code, 0)
+      const spec = JSON.parse(out)
+      assert.match(spec.reviewers[0].prompt, /npm test/)
+      assert.doesNotMatch(spec.reviewers[0].prompt, /npm run typecheck/)
+    },
+  )
+})
+
+test('a single command check under any name is the suite', async () => {
+  await withClaimsPhase(
+    [{ name: 'suite', kind: 'command', run: 'make check' }, CLAIMS_CHECK],
+    ({ code, out }) => {
+      assert.equal(code, 0)
+      assert.match(JSON.parse(out).reviewers[0].prompt, /make check/)
+    },
+  )
+})
+
+// Guessing between them is what produced the fabricated findings; refusing names the candidates
+// so the fix is a one-word manifest edit.
+test('review-dispatch refuses to guess between command checks for the claims lens', async () => {
+  await withClaimsPhase(
+    [
+      { name: 'typecheck', kind: 'command', run: 'npm run typecheck' },
+      { name: 'lint', kind: 'command', run: 'npm run lint' },
+      CLAIMS_CHECK,
+    ],
+    ({ code, out }) => {
+      assert.equal(code, 4)
+      assert.match(out, /typecheck/)
+      assert.match(out, /lint/)
+    },
+  )
+})
+
+// The ambiguity only matters to the lens that runs the command. Refusing a correctness dispatch
+// over it would block a phase on a question that dispatch never asks.
+test('an ambiguous command list does not refuse a dispatch without the claims lens', async () => {
+  await withClaimsPhase(
+    [
+      { name: 'typecheck', kind: 'command', run: 'npm run typecheck' },
+      { name: 'lint', kind: 'command', run: 'npm run lint' },
+      { name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: ['correctness'], blockOn: ['high'] },
+    ],
+    ({ code, out }) => {
+      assert.equal(code, 0)
+      assert.equal(JSON.parse(out).reviewers[0].lens, 'correctness')
+    },
+  )
+})
+
+// End to end for the containment check: the entry never reaches a prompt telling a reviewer to
+// link it into a worktree it will later remove.
+test('review-dispatch refuses a preview.link entry that escapes the repository', async () => {
+  await withClaimsPhase(
+    [{ name: 'test', kind: 'command', run: 'npm test' }, CLAIMS_CHECK],
+    ({ code, out }) => {
+      assert.equal(code, 4)
+      assert.match(out, /preview\.link/)
+      assert.match(out, /escapes the repository/)
+    },
+    { preview: { link: ['../../../../Users/andre/.ssh'] } },
+  )
+})
+
+// `previewLinks` normalises a non-array to [] where `config.preview?.link ?? []` would hand the
+// string through to `linkPaths.join`. On this path the two cannot be told apart, and this test
+// records why rather than claiming a difference it cannot show: `config.mjs`'s `preview`
+// validator refuses a non-array `link` before `resolveGateConfig` returns, so review-dispatch
+// exits 2 without ever reading the value. The tolerant helper is defence behind that check, not
+// the check itself — which is the whole claim made for it here.
+test('a non-array preview.link is refused by the manifest layer before review-dispatch reads it', async () => {
+  await withClaimsPhase(
+    [{ name: 'test', kind: 'command', run: 'npm test' }, CLAIMS_CHECK],
+    ({ code, out }) => {
+      assert.equal(code, 2)
+      assert.match(out, /preview\.link must be an array of non-empty strings/)
+    },
+    { preview: { link: 'node_modules' } },
+  )
+})
+
+// The one line that turns the lens on for this repository's own runs, and the command check the
+// lens needs in order to be dispatchable at all. Its natural home is tests/self-gate.test.mjs,
+// which is not in this task's file set; it is pinned here so it is pinned somewhere.
+test('this repository dispatches the claims lens and declares a command check it can run', async () => {
+  const manifest = JSON.parse(await readFile(new URL('../teammates.gate.json', import.meta.url), 'utf8'))
+  const checks = manifest.phases.default.checks
+  const review = checks.find((c) => c.kind === 'agent')
+  assert.ok(review.lens.includes('claims'), 'the default phase must dispatch the claims lens')
+  const commands = checks.filter((c) => c.kind === 'command')
+  const named = commands.filter((c) => c.name === 'test')
+  assert.equal(
+    named.length === 1 || commands.length === 1,
+    true,
+    'the claims lens needs an unambiguous command check to baseline against',
+  )
+})
+
 // A dispatch emitted anyway would carry a mutation method with no command to run it, and the
 // reviewer would fall back to reading — a static review reported under a lens whose whole value
 // is that it is not one.

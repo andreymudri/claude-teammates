@@ -1,4 +1,9 @@
 import { reviewFileName } from './reviews.mjs'
+// A pure string check — no filesystem, no resolution — so importing it does not cost this module
+// its own purity. It is the same screen `withMergePreview` runs before it links anything, which
+// is what makes "a manifest this refuses has no working merge preview either" checkable rather
+// than reassuring.
+import { validateLinkPaths } from './preview-links.mjs'
 
 // Generates the reviewer dispatches for a phase, the way `workflow-gen` generates the
 // implementer ones.
@@ -24,20 +29,44 @@ import { reviewFileName } from './reviews.mjs'
 // anything noticed. A lens named `claims` with the generic prompt would be a fourth reader.
 //
 // A lens absent from this map produces the generic prompt byte for byte.
-const LENS_METHODS = {
-  claims: ({ testCommand, mutationCap, linkPaths, scratchWorktree }) => [
+//
+// Null-prototyped AND read through Object.hasOwn. On a bare literal read bare, a lens of
+// `toString` resolves to Object.prototype.toString and appends its call result to the prompt,
+// and `__defineGetter__` resolves to a function that throws where a dispatch-validation message
+// is expected. `scripts/gate-runner.mjs` carries the same fix for check kinds, and the lens
+// array is the same hand-written manifest field.
+//
+// Measured, not assumed: either guard alone is sufficient, so removing one does not fail a test.
+// Both are kept because whichever is removed later will be removed as the redundant one, and the
+// tests above pin only the behaviour, which the survivor still delivers — until it too goes.
+const LENS_METHODS = Object.assign(Object.create(null), {
+  claims: ({ testCommand, mutationCap, linkPaths, scratchWorktree, runBranch, branches }) => [
     '',
     'This lens has a method, and it is not the generic one. A claim is any sentence in the diff asserting a guarantee: a code comment, a skill sentence, a spec line. Reading a claim cannot tell you whether the code delivers it. Mutating what it protects can.',
     '',
-    `1. Establish a green baseline BEFORE mutating anything. Create your scratch worktree at ${scratchWorktree}${linkPaths.length > 0 ? `, link these paths in from the repository root so the suite can run: ${linkPaths.join(', ')}` : ''}, then run \`${testCommand}\` unmodified. If it is not green, STOP: return zero findings and an "unableToVerify" key naming the failure. Every mutation below reads as "nothing pins this claim" when the suite cannot run, so findings from a red baseline would be fabrications.`,
-    '2. Enumerate every claim in the diff, citing each as file:line.',
-    '3. Rank them by assertion strength. A claim that a window is closed, that a list is exhaustive, or that every case is covered outranks a descriptive comment.',
-    `4. Take the top ${mutationCap}. For each, break what the claim protects in your scratch worktree — delete the filter, widen the guard, remove the branch — and run \`${testCommand}\`.`,
-    '5. A claim whose mutation leaves the suite green is a finding. Quote the claim, name the mutation that survived, and cite file:line.',
-    `6. List every claim you enumerated but did NOT probe, by file:line, under an "unprobed" key in your findings JSON. You probed at most ${mutationCap} of what you found, and a bounded review that reports as though it were exhaustive is the exact defect this lens exists to catch.`,
+    `1. Build the tree this phase would integrate: create your scratch worktree at ${scratchWorktree} from ${runBranch}, then merge ${branches.join(', ')} into it. No single ref holds the whole diff you are reviewing, so a worktree based on any one of them is not the tree under review — mutating it would answer a question nobody asked. If that merge conflicts, STOP: return zero findings and an "unableToVerify" key naming the conflict.`,
+    `2. Establish a green baseline BEFORE mutating anything.${linkPaths.length > 0 ? ` First link these paths in from the repository root so the suite can run: ${linkPaths.join(', ')}.` : ''} Run \`${testCommand}\` unmodified in that worktree. If it is not green, STOP: return zero findings and an "unableToVerify" key naming the failure. Every mutation below reads as "nothing pins this claim" when the suite cannot run, so findings from a red baseline would be fabrications.`,
+    '3. Enumerate every claim in the diff, citing each as file:line.',
+    '4. Rank them by assertion strength. A claim that a window is closed, that a list is exhaustive, or that every case is covered outranks a descriptive comment.',
+    `5. Take the top ${mutationCap} and probe them ONE AT A TIME. For each: break what the claim protects — delete the filter, widen the guard, remove the branch — run \`${testCommand}\`, then REVERT that mutation before probing the next. Mutations left in place accumulate, and the first claim that really is pinned turns the suite red for every claim probed after it, which reads as though all of them were pinned.`,
+    '6. A claim whose mutation leaves the suite green is a finding. Quote the claim, name the mutation that survived, and cite file:line.',
+    `7. List every claim you enumerated but did NOT probe, by file:line, under an "unprobed" key in your findings JSON. You probed at most ${mutationCap} of what you found, and a bounded review that reports as though it were exhaustive is the exact defect this lens exists to catch.`,
+    '8. Clean up in this order: remove every link you created FIRST, then remove the worktree, and never with `--force`. On Windows a linked build input is a junction, and removing a worktree that still contains one deletes the contents of the REAL directory it points at rather than the link.',
     '',
     'Severity: an unpinned claim about an enforcement or security guarantee is high. A descriptive comment that has merely drifted from the code is low.',
   ].join('\n'),
+})
+
+// Interpolated into a numbered list of instructions the reviewer executes, so a newline in the
+// command turns into extra instructions. Verified: a crafted `run` produced a prompt whose steps
+// carried the injected sentences. The whole C0 range plus DEL, because the argument for refusing
+// a newline is the argument for refusing anything else a terminal or a parser acts on.
+function hasControlChar(text) {
+  for (const ch of text) {
+    const code = ch.codePointAt(0)
+    if (code < 0x20 || code === 0x7f) return true
+  }
+  return false
 }
 
 export function generateReviewDispatch({
@@ -54,6 +83,7 @@ export function generateReviewDispatch({
   findingsDir,
   scratchRoot,
   testCommand = '',
+  testCommandName = '',
   mutationCap = 8,
   linkPaths = [],
 }) {
@@ -63,11 +93,27 @@ export function generateReviewDispatch({
   if (!Array.isArray(branches) || branches.length === 0) {
     throw new Error(`a review dispatch needs at least one task branch to review, got ${JSON.stringify(branches)}`)
   }
-  // Thrown at generation time, not degraded into a weaker prompt. Without a command to run, the
-  // method above collapses into "read the claims and reason about them" — which is the static
-  // review the mutation step exists to replace, delivered under a name that says otherwise.
-  if (lenses.includes('claims') && !testCommand) {
-    throw new Error('the claims lens mutates code and runs the suite, so it needs a test command; this phase declares no command check to take one from')
+  // Screened on every dispatch, not only the ones that emit these paths, and screened here
+  // rather than trusted from the caller: `previewLinks` tests Array.isArray and nothing else, so
+  // an entry of '../../../../Users/someone/.ssh' would otherwise reach a prompt that tells the
+  // reviewer to link it into a worktree and later remove that worktree — and removing a worktree
+  // through a junction deletes the target's contents, which this repository has recorded and
+  // tested. Screening unconditionally costs a phase nothing it had: `withMergePreview` runs this
+  // same check before it links anything, so a manifest refused here has no merge preview either.
+  const badLink = validateLinkPaths(linkPaths)
+  if (badLink) throw new Error(badLink)
+
+  if (lenses.includes('claims')) {
+    // Thrown at generation time, not degraded into a weaker prompt. Without a command to run, the
+    // method above collapses into "read the claims and reason about them" — which is the static
+    // review the mutation step exists to replace, delivered under a name that says otherwise.
+    if (!testCommand) {
+      throw new Error('the claims lens mutates code and runs the suite, so it needs a test command; this phase declares no command check to take one from')
+    }
+    if (hasControlChar(testCommand)) {
+      const named = testCommandName ? `the command check ${JSON.stringify(testCommandName)}` : 'the command check this phase declares'
+      throw new Error(`${named} has a run string containing a control character, and the claims method interpolates it into instructions the reviewer executes; refused rather than emitted`)
+    }
   }
 
   const model = tierModels?.[tier]
@@ -93,7 +139,8 @@ export function generateReviewDispatch({
       `Write your findings JSON to ${findingsPath} before you return, then return the same JSON as your final output. The response is the interface; the file is what makes your review recoverable if you go idle before emitting it.`,
     ].join('\n')
 
-    const method = LENS_METHODS[lens]?.({ testCommand, mutationCap, linkPaths, scratchWorktree }) ?? ''
+    const build = Object.hasOwn(LENS_METHODS, lens) ? LENS_METHODS[lens] : null
+    const method = build ? build({ testCommand, mutationCap, linkPaths, scratchWorktree, runBranch, branches }) : ''
     const prompt = method ? `${basePrompt}\n${method}` : basePrompt
 
     const dispatch = {

@@ -86,12 +86,16 @@ those you execute:
   either to make the code deliver the claim or to correct the claim. Weakening the test is not a
   fix.
 
-  Two `claims` results are not findings and must not be read as a clean review:
+  A `claims` reviewer also writes two keys that are not findings, and `collect-reviews` reads
+  neither: `collectReviewResults` keeps `lens`, `stamp` and `findings` and drops every other key.
+  So the CLI cannot tell you about them, and you must open the findings file yourself before
+  treating a clean claims lens as a clean claims lens.
 
-  - `unableToVerify` means the reviewer could not get a green baseline in its scratch worktree,
-    so it probed nothing. Treat it as the check not having run.
-  - `unprobed` lists claims it enumerated and did not reach. The lens is bounded; that list is
-    the boundary, and it is reported rather than hidden.
+  - `unableToVerify` means the reviewer could not build the phase's tree or get a green baseline
+    in its scratch worktree, so it probed nothing. It is collected today as `status: "pass"` with
+    zero findings: a lens that verified nothing is recorded as a lens that found nothing.
+  - `unprobed` lists claims it enumerated and did not reach. The lens is bounded by its mutation
+    cap, and a review that reached 8 of 40 claims collects identically to an exhaustive clean one.
 - **mcp** — call the declared tool and compare against `passWhen`. If the server is not
   connected and the check is `optional`, record `skip` and say so out loud. A missing optional
   server is never a silent pass.
