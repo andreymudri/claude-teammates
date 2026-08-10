@@ -58,9 +58,21 @@ where the corresponding claim is made:
 
 - **A teammate that runs arbitrary code.** It has Bash with the user's permissions. It can
   write any file, including its own `package.json`, `.git/hooks/`, and `.git/config`.
-- **Self-integration.** A teammate can fast-forward the run branch to its own tip and create
-  branches named for tasks it does not own, making phases read as integrated so no check runs.
-  Confirmed.
+- **Self-integration.** A teammate can create its own task branches, do real work on each, and
+  merge them into the run branch itself, bypassing `tm-integrator`. Every branch then carries
+  its own work off its own fork point, which is exactly the shape legitimate integration has;
+  the only difference is who ran the merge, and git does not record that in a form this gate can
+  trust. Confirmed, and out of scope for the same reason as arbitrary code execution.
+
+  One variant that used to sit in this bullet is now CAUGHT, and is pinned in
+  `tests/adversarial.test.mjs` under the defended section: a teammate pointing a task ref at a
+  run tip that already carries someone else's real work, and committing nothing itself.
+  `deriveContext` measures every task branch against its own fork point off the run branch
+  rather than against the run anchor, so such a ref shows no work of its own, its phase does not
+  read as integrated, and the fileset check runs against it instead of being skipped by the
+  "every phase in the plan is integrated" fast path. A branch integrated by fast-forward is
+  indistinguishable from one parked at the same commit and is failed too — `tm-integrator`'s
+  contract is `--no-ff`, so that state is out-of-contract rather than undetected.
 - **A teammate that forges run state.** `.teammates/` is writable. Nothing reads it for a
   verdict, so this buys little — but the digest and supervision output can be made to lie.
 - **Uncommitted work.** The gate reads commits. The claim is precisely "committed changes

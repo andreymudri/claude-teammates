@@ -154,13 +154,14 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
       // What the fork-point base adds is that "did work" now means the branch's OWN work,
       // rather than anything that was already on the run branch when the branch was created.
       //
-      // It also closes one variant of self-integration that the anchor base left open and the
-      // spec's "Not defended against" list still records: a phantom branch pointed at a run
-      // tip that already carries someone ELSE'S real commits used to show those commits as its
-      // own work, and now measures against its own tip and shows nothing. What remains open is
-      // the variant where a teammate does the integrator's job — creating task branches that
-      // each carry real work and merging them itself — which is indistinguishable here from
-      // legitimate integration, because at this level it IS the same shape.
+      // It also closes one variant of self-integration that the anchor base left open: a
+      // phantom branch pointed at a run tip that already carries someone ELSE'S real commits
+      // used to show those commits as its own work, and now measures against its own tip and
+      // shows nothing. What remains open is the variant where a teammate does the integrator's
+      // job — creating task branches that each carry real work and merging them itself — which
+      // is indistinguishable here from legitimate integration, because at this level it IS the
+      // same shape. The spec's "Not defended against" list records the split, and
+      // `tests/adversarial.test.mjs` pins both halves.
       //
       // A branch integrated by FAST-FORWARD leaves no merge commit to name it, so it measures
       // against its own tip and reads as no work even though the work is on the run branch.
