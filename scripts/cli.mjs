@@ -1639,7 +1639,16 @@ export async function runCli(argv, io = { out: console.log }) {
     // `selectPrunableWorktrees` with the answer. The first call is what decides which
     // directories are opened at all — no path outside a detached, branchless tm-preview-* under
     // the temp root is ever read.
-    const previewCandidates = leakedPreviews(worktrees, { tempRoot: tmpdir() }).map((p) => p.path)
+    //
+    // ONE root for both calls, resolved once. The two passes are the same identification run
+    // twice, so disagreeing on the temp root is not a narrower result — it is the destructive
+    // one. With the raw spelling here and the resolved one below, the candidate list came back
+    // EMPTY on macOS and Windows, so no marker was read, so the live set was empty, and then the
+    // resolved pass identified the preview and found nothing claiming it: a preview whose owner
+    // is alive was reaped with its junctions still in place. Resolving in only one of the two
+    // places is strictly worse than resolving in neither.
+    const tempRoot = resolvedTempRoot()
+    const previewCandidates = leakedPreviews(worktrees, { tempRoot }).map((p) => p.path)
     const livePreviews = await livePreviewPaths(previewCandidates)
     const plan = selectPrunableWorktrees({
       runId,
@@ -1654,8 +1663,8 @@ export async function runCli(argv, io = { out: console.log }) {
       // caller supplies the root it observed. Without it, NOTHING is identified as a leaked
       // preview — a `tm-preview-*` worktree an operator keeps elsewhere on disk is theirs.
       // Resolved, not raw: git reports real paths, and the raw spelling misses every preview on
-      // macOS and Windows. See resolvedTempRoot.
-      tempRoot: resolvedTempRoot(),
+      // macOS and Windows. See resolvedTempRoot. The SAME value the candidate pass above used.
+      tempRoot,
     })
     io.out(renderPrunePlan(plan))
 
