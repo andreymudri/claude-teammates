@@ -259,6 +259,29 @@ test('mergeBase rejects an empty or non-string ref with GitError', async () => {
   assert.deepEqual(calls, [])
 })
 
+// The stderr an old git (< 2.24) produces for --end-of-options, which it does not recognise:
+// parse-options.c's generic "unknown option" rejection, confirmed against real git by
+// substituting an unrecognised long option for --end-of-options and reading its stderr and
+// exit code, since the git available to run this suite already accepts --end-of-options and so
+// cannot be made to fail this way directly.
+const OLD_GIT_STDERR = "error: unknown option `end-of-options'\nusage: git merge-base [-a|--all] <commit> <commit>...\n"
+
+test('mergeBase on a too-old git raises a GitError naming the 2.24 floor, not the raw stderr', async () => {
+  const { exec } = recorder({ code: 129, stdout: '', stderr: OLD_GIT_STDERR })
+  await assert.rejects(
+    () => createGit({ exec }).mergeBase('a', 'b'),
+    (err) => err instanceof GitError && /2\.24/.test(err.message) && /too old/.test(err.message),
+  )
+})
+
+test('a failure unrelated to --end-of-options still reports git\'s raw stderr, not the old-git message', async () => {
+  const { exec } = recorder({ code: 128, stdout: '', stderr: 'fatal: not a git repository' })
+  await assert.rejects(
+    () => createGit({ exec }).mergeBase('a', 'b'),
+    (err) => err instanceof GitError && !/2\.24/.test(err.message) && /not a git repository/.test(err.message),
+  )
+})
+
 // --- isAncestor --------------------------------------------------------------------------
 
 test('isAncestor builds the argv exactly, with no trailing --, and returns true on exit 0', async () => {
@@ -275,6 +298,14 @@ test('isAncestor returns false on exit 1', async () => {
 test('isAncestor throws GitError on exit 128 rather than reporting false', async () => {
   const { exec } = recorder({ code: 128, stdout: '', stderr: 'bad revision' })
   await assert.rejects(() => createGit({ exec }).isAncestor('a', 'b'), GitError)
+})
+
+test('isAncestor on a too-old git raises a GitError naming the 2.24 floor', async () => {
+  const { exec } = recorder({ code: 129, stdout: '', stderr: OLD_GIT_STDERR })
+  await assert.rejects(
+    () => createGit({ exec }).isAncestor('a', 'b'),
+    (err) => err instanceof GitError && /2\.24/.test(err.message),
+  )
 })
 
 test('isAncestor rejects an empty or non-string ref with GitError', async () => {

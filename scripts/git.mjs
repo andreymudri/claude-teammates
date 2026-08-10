@@ -2,6 +2,28 @@ import { spawn } from 'node:child_process'
 
 export class GitError extends Error {}
 
+// Every ref-consuming command in this module passes --end-of-options, added to git in 2.24
+// (November 2019). On an older git the option itself is unrecognised, and parse-options.c's
+// generic rejection for every long option it does not know is `error: unknown option
+// \`<name>'` on stderr with exit 129 — confirmed against real git by substituting an
+// unrecognised long option for --end-of-options, since the git installed here (>= 2.24)
+// accepts --end-of-options itself and so cannot reproduce the old-git failure directly.
+// Matching on this turns a bare, unexplained "exit 129" into a message that names the actual
+// cause instead of git's raw complaint.
+const OLD_GIT_UNKNOWN_END_OF_OPTIONS = /unknown option `end-of-options'/
+
+// Builds the message a failed git invocation raises as. Not a version probe — this only
+// inspects the stderr of a call that already failed, so it costs nothing on the success path
+// that dominates this module's use (once-per-call-that-errors, not once-per-call).
+function describeGitFailure(args, code, stderr) {
+  const trimmed = stderr.trim()
+  if (OLD_GIT_UNKNOWN_END_OF_OPTIONS.test(stderr)) {
+    return `git ${args.join(' ')} failed: the installed git is too old to run this plugin — ` +
+      `--end-of-options requires git >= 2.24, got: ${trimmed || `exit ${code}`}`
+  }
+  return `git ${args.join(' ')} failed: ${trimmed || `exit ${code}`}`
+}
+
 // Where the Claude Code harness creates agent worktrees, relative to the repo root.
 const HARNESS_WORKTREES = /^\.claude\//
 
@@ -38,7 +60,7 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
 
   const run = async (args) => {
     const { code, stdout, stderr } = await runRaw(args)
-    if (code !== 0) throw new GitError(`git ${args.join(' ')} failed: ${stderr.trim() || `exit ${code}`}`)
+    if (code !== 0) throw new GitError(describeGitFailure(args, code, stderr))
     return stdout
   }
 
@@ -248,7 +270,7 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
       // Exit 1 is git's answer for "not an ancestor". Anything else (128 for a bad ref,
       // for instance) is a failure and must not read as a clean "no".
       if (code === 1) return false
-      throw new GitError(`git ${args.join(' ')} failed: ${stderr.trim() || `exit ${code}`}`)
+      throw new GitError(describeGitFailure(args, code, stderr))
     },
     // The set of shas the run branch merged IN as secondary parents, past the anchor — that is,
     // the tips of the branches this run's integrator actually carried onto the run branch.

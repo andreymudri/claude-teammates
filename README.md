@@ -19,6 +19,8 @@ phase 2   T4
 
 - Claude Code
 - Node.js >= 24.2.0
+- git >= 2.24, because every git invocation this plugin makes passes `--end-of-options` to stop
+  a ref name beginning with `-` from being parsed as a flag
 - A git repository — worktree isolation depends on it
 
 Zero runtime and zero dev dependencies. Tests use the built-in `node:test` runner.
