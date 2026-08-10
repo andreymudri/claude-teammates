@@ -339,13 +339,8 @@ test('gate fails when a task ref is parked at a run tip carrying another task\'s
   })
 })
 
-// A plan with three phase-2 siblings (T2, T3, T4 each depend only on T1 and touch disjoint
-// files, so `assignPhases` places all three in phase 2). T4 never starts, which is what keeps
-// deriveContext's own ownWorkBase gap (scripts/gate-runner.mjs:191-200, still open — this task
-// does not touch it) from advancing the phase to `null` and skipping the fileset check
-// entirely: phase 2 needs every one of its tasks integrated to read as done, and T4 alone
-// keeps it from doing so, so the gate actually reaches the phase-specific loop where the new
-// duplicate rule lives.
+// A plan with two phase-2 siblings (T2, T3 each depend only on T1 and touch disjoint files, so
+// `assignPhases` places both in phase 2).
 const SIBLING_TIP_PLAN = `### Task 1: A
 
 **Files:**
@@ -362,13 +357,6 @@ const SIBLING_TIP_PLAN = `### Task 1: A
 
 **Files:**
 - Create: \`c.mjs\`
-
-**Depends:** T1
-
-### Task 4: D
-
-**Files:**
-- Create: \`d.mjs\`
 
 **Depends:** T1
 `
@@ -388,12 +376,18 @@ function commitPlanAtAnchor(root, planMarkdown) {
 }
 
 // Was recorded only as prose, in the spec's "Not defended against" list and in
-// `deriveContext`'s own comment (scripts/gate-runner.mjs:191-200): T3 commits `c.mjs` and is
-// merged `--no-ff`; T2 never commits anything of its own, and its ref is pointed directly at
-// T3's tip instead. T2's sha is a genuine secondary parent of the merge and genuinely inside
+// `deriveContext`'s own comment (scripts/gate-runner.mjs): T3 commits `c.mjs` and is merged
+// `--no-ff`; T2 never commits anything of its own, and its ref is pointed directly at T3's tip
+// instead. T2's sha is a genuine secondary parent of the merge and genuinely inside
 // anchor..run, so the old empty-diff test (which asks only "is this sha a merged tip") passed
-// it. The new duplicate rule asks a cheaper question first — do two task refs of this run
-// resolve to the identical sha — and rejects this shape before the empty-diff test ever runs.
+// it, and the old `ownWorkBase` fork-point trick credited T2 with `c.mjs` in `deriveContext`
+// too, reading phase 2 as fully integrated and skipping the fileset check entirely.
+//
+// Both are now closed by the same shared-sha exclusion: `deriveContext` no longer credits
+// EITHER T2 or T3 as having done independent work once their branches resolve to the identical
+// sha, so phase 2 does not read as integrated on T3's legitimate merge alone, the gate keeps
+// checking it, and `runFilesetCheck`'s duplicate rule — which asks the same question over the
+// same run-wide set — rejects the pair by name.
 test('gate fails when a task ref is parked at a merged SIBLING\'s tip', async () => {
   await withRepo(async (root) => {
     await commitPlanAtAnchor(root, SIBLING_TIP_PLAN)
@@ -406,7 +400,7 @@ test('gate fails when a task ref is parked at a merged SIBLING\'s tip', async ()
     git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T3', t3Branch])
 
     // T2 never commits: its ref is pointed straight at T3's own tip commit, not at the merge
-    // commit that carried it. T4 never starts.
+    // commit that carried it.
     git(root, ['branch', 'teammates/r1/T2', t3Tip])
 
     const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
