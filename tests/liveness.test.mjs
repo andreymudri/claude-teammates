@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { livenessRows, renderLiveness, hasStall, DEFAULT_STALE_MINUTES } from '../scripts/liveness.mjs'
+import { livenessRows, renderLiveness, hasStall, hasUnknown, DEFAULT_STALE_MINUTES } from '../scripts/liveness.mjs'
 
 const NOW = 1_700_000_000_000
 const MIN = 60 * 1000
@@ -60,13 +60,38 @@ test('a worktree with no commits and a stale mtime reads stalled', () => {
   assert.equal(row.branch, 'teammates/r1/T1')
 })
 
-test('a floored touch never reads stalled however old the measurement is', () => {
+// A floored walk stopped early, so the newest file may be one it never reached: "stalled" is
+// unsayable. "working" is equally unsayable, and saying it was the bug — on a repository whose
+// worktree always floors, every row read working and the stall signal could never fire at all.
+test('a floored touch with nothing fresh reads unknown, not working and not stalled', () => {
   const row = rowFor({
     tip: { branch: 'teammates/r1/T1', at: NOW - 5000 * MIN },
     touch: { branch: 'teammates/r1/T1', at: NOW - 5000 * MIN, floored: true },
   })
-  assert.equal(row.state, 'working')
+  assert.equal(row.state, 'unknown')
   assert.equal(row.floored, true)
+})
+
+test('a floored touch with no touch measurement at all still reads unknown', () => {
+  const row = rowFor({ touch: { branch: 'teammates/r1/T1', at: null, floored: true } })
+  assert.equal(row.state, 'unknown')
+})
+
+// The tip is a measurement in its own right, and a commit inside the window settles the question
+// whatever the walk did — so a floored row is not automatically unknown.
+test('a fresh tip settles a row as working even when the worktree walk floored', () => {
+  const row = rowFor({
+    tip: { branch: 'teammates/r1/T1', at: NOW - 1 * MIN },
+    touch: { branch: 'teammates/r1/T1', at: NOW - 5000 * MIN, floored: true },
+  })
+  assert.equal(row.state, 'working')
+})
+
+test('hasUnknown is true only when some row was not measured', () => {
+  assert.equal(hasUnknown([{ state: 'working' }, { state: 'stalled' }]), false)
+  assert.equal(hasUnknown([{ state: 'working' }, { state: 'unknown' }]), true)
+  assert.equal(hasUnknown([]), false)
+  assert.equal(hasUnknown(), false)
 })
 
 test('the threshold is inclusive at exactly staleMinutes and stalls one millisecond past it', () => {
@@ -104,7 +129,7 @@ test('renderLiveness names the threshold, every task and its state', () => {
   assert.match(out, /stale after 20m/)
   assert.match(out, /T1\s+3m\s+-\s+working/)
   assert.match(out, /T2\s+60m\s+60m\s+stalled/)
-  assert.match(out, /T3\s+-\s+99m \(floor\)\s+working/)
+  assert.match(out, /T3\s+-\s+99m \(floor\)\s+unknown/)
 })
 
 test('hasStall is true only when some row is stalled', () => {

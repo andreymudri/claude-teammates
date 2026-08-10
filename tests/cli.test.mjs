@@ -6632,19 +6632,187 @@ test('newestMtime measures a tree under the cap rather than flooring it', async 
 })
 
 // `.git` is skipped by name, so a linked worktree's `.git` FILE is skipped too — a checkout that
-// rewrites it must not read as a teammate editing its own code.
-test('newestMtime skips .git and node_modules whether they are a file or a directory', async () => {
+// rewrites it must not read as a teammate editing its own code. It is the ONE hardcoded skip:
+// git never reports `.git` as ignored, because it is not ignored, it is simply not part of the
+// working tree. Everything else is the project's own .gitignore, supplied by the caller.
+test('newestMtime skips .git whether it is a file or a directory', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'tm-walk-'))
   try {
     await writeFile(path.join(dir, 'kept'), '', 'utf8')
     await utimes(path.join(dir, 'kept'), new Date(1_000_000_000_000), new Date(1_000_000_000_000))
-    // Newer than `kept` by construction: if either were walked, `at` would be the recent one.
+    // Newer than `kept` by construction: if it were walked, `at` would be the recent one.
     await writeFile(path.join(dir, '.git'), 'gitdir: elsewhere\n', 'utf8')
-    await mkdir(path.join(dir, 'node_modules'), { recursive: true })
-    await writeFile(path.join(dir, 'node_modules', 'pkg'), '', 'utf8')
     const walked = await newestMtime(dir)
     assert.equal(walked.at, 1_000_000_000_000)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+// The ignored set comes from git, so a project's own .gitignore prunes the walk. Both shapes git
+// reports have to work: a whole directory (trailing slash) and a single file.
+test('newestMtime prunes the paths git reports as ignored, directory or file', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-walk-'))
+  try {
+    await writeFile(path.join(dir, 'kept'), '', 'utf8')
+    await utimes(path.join(dir, 'kept'), new Date(1_000_000_000_000), new Date(1_000_000_000_000))
+    await mkdir(path.join(dir, 'dist', 'deep'), { recursive: true })
+    await writeFile(path.join(dir, 'dist', 'deep', 'bundle.js'), '', 'utf8')
+    await writeFile(path.join(dir, 'debug.log'), '', 'utf8')
+    const walked = await newestMtime(dir, { ignored: new Set(['dist/', 'debug.log']) })
+    assert.equal(walked.at, 1_000_000_000_000)
+    assert.equal(walked.floored, false)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+// Both branches that swallow a filesystem error. `git worktree list` reports a worktree whose
+// directory was deleted without `git worktree prune`, and `worktrees()` does not filter those —
+// so the walk is handed a path that is not there on a state git produces routinely.
+test('newestMtime reports no measurement for a directory that is gone rather than rejecting', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-walk-'))
+  await rm(dir, { recursive: true, force: true })
+  const walked = await newestMtime(dir)
+  assert.deepEqual(walked, { at: null, floored: false })
+})
+
+// An entry readdir lists and stat cannot resolve: a link whose target was removed. `stat` follows
+// the link, so this is the vanished-mid-walk shape made deterministic.
+test('newestMtime skips an entry it cannot stat rather than rejecting', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-walk-'))
+  try {
+    await writeFile(path.join(dir, 'kept'), '', 'utf8')
+    await utimes(path.join(dir, 'kept'), new Date(1_000_000_000_000), new Date(1_000_000_000_000))
+    const target = path.join(dir, 'target')
+    await mkdir(target, { recursive: true })
+    await symlink(target, path.join(dir, 'dangling'), process.platform === 'win32' ? 'junction' : 'dir')
+    await rm(target, { recursive: true, force: true })
+    const walked = await newestMtime(dir)
+    assert.equal(walked.at, 1_000_000_000_000)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+// Finding A end to end, and the reason the hardcoded pair was the wrong filter: a `dist/` of five
+// thousand files is enough to floor every walk on a real project, and a floored row can never be
+// stalled. Ignored by the project's own .gitignore, it must not be walked at all — so the stall
+// signal still works on exactly the repositories this command exists to supervise.
+test('liveness still reports a stall when a gitignored directory holds more entries than the cap', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, '.gitignore'), '.teammates/\ndist/\n', 'utf8')
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs', '.gitignore'])
+    commitAt(root, 'T1 work', '2001-02-03T04:05:06Z')
+    g(['checkout', '--quiet', 'run-branch'])
+    const wt = path.join(root, 'wt-T1')
+    g(['worktree', 'add', '--quiet', wt, 'teammates/r1/T1'])
+    await ageTree(wt, Date.now() - 6 * 60 * 60 * 1000)
+    // Fresh, numerous, and ignored: neither its count nor its mtimes may reach the report.
+    await mkdir(path.join(wt, 'dist'), { recursive: true })
+    await Promise.all(
+      Array.from({ length: MAX_WALK_ENTRIES + 1 }, (_, i) => writeFile(path.join(wt, 'dist', `f${i}`), '', 'utf8')),
+    )
+    lines.length = 0
+    const code = await runCli(['liveness', '--run', 'r1', '--plan', 'plan.md', '--root', root], io)
+    const out = lines.join('\n')
+    assert.match(out, /T1.*stalled/)
+    assert.doesNotMatch(out, /\(floor\)/)
+    assert.equal(code, 1)
+    g(['worktree', 'remove', '--force', wt])
+  })
+})
+
+// When the walk floors anyway, freshness was not measured. Reporting that row as working at exit 0
+// is an all-clear about a teammate nothing looked at, so it is `unknown` and exit 2.
+test('liveness reports an unmeasurable worktree as unknown and exits 2, never as an all-clear', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    commitAt(root, 'T1 work', '2001-02-03T04:05:06Z')
+    g(['checkout', '--quiet', 'run-branch'])
+    const wt = path.join(root, 'wt-T1')
+    g(['worktree', 'add', '--quiet', wt, 'teammates/r1/T1'])
+    // Tracked by nothing and ignored by nothing: git reports these as untracked, so the walk must
+    // visit them, hit the cap, and admit it did not measure the tree.
+    await mkdir(path.join(wt, 'many'), { recursive: true })
+    await Promise.all(
+      Array.from({ length: MAX_WALK_ENTRIES + 1 }, (_, i) => writeFile(path.join(wt, 'many', `f${i}`), '', 'utf8')),
+    )
+    await ageTree(wt, Date.now() - 6 * 60 * 60 * 1000)
+    lines.length = 0
+    const code = await runCli(['liveness', '--run', 'r1', '--plan', 'plan.md', '--root', root], io)
+    const out = lines.join('\n')
+    assert.match(out, /T1.*unknown/)
+    assert.match(out, /\(floor\)/)
+    assert.match(out, /freshness was not measured/)
+    assert.doesNotMatch(out, /T1.*working/)
+    assert.equal(code, 2)
+    g(['worktree', 'remove', '--force', wt])
+  })
+})
+
+// A worktree git still lists but whose directory is gone: shipped code printed a row from the tip
+// alone; without the readdir catch the whole command rejects with ENOENT.
+test('liveness survives a worktree directory deleted without git worktree prune', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    const wt = path.join(root, 'wt-T1')
+    g(['worktree', 'add', '--quiet', wt, 'teammates/r1/T1'])
+    await rm(wt, { recursive: true, force: true })
+    assert.equal(hasWorktree(root, 'wt-T1'), true, 'git still lists the worktree it was never told to prune')
+    lines.length = 0
+    const code = await runCli(['liveness', '--run', 'r1', '--plan', 'plan.md', '--root', root], io)
+    // The tip is fresh, so the row is decided by the signal that survived.
+    assert.match(lines.join('\n'), /T1.*working/)
+    assert.equal(code, 0)
+  })
+})
+
+// The phase is derived from the plan at the ANCHOR and the rows come from the plan in the WORKING
+// TREE. Amending a plan mid-run is a documented procedure here — `plan-drift` exists because it
+// happens — and when the amendment drops the derived phase's tasks the report was a bare header
+// at exit 0: an all-clear covering nobody.
+test('liveness refuses when the working-tree plan has no task in the derived phase', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--quiet', '--no-ff', '-m', 'integrate T1', 'teammates/r1/T1'])
+    // Phase 1 is integrated, so the derived phase is 2 — which this amendment removes.
+    await writeFile(planPath, '### Task 1: A\n\n**Files:**\n- Create: `a.mjs`\n', 'utf8')
+    lines.length = 0
+    const code = await runCli(['liveness', '--run', 'r1', '--plan', 'plan.md', '--root', root], io)
+    const out = lines.join('\n')
+    assert.match(out, /phase 2/)
+    assert.match(out, /no task/)
+    assert.equal(code, 2)
+  })
+})
+
+// A mistyped --run matches no branch and no worktree, so every row took the not-started path and
+// the heartbeat read as an all-clear for a run the command never looked at.
+test('liveness refuses a run id with no directory rather than reporting a board of not-started', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const code = await runCli(['liveness', '--run', 'r11', '--plan', 'plan.md', '--root', root], io)
+    const out = lines.join('\n')
+    assert.match(out, /r11/)
+    assert.doesNotMatch(out, /not started/)
+    assert.equal(code, 2)
+  })
 })

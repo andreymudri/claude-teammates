@@ -264,6 +264,29 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
       }
       return (await run(['log', '-n', '1', '--format=%h %s', '--end-of-options', ref, '--'])).trim()
     },
+    // The paths a worktree's own ignore rules exclude, as git decides them rather than as a
+    // hardcoded list guesses them. A wholly ignored directory comes back once with a trailing
+    // slash instead of as its contents, which is what makes the result usable as a set of
+    // prefixes to prune a filesystem walk at.
+    //
+    // `.git` is NOT in the result and cannot be: git does not report it as ignored, because it is
+    // not ignored — it is simply not part of the working tree. A caller pruning a walk still has
+    // to skip it by name.
+    //
+    // No `--end-of-options` and no trailing `--`, against this module's habit everywhere else,
+    // and that is measured rather than assumed: `git status --porcelain --ignored -z
+    // --end-of-options --` prints NOTHING and exits 0 on real git (2.53, checked directly). Adding
+    // them for consistency would turn "every ignored path" into "no ignored path" silently, which
+    // is the exact class of failure the flags exist to prevent elsewhere. There is also no
+    // pathspec position to defend here: `dir` reaches git as the argument of `-C`, never as a
+    // pathspec. `tests/git.test.mjs` pins the absence so a later sweep cannot re-add them quietly.
+    async ignoredPaths(dir) {
+      if (!isNonEmptyString(dir)) {
+        throw new GitError(`ignoredPaths requires a non-empty dir, got ${JSON.stringify(dir)}`)
+      }
+      const out = await run(['-C', dir, '-c', 'core.quotePath=false', 'status', '--porcelain', '--ignored', '-z'])
+      return out.split('\0').filter((entry) => entry.startsWith('!! ')).map((entry) => entry.slice(3))
+    },
     // Committer date, in milliseconds, of a sha the caller already resolved. %ct rather than %at:
     // the author date survives a rebase and would report a teammate's work as older than the
     // commit that carries it.

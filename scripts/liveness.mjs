@@ -28,11 +28,23 @@ export function livenessRows({ tasks = [], tips = {}, touches = {}, now, staleMi
     }
     // A floored measurement is a LOWER bound on freshness: the walk stopped early, so the newest
     // file may be one it never reached. The task can only be more recently touched than reported,
-    // never less — so a floored row is never called stalled.
+    // never less — so a floored row cannot be called stalled.
+    //
+    // It cannot be called working either, and calling it working was a real defect rather than a
+    // theoretical one: on any project whose worktree holds more entries than the walk's cap —
+    // a `dist/`, `.next/`, `target/` or `.venv` is enough — every walk floors, every row read
+    // working, and the command's only failure signal could never fire on exactly the repositories
+    // it exists to supervise. So there are three answers, and the third says so: `unknown` means
+    // freshness was NOT measured, which the caller reports rather than dressing up as an
+    // all-clear.
+    //
+    // A fresh TIP still settles the row as working, because that signal was measured and a commit
+    // inside the window is proof of work on its own. Only when nothing measured is fresh does the
+    // floor decide between `unknown` and `stalled`.
     const floored = touch?.floored === true
     const ages = [tipAgeMs, touchAgeMs].filter((a) => a != null)
     const fresh = ages.some((age) => age <= thresholdMs)
-    const state = fresh || floored ? 'working' : 'stalled'
+    const state = fresh ? 'working' : (floored ? 'unknown' : 'stalled')
     return { taskId: task.id, branch: tip?.branch ?? touch?.branch ?? null, tipAgeMs, touchAgeMs, floored, state }
   })
 }
@@ -49,4 +61,11 @@ export function renderLiveness(rows = [], { staleMinutes = DEFAULT_STALE_MINUTES
 
 export function hasStall(rows = []) {
   return rows.some((row) => row.state === 'stalled')
+}
+
+// Rows whose freshness was never measured. Separate from `hasStall` because the two say different
+// things and the caller answers them with different exit codes: a stall is a measurement, and this
+// is the absence of one.
+export function hasUnknown(rows = []) {
+  return rows.some((row) => row.state === 'unknown')
 }

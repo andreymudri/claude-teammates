@@ -1,5 +1,5 @@
 import { readFile, writeFile, mkdir, rename, lstat, readdir, unlink } from 'node:fs/promises'
-import { livenessRows, renderLiveness, hasStall, DEFAULT_STALE_MINUTES } from './liveness.mjs'
+import { livenessRows, renderLiveness, hasStall, hasUnknown, DEFAULT_STALE_MINUTES } from './liveness.mjs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parsePlan } from './plan-parser.mjs'
@@ -416,19 +416,29 @@ function numericWindow(value, fallback) {
   return Number(value)
 }
 
-// Newest mtime under a directory, skipping `.git` and `node_modules` and visiting at most
+// Newest mtime under a directory, pruning what git says the project ignores and visiting at most
 // MAX_WALK_ENTRIES entries. `floored: true` means the cap stopped the walk, so the answer is a
-// lower bound on freshness rather than a measurement — `livenessRows` refuses to call a floored
-// row stalled for exactly that reason.
+// lower bound on freshness rather than a measurement — `livenessRows` reports such a row as
+// `unknown` rather than as either working or stalled.
+//
+// `ignored` is supplied by the caller from `git.ignoredPaths`, not decided here, and it replaced a
+// hardcoded `.git`/`node_modules` pair that was the wrong filter twice over: it missed every other
+// generated directory (`dist`, `.next`, `target`, `.venv`), and it named `node_modules` in a
+// project that might legitimately track it. A repository with any of those floored every walk, and
+// a floored row could never be stalled, so the command's only failure signal was inert on exactly
+// the repositories it exists to supervise.
+//
+// `.git` stays hardcoded because git does not report it as ignored — it is not ignored, it is
+// simply not part of the working tree — so nothing in the supplied set can cover it.
 //
 // Both the cap and this function are exported so the suite walks a real tree of MAX_WALK_ENTRIES+1
-// entries rather than being told the flag: a floored row is never stalled, so a walk that floors
-// everything disarms `liveness`'s only failure signal while every unit test on the synthetic flag
-// stays green. That is not hypothetical — it is how the branch was found unpinned.
+// entries rather than being told the flag: a walk that always floors reports no stall ever, while
+// every unit test on the synthetic flag stays green. That is not hypothetical — it is how the
+// branch was found unpinned.
 export const MAX_WALK_ENTRIES = 5000
-const WALK_SKIP = new Set(['.git', 'node_modules'])
+const WALK_SKIP = new Set(['.git'])
 
-export async function newestMtime(dir) {
+export async function newestMtime(dir, { ignored = new Set() } = {}) {
   let newest = null
   let visited = 0
   const stack = [dir]
@@ -438,8 +448,10 @@ export async function newestMtime(dir) {
     try {
       entries = await readdir(current, { withFileTypes: true })
     } catch {
-      // A worktree removed mid-walk is not an error worth failing the report over; it is the
-      // absence of evidence, which the caller already represents as a missing touch record.
+      // A worktree deleted without `git worktree prune` is still listed by git, so this is a state
+      // git produces routinely rather than a rare race. It is not an error worth failing the
+      // report over; it is the absence of evidence, which the caller already represents as a
+      // missing touch record.
       continue
     }
     for (const entry of entries) {
@@ -447,11 +459,16 @@ export async function newestMtime(dir) {
       visited += 1
       if (WALK_SKIP.has(entry.name)) continue
       const full = path.join(current, entry.name)
+      // git reports ignored paths relative to the worktree root, with forward slashes, and a
+      // whole ignored directory carries a trailing slash. Both spellings are tested, because a
+      // rule can ignore a single file as easily as a directory.
+      const rel = path.relative(dir, full).split(path.sep).join('/')
+      if (ignored.has(rel) || ignored.has(`${rel}/`)) continue
       if (entry.isDirectory()) { stack.push(full); continue }
       try {
         const st = await stat(full)
         if (newest == null || st.mtimeMs > newest) newest = st.mtimeMs
-      } catch { /* vanished mid-walk; same reasoning as above */ }
+      } catch { /* a link whose target is gone, or a file removed mid-walk; same reasoning */ }
     }
   }
   return { at: newest, floored: false }
@@ -1571,6 +1588,25 @@ export async function runCli(argv, io = { out: console.log }) {
       return 2
     }
 
+    // Existence only, never the contents. The constraint that no CHECK may read `.teammates/`
+    // binds the checks whose verdict must not be influenced by the agents they enforce; this is a
+    // report that records nothing and decides nothing, and the state it reads is a directory name
+    // the orchestrator created, not a claim a teammate wrote. The exception is stated here rather
+    // than left to look like an oversight.
+    //
+    // Without it a mistyped run id is the quietest failure this command has: `--run r11` for a run
+    // named `r1` matches no branch and no worktree, so every row takes the not-started path and
+    // the heartbeat reads as an all-clear for a run nothing ever looked at.
+    try {
+      await stat(runDir(root, runId))
+    } catch {
+      io.out(
+        `run ${runId} has no directory under .teammates — check --run, because a run id that`
+        + ' matches nothing produces a report about no teammate at all',
+      )
+      return 2
+    }
+
     // The current phase's tasks only. An earlier phase's teammates have returned, and a later
     // phase's have not been dispatched; reporting either as stalled would be noise on every run.
     //
@@ -1609,6 +1645,19 @@ export async function runCli(argv, io = { out: console.log }) {
       return 0
     }
     const subject = tasks.filter((t) => t.phase === derived.currentPhase)
+    // The phase is derived from the plan at the ANCHOR; these rows come from the plan in the
+    // WORKING TREE. Amending a plan mid-run is a documented procedure in this plugin — `plan-drift`
+    // exists because it happens — and an amendment that drops the derived phase's tasks left this
+    // printing a bare header at exit 0: an all-clear covering nobody. Same class as the three
+    // states above, so it gets the same answer.
+    if (subject.length === 0) {
+      io.out(
+        `the plan in the working tree has no task in phase ${derived.currentPhase}, which is the`
+        + ` phase derived from the plan at the anchor — reporting nothing rather than an all-clear`
+        + ' covering no teammate. Run plan-drift to see what changed.',
+      )
+      return 2
+    }
 
     // Worktree paths come from git rather than from `.teammates/`, which is written by the very
     // teammates being reported on. This is NOT a claim that the path is trustworthy: `git worktree
@@ -1632,16 +1681,40 @@ export async function runCli(argv, io = { out: console.log }) {
       }
       const dir = byBranch.get(branch)
       if (dir) {
-        const walked = await newestMtime(dir)
+        // The project's own ignore rules prune the walk. A failure here is not fatal: an empty set
+        // walks everything, which can only floor the row into `unknown` — the honest answer — and
+        // never invent freshness. The likeliest cause is the worktree directory being gone, which
+        // the walk itself already treats as no measurement.
+        const ignored = new Set(await git.ignoredPaths(dir).catch(() => []))
+        const walked = await newestMtime(dir, { ignored })
         touches[task.id] = { branch, at: walked.at, floored: walked.floored }
       }
     }
 
     const rows = livenessRows({ tasks: subject, tips, touches, now: Date.now(), staleMinutes })
     io.out(renderLiveness(rows, { staleMinutes }))
-    // Exit 1 on a stall, mirroring `doctor`, so a caller can branch on it. Still a report: it
-    // records nothing and no verdict is issued or implied.
-    return hasStall(rows) ? 1 : 0
+
+    // Precedence is deliberate, and the two codes answer different questions. A stall is a
+    // MEASUREMENT and the one thing a supervisor must act on, so it wins outright: masking a
+    // measured hang behind an unrelated unmeasurable row would lose the signal this command
+    // exists for. Every row is printed either way, so nothing is hidden by the ordering.
+    //
+    // Exit 1 on a stall mirrors `doctor`. It remains a report: it records nothing, and no verdict
+    // is issued or implied.
+    if (hasStall(rows)) return 1
+    // Freshness that was never measured is not an all-clear. Exit 2 is what this command already
+    // returns wherever it could not measure, rather than 0, which would say every teammate is fine
+    // on the strength of a walk that stopped early.
+    if (hasUnknown(rows)) {
+      const names = rows.filter((row) => row.state === 'unknown').map((row) => row.taskId)
+      io.out(
+        `freshness was not measured for ${names.join(', ')}: the worktree walk hit its ${MAX_WALK_ENTRIES}-entry`
+        + ' cap, so the newest file may be one it never reached. Ignore the generated directories in'
+        + ' the project .gitignore, or look at those teammates directly.',
+      )
+      return 2
+    }
+    return 0
   }
 
   if (command === 'rebuild-state') {

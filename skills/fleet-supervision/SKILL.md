@@ -37,10 +37,19 @@ in a poll loop.
 Run it on the 20-30 minute heartbeat, not in a loop. Exit 1 means at least one teammate of the
 current phase has neither committed nor touched its worktree inside the window.
 
-Exit 2 means it could not name a current phase and so reported nothing — the main worktree is on
-the base branch, the plan is missing at the anchor, or the phases integrated out of order. It is
-not a stall and not an all-clear; fix what the message names, then run it again. A run whose
-phases are all integrated is finished, and says so at exit 0.
+Exit 2 means it did not measure what you asked about, and is neither a stall nor an all-clear. Fix
+what the message names and run it again. It reports that when:
+
+- no current phase can be named — the main worktree is on the base branch, the plan is missing at
+  the anchor, or the phases integrated out of order;
+- the run id matches no run directory (a typo would otherwise report a board of "not started");
+- the plan in the working tree has no task in the derived phase, which an amendment mid-run causes;
+- a row reads `unknown`, meaning freshness was not measured for that teammate. The worktree walk
+  stops at 5000 entries, so the newest file may be one it never reached. It walks only what git
+  does not ignore, so the fix is usually to add the generated directory to the project .gitignore.
+
+A row is only `stalled` when it was measured, and a run whose phases are all integrated is
+finished — both at their own exit codes, 1 and 0.
 
 It reports; it does not act. A stalled row is your cue to message that teammate or offer to stop
 it — the CLI has no handle on a subagent. Both of its signals are forgeable by the teammate they
