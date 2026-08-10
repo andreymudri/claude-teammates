@@ -361,13 +361,7 @@ test('parallel-execution keeps a returned teammate’s worktree until its phase 
     subject: /\bprun(e|es|ed|ing)\b/i,
     allow: [
       /^Only prune worktrees belonging to this run\.$/i,
-      // Left unanchored, unlike the rest of this list: this phrase is a substring in the middle
-      // of one long statement ("If a task must go to a fresh implementer instead — ... — prune
-      // that task's worktree first, since ... because none of that survives the handover.").
-      // Transcribing that whole sentence into an anchored pattern risks a silent mismatch that
-      // this comment alone would not catch; the substring already pins the one clause this test
-      // cares about, and the `assertStatement` below pins the same substring independently.
-      /prune that task's worktree first/i,
+      /^If a task must go to a fresh implementer instead — because resuming stalled — prune that task's worktree first, since a returned teammate's worktree keeps its branch checked out and the new dispatch would fail with "already used by worktree"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover\.$/i,
       // Reviewed: the command bullet states the same rule mechanically — it recomputes each
       // phase's gate and removes only worktrees whose phase passes — so it reinforces the claim
       // rather than qualifying it.
@@ -590,6 +584,14 @@ test('parallel-execution documents --enforcement-only and what it is for', async
   )
 })
 
+// The three `subject:` locks below (scope, refusal, prune guard) each catch a contradicting
+// neighbour that uses the vocabulary the subject names — "ownership check", "refus-", "remove" /
+// "delete". A sentence that negates the pinned claim without using any of that vocabulary passes
+// unreviewed, the same limit `tests/md-contract.mjs:41-52` documents for this whole module: this
+// is a vocabulary lock, not a semantic one, and no amount of widening turns it into one. Piling on
+// more subject words to chase completeness is the wrong fix — it only pulls more legitimate
+// neighbours into each `allow` list, which is how a lock stops locking. An accurate note about a
+// partial lock, not a wider vocabulary, is the stable end state.
 test('parallel-execution states --enforcement-only drops only command checks', async () => {
   const { doc } = await skill('parallel-execution')
   const section = doc.section('Worktree mechanics')
