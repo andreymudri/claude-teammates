@@ -5592,6 +5592,61 @@ test('prune-run reports a leaked merge preview and removes it with --yes', async
   })
 })
 
+// The CI red-across-two-PRs one. `git worktree list` reports a worktree's RESOLVED real path,
+// while `os.tmpdir()` reports whatever the environment spells — and the two disagree on both
+// non-Linux runners: macOS `/var` is a symlink to `/private/var`, and a Windows `TEMP` can be an
+// 8.3 short name (`RUNNER~1`) where git reports the long one. `under()` in prune.mjs is a pure
+// string comparison by design, so a disagreeing spelling identifies NO preview at all and every
+// preview test fails. The resolution is the caller's job, and this pins it there.
+//
+// Reproduced without needing either platform: a junction/symlink named `link` pointing at `real`
+// is the same shape as `/var` -> `/private/var`. The temp root is spelled through the link, git
+// reports the target, and only a caller that resolves before comparing still sees the preview.
+test('prune-run identifies a preview when the temp root is spelled unresolved', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'fileset', kind: 'fileset' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+
+    // `real` is the directory that exists; `link` is a second spelling of it. Nothing here is
+    // platform-specific: 'junction' is ignored off Windows, where a plain dir symlink is made.
+    const scratch = await mkdtemp(path.join(tmpdir(), 'tm-tmproot-'))
+    const real = path.join(scratch, 'real')
+    await mkdir(real)
+    const link = path.join(scratch, 'link')
+    await symlink(real, link, 'junction')
+
+    // The worktree is created THROUGH the link, so git records and reports the `real` spelling.
+    const preview = path.join(link, `tm-preview-unresolved-${process.pid}-${Date.now()}`)
+    g(['worktree', 'add', '--detach', '--quiet', preview, 'HEAD'])
+
+    // os.tmpdir() reads these on every call, so overriding them is what makes the CLI observe the
+    // link spelling — exactly the mismatch a macOS or Windows runner hands it for free.
+    const saved = { TMPDIR: process.env.TMPDIR, TEMP: process.env.TEMP, TMP: process.env.TMP }
+    process.env.TMPDIR = link
+    process.env.TEMP = link
+    process.env.TMP = link
+    try {
+      lines.length = 0
+      await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+      const out = lines.join('\n')
+      assert.match(out, /leaked merge previews/, 'an unresolved temp root must still identify the preview')
+      // The failure mode is not merely a missing line: an unidentified preview falls through to
+      // the refusals, where it reads as a worktree this run does not own.
+      assert.doesNotMatch(out, /no branch checked out \(detached\); this run does not own it/)
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+      await rm(scratch, { recursive: true, force: true })
+    }
+  })
+})
+
 // The one that matters. `git worktree remove --force` FOLLOWS a junction and deletes the
 // CONTENTS OF ITS TARGET — verified on git 2.x/Windows against a throwaway fixture. A leaked
 // preview is by construction one whose teardown never ran, so it still holds the junctions

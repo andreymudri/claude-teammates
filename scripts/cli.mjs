@@ -20,6 +20,7 @@ import { collectReviewResults, reviewFileName, reviewStamp } from './reviews.mjs
 import { generateReviewDispatch } from './review-gen.mjs'
 import { resolveTaskBranch } from './enforce.mjs'
 import { tmpdir } from 'node:os'
+import { realpathSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { validateLinkPaths } from './preview-links.mjs'
 import { planDrift, renderDrift } from './plan-drift.mjs'
@@ -32,6 +33,36 @@ import { createGit, GitError, defaultGitExec } from './git.mjs'
 import { buildCoupling, neighboursOf, inventory, hotPairs, renderMap } from './codemap.mjs'
 import { mapNotesStale, mapNotesPrompt, mapNotesWritable } from './mapnotes.mjs'
 import { deriveContext } from './gate-runner.mjs'
+
+// The temp root as GIT would spell it, which is not what `os.tmpdir()` returns.
+//
+// `git worktree list` reports a worktree's resolved real path. `os.tmpdir()` reports whatever
+// TMPDIR/TEMP/TMP holds, and on both non-Linux CI runners those are a DIFFERENT spelling of the
+// same directory: macOS `/var` is a symlink to `/private/var`, and a Windows `TEMP` can be an 8.3
+// short name (`C:\Users\RUNNER~1\...`) for a path git names in long form. `under()` in prune.mjs
+// is a whole-segment string comparison over paths it cannot stat — deliberately, since that
+// module is pure — so a disagreeing spelling identified NO preview at all, and every preview test
+// went red on macOS and windows-latest while ubuntu passed.
+//
+// Resolving belongs here, in the caller, because here there is a filesystem to ask.
+//
+// `.native` and not the JS `realpathSync`: measured on Windows 10, the JS implementation returns
+// an 8.3 component unchanged (`...\Temp\LONGDI~1`) while `.native` expands it to the long name
+// git reports. `.native` is realpath(3) off Windows, so it resolves the macOS symlink too. The JS
+// one would have fixed macOS only, while reading as though it had fixed both.
+//
+// A failed resolution falls back to the unresolved value rather than throwing. The cost of not
+// resolving is that a preview goes UNIDENTIFIED, which leaves it on disk and reports it among the
+// refusals — the same non-destructive outcome as before this fix, and never a wider delete.
+// Aborting the whole prune because a temp directory could not be statted would be the worse trade.
+function resolvedTempRoot() {
+  const raw = tmpdir()
+  try {
+    return realpathSync.native(raw)
+  } catch {
+    return raw
+  }
+}
 
 const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|config> [options]
 
@@ -1622,7 +1653,9 @@ export async function runCli(argv, io = { out: console.log }) {
       // The module stays pure and takes no view of where the system temp directory is, so the
       // caller supplies the root it observed. Without it, NOTHING is identified as a leaked
       // preview — a `tm-preview-*` worktree an operator keeps elsewhere on disk is theirs.
-      tempRoot: tmpdir(),
+      // Resolved, not raw: git reports real paths, and the raw spelling misses every preview on
+      // macOS and Windows. See resolvedTempRoot.
+      tempRoot: resolvedTempRoot(),
     })
     io.out(renderPrunePlan(plan))
 
