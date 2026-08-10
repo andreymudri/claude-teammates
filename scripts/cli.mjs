@@ -1,4 +1,5 @@
 import { readFile, writeFile, mkdir, rename, lstat, readdir, unlink } from 'node:fs/promises'
+import { livenessRows, renderLiveness, hasStall, hasUnknown, DEFAULT_STALE_MINUTES } from './liveness.mjs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parsePlan } from './plan-parser.mjs'
@@ -18,7 +19,7 @@ import { renderDigest } from './digest.mjs'
 import { collectDoctorReport, renderDoctor } from './doctor.mjs'
 import { collectReviewResults, reviewFileName, reviewStamp } from './reviews.mjs'
 import { generateReviewDispatch } from './review-gen.mjs'
-import { resolveTaskBranch } from './enforce.mjs'
+import { resolveTaskBranch, taskBranchName } from './enforce.mjs'
 import { tmpdir } from 'node:os'
 import { realpathSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
@@ -64,10 +65,11 @@ function resolvedTempRoot() {
   }
 }
 
-const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|config> [options]
+const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclaim|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|config> [options]
 
   init-run <planPath> --run <id> [--root <path>]
   doctor   --run <id> --plan <path> [--base <branch>] [--run-branch <name>] [--root <path>]
+  liveness --run <id> --plan <path> [--stale <minutes>] [--root <path>]
   finish   --run <id> --plan <path> [--base <branch>] [--root <path>] [--results <path>] [--enforcement-only]
   prune-run --run <id> --plan <path> [--base <branch>] [--yes] [--root <path>] [--results <path>] [--enforcement-only]
   rebuild-state --run <id> --plan <path> [--base <branch>] [--force] [--root <path>]
@@ -190,6 +192,7 @@ export const REQUIRED = {
   'init-run': ['run'],
   gate: ['run', 'plan'],
   doctor: ['run', 'plan'],
+  liveness: ['run', 'plan'],
   // `--phase` is the manifest phase key, not a plan phase number, so it stays out of
   // NUMERIC_PHASE_COMMANDS and defaults to `default` exactly as `gate`'s does.
   'collect-reviews': ['run'],
@@ -231,6 +234,7 @@ export const KNOWN_FLAGS = {
   'init-run': ['run'],
   gate: ['run', 'plan', 'base', 'phase', 'no-fleet', 'results'],
   doctor: ['run', 'plan', 'base', 'run-branch'],
+  liveness: ['run', 'plan', 'stale'],
   digest: ['run'],
   claim: ['run', 'task', 'by'],
   unclaim: ['run', 'task'],
@@ -410,6 +414,76 @@ function numericWindow(value, fallback) {
   if (value === undefined) return fallback
   if (typeof value !== 'string') return NaN
   return Number(value)
+}
+
+// Newest mtime under a directory, pruning what git says the project ignores and visiting at most
+// MAX_WALK_ENTRIES entries. `floored: true` means the cap stopped the walk, so the answer is a
+// lower bound on freshness rather than a measurement — `livenessRows` reports such a row as
+// `unknown` rather than as either working or stalled.
+//
+// `ignored` is supplied by the caller from `git.ignoredPaths`, not decided here, and it replaced a
+// hardcoded `.git`/`node_modules` pair that was the wrong filter twice over: it missed every other
+// generated directory (`dist`, `.next`, `target`, `.venv`), and it named `node_modules` in a
+// project that might legitimately track it. A repository with any of those floored every walk, and
+// a floored row could never be stalled, so the command's only failure signal was inert on exactly
+// the repositories it exists to supervise.
+//
+// `.git` stays hardcoded because git does not report it as ignored — it is not ignored, it is
+// simply not part of the working tree — so nothing in the supplied set can cover it.
+//
+// Both the cap and this function are exported so the suite walks a real tree of MAX_WALK_ENTRIES+1
+// entries rather than being told the flag: a walk that always floors reports no stall ever, while
+// every unit test on the synthetic flag stays green. That is not hypothetical — it is how the
+// branch was found unpinned.
+export const MAX_WALK_ENTRIES = 5000
+const WALK_SKIP = new Set(['.git'])
+
+// What each unmeasured row means and what to do about it. `livenessRows` names the reason and this
+// supplies the prose, so the pure module stays free of wording and the two cannot be conflated in
+// the output — they call for different actions, and "not measured" with no cause named is close to
+// useless to whoever is holding the heartbeat.
+const UNMEASURED_REASONS = [
+  ['walk-capped', `the worktree walk hit its ${MAX_WALK_ENTRIES}-entry cap, so the newest file may be one it never`
+    + ' reached. Add the generated directory to the project .gitignore — the walk skips what git ignores.'],
+  ['no-worktree-measurement', 'no worktree of that branch could be read, so nothing looked at whether files are'
+    + ' being edited. Either none is registered — a teammate dispatched without worktree isolation, or working in'
+    + ' the main worktree — or its directory is gone. This is not a stall; look at that teammate directly.'],
+]
+
+export async function newestMtime(dir, { ignored = new Set() } = {}) {
+  let newest = null
+  let visited = 0
+  const stack = [dir]
+  while (stack.length > 0) {
+    const current = stack.pop()
+    let entries
+    try {
+      entries = await readdir(current, { withFileTypes: true })
+    } catch {
+      // A worktree deleted without `git worktree prune` is still listed by git, so this is a state
+      // git produces routinely rather than a rare race. It is not an error worth failing the
+      // report over; it is the absence of evidence, which the caller already represents as a
+      // missing touch record.
+      continue
+    }
+    for (const entry of entries) {
+      if (visited >= MAX_WALK_ENTRIES) return { at: newest, floored: true }
+      visited += 1
+      if (WALK_SKIP.has(entry.name)) continue
+      const full = path.join(current, entry.name)
+      // git reports ignored paths relative to the worktree root, with forward slashes, and a
+      // whole ignored directory carries a trailing slash. Both spellings are tested, because a
+      // rule can ignore a single file as easily as a directory.
+      const rel = path.relative(dir, full).split(path.sep).join('/')
+      if (ignored.has(rel) || ignored.has(`${rel}/`)) continue
+      if (entry.isDirectory()) { stack.push(full); continue }
+      try {
+        const st = await stat(full)
+        if (newest == null || st.mtimeMs > newest) newest = st.mtimeMs
+      } catch { /* a link whose target is gone, or a file removed mid-walk; same reasoning */ }
+    }
+  }
+  return { at: newest, floored: false }
 }
 
 function missingArgs(command, flags, positional) {
@@ -1505,6 +1579,154 @@ export async function runCli(argv, io = { out: console.log }) {
     // 1 on problems, mirroring the gate, so a caller can branch on the exit code. It is still
     // a report: nothing is recorded, and no verdict is issued or implied.
     return report.problems.length === 0 ? 0 : 1
+  }
+
+  if (command === 'liveness') {
+    const git = createGit({ cwd: root })
+    // Same reasoning as `doctor`: the plan is read from the working tree, because a report that
+    // enforces nothing has no reason to read it at the anchor, and a diagnostic that needs a
+    // committed plan is useless at the moment a run is going wrong.
+    let tasks = []
+    try {
+      tasks = assignPhases(parsePlan(await readFile(path.resolve(root, flags.plan), 'utf8')))
+    } catch (err) {
+      io.out(`cannot read the plan at ${flags.plan}: ${err.message}`)
+      return 2
+    }
+
+    const staleMinutes = numericWindow(flags.stale, DEFAULT_STALE_MINUTES)
+    if (!Number.isFinite(staleMinutes) || staleMinutes <= 0) {
+      io.out(`--stale takes a positive number of minutes, got ${JSON.stringify(flags.stale)}`)
+      return 2
+    }
+
+    // Existence only, never the contents. The constraint that no CHECK may read `.teammates/`
+    // binds the checks whose verdict must not be influenced by the agents they enforce; this is a
+    // report that records nothing and decides nothing, and the state it reads is a directory name
+    // the orchestrator created, not a claim a teammate wrote. The exception is stated here rather
+    // than left to look like an oversight.
+    //
+    // Without it a mistyped run id is the quietest failure this command has: `--run r11` for a run
+    // named `r1` matches no branch and no worktree, so every row takes the not-started path and
+    // the heartbeat reads as an all-clear for a run nothing ever looked at.
+    try {
+      await stat(runDir(root, runId))
+    } catch {
+      io.out(
+        `run ${runId} has no directory under .teammates — check --run, because a run id that`
+        + ' matches nothing produces a report about no teammate at all',
+      )
+      return 2
+    }
+
+    // The current phase's tasks only. An earlier phase's teammates have returned, and a later
+    // phase's have not been dispatched; reporting either as stalled would be noise on every run.
+    //
+    // There is deliberately no fallback to "every task in the run". Three states reach here with
+    // no phase to name, and rows for all of them is what made a finished run print a full board of
+    // stalls and exit 1 — the supervision skill's signal that a teammate has HUNG, raised on a run
+    // whose teammates all returned. None of the three is a hang, so each is stated instead:
+    //
+    //   - the derivation FAILED (the main worktree parked on the base branch, a plan absent from
+    //     the anchor). Surfaced the way `doctor` surfaces the same failure, not swallowed: without
+    //     it the output was byte-identical to a real stall report.
+    //   - `derivePhase` refused to name a phase (`phaseError`: phases integrated out of order, a
+    //     plan parsing to zero tasks at the anchor).
+    //   - every phase is integrated, which is a finished run and not a stall.
+    //
+    // The first two exit 2 — this report could not be produced — rather than 0 or 1, because both
+    // of those are assertions about teammates that nothing here measured.
+    let derived = null
+    let deriveError = null
+    try {
+      derived = await derive(root, runId, { ...flags, plan: flags.plan })
+    } catch (err) {
+      deriveError = err.message
+    }
+    const phaseProblem = deriveError ?? derived?.phaseError ?? null
+    if (phaseProblem) {
+      io.out(
+        `liveness could not derive the current phase: ${phaseProblem}`
+        + ' — without a current phase this report cannot tell a hung teammate from a finished one,'
+        + ' so it reports nothing rather than raising a stall it has not measured',
+      )
+      return 2
+    }
+    if (derived.currentPhase == null) {
+      io.out(`every phase of run ${runId} is integrated — no teammate of this run is expected to be working`)
+      return 0
+    }
+    const subject = tasks.filter((t) => t.phase === derived.currentPhase)
+    // The phase is derived from the plan at the ANCHOR; these rows come from the plan in the
+    // WORKING TREE. Amending a plan mid-run is a documented procedure in this plugin — `plan-drift`
+    // exists because it happens — and an amendment that drops the derived phase's tasks left this
+    // printing a bare header at exit 0: an all-clear covering nobody. Same class as the three
+    // states above, so it gets the same answer.
+    if (subject.length === 0) {
+      io.out(
+        `the plan in the working tree has no task in phase ${derived.currentPhase}, which is the`
+        + ` phase derived from the plan at the anchor — reporting nothing rather than an all-clear`
+        + ' covering no teammate. Run plan-drift to see what changed.',
+      )
+      return 2
+    }
+
+    // Worktree paths come from git rather than from `.teammates/`, which is written by the very
+    // teammates being reported on. This is NOT a claim that the path is trustworthy: `git worktree
+    // list` reports whatever path was passed to `git worktree add`, so the directory is still the
+    // teammate's choice, and `liveness.mjs`'s header concedes both signals are forgeable anyway.
+    // What it buys is narrower and worth stating exactly — the report follows the directory git
+    // has checked out for that branch right now, so redirecting it means moving a real worktree
+    // rather than editing a JSON file the teammate already owns.
+    const byBranch = new Map()
+    for (const wt of await git.worktrees()) {
+      if (wt.branch) byBranch.set(wt.branch, wt.path)
+    }
+
+    const tips = {}
+    const touches = {}
+    for (const task of subject) {
+      const branch = taskBranchName(runId, task.id)
+      if (await git.branchExists(branch)) {
+        const sha = await git.resolveRef(`refs/heads/${branch}`)
+        tips[task.id] = { branch, at: await git.commitTime(sha) }
+      }
+      const dir = byBranch.get(branch)
+      if (dir) {
+        // The project's own ignore rules prune the walk. A failure here is not fatal: an empty set
+        // walks everything, which can only floor the row into `unknown` — the honest answer — and
+        // never invent freshness. The likeliest cause is the worktree directory being gone, which
+        // the walk itself already treats as no measurement.
+        const ignored = new Set(await git.ignoredPaths(dir).catch(() => []))
+        const walked = await newestMtime(dir, { ignored })
+        touches[task.id] = { branch, at: walked.at, floored: walked.floored }
+      }
+    }
+
+    const rows = livenessRows({ tasks: subject, tips, touches, now: Date.now(), staleMinutes })
+    io.out(renderLiveness(rows, { staleMinutes }))
+
+    // Said before the exit code is decided, and independently of it: precedence chooses the code,
+    // never what the operator is told. A board carrying both a stall and an unmeasured row reports
+    // both.
+    for (const [reason, explanation] of UNMEASURED_REASONS) {
+      const names = rows.filter((row) => row.unknownReason === reason).map((row) => row.taskId)
+      if (names.length > 0) io.out(`freshness was not measured for ${names.join(', ')}: ${explanation}`)
+    }
+
+    // Precedence is deliberate, and the two codes answer different questions. A stall is a
+    // MEASUREMENT and the one thing a supervisor must act on, so it wins outright: masking a
+    // measured hang behind an unrelated unmeasured row would lose the signal this command exists
+    // for. Every row and every explanation is printed either way, so the ordering hides nothing.
+    //
+    // Exit 1 on a stall mirrors `doctor`. It remains a report: it records nothing, and no verdict
+    // is issued or implied.
+    if (hasStall(rows)) return 1
+    // Freshness that was never measured is not an all-clear. Exit 2 is what this command already
+    // returns wherever it could not measure, rather than 0, which would say every teammate is fine
+    // on the strength of something nobody looked at.
+    if (hasUnknown(rows)) return 2
+    return 0
   }
 
   if (command === 'rebuild-state') {

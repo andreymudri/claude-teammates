@@ -1118,6 +1118,91 @@ test('commitSubject on a too-old git raises a GitError naming the 2.24 floor', a
   )
 })
 
+test('commitTime returns the committer date in milliseconds for a resolved sha', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: '1700000000\n', stderr: '' })
+  const at = await createGit({ exec }).commitTime('abc1234abc1234abc1234abc1234abc1234abcd')
+  assert.deepEqual(calls[0], [
+    'log', '-n', '1', '--format=%ct', '--end-of-options', 'abc1234abc1234abc1234abc1234abc1234abcd', '--',
+  ])
+  assert.equal(at, 1700000000000)
+})
+
+test('commitTime rejects an empty sha rather than reporting HEAD', async () => {
+  const { calls, exec } = recorder()
+  await assert.rejects(() => createGit({ exec }).commitTime(''), GitError)
+  assert.deepEqual(calls, [])
+})
+
+test('commitTime rejects a non-string sha rather than stringifying it', async () => {
+  const { calls, exec } = recorder()
+  await assert.rejects(() => createGit({ exec }).commitTime(null), GitError)
+  await assert.rejects(() => createGit({ exec }).commitTime(['refs/heads/x']), GitError)
+  assert.deepEqual(calls, [])
+})
+
+// An unparseable date must not become NaN and travel on: a caller subtracting it from the clock
+// gets NaN, which compares false against every threshold, so a stall would read as fresh.
+test('commitTime rejects a non-numeric committer date instead of returning NaN', async () => {
+  const { exec } = recorder({ code: 0, stdout: 'not-a-date\n', stderr: '' })
+  await assert.rejects(
+    () => createGit({ exec }).commitTime('abc1234'),
+    (err) => err instanceof GitError && /non-numeric committer date/.test(err.message),
+  )
+})
+
+test('commitTime on a too-old git raises a GitError naming the 2.24 floor', async () => {
+  const { exec } = recorder({ code: 128, stdout: '', stderr: OLD_GIT_LOG_SHOW_STDERR })
+  await assert.rejects(
+    () => createGit({ exec }).commitTime('abc1234'),
+    (err) => err instanceof GitError && /2\.24/.test(err.message) && /too old/.test(err.message),
+  )
+})
+
+test('ignoredPaths asks the worktree’s own ignore rules and returns only the ignored entries', async () => {
+  const { calls, exec } = recorder({
+    code: 0,
+    stdout: 'A  .gitignore\0A  src/main.js\0!! dist/\0!! node_modules/\0!! src/debug.log\0',
+    stderr: '',
+  })
+  const ignored = await createGit({ exec }).ignoredPaths('/repo/wt')
+  assert.deepEqual(calls[0], [
+    '-C', '/repo/wt', '-c', 'core.quotePath=false', 'status', '--porcelain', '--ignored', '-z',
+  ])
+  // A wholly ignored directory comes back once, with its trailing slash, rather than as its
+  // contents — which is what makes it usable as a prefix to prune a walk at.
+  assert.deepEqual(ignored, ['dist/', 'node_modules/', 'src/debug.log'])
+})
+
+// Measured against real git 2.53, not assumed: `git status --porcelain --ignored -z
+// --end-of-options --` prints NOTHING and exits 0. Carrying this module's usual belt-and-braces
+// on this one command would silently turn "every ignored path" into "no ignored path", so the
+// argv above deliberately omits both. Pinned here so a later sweep that adds them for consistency
+// fails rather than quietly emptying the result.
+test('ignoredPaths passes neither --end-of-options nor a trailing -- to git status', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: '', stderr: '' })
+  await createGit({ exec }).ignoredPaths('/repo/wt')
+  assert.equal(calls[0].includes('--end-of-options'), false)
+  assert.equal(calls[0].includes('--'), false)
+})
+
+test('ignoredPaths returns an empty list when the worktree ignores nothing', async () => {
+  const { exec } = recorder({ code: 0, stdout: 'A  src/main.js\0', stderr: '' })
+  assert.deepEqual(await createGit({ exec }).ignoredPaths('/repo/wt'), [])
+})
+
+test('ignoredPaths rejects an empty dir rather than reading the wrong worktree', async () => {
+  const { calls, exec } = recorder()
+  await assert.rejects(() => createGit({ exec }).ignoredPaths(''), GitError)
+  assert.deepEqual(calls, [])
+})
+
+// The worktree a stale `git worktree list` entry names is gone; the caller has to be able to tell
+// that apart from "this worktree ignores nothing".
+test('ignoredPaths raises a GitError when the directory is gone', async () => {
+  const { exec } = recorder({ code: 128, stdout: '', stderr: "fatal: cannot change to '/gone': No such file or directory\n" })
+  await assert.rejects(() => createGit({ exec }).ignoredPaths('/gone'), GitError)
+})
+
 test('tracks reports whether the repository has any tracked file under a path', async () => {
   const { calls, exec } = recorder({ code: 0, stdout: 'scripts/cli.mjs\nscripts/git.mjs\n', stderr: '' })
   const yes = await createGit({ exec }).tracks('scripts')
