@@ -195,9 +195,10 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
       //     declared file never reaches the run branch. The range filter cannot help: the sha
       //     really was merged, just not as this task. `runFilesetCheck` has the symmetric hole
       //     through `mergedBranchTips`, which asks the same membership question.
-      //     A signal exists but is not checked anywhere yet: in this shape two task refs resolve
-      //     to the IDENTICAL sha, which the gate already reports in `branchShas`. Recorded in the
-      //     spec so it is not rediscovered; building the check is not this function's job.
+      //     `runFilesetCheck` now rejects this by the identical-sha signal named here. What
+      //     remains open is the near-sibling variant: a distinct sha one empty commit above the
+      //     sibling's tip. This function's own `integratedPhases` computation is unchanged and
+      //     still cannot see either shape.
       //
       // The spec's "Not defended against" list records the same split, and
       // `tests/adversarial.test.mjs` pins the defended and undefended halves separately.
@@ -261,6 +262,27 @@ function scopedPhaseTasks(ctx) {
   return scopedTasks(ctx).filter((t) => t.phase === ctx.currentPhase)
 }
 
+// Run-wide, deliberately, and the asymmetry is the point: the SUBJECT of the duplicate rule is
+// the phase under check, but the COMPARISON SET is every task ref in the run. A ref parked at a
+// merged sibling's tip is the shape the empty-diff test below cannot see — the sibling's sha
+// genuinely is a merge parent in range, so `mergedBranchTips` vouches for it — and the sibling
+// is usually in an earlier phase, so a phase-wide comparison set would never meet it.
+//
+// Widening the SUBJECT instead, by asking this of every task in the run, would fail a phase for
+// two not-yet-started refs of a LATER phase both sitting exactly where `git checkout -B <task>
+// <run branch>` put them. That is not a violation of anything, which is why this does not live
+// in `runOwnershipCheck` despite ownership being the run-wide check.
+async function runWideTaskShas(git, tasks, runId) {
+  const shas = new Map()
+  for (const task of tasks ?? []) {
+    const branch = resolveTaskBranch(task, runId)
+    if (!branch) continue
+    if (!(await git.branchExists(branch))) continue
+    shas.set(branch, { sha: await git.resolveRef(`refs/heads/${branch}`), taskId: task.id })
+  }
+  return shas
+}
+
 export async function runFilesetCheck(check, ctx = {}) {
   const { git, runId, runSha, anchorSha, currentPhase, phaseError } = ctx
   if (!git) return checkResult(check, 'fail', 'fileset check has no git access')
@@ -299,6 +321,14 @@ export async function runFilesetCheck(check, ctx = {}) {
     return checkResult(check, 'fail', `phase ${currentPhase} selected no tasks from the plan`)
   }
 
+  let allTaskShas
+  try {
+    allTaskShas = await runWideTaskShas(git, ctx.tasks ?? [], runId)
+  } catch (err) {
+    if (!(err instanceof GitError)) throw err
+    return checkResult(check, 'fail', `could not resolve this run's task refs: ${err.message}`)
+  }
+
   const problems = []
   const branchShas = {}
   // One walk for the whole phase, and only if some branch's diff comes up empty: the set is a
@@ -320,6 +350,15 @@ export async function runFilesetCheck(check, ctx = {}) {
       }
       const sha = await git.resolveRef(`refs/heads/${branch}`)
       branchShas[branch] = sha
+      // Before the diff, not after: this shape's diff is empty and `mergedBranchTips` contains
+      // its sha, so the empty-diff test below passes it. Two task refs of one run resolving to
+      // the same commit has no legitimate shape once the phase is being gated — one of them was
+      // moved onto the other.
+      const twin = [...allTaskShas].find(([name, rec]) => name !== branch && rec.sha === sha)
+      if (twin) {
+        problems.push(`${task.id}: branch ${branch} and ${twin[0]} (task ${twin[1].taskId}) are both at commit ${sha} — one is parked at the other's tip and would be credited with work it did not do`)
+        continue
+      }
       // Diffed against the branch's actual fork point off the run branch, not the run
       // anchor fixed at the start of the whole run. A phase-2 branch legitimately forks
       // from the run branch after phase 1 has already been merged into it, so a diff
@@ -378,8 +417,11 @@ export async function runFilesetCheck(check, ctx = {}) {
         //   - A SQUASH merge likewise carries no secondary parent. The plugin's integrator
         //     never squashes, so that is a statement about a repository someone else merged
         //     into, not about a run this tool drove.
-        //   - Two branches whose tips are the identical sha are indistinguishable here, because
-        //     there is nothing to tell apart.
+        //   - Two branches whose tips are the identical sha are rejected before this test runs, by
+        //     the duplicate-ref rule above. What that rule does NOT reject is a NEAR-sibling: an
+        //     empty commit on top of the sibling's tip is a distinct sha, so the duplicate test
+        //     does not fire, and whether this test fires depends on whether that commit is itself
+        //     a merge parent in range. Narrow, open, and recorded here rather than rediscovered.
         //
         // `scripts/doctor.mjs` computes this same test the same way, over the same set, with
         // the same limits.

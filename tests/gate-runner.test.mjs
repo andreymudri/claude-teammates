@@ -281,6 +281,90 @@ test('runFilesetCheck fails naming a stray path', async () => {
   assert.match(res.output, /secret\.mjs/)
 })
 
+// T2 (phase 2, under check) sits at T1's tip (phase 1, merged). T2's own diff is empty and
+// T1's sha IS a merged tip, so without the duplicate rule this passes — the shape
+// `deriveContext`'s "ref parked at a merged SIBLING'S tip" comment names as undefended.
+test('runFilesetCheck fails a phase branch parked at another task ref', async () => {
+  const T2_TASK = { id: 'T2', phase: 2, files: ['b.mjs'] }
+  const SHARED_SHA = 'sharedSha1'
+  const git = fakeGit({
+    branchExists: async () => true,
+    resolveRef: async (ref) => {
+      if (ref === `refs/heads/${T1_BRANCH}`) return SHARED_SHA
+      if (ref === `refs/heads/${T2_BRANCH}`) return SHARED_SHA
+      if (ref === 'refs/heads/run') return 'runSha1'
+      return `${ref}-sha`
+    },
+    changedFiles: async () => [],
+    mergedBranchTips: async () => new Set([SHARED_SHA]),
+  })
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = {
+    git, runId: RUN_ID, runSha: 'runSha1', anchorSha: 'anchorSha1',
+    tasks: [T1_TASK, T2_TASK], currentPhase: 2, phaseError: null,
+  }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.match(res.output, new RegExp(`T2: branch ${T2_BRANCH.replace(/\//g, '\\/')} and ${T1_BRANCH.replace(/\//g, '\\/')} \\(task T1\\)`))
+})
+
+// T8 and T9 (phase 3, untouched) both sit at the run tip while phase 2 is gated. Widening the
+// SUBJECT to every task in the run — rather than only the phase under check — would fail this
+// phase for two not-yet-started refs of a LATER phase, which is not a violation of anything.
+test('runFilesetCheck does not fail the current phase for two refs of a later phase sharing a sha', async () => {
+  const T2_TASK = { id: 'T2', phase: 2, files: ['b.mjs'] }
+  const T8_TASK = { id: 'T8', phase: 3, files: ['h.mjs'] }
+  const T9_TASK = { id: 'T9', phase: 3, files: ['i.mjs'] }
+  const T8_BRANCH = 'teammates/r1/T8'
+  const T9_BRANCH = 'teammates/r1/T9'
+  const FUTURE_SHA = 'futureSha1'
+  const git = fakeGit({
+    branchExists: async () => true,
+    resolveRef: async (ref) => {
+      if (ref === `refs/heads/${T8_BRANCH}`) return FUTURE_SHA
+      if (ref === `refs/heads/${T9_BRANCH}`) return FUTURE_SHA
+      if (ref === 'refs/heads/run') return 'runSha1'
+      return `${ref}-sha`
+    },
+    changedFiles: async ({ branch }) => (branch === `refs/heads/${T2_BRANCH}-sha` ? ['b.mjs'] : []),
+  })
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = {
+    git, runId: RUN_ID, runSha: 'runSha1', anchorSha: 'anchorSha1',
+    tasks: [T2_TASK, T8_TASK, T9_TASK], currentPhase: 2, phaseError: null,
+  }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'pass')
+})
+
+test('runFilesetCheck names both refs and both task ids in a duplicate failure', async () => {
+  const T2_TASK = { id: 'T2', phase: 2, files: ['b.mjs'] }
+  const SHARED_SHA = 'sharedSha1'
+  const git = fakeGit({
+    branchExists: async () => true,
+    resolveRef: async (ref) => {
+      if (ref === `refs/heads/${T1_BRANCH}`) return SHARED_SHA
+      if (ref === `refs/heads/${T2_BRANCH}`) return SHARED_SHA
+      if (ref === 'refs/heads/run') return 'runSha1'
+      return `${ref}-sha`
+    },
+    changedFiles: async () => [],
+    mergedBranchTips: async () => new Set([SHARED_SHA]),
+  })
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = {
+    git, runId: RUN_ID, runSha: 'runSha1', anchorSha: 'anchorSha1',
+    tasks: [T1_TASK, T2_TASK], currentPhase: 2, phaseError: null,
+  }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.match(res.output, new RegExp(T1_BRANCH.replace(/\//g, '\\/')))
+  assert.match(res.output, new RegExp(T2_BRANCH.replace(/\//g, '\\/')))
+  assert.match(res.output, /task T1/)
+  assert.match(res.output, /T2:/)
+  assert.match(res.output, new RegExp(SHARED_SHA))
+})
+
 // A teammate that skips its `git checkout -B teammates/<run>/<task>` and commits on the
 // harness's own worktree branch leaves the conventional ref existing but empty: it points at
 // the run tip with no work on it. `filesetViolations` of an empty change list is empty, so the

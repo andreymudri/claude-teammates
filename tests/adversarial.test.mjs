@@ -339,12 +339,146 @@ test('gate fails when a task ref is parked at a run tip carrying another task\'s
   })
 })
 
+// A plan with three phase-2 siblings (T2, T3, T4 each depend only on T1 and touch disjoint
+// files, so `assignPhases` places all three in phase 2). T4 never starts, which is what keeps
+// deriveContext's own ownWorkBase gap (scripts/gate-runner.mjs:191-200, still open — this task
+// does not touch it) from advancing the phase to `null` and skipping the fileset check
+// entirely: phase 2 needs every one of its tasks integrated to read as done, and T4 alone
+// keeps it from doing so, so the gate actually reaches the phase-specific loop where the new
+// duplicate rule lives.
+const SIBLING_TIP_PLAN = `### Task 1: A
+
+**Files:**
+- Create: \`a.mjs\`
+
+### Task 2: B
+
+**Files:**
+- Create: \`b.mjs\`
+
+**Depends:** T1
+
+### Task 3: C
+
+**Files:**
+- Create: \`c.mjs\`
+
+**Depends:** T1
+
+### Task 4: D
+
+**Files:**
+- Create: \`d.mjs\`
+
+**Depends:** T1
+`
+
+// `gate` reads the plan at the run anchor (mergeBase of main and run-branch), not from the
+// working tree — pinned above by 'gate fails on a widened working-tree plan edit'. To make a
+// custom plan reach the anchor, it must be committed to `main` before `run-branch` diverges,
+// so it is committed there and fast-forwarded onto `run-branch`, which has not diverged yet.
+function commitPlanAtAnchor(root, planMarkdown) {
+  git(root, ['checkout', '--quiet', 'main'])
+  return writeFile(path.join(root, 'plan.md'), planMarkdown, 'utf8').then(() => {
+    git(root, ['add', '.'])
+    git(root, ['commit', '--quiet', '-m', 'plan: amend for this test'])
+    git(root, ['checkout', '--quiet', 'run-branch'])
+    git(root, ['merge', '--quiet', 'main'])
+  })
+}
+
+// Was recorded only as prose, in the spec's "Not defended against" list and in
+// `deriveContext`'s own comment (scripts/gate-runner.mjs:191-200): T3 commits `c.mjs` and is
+// merged `--no-ff`; T2 never commits anything of its own, and its ref is pointed directly at
+// T3's tip instead. T2's sha is a genuine secondary parent of the merge and genuinely inside
+// anchor..run, so the old empty-diff test (which asks only "is this sha a merged tip") passed
+// it. The new duplicate rule asks a cheaper question first — do two task refs of this run
+// resolve to the identical sha — and rejects this shape before the empty-diff test ever runs.
+test('gate fails when a task ref is parked at a merged SIBLING\'s tip', async () => {
+  await withRepo(async (root) => {
+    await commitPlanAtAnchor(root, SIBLING_TIP_PLAN)
+
+    await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+
+    const t3Branch = await taskBranch(root, 'r1', 'T3', { files: { 'c.mjs': 'x\n' } })
+    const t3Tip = git(root, ['rev-parse', t3Branch]).trim()
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T3', t3Branch])
+
+    // T2 never commits: its ref is pointed straight at T3's own tip commit, not at the merge
+    // commit that carried it. T4 never starts.
+    git(root, ['branch', 'teammates/r1/T2', t3Tip])
+
+    const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(code, 1)
+    const parsed = JSON.parse(out)
+    assert.equal(parsed.verdict, 'FAIL')
+    assert.equal(parsed.phase, 2)
+    const fileset = parsed.results.find((r) => r.name === 'fileset')
+    assert.match(fileset.output, /T2: branch teammates\/r1\/T2 and teammates\/r1\/T3 \(task T3\)/)
+    assert.match(fileset.output, /are both at commit/)
+  })
+})
+
+// A plan with T3 as T2's only phase-2 sibling (both depend only on T1).
+const NEAR_SIBLING_PLAN = `### Task 1: A
+
+**Files:**
+- Create: \`a.mjs\`
+
+### Task 2: B
+
+**Files:**
+- Create: \`b.mjs\`
+
+**Depends:** T1
+
+### Task 3: C
+
+**Files:**
+- Create: \`c.mjs\`
+
+**Depends:** T1
+`
+
 // ============================================================================================
 // Step 3 — limits that are NOT defended. Each asserts the CURRENT behavior (usually a PASS),
 // with a comment naming the limitation and pointing at the spec's "Not defended against" list.
 // This is deliberate: an untested limitation drifts into an implied guarantee, which is the
 // exact defect that started this work.
 // ============================================================================================
+
+// The boundary the duplicate rule does NOT close, named in the comment it added to
+// scripts/gate-runner.mjs above the empty-diff test: a commit built one empty commit past a
+// merged sibling's tip is a DISTINCT sha, so the duplicate rule never fires for it. Here that
+// commit is itself merged into the run branch under T2's own name, which makes it a merge
+// parent inside anchor..run too — the same signal a genuine sibling's tip carries — so the
+// empty-diff test excuses it exactly as it would a real contribution, even though T2's
+// declared file, b.mjs, never reaches the run branch.
+test('LIMIT (near-sibling): a distinct sha one empty commit above a merged sibling\'s tip, merged under its own name, still reads as landed', async () => {
+  await withRepo(async (root) => {
+    await commitPlanAtAnchor(root, NEAR_SIBLING_PLAN)
+
+    await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+
+    const t3Branch = await taskBranch(root, 'r1', 'T3', { files: { 'c.mjs': 'x\n' } })
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T3', t3Branch])
+
+    // T2 branches from T3's tip and adds one empty commit — a distinct sha, not T3's own —
+    // then that branch is merged under T2's own name, exactly as a genuine contribution would
+    // be.
+    git(root, ['checkout', '--quiet', '-b', 'teammates/r1/T2', t3Branch])
+    git(root, ['commit', '--quiet', '--allow-empty', '-m', 'T2: empty, contributes nothing'])
+    git(root, ['checkout', '--quiet', 'run-branch'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T2', 'teammates/r1/T2'])
+
+    const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(code, 0)
+    const parsed = JSON.parse(out)
+    assert.equal(parsed.verdict, 'PASS')
+  })
+})
 
 test('LIMIT (self-integration): a teammate that does real work and merges its own branches reads as integrated', async () => {
   await withRepo(async (root) => {
