@@ -255,7 +255,7 @@ changes there, and two tasks in one phase cannot declare the same file.
 | Phase | Task | Files |
 |---|---|---|
 | 1 | T1 — distinct task refs | `scripts/gate-runner.mjs`, `tests/gate-runner.test.mjs`, `tests/adversarial.test.mjs` |
-| 1 | T2 — liveness | `scripts/liveness.mjs`, `scripts/git.mjs`, `scripts/cli.mjs`, `tests/liveness.test.mjs`, `tests/cli.test.mjs`, `skills/fleet-supervision/SKILL.md`, `README.md` |
+| 1 | T2 — liveness | `scripts/liveness.mjs`, `scripts/git.mjs`, `scripts/cli.mjs`, `tests/liveness.test.mjs`, `tests/git.test.mjs`, `tests/cli.test.mjs`, `skills/fleet-supervision/SKILL.md`, `README.md` |
 | 2 | T3 — claims lens | `scripts/review-gen.mjs`, `scripts/cli.mjs`, `teammates.gate.json`, `tests/review-gen.test.mjs`, `tests/cli.test.mjs`, `skills/phase-gate/SKILL.md`, `tests/skill-contracts.test.mjs` |
 
 No task depends on another. The split into two phases is forced entirely by `scripts/cli.mjs` and

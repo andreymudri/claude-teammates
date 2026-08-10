@@ -139,6 +139,7 @@ Fill each body against the existing fake-git harness in that file, following the
 - Modify: `skills/fleet-supervision/SKILL.md`
 - Modify: `README.md`
 - Test: `tests/liveness.test.mjs`
+- Test: `tests/git.test.mjs`
 - Test: `tests/cli.test.mjs`
 
 - [ ] **Step 1:** Create `scripts/liveness.mjs` as a pure module — no git, no filesystem, no
@@ -219,6 +220,11 @@ export function hasStall(rows = []) {
       return seconds * 1000
     },
 ```
+
+- [ ] **Step 2b:** Add `commitTime` coverage to `tests/git.test.mjs`, following the shape of the
+  existing `commitSubject` tests: it returns milliseconds for a resolved sha, it throws a
+  `GitError` on an empty or non-string ref, it throws when git returns a non-numeric committer
+  date, and the argv it builds carries `--end-of-options` and the trailing `--`.
 
 - [ ] **Step 3:** In `scripts/cli.mjs`, add the bounded mtime walk. It lives here rather than in
   `liveness.mjs` because that module is pure by design:
