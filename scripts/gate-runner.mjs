@@ -88,14 +88,40 @@ function checkResult(check, status, output) {
 // off the shared sha in a later fix round changes nothing — the merge that already landed is
 // unaffected by where any ref currently points.
 //
-// Built by walking every merge commit in `anchor..run` once: for each, the files it changed
-// relative to its own first parent (`changedFiles({ base: parents[0], branch: commit })`), keyed
-// under every non-first parent that is itself inside the range. Both filters mirror
-// `git.mergedBranchTips`'s own two filters, for the same reasons `scripts/git.mjs:270-287` gives
-// at length:
+// Built by walking only the run branch's OWN first-parent chain — from `runSha` back through
+// `parents[0]` until `anchorSha` — not every commit in `anchor..run`. Those chain commits are
+// the integrator's own merges, the only ones that actually integrate a branch; a merge commit
+// reachable from `run` but NOT on that chain is one a TASK made on its own branch (a sync merge,
+// `git merge --no-ff run-branch`, run to pick up an earlier phase's interface) and must never
+// grant credit.
 //
-//   - Non-first parents only. The first parent is the run branch's own prior history; keying it
-//     too would let any commit already on the run branch vouch for itself.
+// An earlier version of this walk visited every commit in `anchor..run` and attributed a
+// merge's ENTIRE first-parent diff to every one of its secondary parents. That double-credited a
+// sync merge's target: the sync names the run tip it synced FROM as a secondary parent, and that
+// merge's first-parent diff is whatever the sync's own branch changed relative to where the sync
+// branch itself forked — which can include files the SYNCED-FROM commit merely carried, not
+// originated. Executed repro: T1 (phase 1) creates `a.mjs`, merged. T2 (phase 2) declares
+// `a.mjs` and never commits — its ref sits at the post-T1 run tip. T3 (phase 2) forks earlier,
+// commits `c.mjs`, then runs `git merge --no-ff run-branch` on its OWN branch to pick up T1's
+// interface, and is then integrated normally. The old walk keyed the post-T1 tip (T2's sha) with
+// `{a.mjs}` — from T3's sync merge, not from anything T1's own integrating merge did — and T2
+// read landed with nothing written. `gate does not credit an idle ref parked on a run tip that
+// only a sibling's own sync merge later named` pins the fix.
+//
+// For each chain commit with more than one parent, and for each of its secondary parents still
+// passing the in-range filter below, the value indexed is that secondary parent's OWN
+// contribution since it diverged from the chain's prior tip —
+// `changedFiles({ base: parents[0], branch: parent })`, which `changedFiles` itself computes as
+// a three-dot diff against `mergeBase(parents[0], parent)` (see `scripts/git.mjs:125-126`), not
+// the merge commit's own tree. This is the same call shape as before; only WHAT is walked (the
+// chain, not every commit) and WHOSE tree the diff reads (the parent's own, not the merge
+// commit's) changed. A legitimately integrated branch is unaffected: the integrator's own merge
+// still names that branch's tip as a secondary parent, and the three-dot diff from the run
+// branch's prior tip still gives exactly that branch's own committed files.
+//
+// The in-range filter is unchanged, and still answers the same question over the same set built
+// from a single `commitsBetween` call:
+//
 //   - The parent must be in range. A plan amendment merges the BASE branch into the run branch,
 //     naming the base tip as a secondary parent — and for a run whose amendment has landed, the
 //     anchor IS that base tip. Unfiltered, a task ref parked at the anchor would be keyed here,
@@ -108,25 +134,42 @@ function checkResult(check, status, output) {
 //     `runFilesetCheck does not read a ref parked at the anchor as landed even when a
 //     coincidental filename matches`, which goes red without it.
 //
-// A sha can be named by more than one merge (a stale parked position, plus an unrelated later
-// sync that happens to reuse the same commit as a parent). The file sets found are unioned per
-// sha rather than kept per-merge, because "does some merge naming this sha carry a declared
-// file" and "does the declared set intersect the union of every merge naming this sha" are the
-// same existence claim — a file is in the union exactly when it is in at least one member set.
+// A sha can be named by more than one chain commit (a stale parked position, plus an unrelated
+// later sync that happens to reuse the same commit as a parent). The file sets found are unioned
+// per sha rather than kept per-merge — pinned by
+// `mergedParentFiles unions file sets across two merges naming the same sha, rather than
+// keeping only the first` — because "does some merge naming this sha carry a declared file" and
+// "does the declared set intersect the union of every merge naming this sha" are the same
+// existence claim: a file is in the union exactly when it is in at least one member set.
 async function mergedParentFiles(git, { anchorSha, runSha }) {
   const commits = await git.commitsBetween({ from: anchorSha, to: runSha })
   const inRange = new Set(commits)
   const filesBySha = new Map()
-  for (const commit of commits) {
-    const parents = await git.commitParents(commit)
-    if (parents.length < 2) continue
-    const changed = await git.changedFiles({ base: parents[0], branch: commit })
-    for (const parent of parents.slice(1)) {
-      if (!inRange.has(parent)) continue
-      let set = filesBySha.get(parent)
-      if (!set) { set = new Set(); filesBySha.set(parent, set) }
-      for (const file of changed) set.add(file)
+  // The run branch's own first-parent chain can visit at most `commits.length` distinct
+  // commits before reaching the anchor: every commit on that chain, short of the anchor
+  // itself, is by construction one of the commits `commitsBetween` already returned. Bounded
+  // explicitly rather than trusting `cursor` to reach `anchorSha` exactly — a git double whose
+  // mocked first-parent chain never passes through the anchor (a test bug, not a real-repo
+  // shape) would otherwise walk forever, calling `commitParents` on an ever-changing cursor.
+  // Confirmed reachable, not hypothetical: an unbounded version of this loop OOM'd the test
+  // process outright.
+  let cursor = runSha
+  let steps = 0
+  while (cursor !== anchorSha && steps <= commits.length) {
+    const parents = await git.commitParents(cursor)
+    if (parents.length === 0) break
+    if (parents.length >= 2) {
+      const firstParent = parents[0]
+      for (const parent of parents.slice(1)) {
+        if (!inRange.has(parent)) continue
+        const changed = await git.changedFiles({ base: firstParent, branch: parent })
+        let set = filesBySha.get(parent)
+        if (!set) { set = new Set(); filesBySha.set(parent, set) }
+        for (const file of changed) set.add(file)
+      }
     }
+    cursor = parents[0]
+    steps += 1
   }
   return filesBySha
 }
@@ -134,13 +177,27 @@ async function mergedParentFiles(git, { anchorSha, runSha }) {
 // True when some merge in range named `sha` as a secondary parent AND that merge's own diff
 // against its first parent carried at least one of `declaredFiles`. Paths are normalized the
 // same way `filesetViolations` normalizes them (backslashes, a leading `./`, a leading `/`),
-// so a declared `a.mjs` matches a merge diff reporting `./a.mjs` alike.
+// so a declared `a.mjs` matches a merge diff reporting `./a.mjs` alike — pinned by
+// `runFilesetCheck matches a declared path against a differently-normalized merge diff path`,
+// since removing the normalization leaves the suite green otherwise (plans are hand-authored on
+// Windows and may declare `./scripts/a.mjs` against a diff reporting `scripts/a.mjs`).
+//
+// The precondition this predicate actually needs, stated precisely rather than by example: the
+// PARKED task's declared set must not intersect what the integrating merge actually carried.
+// Within one phase that always holds — `scripts/phases.mjs` assigns two tasks to the same phase
+// only when their declared files are disjoint — but declared sets routinely overlap ACROSS
+// phases, because a later task modifies a file an earlier task created. When they do overlap,
+// this predicate cannot tell a parked ref from a genuine one: both read `landedForFiles` true
+// from the identical, real intersection. This is the irreducible case named in the spec's "Not
+// defended against" list as sibling-tip self-integration, and it is NOT closed — see the LIMIT
+// test below.
 //
 // What this test has been confirmed to give, by executing each shape below against a real
 // repository — not asserted from the design alone. The test named is where each is pinned:
-//   - T3 commits `c.mjs`, is merged `--no-ff`, T2 parks on T3's tip: the merge naming that sha
-//     carried `c.mjs`, T3's declared file, not T2's `b.mjs`. `landedForFiles` for T2 is false.
-//     `gate fails when a task ref is parked at a merged SIBLING's tip`.
+//   - T3 commits `c.mjs`, is merged `--no-ff`, T2 parks on T3's tip, and T2's declared file
+//     (`b.mjs`) does NOT intersect what that merge carried (`c.mjs`): `landedForFiles` for T2 is
+//     false. `gate fails when a task ref is parked at a merged SIBLING's tip`. This is the
+//     disjoint case; the SAME shape with an overlapping declared set is the open LIMIT below.
 //   - The same, after T3 makes a further fix-round commit that moves T3's OWN ref off the
 //     shared sha: the merge that already named the sha still only ever carried `c.mjs` — this
 //     test does not depend on where T3's ref currently sits, only on what that one merge
@@ -150,14 +207,14 @@ async function mergedParentFiles(git, { anchorSha, runSha }) {
 //     still did. `gate still fails a parked ref after the sibling it parked on makes a further
 //     fix-round commit`.
 //   - Two idle refs sharing an old run tip that an UNRELATED merge turned into a secondary
-//     parent — either a plan amendment merging the base in, or a third task's own
-//     `git merge --no-ff run-branch` picking up a sibling's interfaces: that merge's diff is
-//     whatever it actually pulled in, never either idle task's still-nonexistent declared file.
-//     Both idle refs read `landedForFiles` false, and fail on the ordinary, true "contributes no
-//     file changes" message below — nothing is accused of parking, nothing goes null.
+//     parent — a plan amendment merging the base in, or a third task's own
+//     `git merge --no-ff run-branch` picking up a sibling's interfaces — where neither idle
+//     task's declared file intersects what that merge actually carried: both idle refs read
+//     `landedForFiles` false, and fail on the ordinary, true "contributes no file changes"
+//     message below — nothing is accused of parking, nothing goes null.
 //     `gate does not treat two idle siblings as parked when an unrelated commit moves the run
-//     tip past them`; `gate does not treat an idle ref as parked when a sibling's own sync merge
-//     names the tip it sits at`.
+//     tip past them`; `gate does not credit an idle ref parked on a run tip that only a
+//     sibling's own sync merge later named`.
 //   - A near-sibling — an empty commit built one commit above a merged sibling's tip, itself
 //     later merged under its own name: that merge's own diff against its own first parent is
 //     EMPTY (it brings in nothing new), so it can never intersect a non-empty declared set
@@ -239,10 +296,21 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
       // fast-forward: `deriveContext does not read a fast-forward-integrated branch as
       // integrated (real repo)`.
       //
-      // What remains open, unchanged from every earlier design: a teammate that does the
-      // integrator's job itself — creating task branches that each carry real work and merging
-      // them itself — is indistinguishable here from legitimate integration, because at this
-      // level it IS the same shape.
+      // What remains open:
+      //   - A teammate that does the integrator's job itself — creating task branches that each
+      //     carry real work and merging them itself — is indistinguishable here from legitimate
+      //     integration, because at this level it IS the same shape. Unchanged from every
+      //     earlier design.
+      //   - Sibling-tip self-integration with an OVERLAPPING declared set. Declared files are
+      //     disjoint only WITHIN a phase (`scripts/phases.mjs` enforces that); across phases a
+      //     later task routinely modifies a file an earlier task created. When a parked ref's
+      //     declared set intersects what the integrating merge actually carried, this predicate
+      //     cannot tell it apart from the branch that genuinely earned that credit — both read
+      //     `landedForFiles` true from the identical, real intersection. Executed: `T1: Create
+      //     a.mjs`, `T2: Modify a.mjs, Create b.mjs`; T2 writes nothing and its ref is pointed
+      //     at T1's own merged tip; verdict PASS, `b.mjs` never exists. Recorded in the spec's
+      //     "Not defended against" list as sibling-tip self-integration; pinned as a LIMIT in
+      //     `tests/adversarial.test.mjs`.
       states.push(landedForFiles(mergedFiles, sha, t.files) && await git.isAncestor(sha, runSha))
     }
     if (states.length > 0 && states.every(Boolean)) integratedPhases.push(phase)
@@ -409,10 +477,17 @@ export async function runFilesetCheck(check, ctx = {}) {
         // name construction; not asserted from the design alone. Pinned as a defended test —
         // no longer a LIMIT — in `tests/adversarial.test.mjs`.
         //
-        // What remains open: a teammate that does the integrator's job itself — creating
-        // branches that each carry real work and merging them itself — is indistinguishable
-        // here from legitimate integration, because at this level it IS the same shape; this is
-        // unchanged from every earlier design and was never claimed to be closed.
+        // What remains open:
+        //   - A teammate that does the integrator's job itself — creating branches that each
+        //     carry real work and merging them itself — is indistinguishable here from
+        //     legitimate integration, because at this level it IS the same shape; unchanged
+        //     from every earlier design and was never claimed to be closed.
+        //   - Sibling-tip self-integration with an OVERLAPPING declared set: declared files are
+        //     disjoint only WITHIN a phase, not across phases, and when a parked ref's declared
+        //     set intersects what the integrating merge actually carried, this predicate cannot
+        //     tell the parked ref from the branch that genuinely earned that credit. See the
+        //     comment on `landedForFiles` above `deriveContext`, and the LIMIT test in
+        //     `tests/adversarial.test.mjs`, for the executed repro.
         const landed = landedForFiles(mergedFiles, sha, task.files)
         if (!landed) {
           problems.push(`${task.id}: branch ${branch} contributes no file changes past its fork point ${forkPoint} — the work is not on the conventional ref, and merging this task would be a no-op`)
