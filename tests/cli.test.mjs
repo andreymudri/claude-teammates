@@ -5647,6 +5647,69 @@ test('prune-run identifies a preview when the temp root is spelled unresolved', 
   })
 })
 
+// The SECOND half of the same mismatch, and the destructive one. Identification and liveness are
+// two separate passes over the same worktree list, and they were reading two different spellings
+// of the temp root: the liveness pass chose its candidates with the RAW `tmpdir()`, and only the
+// identification pass got the resolved one. Under a temp root spelled through a symlink — macOS
+// `/var` -> `/private/var`, a Windows 8.3 `TEMP` — that combination is the worst of both: the
+// candidate list comes back empty, so no marker is ever READ, so the live set is empty, and then
+// the resolved pass identifies the preview and finds nothing claiming it. A preview whose owner
+// is alive is reaped, junctions and all.
+//
+// Same junction technique as the test above, so this runs on any platform: `link` -> `real` has
+// the shape of `/var` -> `/private/var`, the worktree is created through `link` so git reports
+// `real`, and TMPDIR/TEMP/TMP are overridden to `link`.
+test('prune-run leaves a live preview when the temp root is spelled unresolved', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writePruneManifest(root, g)
+
+    const scratch = await mkdtemp(path.join(tmpdir(), 'tm-livetmproot-'))
+    const real = path.join(scratch, 'real')
+    await mkdir(real)
+    const link = path.join(scratch, 'link')
+    await symlink(real, link, 'junction')
+
+    const preview = path.join(link, `tm-preview-liveunresolved-${process.pid}-${Date.now()}`)
+    g(['worktree', 'add', '--detach', '--quiet', preview, 'HEAD'])
+    // This process is the owner, so the probe cannot say ESRCH: the only way this preview is
+    // reaped is a liveness pass that never read the marker at all.
+    await writeFile(previewOwnerMarkerPath(preview), `${process.pid}\n`, 'utf8')
+
+    const saved = { TMPDIR: process.env.TMPDIR, TEMP: process.env.TEMP, TMP: process.env.TMP }
+    process.env.TMPDIR = link
+    process.env.TEMP = link
+    process.env.TMP = link
+    try {
+      lines.length = 0
+      const code = await runCli(
+        ['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'],
+        io,
+      )
+      assert.equal(code, 0)
+      assert.equal(
+        hasWorktree(root, path.basename(preview)),
+        true,
+        'an unresolved temp root must not turn a live preview into a reaped one',
+      )
+      assert.equal(await pathExists(preview), true)
+      const out = lines.join('\n')
+      assert.match(out, /a gate owns this preview right now/)
+      assert.doesNotMatch(out, /removed leaked preview/)
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+      // The preview survives when the fix holds and is already gone when it does not, so both
+      // outcomes have to clean up without throwing out of the `finally`.
+      try { g(['worktree', 'remove', '--force', preview]) } catch { /* already reaped */ }
+      await rm(previewOwnerMarkerPath(preview), { force: true })
+      await rm(scratch, { recursive: true, force: true })
+    }
+  })
+})
+
 // The one that matters. `git worktree remove --force` FOLLOWS a junction and deletes the
 // CONTENTS OF ITS TARGET — verified on git 2.x/Windows against a throwaway fixture. A leaked
 // preview is by construction one whose teardown never ran, so it still holds the junctions
