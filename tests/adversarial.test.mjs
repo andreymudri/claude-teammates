@@ -308,6 +308,37 @@ test('gate reports the ambiguity, not a silent guess, when both main and master 
   })
 })
 
+// Was pinned in the "NOT defended" section below, as one half of a self-integration bullet that
+// covered two different shapes. This half is now defended: `deriveContext` measures every task
+// branch against its OWN fork point, so a ref parked at a run tip that already carries someone
+// else's work shows no work of its own, its phase does not read as integrated, and the fileset
+// check actually runs against it instead of being skipped by the "every phase is integrated"
+// fast path. The other half — a teammate doing real work and merging it itself — is still open
+// and still pinned below.
+//
+// T1 is merged --no-ff rather than fast-forwarded (which is what the old fixture did) so that
+// phase 1 is genuinely integrated and phase 2 is the phase under test. A fast-forwarded T1 now
+// reads as no work itself, so the check would fail on T1 and never reach T2 — that is the
+// fast-forward limit, pinned separately in tests/gate-runner.test.mjs, not this shape.
+test('gate fails when a task ref is parked at a run tip carrying another task\'s work', async () => {
+  await withRepo(async (root) => {
+    await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+    // T2's branch is created pointing at the run tip, which already carries T1's real work,
+    // and never moves. Diffed against the run anchor it showed a.mjs and got credit for work
+    // it never did; diffed against its own fork point it shows nothing.
+    git(root, ['branch', 'teammates/r1/T2', 'run-branch'])
+
+    const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(code, 1)
+    const parsed = JSON.parse(out)
+    assert.equal(parsed.verdict, 'FAIL')
+    assert.equal(parsed.phase, 2)
+    const fileset = parsed.results.find((r) => r.name === 'fileset')
+    assert.match(fileset.output, /T2: branch teammates\/r1\/T2 contributes no file changes/)
+  })
+})
+
 // ============================================================================================
 // Step 3 — limits that are NOT defended. Each asserts the CURRENT behavior (usually a PASS),
 // with a comment naming the limitation and pointing at the spec's "Not defended against" list.
@@ -315,22 +346,30 @@ test('gate reports the ambiguity, not a silent guess, when both main and master 
 // exact defect that started this work.
 // ============================================================================================
 
-test('LIMIT (self-integration): fast-forwarding to your own tip and pointing another task branch at it reads as integrated', async () => {
+test('LIMIT (self-integration): a teammate that does real work and merges its own branches reads as integrated', async () => {
   await withRepo(async (root) => {
-    // Spec: "Self-integration. A teammate can fast-forward the run branch to its own tip
-    // and create branches named for tasks it does not own, making phases read as
-    // integrated so no check runs. Confirmed." This is out of scope by design: enforcement
-    // does not stop a teammate targeting it.
+    // Spec: "Self-integration ... a teammate creates its own task branches, does real work on
+    // each, and merges them itself, bypassing tm-integrator." Out of scope by design:
+    // enforcement does not stop a teammate targeting it, and running a teammate's code is
+    // arbitrary execution. Every branch here carries its own work against its own fork point,
+    // so nothing at this level distinguishes it from legitimate integration — the difference
+    // is WHO ran the merge, which git does not record in a way this check can trust.
+    //
+    // The parked-branch variant this bullet used to be conflated with is now DEFENDED; see
+    // 'gate fails when a task ref is parked at a run tip carrying another task's work' above.
     await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
-    git(root, ['merge', '--quiet', '--ff-only', 'teammates/r1/T1'])
-    // T2's branch is created pointing at the run tip, which already carries T1's real
-    // work — so the ownChanges guard (which defends the *empty-commit* variant above) is
-    // satisfied trivially, and T2 gets credit for work it never did.
-    git(root, ['branch', 'teammates/r1/T2', 'run-branch'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+    await taskBranch(root, 'r1', 'T2', { files: { 'b.mjs': 'y\n' } })
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T2', 'teammates/r1/T2'])
 
     const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
     assert.equal(code, 0)
-    assert.equal(JSON.parse(out).verdict, 'PASS')
+    const parsed = JSON.parse(out)
+    assert.equal(parsed.verdict, 'PASS')
+    // Both phases read as integrated, so this is the "every phase in the plan is integrated"
+    // verdict — the teammate's own merges were accepted as integration, which is the point of
+    // the limitation. Asserted after observing the run, not written from expectation.
+    assert.equal(parsed.phase, null)
   })
 })
 

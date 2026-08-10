@@ -83,6 +83,76 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
     if (!byPhase.has(task.phase)) byPhase.set(task.phase, [])
     byPhase.get(task.phase).push(task)
   }
+  // Lazily built, then shared by every task branch of every phase: for each merge commit on
+  // the run branch since the anchor, the first parent of that merge, indexed by each of its
+  // NON-first parents that is ITSELF a commit inside anchor..run. Only a branch already on the
+  // run branch needs it (see `ownWorkBase`), so a run whose branches all still carry unmerged
+  // work never pays for the walk, and a run that does pays for it once.
+  //
+  // Both filters are load-bearing, and this index answers the same question `mergedBranchTips`
+  // answers over the same set, so it applies the same two filters for the same reasons:
+  //
+  //   - Non-first parents only. The first parent is the run branch's own prior history, so
+  //     treating it as "the branch this merge carried" would let any commit already on the run
+  //     branch vouch for itself — the same reason `runOwnershipCheck` slices it off.
+  //   - The parent must be in range. The range bounds which merge commits are WALKED; it does
+  //     not filter the parents they print. This plugin's plan-amendment procedure merges the
+  //     BASE branch into the run branch, so the base tip is printed as a secondary parent of a
+  //     merge inside the range — and for a run whose amendments have landed, the anchor IS that
+  //     base tip. Unfiltered, a task ref parked at the anchor is keyed here, gets a fork point
+  //     from BEFORE the anchor, and its diff fills with the base branch's own commits: it reads
+  //     as work it never did, its phase reads integrated, and `runFilesetCheck` returns the
+  //     vacuous pass this whole change exists to stop reaching. Reproduced end to end; pinned by
+  //     `a task branch parked at the anchor does not read as integrated after a plan amendment`.
+  //
+  // Every parent of a commit on the run branch is reachable from the run branch by construction,
+  // so "inside anchor..run" is exactly "not reachable from the anchor" — the filter expressed as
+  // a bound rather than as an isAncestor call per parent, which is how `mergedBranchTips` states
+  // it too. That helper returns only the parent set, with no way to ask which merge carried a
+  // given parent, so the mapping is rebuilt here rather than shared; the filter is duplicated
+  // deliberately, and `scripts/git.mjs:270-287` is where its reasoning is set out at length.
+  let mergeFirstParents = null
+  const firstParentOfMergeNaming = async (sha) => {
+    if (!mergeFirstParents) {
+      mergeFirstParents = new Map()
+      const commits = await git.commitsBetween({ from: anchorSha, to: runSha })
+      const inRange = new Set(commits)
+      for (const commit of commits) {
+        const parents = await git.commitParents(commit)
+        if (parents.length < 2) continue
+        for (const parent of parents.slice(1)) {
+          if (!inRange.has(parent)) continue
+          if (!mergeFirstParents.has(parent)) mergeFirstParents.set(parent, parents[0])
+        }
+      }
+    }
+    return mergeFirstParents.get(sha) ?? null
+  }
+
+  // The base a branch's own work is measured from, which is never the run anchor. The anchor
+  // is fixed at the start of the whole run, so from phase 2 onward it sits behind everything
+  // earlier phases merged, and an anchor-based diff credits a branch with THOSE files.
+  // Confirmed: a phase-2 branch created by `git checkout -B <task> <run branch>` and never
+  // committed to reads as "changed a.mjs" once a sibling's merge moves the run tip past it,
+  // the phase reads integrated, `derivePhase` advances past it, and `runFilesetCheck` takes
+  // its `currentPhase === null` fast path — so the landed test never runs for that task at all.
+  //
+  // Before the branch is on the run branch, its fork point off that branch is the answer, and
+  // it is the same base `runFilesetCheck` diffs from, so the two stop disagreeing about what a
+  // branch contributed. Once the branch IS on the run branch, merge-base(run, branch) is the
+  // branch's own tip and every diff from it is empty however much work the branch carried; the
+  // base that still answers "what did THIS branch contribute" is the fork point the branch had
+  // at the moment it was merged, i.e. merge-base(first parent of the merge that named it,
+  // branch). A branch on the run branch that no merge names is left measuring against itself,
+  // which reads as no work — that is the parked-branch case, and it must read that way.
+  const ownWorkBase = async (sha) => {
+    const forkPoint = await git.mergeBase(runSha, sha)
+    if (forkPoint !== sha) return forkPoint
+    const firstParent = await firstParentOfMergeNaming(sha)
+    if (!firstParent) return sha
+    return await git.mergeBase(firstParent, sha)
+  }
+
   const integratedPhases = []
   for (const [phase, phaseTasks] of byPhase) {
     const states = []
@@ -97,12 +167,46 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
       // anywhere, and every phase reads integrated. Counting commits is not enough either —
       // confirmed separately: a single `git commit --allow-empty` satisfies "has a commit"
       // while changing no file at all. Requiring at least one *file* changed between the
-      // anchor and the branch means "integrated" implies "did work", not just "points at
-      // something already on the run branch" or "has a commit". This does not close
-      // self-integration in general — a phantom branch pointed at a run tip that already
-      // carries someone else's real commits still passes this check — that remains the
-      // documented, accepted limitation (see the spec's "Not defended against" list).
-      const ownChanges = await git.changedFiles({ base: anchorSha, branch: sha })
+      // branch's own work base and the branch means "integrated" implies "did work", not just
+      // "points at something already on the run branch" or "has a commit".
+      //
+      // Both of those attacks are still defeated once the base is the fork point rather than
+      // the anchor, and the second is defeated MORE completely than before: a branch created
+      // at the run tip measures against its own tip and shows nothing, and a branch of empty
+      // commits measures against the fork point it was merged from and still shows nothing.
+      // What the fork-point base adds is that "did work" now means the branch's OWN work,
+      // rather than anything that was already on the run branch when the branch was created.
+      //
+      // It also closes two variants the anchor base left open: a ref pointed at a run TIP that
+      // already carries someone ELSE'S real commits, and a ref parked at the ANCHOR after a plan
+      // amendment merged the base in. Both used to show commits they had no part in as their own
+      // work; both now measure against a base that yields nothing.
+      //
+      // Two variants remain open. This list is meant to be exhaustive for what this mechanism
+      // cannot see, and an earlier version of this comment named only the first, which is how
+      // the second went unrecorded:
+      //   - A teammate that does the integrator's job — creating task branches that each carry
+      //     real work and merging them itself. Indistinguishable here from legitimate
+      //     integration, because at this level it IS the same shape.
+      //   - A ref parked at a merged SIBLING'S tip. Reproduced: T3 commits `c.mjs` and is merged
+      //     `--no-ff`; T2's ref is then pointed at T3's tip. T2's sha is a genuine secondary
+      //     parent of that merge and genuinely in range, so it is keyed in the index above, and
+      //     `ownWorkBase` hands back T3's fork point — crediting T2 with `c.mjs` while T2's own
+      //     declared file never reaches the run branch. The range filter cannot help: the sha
+      //     really was merged, just not as this task. `runFilesetCheck` has the symmetric hole
+      //     through `mergedBranchTips`, which asks the same membership question.
+      //     A signal exists but is not checked anywhere yet: in this shape two task refs resolve
+      //     to the IDENTICAL sha, which the gate already reports in `branchShas`. Recorded in the
+      //     spec so it is not rediscovered; building the check is not this function's job.
+      //
+      // The spec's "Not defended against" list records the same split, and
+      // `tests/adversarial.test.mjs` pins the defended and undefended halves separately.
+      //
+      // A branch integrated by FAST-FORWARD leaves no merge commit to name it, so it measures
+      // against its own tip and reads as no work even though the work is on the run branch.
+      // That is the same limit `runFilesetCheck` states for the same reason, and it fails
+      // closed: `tm-integrator`'s contract is `--no-ff`, so the state is out-of-contract.
+      const ownChanges = await git.changedFiles({ base: await ownWorkBase(sha), branch: sha })
       states.push(ownChanges.length > 0 && await git.isAncestor(sha, runSha))
     }
     if (states.length > 0 && states.every(Boolean)) integratedPhases.push(phase)
