@@ -3,21 +3,43 @@ import { spawn } from 'node:child_process'
 export class GitError extends Error {}
 
 // Every ref-consuming command in this module passes --end-of-options, added to git in 2.24
-// (November 2019). On an older git the option itself is unrecognised, and parse-options.c's
-// generic rejection for every long option it does not know is `error: unknown option
-// \`<name>'` on stderr with exit 129 — confirmed against real git by substituting an
-// unrecognised long option for --end-of-options, since the git installed here (>= 2.24)
-// accepts --end-of-options itself and so cannot reproduce the old-git failure directly.
-// Matching on this turns a bare, unexplained "exit 129" into a message that names the actual
-// cause instead of git's raw complaint.
-const OLD_GIT_UNKNOWN_END_OF_OPTIONS = /unknown option `end-of-options'/
+// (November 2019). On an older git the option itself is unrecognised — but git's rejection
+// text for an unrecognised long option is not one shape, and it depends on which command's
+// argument parser rejects it. Confirmed against real git (the git installed here is >= 2.24
+// and accepts --end-of-options itself, so it cannot be made to reject it directly) by
+// substituting a different unrecognised long option for --end-of-options at each call site's
+// exact argument position:
+//
+//   COVERED — `error: unknown option \`<name>'` on stderr, exit 129: merge-base (mergeBase,
+//   isAncestor), fetch (fetchRefspec), worktree add/remove (addWorktreeDetached,
+//   removeWorktree), merge (mergeInto).
+//
+//   COVERED — `fatal: unrecognized argument: <name>` on stderr, exit 128: log
+//   (commitSubject), show (fileAtCommit).
+//
+//   NOT COVERED — diff (changedFiles) and rev-list (mergedBranchTips, commitsBetween,
+//   commitParents) print only their usage wall on an unrecognised flag, with no line naming
+//   the flag or saying "unknown" anything — confirmed nothing in that text to match on. A
+//   phase gate running one of these on git < 2.24 gets a bare, unexplained usage dump; this
+//   module cannot turn that into an explained failure without risking a match broad enough to
+//   fire on an unrelated usage error, which is worse than no match at all.
+//
+//   NOT AT RISK — rev-parse --verify (qualifyBranch, branchSha, resolveRef) silently ignores
+//   an unrecognised long option and still resolves the ref correctly: confirmed real git
+//   `rev-parse --verify --quiet --bogus-flag refs/heads/master --` prints the sha, exit 0, as
+//   if the flag were never there. --end-of-options is therefore a harmless no-op for these
+//   calls on git < 2.24, not a failure this module needs to explain.
+function isOldGitRejectingEndOfOptions(stderr) {
+  return /unknown option `end-of-options'/.test(stderr) ||
+    /unrecognized argument: --end-of-options/.test(stderr)
+}
 
 // Builds the message a failed git invocation raises as. Not a version probe — this only
 // inspects the stderr of a call that already failed, so it costs nothing on the success path
 // that dominates this module's use (once-per-call-that-errors, not once-per-call).
 function describeGitFailure(args, code, stderr) {
   const trimmed = stderr.trim()
-  if (OLD_GIT_UNKNOWN_END_OF_OPTIONS.test(stderr)) {
+  if (isOldGitRejectingEndOfOptions(stderr)) {
     return `git ${args.join(' ')} failed: the installed git is too old to run this plugin — ` +
       `--end-of-options requires git >= 2.24, got: ${trimmed || `exit ${code}`}`
   }
@@ -411,19 +433,22 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
       }
       for (const branch of branches) {
         const ref = await qualifyBranch(branch, ['-C', dir])
-        const { code, stderr } = await exec(
-          ['-C', dir, 'merge', '--no-ff', '-m', 'gate merge preview', '--end-of-options', ref], cwd,
-        )
+        const mergeArgs = ['-C', dir, 'merge', '--no-ff', '-m', 'gate merge preview', '--end-of-options', ref]
+        const { code, stderr } = await exec(mergeArgs, cwd)
         if (code === 0) continue
         const out = await exec(['-C', dir, 'diff', '--name-only', '--diff-filter=U'], cwd)
         const conflicted = out.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
         // A conflict is a merge that failed AND left unmerged paths. Everything else — an
         // unset user.email in CI, a branch deleted out from under the run, unrelated
-        // histories, a stale index.lock — is a failure whose reason lives only in git's
-        // stderr. Returning [] for those would discard the reason and dress the failure up as
-        // a conflict that names nothing.
+        // histories, a stale index.lock, or (on git < 2.24) --end-of-options itself being
+        // unrecognised — is a failure whose reason lives only in git's stderr. Returning []
+        // for those would discard the reason and dress the failure up as a conflict that
+        // names nothing. Routed through describeGitFailure rather than building the message
+        // inline, so an old-git failure here reports the same 2.24 floor every other command
+        // in this module does, instead of sending the operator hunting a merge problem that
+        // is actually a version problem.
         if (conflicted.length > 0) return conflicted
-        throw new GitError(`git merge ${branch} into ${dir} failed with no unmerged paths: ${stderr.trim() || `exit ${code}`}`)
+        throw new GitError(describeGitFailure(mergeArgs, code, stderr))
       }
       return null
     },
