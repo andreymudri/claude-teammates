@@ -1432,6 +1432,61 @@ test('a phase-2 branch parked at the run tip does not read as integrated (real r
   })
 })
 
+// The plan-amendment shape, against the merge index `deriveContext` uses to find a merged
+// branch's fork point. This plugin's amendment procedure merges the BASE branch into the run
+// branch, so the base tip is printed as a secondary parent of a merge inside anchor..run — and
+// for a run whose amendments have landed, merge-base(base, run) IS that base tip. An index that
+// keys every secondary parent therefore keys the ANCHOR, and a task ref parked there gets a
+// fork point far behind the anchor, filling its diff with the base branch's own commits. It
+// would read as work, its phase would read integrated, `currentPhase` would go null, and
+// `runFilesetCheck` would return the vacuous "every phase in the plan is integrated" pass — the
+// exact pass the fork-point base exists to stop reaching. `mergedBranchTips` filters its parents
+// to the range for this same reason; the index must filter the same way.
+//
+// Not a constructed shape: `run/followups` itself carries `merge: plan amendment` commits.
+test('a task branch parked at the anchor does not read as integrated after a plan amendment (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'plan.md'), planMarkdown(), 'utf8')
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+
+    // Phase 1: real work, merged --no-ff.
+    await sh(['checkout', '-b', T1_BRANCH])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', T1_BRANCH])
+
+    // The plan amendment: the base advances and the run branch merges it in, so the base tip
+    // is a secondary parent of a merge inside anchor..run, and is itself the anchor.
+    await sh(['checkout', 'main'])
+    await writeFile(path.join(root, 'amend.txt'), 'amended\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'amend the plan'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'merge: plan amendment', 'main'])
+
+    const anchorSha = (await sh(['merge-base', 'main', 'run'])).stdout.trim()
+    assert.equal(anchorSha, (await sh(['rev-parse', 'main'])).stdout.trim(), 'fixture: the anchor is the base tip')
+
+    // Phase 2's ref: created off the base, never committed to.
+    await sh(['branch', T2_BRANCH, anchorSha])
+
+    const ctx = await deriveContext({ git, runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, planPath: 'plan.md' })
+
+    assert.deepEqual(ctx.integratedPhases, [1])
+    assert.equal(ctx.currentPhase, 2)
+    assert.equal(ctx.phaseError, null)
+
+    const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
+    assert.equal(res.status, 'fail')
+    assert.match(res.output, /T2: branch teammates\/r1\/T2 contributes no file changes/)
+  })
+})
+
 // V5: pinned exactly to the coordinator's literal reported repro (both tasks declaring the
 // same file, T1 merging clean first, T2 conflicting second) to settle a reported
 // contradiction. Extensive re-testing (this shape, the reverse order, and a variant where

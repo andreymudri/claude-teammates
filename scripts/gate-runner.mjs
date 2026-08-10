@@ -83,22 +83,45 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
     if (!byPhase.has(task.phase)) byPhase.set(task.phase, [])
     byPhase.get(task.phase).push(task)
   }
-  // Lazily built, then shared by every task branch of every phase: for each commit on the run
-  // branch since the anchor that is a merge, the first parent of that merge, indexed by each
-  // of its NON-first parents. Only a branch already on the run branch needs it (see
-  // `ownWorkBase`), so a run whose branches all still carry unmerged work never pays for the
-  // walk, and a run that does pays for it once.
+  // Lazily built, then shared by every task branch of every phase: for each merge commit on
+  // the run branch since the anchor, the first parent of that merge, indexed by each of its
+  // NON-first parents that is ITSELF a commit inside anchor..run. Only a branch already on the
+  // run branch needs it (see `ownWorkBase`), so a run whose branches all still carry unmerged
+  // work never pays for the walk, and a run that does pays for it once.
+  //
+  // Both filters are load-bearing, and this index answers the same question `mergedBranchTips`
+  // answers over the same set, so it applies the same two filters for the same reasons:
+  //
+  //   - Non-first parents only. The first parent is the run branch's own prior history, so
+  //     treating it as "the branch this merge carried" would let any commit already on the run
+  //     branch vouch for itself — the same reason `runOwnershipCheck` slices it off.
+  //   - The parent must be in range. The range bounds which merge commits are WALKED; it does
+  //     not filter the parents they print. This plugin's plan-amendment procedure merges the
+  //     BASE branch into the run branch, so the base tip is printed as a secondary parent of a
+  //     merge inside the range — and for a run whose amendments have landed, the anchor IS that
+  //     base tip. Unfiltered, a task ref parked at the anchor is keyed here, gets a fork point
+  //     from BEFORE the anchor, and its diff fills with the base branch's own commits: it reads
+  //     as work it never did, its phase reads integrated, and `runFilesetCheck` returns the
+  //     vacuous pass this whole change exists to stop reaching. Reproduced end to end; pinned by
+  //     `a task branch parked at the anchor does not read as integrated after a plan amendment`.
+  //
+  // Every parent of a commit on the run branch is reachable from the run branch by construction,
+  // so "inside anchor..run" is exactly "not reachable from the anchor" — the filter expressed as
+  // a bound rather than as an isAncestor call per parent, which is how `mergedBranchTips` states
+  // it too. That helper returns only the parent set, with no way to ask which merge carried a
+  // given parent, so the mapping is rebuilt here rather than shared; the filter is duplicated
+  // deliberately, and `scripts/git.mjs:270-287` is where its reasoning is set out at length.
   let mergeFirstParents = null
   const firstParentOfMergeNaming = async (sha) => {
     if (!mergeFirstParents) {
       mergeFirstParents = new Map()
-      for (const commit of await git.commitsBetween({ from: anchorSha, to: runSha })) {
+      const commits = await git.commitsBetween({ from: anchorSha, to: runSha })
+      const inRange = new Set(commits)
+      for (const commit of commits) {
         const parents = await git.commitParents(commit)
         if (parents.length < 2) continue
-        // Non-first parents only. The first parent is the run branch's own prior history, so
-        // treating it as "the branch this merge carried" would let any commit already on the
-        // run branch vouch for itself — the same reason `runOwnershipCheck` slices it off.
         for (const parent of parents.slice(1)) {
+          if (!inRange.has(parent)) continue
           if (!mergeFirstParents.has(parent)) mergeFirstParents.set(parent, parents[0])
         }
       }
