@@ -139,10 +139,17 @@ test('phase-gate documents the two claims results that are not findings', async 
 // the skill sentence saying it does not has to be rewritten — which is the direction of drift
 // that produced this finding in the first place.
 test('collect-reviews really does collect an unableToVerify claims review as a pass', async () => {
+  // The stamp has to EXIST for "it is dropped" to be an assertion about anything. Without it the
+  // `'stamp' in result` check below passed whether or not the code kept the key — which is this
+  // run's signature defect committed one level up, inside the test written to close an instance
+  // of it. `expected` matches, so the file is current and reaches the result-building path.
+  const stamp = { phase: '1', lens: 'claims', branches: ['teammates/r1/T1@abc123'] }
   const out = collectReviewResults({
     lenses: ['claims'],
-    files: [{ lens: 'claims', findings: [], unableToVerify: 'the baseline suite was red', unprobed: ['a.mjs:1'] }],
+    expected: { phase: '1', branches: ['teammates/r1/T1@abc123'] },
+    files: [{ lens: 'claims', stamp, findings: [], unableToVerify: 'the baseline suite was red', unprobed: ['a.mjs:1'] }],
   })
+  assert.deepEqual(out.stale, [], 'the fixture must not be rejected as stale, or it proves nothing')
   assert.equal(out.results.length, 1)
   assert.equal(out.results[0].status, 'pass')
   assert.deepEqual(out.results[0].findings, [])

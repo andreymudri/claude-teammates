@@ -2367,8 +2367,11 @@ export async function runCli(argv, io = { out: console.log }) {
     if (!commandCheck && commandChecks.length > 1 && (check.lens ?? []).includes('claims')) {
       const preamble = 'the claims lens needs one command check to baseline against and this phase declares'
       io.out(namedTest.length > 1
+        // The duplicates, not every command check: enumerating all of them printed a third name
+        // under a count of two, and the extra name is the one an operator told to "rename the one
+        // that is not the suite" would reach for, which would change nothing.
         ? `${preamble} ${namedTest.length} command checks named "test": `
-          + `${commandChecks.map((c) => c.name).join(', ')}. Rename the one that is not the suite`
+          + `${namedTest.map((c) => c.name).join(', ')}. Rename the one that is not the suite`
         : `${preamble} ${commandChecks.length} with none named "test": `
           + `${commandChecks.map((c) => c.name).join(', ')}. `
           + 'Name the one that runs the suite "test", or drop the claims lens from this phase')

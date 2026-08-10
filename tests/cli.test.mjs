@@ -602,15 +602,55 @@ test('two command checks named test are diagnosed as duplicates, not as none', a
   )
 })
 
-// `testCommandName` is what turns "the command check this phase declares" into a check an
-// operator can go and look at. Replacing the wiring with '' left the whole suite green.
-test('a refused run string names the command check it came from, end to end', async () => {
+// The count came from `namedTest` and the list from `commandChecks`, so a third check appeared
+// under a count of two — and `lint` is exactly the name an operator reading "rename the one that
+// is not the suite" would pick, which changes nothing. Two checks made count and list coincide,
+// which is why the pin above cannot see it.
+test('the duplicate-test message lists the duplicates, not every command check', async () => {
   await withClaimsPhase(
-    [{ name: 'suite', kind: 'command', run: 'npm test`x' }, CLAIMS_CHECK],
+    [
+      { name: 'test', kind: 'command', run: 'npm test' },
+      { name: 'test', kind: 'command', run: 'npm run test:e2e' },
+      { name: 'lint', kind: 'command', run: 'npm run lint' },
+      CLAIMS_CHECK,
+    ],
     ({ code, out }) => {
       assert.equal(code, 4)
-      assert.match(out, /"suite"/)
-      assert.match(out, /refused rather than emitted/)
+      assert.match(out, /2 command checks named "test"/)
+      assert.match(out, /: test, test\b/)
+      assert.doesNotMatch(out, /lint/)
+    },
+  )
+})
+
+// `testCommandName` tells the reviewer which check its baseline command came from. It used to
+// exist only for a refusal message; the refusal is gone, so it is pinned where it now lives — the
+// DATA block — and the wiring is still dead if replaced with ''.
+test('the DATA block names the command check the baseline came from', async () => {
+  await withClaimsPhase(
+    [{ name: 'suite', kind: 'command', run: 'npm test' }, CLAIMS_CHECK],
+    ({ code, out }) => {
+      assert.equal(code, 0)
+      const spec = JSON.parse(out)
+      assert.match(spec.reviewers[0].prompt, /from check: "suite"/)
+    },
+  )
+})
+
+// A backtick in an ordinary command took down the correctness and security dispatches too, for a
+// value neither of them reads. The whole phase must still be reviewable.
+test('an awkward but honest run string does not make a phase unreviewable', async () => {
+  await withClaimsPhase(
+    [
+      { name: 'test', kind: 'command', run: 'node -e "console.log(`ok`)"' },
+      { name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: ['correctness', 'claims'], blockOn: ['high'] },
+    ],
+    ({ code, out }) => {
+      assert.equal(code, 0)
+      const spec = JSON.parse(out)
+      assert.deepEqual(spec.reviewers.map((r) => r.lens), ['correctness', 'claims'])
+      const claims = spec.reviewers.find((r) => r.lens === 'claims')
+      assert.match(claims.prompt, /console\.log\(`ok`\)/)
     },
   )
 })
