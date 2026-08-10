@@ -172,6 +172,62 @@ test('the temp root is compared with the separator normalisation the module alre
   assert.deepEqual(out.map((p) => p.path), ['C:\\Temp\\tm-preview-a'])
 })
 
+// The exact pair of spellings that turned CI red on macOS and windows-latest for both open PRs,
+// pinned here as data because `leakedPreviews` is pure and takes both paths as arguments — which
+// makes the platform bug reproducible on any machine, including the Linux one where it passed.
+//
+// `git worktree list` reports a RESOLVED real path; `os.tmpdir()` reports whatever the
+// environment spells. On macOS `/var` is a symlink to `/private/var`; on a Windows runner `TEMP`
+// can be an 8.3 short name (`RUNNER~1`) for a directory git names in long form. Each pair below
+// is one directory under two names.
+//
+// These assertions cut BOTH ways on purpose, and that is the point. The mismatched pair must stay
+// unidentified: `under()` is a whole-segment string comparison over paths this module cannot
+// stat, and teaching it to guess that `/var` and `/private/var` are the same place — or folding
+// case to make `RUNNER~1` match — would be a guess dressed as a fact, and would silently widen
+// what a `--yes` deletes. The fix belongs to the caller, which has a filesystem to ask. So what
+// is pinned is: give this module the resolved root and it identifies the preview; give it the
+// unresolved one and it correctly identifies nothing.
+test('a macOS-shaped temp root identifies the preview only once the caller has resolved it', () => {
+  const path_ = '/private/var/folders/df/xyz/T/tm-preview-leak-17406-1'
+  // What the CLI passed before the fix: tmpdir()'s unresolved spelling.
+  assert.deepEqual(
+    leakedPreviews([preview(path_)], { tempRoot: '/var/folders/df/xyz/T' }),
+    [],
+    'an unresolved root cannot be bridged by string comparison, and must not pretend otherwise',
+  )
+  // What it passes now: realpath of the same directory, in git's own spelling.
+  assert.deepEqual(
+    leakedPreviews([preview(path_)], { tempRoot: '/private/var/folders/df/xyz/T' }).map((p) => p.path),
+    [path_],
+  )
+})
+
+test('a Windows short-name temp root identifies the preview only once the caller has resolved it', () => {
+  const path_ = 'C:/Users/runneradmin/AppData/Local/Temp/tm-preview-leak-17406-1'
+  assert.deepEqual(
+    leakedPreviews([preview(path_)], { tempRoot: 'C:/Users/RUNNER~1/AppData/Local/Temp' }),
+    [],
+    '8.3 short names are not expandable without a filesystem, so this module must not try',
+  )
+  assert.deepEqual(
+    leakedPreviews([preview(path_)], { tempRoot: 'C:/Users/runneradmin/AppData/Local/Temp' }).map((p) => p.path),
+    [path_],
+  )
+})
+
+// Guards the shortcut fix specifically. Making `under()` case-insensitive would turn this green
+// while leaving the symlink and short-name cases — the ones that actually broke CI — untouched,
+// so it would look like a fix and be none. Windows path comparison IS case-insensitive in the
+// filesystem, but this module has no filesystem to ask and cannot know it is looking at a
+// Windows path; the caller's realpath returns the on-disk casing and settles it there.
+test('case is not folded to bridge a differently-spelled temp root', () => {
+  assert.deepEqual(
+    leakedPreviews([preview('C:/Users/x/AppData/Local/Temp/tm-preview-a')], { tempRoot: 'C:/USERS/X/APPDATA/LOCAL/TEMP' }),
+    [],
+  )
+})
+
 // Without a temp root the module cannot tell a preview it made from a directory that happens to
 // be named like one, so it identifies nothing. Identifying everything would make the failure mode
 // "delete an operator's worktree" instead of "report none".
