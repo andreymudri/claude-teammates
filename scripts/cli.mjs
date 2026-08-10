@@ -685,12 +685,12 @@ async function unlinkPreviewLinks(dir, depth = 0) {
 // Which of these previews an owner is still HOLDING.
 //
 // scripts/merge-preview.mjs writes a marker BESIDE the preview directory before it calls
-// `git worktree add`, and removes it in its own `finally` before tearing the links down. Git
-// registers a worktree at the START of the add, so the span over which the marker is held
-// strictly contains the span over which the preview is observable here — which is what makes
-// this different in kind from an mtime or a registration age. Those are sampled by the reaper
-// and only narrow the window; this is held by the owner, so there is no instant at which a
-// living owner reads as absent.
+// `git worktree add`, and releases it only after `removeWorktree` has deregistered the worktree.
+// Git registers a worktree at the START of the add and deregisters it at the end of the removal,
+// so the span over which the marker is held contains the span over which the preview is
+// observable here — which is what makes this different in kind from an mtime or a registration
+// age. Those are sampled by the reaper and only narrow the window; this is held by the owner, so
+// there is no instant at which a living owner reads as absent.
 //
 // THREE FAIL-SAFE BRANCHES, all deliberate, all saying the same thing: an owner that cannot be
 // RULED OUT is an owner.
@@ -1663,8 +1663,10 @@ export async function runCli(argv, io = { out: console.log }) {
     // never close it, because a junction the owner creates in the window BETWEEN this sweep and
     // the removal below would still be followed. What closes that window is that a live preview
     // does not reach this loop at all: `livePreviewPaths` above found the marker its owner holds
-    // from before `git worktree add` is called until its own teardown begins, and the preview is
-    // excluded from `plan.previews` and reported as owned instead.
+    // from before `git worktree add` registers the preview until after `removeWorktree`
+    // deregisters it, and the preview is excluded from `plan.previews` and reported as owned
+    // instead. The teardown is inside that span, not after it: a preview mid-teardown still
+    // holds its junctions, and reading it as unowned there would follow them.
     //
     // THE RESIDUALS, stated as what is true rather than as what would be convenient.
     //
