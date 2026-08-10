@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { filesetViolations, ownershipViolations, baseExplainedNote, resolveTaskBranch, derivePhase, planHash } from './enforce.mjs'
+import { filesetViolations, ownershipViolations, baseExplainedNote, resolveTaskBranch, derivePhase, planHash, normalizePath } from './enforce.mjs'
 import { GitError } from './git.mjs'
 import { withMergePreview, conflictPairs } from './merge-preview.mjs'
 
@@ -60,6 +60,122 @@ function checkResult(check, status, output) {
   return { name: check.name, kind: check.kind, status, output, optional }
 }
 
+// The files a merge commit M in `anchor..run` actually carried, indexed by every one of its
+// NON-first parents that is ITSELF a commit inside `anchor..run` — built once, shared by
+// `deriveContext`'s own integration credit and `runFilesetCheck`'s empty-diff test, which each
+// build their own copy (a phase-gate invocation and a `complete` invocation neither owns the
+// other's cache).
+//
+// Three earlier designs asked a different question — "is this sha suspicious" — by classifying
+// a shared sha as parked or benign from properties of the sha alone: shared-by-anyone,
+// not-the-run-tip, a member of `git.mergedBranchTips`. Every one of them was wrong, because a
+// sha's innocence depends on how a ref CAME to point at it, which a sha carries no trace of.
+// Concretely: `git.mergedBranchTips` answers "is this sha a secondary parent of some merge in
+// range" — but a teammate that runs `git merge --no-ff run-branch` on ITS OWN branch, to pick
+// up a sibling's interfaces, makes the OLD run tip a secondary parent of that sync merge too,
+// poisoning `mergedBranchTips` for every idle ref that happened to be dispatched at that old
+// tip. The REF was never merged; the COMMIT it points at can be, for reasons that have nothing
+// to do with that ref.
+//
+// The question this check actually needs answered is narrower and per-task: when a branch
+// reads as "landed" (its own diff off the run branch is empty because it is already on the run
+// branch), did the merge that put it there actually carry THIS TASK's declared files? A parked
+// ref's sha is named by a merge, but that merge carried the SIBLING's files, never the parked
+// task's own declared set — so filtering by the merge's own diff against its own first parent,
+// rather than by sha membership alone, is what actually tells a parked ref from a genuine one,
+// and it does so without needing to reason about any OTHER ref at all: `landedForFiles` takes
+// only this task's own sha and this task's own declared files, so a sibling moving its OWN ref
+// off the shared sha in a later fix round changes nothing — the merge that already landed is
+// unaffected by where any ref currently points.
+//
+// Built by walking every merge commit in `anchor..run` once: for each, the files it changed
+// relative to its own first parent (`changedFiles({ base: parents[0], branch: commit })`), keyed
+// under every non-first parent that is itself inside the range. Both filters mirror
+// `git.mergedBranchTips`'s own two filters, for the same reasons `scripts/git.mjs:270-287` gives
+// at length:
+//
+//   - Non-first parents only. The first parent is the run branch's own prior history; keying it
+//     too would let any commit already on the run branch vouch for itself.
+//   - The parent must be in range. A plan amendment merges the BASE branch into the run branch,
+//     naming the base tip as a secondary parent — and for a run whose amendment has landed, the
+//     anchor IS that base tip. Unfiltered, a task ref parked at the anchor would be keyed here,
+//     landed for whatever files that one amendment merge happened to touch. In practice an
+//     amendment rarely names a file that collides with a task's own declared set, so the
+//     existing real-repo parked-at-anchor test stays green with or without this filter — it is
+//     the declared-files predicate itself, not this filter, that defends the common case.
+//     The filter is confirmed load-bearing for the narrower, coincidental-filename case: pinned
+//     directly against `mergedParentFiles`'s output by
+//     `runFilesetCheck does not read a ref parked at the anchor as landed even when a
+//     coincidental filename matches`, which goes red without it.
+//
+// A sha can be named by more than one merge (a stale parked position, plus an unrelated later
+// sync that happens to reuse the same commit as a parent). The file sets found are unioned per
+// sha rather than kept per-merge, because "does some merge naming this sha carry a declared
+// file" and "does the declared set intersect the union of every merge naming this sha" are the
+// same existence claim — a file is in the union exactly when it is in at least one member set.
+async function mergedParentFiles(git, { anchorSha, runSha }) {
+  const commits = await git.commitsBetween({ from: anchorSha, to: runSha })
+  const inRange = new Set(commits)
+  const filesBySha = new Map()
+  for (const commit of commits) {
+    const parents = await git.commitParents(commit)
+    if (parents.length < 2) continue
+    const changed = await git.changedFiles({ base: parents[0], branch: commit })
+    for (const parent of parents.slice(1)) {
+      if (!inRange.has(parent)) continue
+      let set = filesBySha.get(parent)
+      if (!set) { set = new Set(); filesBySha.set(parent, set) }
+      for (const file of changed) set.add(file)
+    }
+  }
+  return filesBySha
+}
+
+// True when some merge in range named `sha` as a secondary parent AND that merge's own diff
+// against its first parent carried at least one of `declaredFiles`. Paths are normalized the
+// same way `filesetViolations` normalizes them (backslashes, a leading `./`, a leading `/`),
+// so a declared `a.mjs` matches a merge diff reporting `./a.mjs` alike.
+//
+// What this test has been confirmed to give, by executing each shape below against a real
+// repository — not asserted from the design alone. The test named is where each is pinned:
+//   - T3 commits `c.mjs`, is merged `--no-ff`, T2 parks on T3's tip: the merge naming that sha
+//     carried `c.mjs`, T3's declared file, not T2's `b.mjs`. `landedForFiles` for T2 is false.
+//     `gate fails when a task ref is parked at a merged SIBLING's tip`.
+//   - The same, after T3 makes a further fix-round commit that moves T3's OWN ref off the
+//     shared sha: the merge that already named the sha still only ever carried `c.mjs` — this
+//     test does not depend on where T3's ref currently sits, only on what that one merge
+//     carried, so T2 is still false. This is the shape every earlier design left open once a
+//     sibling's ref moved: entry counts, membership sets and run-tip comparisons all keyed on
+//     TWO refs sharing something right now, and stopped applying the moment only one of them
+//     still did. `gate still fails a parked ref after the sibling it parked on makes a further
+//     fix-round commit`.
+//   - Two idle refs sharing an old run tip that an UNRELATED merge turned into a secondary
+//     parent — either a plan amendment merging the base in, or a third task's own
+//     `git merge --no-ff run-branch` picking up a sibling's interfaces: that merge's diff is
+//     whatever it actually pulled in, never either idle task's still-nonexistent declared file.
+//     Both idle refs read `landedForFiles` false, and fail on the ordinary, true "contributes no
+//     file changes" message below — nothing is accused of parking, nothing goes null.
+//     `gate does not treat two idle siblings as parked when an unrelated commit moves the run
+//     tip past them`; `gate does not treat an idle ref as parked when a sibling's own sync merge
+//     names the tip it sits at`.
+//   - A near-sibling — an empty commit built one commit above a merged sibling's tip, itself
+//     later merged under its own name: that merge's own diff against its own first parent is
+//     EMPTY (it brings in nothing new), so it can never intersect a non-empty declared set
+//     however many merges name the sha. Closed as a side effect of the predicate, not by
+//     design intent. `gate fails a ref built one empty commit above a merged sibling's tip, even
+//     merged under its own name`.
+//   - A legitimately merged branch: the merge naming it carried exactly its own declared files.
+//     True. `a compliant two-phase run passes phase 1 ... then derives and passes phase 2`.
+function landedForFiles(filesBySha, sha, declaredFiles) {
+  const carried = filesBySha.get(sha)
+  if (!carried) return false
+  const declared = new Set((declaredFiles ?? []).map(normalizePath))
+  for (const file of carried) {
+    if (declared.has(normalizePath(file))) return true
+  }
+  return false
+}
+
 // Takes no `status` argument by design. Three earlier versions of this system were defeated
 // by trusting a file the enforced agents can write.
 export async function deriveContext({ git, runId, runBranch, baseBranch, planPath }) {
@@ -83,143 +199,9 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
     if (!byPhase.has(task.phase)) byPhase.set(task.phase, [])
     byPhase.get(task.phase).push(task)
   }
-  // Lazily built, then shared by every task branch of every phase: for each merge commit on
-  // the run branch since the anchor, the first parent of that merge, indexed by each of its
-  // NON-first parents that is ITSELF a commit inside anchor..run. Only a branch already on the
-  // run branch needs it (see `ownWorkBase`), so a run whose branches all still carry unmerged
-  // work never pays for the walk, and a run that does pays for it once.
-  //
-  // Both filters are load-bearing, and this index answers the same question `mergedBranchTips`
-  // answers over the same set, so it applies the same two filters for the same reasons:
-  //
-  //   - Non-first parents only. The first parent is the run branch's own prior history, so
-  //     treating it as "the branch this merge carried" would let any commit already on the run
-  //     branch vouch for itself — the same reason `runOwnershipCheck` slices it off.
-  //   - The parent must be in range. The range bounds which merge commits are WALKED; it does
-  //     not filter the parents they print. This plugin's plan-amendment procedure merges the
-  //     BASE branch into the run branch, so the base tip is printed as a secondary parent of a
-  //     merge inside the range — and for a run whose amendments have landed, the anchor IS that
-  //     base tip. Unfiltered, a task ref parked at the anchor is keyed here, gets a fork point
-  //     from BEFORE the anchor, and its diff fills with the base branch's own commits: it reads
-  //     as work it never did, its phase reads integrated, and `runFilesetCheck` returns the
-  //     vacuous pass this whole change exists to stop reaching. Reproduced end to end; pinned by
-  //     `a task branch parked at the anchor does not read as integrated after a plan amendment`.
-  //
-  // Every parent of a commit on the run branch is reachable from the run branch by construction,
-  // so "inside anchor..run" is exactly "not reachable from the anchor" — the filter expressed as
-  // a bound rather than as an isAncestor call per parent, which is how `mergedBranchTips` states
-  // it too. That helper returns only the parent set, with no way to ask which merge carried a
-  // given parent, so the mapping is rebuilt here rather than shared; the filter is duplicated
-  // deliberately, and `scripts/git.mjs:270-287` is where its reasoning is set out at length.
-  let mergeFirstParents = null
-  const firstParentOfMergeNaming = async (sha) => {
-    if (!mergeFirstParents) {
-      mergeFirstParents = new Map()
-      const commits = await git.commitsBetween({ from: anchorSha, to: runSha })
-      const inRange = new Set(commits)
-      for (const commit of commits) {
-        const parents = await git.commitParents(commit)
-        if (parents.length < 2) continue
-        for (const parent of parents.slice(1)) {
-          if (!inRange.has(parent)) continue
-          if (!mergeFirstParents.has(parent)) mergeFirstParents.set(parent, parents[0])
-        }
-      }
-    }
-    return mergeFirstParents.get(sha) ?? null
-  }
-
-  // The base a branch's own work is measured from, which is never the run anchor. The anchor
-  // is fixed at the start of the whole run, so from phase 2 onward it sits behind everything
-  // earlier phases merged, and an anchor-based diff credits a branch with THOSE files.
-  // Confirmed: a phase-2 branch created by `git checkout -B <task> <run branch>` and never
-  // committed to reads as "changed a.mjs" once a sibling's merge moves the run tip past it,
-  // the phase reads integrated, `derivePhase` advances past it, and `runFilesetCheck` takes
-  // its `currentPhase === null` fast path — so the landed test never runs for that task at all.
-  //
-  // Before the branch is on the run branch, its fork point off that branch is the answer, and
-  // it is the same base `runFilesetCheck` diffs from, so the two stop disagreeing about what a
-  // branch contributed. Once the branch IS on the run branch, merge-base(run, branch) is the
-  // branch's own tip and every diff from it is empty however much work the branch carried; the
-  // base that still answers "what did THIS branch contribute" is the fork point the branch had
-  // at the moment it was merged, i.e. merge-base(first parent of the merge that named it,
-  // branch). A branch on the run branch that no merge names is left measuring against itself,
-  // which reads as no work — that is the parked-branch case, and it must read that way.
-  const ownWorkBase = async (sha) => {
-    const forkPoint = await git.mergeBase(runSha, sha)
-    if (forkPoint !== sha) return forkPoint
-    const firstParent = await firstParentOfMergeNaming(sha)
-    if (!firstParent) return sha
-    return await git.mergeBase(firstParent, sha)
-  }
-
-  // Run-wide, the same set `runFilesetCheck` builds for the same reason: the sha a commit
-  // carries is a fact about the whole run, not about one phase, and a parked ref's sibling is
-  // usually in an earlier, already-integrated phase.
-  //
-  // The question this asks is narrower than "is this the run tip" — two fix-round versions of
-  // this check tried that framing and both were wrong. "Not the run tip" is true of a parked
-  // ref, but it is ALSO true of two entirely idle refs the moment the tip moves past them for
-  // ANY reason: siblings dispatched together at the run tip (`git checkout -B <task> <run
-  // branch>`, never committed) still share that exact sha after a later, unrelated commit
-  // lands — a plan amendment merging the base in, or any other phase's sibling merging. The run
-  // tip is an instant, not a property of the sha, so testing against it drifts stale the moment
-  // anything else on the run branch moves. Reproduced with the real CLI (fix-round finding 1,
-  // security-HIGH): T2 and T3 (phase 2) created at the run tip and never touched, T1 (phase 1)
-  // merges, then a plan amendment merges the base in — T2 and T3 now share a sha that is not
-  // the run tip, and the "not the run tip" version of this check took down the entire run,
-  // accusing two honest, idle teammates of ref tampering. Pinned as
-  // `deriveContext does not treat two idle siblings as parked when an unrelated commit moves
-  // the run tip past them` in `tests/adversarial.test.mjs`.
-  //
-  // What actually distinguishes a parked ref is not where the tip is now, but whether the
-  // shared sha was ever ITSELF integrated as somebody's branch — `git.mergedBranchTips` answers
-  // exactly that: the set of shas that are a secondary parent of some `--no-ff` merge commit
-  // inside `anchor..run`. A parked ref's sha IS in that set, because it is a genuine sibling's
-  // tip and that sibling really was merged. Two idle refs are NOT in that set, whatever they
-  // share and however the tip has moved since, because neither was ever merged as anyone's
-  // branch — this excludes the run-tip case too, since a walk that ends at `runSha` can never
-  // print `runSha` itself as some other commit's parent. A ref parked on a sibling's tip
-  // BEFORE that sibling is merged is also not in the set yet — it is caught instead by the
-  // ordinary declared-set violation below, on the parked ref's own non-empty diff (it carries
-  // the sibling's real, undeclared files). Pinned as `gate catches a ref parked at an unmerged
-  // sibling's tip via the declared-set violation, not the duplicate rule` in
-  // `tests/adversarial.test.mjs`.
-  //
-  // Two earlier versions of this exclusion are worth naming so neither is rediscovered: the
-  // first silently withheld `integratedPhases` credit from every ref sharing ANY sha,
-  // regardless of the run tip, which broke a genuinely-integrated EARLIER phase whenever a
-  // LATER phase's parked ref happened to share its sha. The second (the "not the run tip"
-  // version this comment replaces) fixed that but reintroduced the same class of false
-  // positive through the run tip's own instability, described above.
-  //
-  // Returned as a dedicated phaseError, naming every ref sharing the sha (not just the first
-  // two — with three or more sharing a sha, naming only a pair lets an attacker pick a task id
-  // that sorts past two idle siblings and stay out of the message), rather than folded into the
-  // states loop as a silent per-task exclusion: this shape means the RUN itself cannot be
-  // trusted to say which phase is current, not that one specific phase failed to integrate, so
-  // it is surfaced before `integratedPhases` is even computed, the same way the zero-task case
-  // below is.
-  const allTaskShas = await runWideTaskShas(git, tasks, runId)
-  const mergedTipShas = await git.mergedBranchTips({ runSha, anchorSha })
-  const byRunWideSha = new Map()
-  for (const [branch, rec] of allTaskShas) {
-    if (!byRunWideSha.has(rec.sha)) byRunWideSha.set(rec.sha, [])
-    byRunWideSha.get(rec.sha).push({ branch, taskId: rec.taskId })
-  }
-  for (const [sha, entries] of byRunWideSha) {
-    if (!mergedTipShas.has(sha)) continue
-    if (entries.length < 2) continue
-    const names = entries.map((e) => `${e.branch} (task ${e.taskId})`).join(', ')
-    return {
-      git, runId, runBranch, baseBranch, anchorSha, runSha,
-      planHash: planHash(planMarkdown),
-      tasks,
-      currentPhase: null,
-      phaseError: `${entries.map((e) => e.taskId).join(', ')}: branches ${names} are all at commit ${sha}, a merged sibling's tip — one is parked at another's tip and this run cannot be phase-gated until it is fixed`,
-      integratedPhases: [],
-    }
-  }
+  // Built once, shared by every task branch of every phase below — see the comment on
+  // `mergedParentFiles` above this function for what it answers and why.
+  const mergedFiles = await mergedParentFiles(git, { anchorSha, runSha })
 
   const integratedPhases = []
   for (const [phase, phaseTasks] of byPhase) {
@@ -228,67 +210,40 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
       const branch = resolveTaskBranch(t, runId)
       if (!branch || !(await git.branchExists(branch))) { states.push(false); continue }
       const sha = await git.resolveRef(`refs/heads/${branch}`)
-      // isAncestor(sha, runSha) alone is trivially true for a branch with zero commits past
-      // the anchor: a branch created at the anchor, or created by pointing at the run tip
-      // itself, is an ancestor by reflexivity or by definition, with no work required.
-      // Confirmed: a teammate can create every task branch at the run tip, commit nothing
-      // anywhere, and every phase reads integrated. Counting commits is not enough either —
-      // confirmed separately: a single `git commit --allow-empty` satisfies "has a commit"
-      // while changing no file at all. Requiring at least one *file* changed between the
-      // branch's own work base and the branch means "integrated" implies "did work", not just
-      // "points at something already on the run branch" or "has a commit".
+      const forkPoint = await git.mergeBase(runSha, sha)
+      if (forkPoint !== sha) {
+        // Not yet on the run branch: an ordinary "did this branch do its own work" check
+        // against its own fork point. isAncestor(sha, runSha) alone is trivially true for a
+        // branch with zero commits past the anchor: a branch created at the anchor, or created
+        // by pointing at the run tip itself, is an ancestor by reflexivity or by definition,
+        // with no work required. Confirmed: a teammate can create every task branch at the run
+        // tip, commit nothing anywhere, and every phase reads integrated. Counting commits is
+        // not enough either — confirmed separately: a single `git commit --allow-empty`
+        // satisfies "has a commit" while changing no file at all. Requiring at least one *file*
+        // changed between the fork point and the branch means "integrated" implies "did work".
+        const ownChanges = await git.changedFiles({ base: forkPoint, branch: sha })
+        states.push(ownChanges.length > 0 && await git.isAncestor(sha, runSha))
+        continue
+      }
+      // Already on the run branch: a diff from `sha` to itself is always empty, so whether
+      // this reads as integrated depends entirely on whether some merge in `anchor..run` that
+      // named this sha as a secondary parent actually carried task t's own declared files —
+      // `landedForFiles`, exactly the predicate `runFilesetCheck`'s empty-diff test applies
+      // below. See the comment on `mergedParentFiles`, above this function, for what this
+      // closes and what it has been confirmed to give.
       //
-      // Both of those attacks are still defeated once the base is the fork point rather than
-      // the anchor, and the second is defeated MORE completely than before: a branch created
-      // at the run tip measures against its own tip and shows nothing, and a branch of empty
-      // commits measures against the fork point it was merged from and still shows nothing.
-      // What the fork-point base adds is that "did work" now means the branch's OWN work,
-      // rather than anything that was already on the run branch when the branch was created.
+      // A branch integrated by FAST-FORWARD leaves no merge commit to name it at all, so it is
+      // not a key in `mergedFiles` and reads as not-landed even though the work IS on the run
+      // branch. `tm-integrator`'s contract is `--no-ff` for exactly this reason; the state is
+      // out-of-contract, and failing closed is the intended direction. Confirmed against a real
+      // fast-forward: `deriveContext does not read a fast-forward-integrated branch as
+      // integrated (real repo)`.
       //
-      // It also closes two variants the anchor base left open: a ref pointed at a run TIP that
-      // already carries someone ELSE'S real commits, and a ref parked at the ANCHOR after a plan
-      // amendment merged the base in. Both used to show commits they had no part in as their own
-      // work; both now measure against a base that yields nothing.
-      //
-      // One variant remains fully open, and one is now only PARTLY open. An earlier version of
-      // this comment named only the first, which is how the second went unrecorded:
-      //   - A teammate that does the integrator's job — creating task branches that each carry
-      //     real work and merging them itself. Indistinguishable here from legitimate
-      //     integration, because at this level it IS the same shape. Still fully open.
-      //   - A ref parked at a merged SIBLING'S tip, AFTER the sibling is merged. Reproduced: T3
-      //     commits `c.mjs` and is merged `--no-ff`; T2's ref is then pointed at T3's tip
-      //     instead of committing. T2's sha is a genuine secondary parent of that merge and
-      //     genuinely in range, so it is keyed in the index above, and `ownWorkBase` would hand
-      //     back T3's fork point — crediting T2 with `c.mjs` while T2's own declared file never
-      //     reaches the run branch. The range filter cannot help: the sha really was merged,
-      //     just not as this task. `runFilesetCheck` had the symmetric hole through
-      //     `mergedBranchTips`, which asks the same membership question.
-      //
-      //     Caught at the shared-sha step just above, once T3 is actually merged: T3's tip is
-      //     then a member of `git.mergedBranchTips`, and the dedicated phaseError fires, naming
-      //     every ref sharing the sha. BEFORE T3 is merged, T2's sha (T3's own, still-unmerged
-      //     tip) is not yet in that set — nothing not-yet-integrated can be — so the shared-sha
-      //     step does not fire, and T2's diff off the run tip (T3's real `c.mjs`, non-empty) is
-      //     instead caught by the ordinary declared-set violation (T2 only declared `b.mjs`).
-      //     `runFilesetCheck`'s OWN duplicate rule agrees with this split for the same reason —
-      //     it gates on the identical `mergedBranchTips` membership — so both functions draw the
-      //     line at the same event (the merge), not at the diff. Pinned, both shapes, in
-      //     `tests/adversarial.test.mjs`.
-      //     What remains open is the NEAR-sibling variant, after the merge: a distinct sha one
-      //     empty commit above the sibling's tip was never itself merged, so it is not in
-      //     `mergedBranchTips` either, and whether the empty-diff test below still catches it
-      //     depends on the shape of what got merged where — see `tests/adversarial.test.mjs`'s
-      //     LIMIT (near-sibling) test for the case that survives.
-      //
-      // The spec's "Not defended against" list still records the shared-sha shape as open; this
-      // function and `tests/adversarial.test.mjs` are the more current source for what remains.
-      //
-      // A branch integrated by FAST-FORWARD leaves no merge commit to name it, so it measures
-      // against its own tip and reads as no work even though the work is on the run branch.
-      // That is the same limit `runFilesetCheck` states for the same reason, and it fails
-      // closed: `tm-integrator`'s contract is `--no-ff`, so the state is out-of-contract.
-      const ownChanges = await git.changedFiles({ base: await ownWorkBase(sha), branch: sha })
-      states.push(ownChanges.length > 0 && await git.isAncestor(sha, runSha))
+      // What remains open, unchanged from every earlier design: a teammate that does the
+      // integrator's job itself — creating task branches that each carry real work and merging
+      // them itself — is indistinguishable here from legitimate integration, because at this
+      // level it IS the same shape.
+      states.push(landedForFiles(mergedFiles, sha, t.files) && await git.isAncestor(sha, runSha))
     }
     if (states.length > 0 && states.every(Boolean)) integratedPhases.push(phase)
   }
@@ -342,35 +297,6 @@ function scopedPhaseTasks(ctx) {
   return scopedTasks(ctx).filter((t) => t.phase === ctx.currentPhase)
 }
 
-// Run-wide, deliberately, and the asymmetry is the point: the SUBJECT of the duplicate rule is
-// the phase under check, but the COMPARISON SET is every task ref in the run. A ref parked at a
-// merged sibling's tip is the shape the empty-diff test below cannot see — the sibling's sha
-// genuinely is a merge parent in range, so `mergedBranchTips` vouches for it — and the sibling
-// is usually in an earlier phase, so a phase-wide comparison set would never meet it.
-//
-// Widening the SUBJECT instead, by asking this of every task in the run, would fail a phase for
-// two not-yet-started refs of a LATER phase both sitting exactly where `git checkout -B <task>
-// <run branch>` put them. That is not a violation of anything, which is why this does not live
-// in `runOwnershipCheck` despite ownership being the run-wide check.
-//
-// This claim depends on the COMPARISON built from this set never firing for two idle refs no
-// matter what they share — a not-yet-started ref cannot have been merged, so it can never be a
-// member of `git.mergedBranchTips`, which is what both `deriveContext`'s dedicated phaseError
-// and this check's own duplicate rule gate on (see the comment above `deriveContext`'s
-// `ownWorkBase` loop). An earlier version of that gate asked "is this the run tip" instead,
-// which does NOT hold that property — two idle refs share a sha that stops being the run tip
-// the moment anything else lands — and briefly made this comment's claim false project-wide.
-async function runWideTaskShas(git, tasks, runId) {
-  const shas = new Map()
-  for (const task of tasks ?? []) {
-    const branch = resolveTaskBranch(task, runId)
-    if (!branch) continue
-    if (!(await git.branchExists(branch))) continue
-    shas.set(branch, { sha: await git.resolveRef(`refs/heads/${branch}`), taskId: task.id })
-  }
-  return shas
-}
-
 export async function runFilesetCheck(check, ctx = {}) {
   const { git, runId, runSha, anchorSha, currentPhase, phaseError } = ctx
   if (!git) return checkResult(check, 'fail', 'fileset check has no git access')
@@ -409,25 +335,16 @@ export async function runFilesetCheck(check, ctx = {}) {
     return checkResult(check, 'fail', `phase ${currentPhase} selected no tasks from the plan`)
   }
 
-  let allTaskShas
+  let mergedFiles
   try {
-    allTaskShas = await runWideTaskShas(git, ctx.tasks ?? [], runId)
+    mergedFiles = await mergedParentFiles(git, { anchorSha, runSha })
   } catch (err) {
     if (!(err instanceof GitError)) throw err
-    return checkResult(check, 'fail', `could not resolve this run's task refs: ${err.message}`)
+    return checkResult(check, 'fail', `could not walk this run's merge history: ${err.message}`)
   }
 
   const problems = []
   const branchShas = {}
-  // One walk for the whole phase, and only if some branch's diff comes up empty: the set is a
-  // fact about the run, not about any single branch, and a phase where every branch carries work
-  // never needs it. Memoised rather than hoisted so a phase that does not need it does not pay
-  // for it, and so a walk that fails is reported against the task that asked for it.
-  let mergedTips = null
-  const landedTips = async () => {
-    if (!mergedTips) mergedTips = await git.mergedBranchTips({ runSha, anchorSha })
-    return mergedTips
-  }
   for (const task of phaseTasks) {
     const branch = resolveTaskBranch(task, runId)
     if (!branch) { problems.push(`${task.id}: no branch could be resolved`); continue }
@@ -455,108 +372,48 @@ export async function runFilesetCheck(check, ctx = {}) {
       // branch is resolved by convention precisely so the enforced party cannot redirect the
       // check; emptiness is what that redirection looks like from here.
       if (changed.length === 0) {
-        // Scoped to the empty-diff branch, and checked before the "no-op" message below. A
-        // branch whose diff is NON-empty cannot be the parked ref — it carries real content of
-        // its own, whatever its sha shares with another branch — so running this unconditionally
-        // failed the honest branch too: phase 2 has siblings T2 and T3, T3 commits `c.mjs`, T2's
-        // ref is pointed at T3's tip, and T3's own `complete` run hit this test before its diff
-        // was even computed and read as "credited with work it did not do" about T3 itself.
+        // What decides it is whether some merge in `anchor..run` that names this sha as a
+        // secondary parent actually carried THIS TASK's declared files — `landedForFiles`, over
+        // the shared `mergedFiles` index built above. See the comment on `mergedParentFiles`
+        // and `landedForFiles` themselves (above `deriveContext`, this file's first export) for
+        // the full reasoning, what this closes, and what has been confirmed against it.
         //
-        // Also scoped to a sha that was actually merged as somebody's branch — `landedTips()`,
-        // the exact set the "no-op" message below already asks the same membership question of.
-        // An earlier version scoped this to `sha !== runSha` instead, on the theory that a
-        // shared sha is benign exactly when it IS the run tip. That is true, but incomplete: two
-        // entirely idle refs share a NON-run-tip sha too, the moment anything else on the run
-        // branch moves past them — a plan amendment merging the base in, or any other phase's
-        // sibling merging. The run tip is an instant, not a property of the sha, and testing
-        // against it goes stale the moment history moves. `landedTips()` asks the right
-        // question instead: was this sha ever integrated as somebody's branch. A parked ref's
-        // sha IS in that set (it is a genuine sibling's tip, and that sibling really was
-        // merged); two idle refs are not, whatever they share and however the tip has since
-        // moved. See the comment on this same discriminator in `deriveContext`, above
-        // `ownWorkBase`'s loop, for the full reasoning and the fix-round regression it replaced.
+        // Three earlier designs asked instead whether this sha was suspicious on its own terms
+        // — shared by any other ref, not the run tip, or merely a member of
+        // `git.mergedBranchTips` — and each produced a real, executed regression: withholding
+        // credit from a legitimate branch sharing a sha with a parked one; failing two entirely
+        // idle siblings the moment anything else landed on the run branch; and failing two
+        // entirely idle siblings again when an unrelated task's OWN sync merge
+        // (`git merge --no-ff run-branch` on its own branch) made an old run tip a secondary
+        // parent of an in-range merge that carried neither idle task's files. `landedForFiles`
+        // is per-task and reads only the merge's own diff, so none of those three shapes can
+        // reach it — a fact confirmed by executing each of them, not asserted from the design
+        // alone.
         //
-        // Two task refs of one run resolving to the identical MERGED sha, while the diff is
-        // empty, has no legitimate shape once the phase is being gated: one of them was moved
-        // onto the other, and the one WITH the empty diff is the one that moved.
-        const landed = (await landedTips()).has(sha)
-        const twins = landed
-          ? [...allTaskShas].filter(([name, rec]) => name !== branch && rec.sha === sha)
-          : []
-        if (twins.length > 0) {
-          const names = twins.map(([name, rec]) => `${name} (task ${rec.taskId})`).join(', ')
-          problems.push(`${task.id}: branch ${branch} and ${names} are all at commit ${sha} — one is parked at another's tip and would be credited with work it did not do`)
-          continue
-        }
-        // Only meaningful BEFORE the branch lands. Once it is on the run branch,
-        // merge-base(run, branch) is the branch's own tip, so the diff is empty however much
-        // work the branch carried — re-verifying an integrated phase (what `finish` does) would
-        // otherwise fail every one of them. What the branch contributed after integration is
-        // `ownership`'s question, and it asks it of every commit on the run branch, every run.
+        // A branch integrated by FAST-FORWARD leaves no merge commit and so no secondary
+        // parent, so it is not a key in `mergedFiles` and reaches this test and fails it — with
+        // a message that names a cause that is not the one, since the work IS on the run
+        // branch. `tm-integrator`'s contract is `--no-ff` for exactly this reason, and no other
+        // check covers the gap: `ownership` explains a fast-forwarded branch's commits by their
+        // ancestry from the task branch, so it reports nothing. Failing closed is the intended
+        // direction; the misleading wording is the price. A SQUASH merge likewise carries no
+        // secondary parent, and this plugin's integrator never squashes.
         //
-        // What decides it is whether the run branch MERGED THIS BRANCH: whether a merge commit
-        // past the anchor names this sha as a parent other than its first, AND that sha is
-        // itself past the anchor. `mergedBranchTips` enforces the second half — it returns only
-        // parents inside the anchor..run range — so this reads as a single membership test. The
-        // second half is not decoration: a plan amendment merges the BASE into the run branch,
-        // which names the base tip as a secondary parent, and for a run whose amendments have
-        // landed the anchor IS the base tip. Anything that weakens that filter puts the anchor
-        // back in the set and re-opens the parked-at-the-anchor hole below.
+        // The NEAR-sibling shape every earlier design left open — an empty commit built on top
+        // of a merged sibling's tip — is closed here too, not by design intent but as a
+        // consequence of the predicate: whether that near-sibling commit is left unmerged (not
+        // a key in `mergedFiles` at all) or later merged under its own name (a key, but its
+        // merge's own diff against its own first parent is empty, since it carries nothing new),
+        // `landedForFiles` reads false either way — an empty carried-file set can never
+        // intersect a non-empty declared set. Confirmed by executing the merged-under-its-own-
+        // name construction; not asserted from the design alone. Pinned as a defended test —
+        // no longer a LIMIT — in `tests/adversarial.test.mjs`.
         //
-        // Ancestry alone cannot decide it, and each exclusion bolted onto ancestry left the next
-        // hole. "On the run branch" is satisfied by a branch parked at the anchor — a teammate
-        // that committed on the harness's own branch and left the conventional ref where it
-        // started. Adding "past the anchor" is satisfied, from phase 2 onward, by a branch left
-        // exactly where `git checkout -B <task> <run branch>` put it. Adding "not the run tip"
-        // is still satisfied by a branch parked at an INTERMEDIATE post-anchor commit, which is
-        // what a branch becomes as soon as the integrator merges a sibling and the run tip moves
-        // past it. All three carry no work, and none can be reached by standing still: being
-        // named as a merge parent is a fact about the merge that carried the branch, and the
-        // range filter keeps the amendment merges from vouching for the first of them.
-        //
-        // What this does NOT distinguish, stated as what is true rather than as what would be
-        // convenient:
-        //   - A branch integrated by FAST-FORWARD leaves no merge commit and so no secondary
-        //     parent. Its diff is empty too (a fast-forward also makes merge-base(run, branch)
-        //     the branch's own tip), so it reaches this test and fails it — with a message that
-        //     names a cause that is not the one, since the work IS on the run branch. Nothing
-        //     here can separate that branch from one merely parked at the same commit: both are
-        //     post-anchor commits on the run branch that no merge names. `tm-integrator`'s
-        //     contract is `--no-ff` for exactly this reason, and no other check covers the gap
-        //     — `ownership` explains a fast-forwarded branch's commits by their ancestry from
-        //     the task branch, so it reports nothing. Failing closed is the intended direction;
-        //     the misleading wording is the price.
-        //   - A SQUASH merge likewise carries no secondary parent. The plugin's integrator
-        //     never squashes, so that is a statement about a repository someone else merged
-        //     into, not about a run this tool drove.
-        //   - Two branches with an empty diff whose tips are the identical MERGED sha are
-        //     rejected before this test runs, by the duplicate-ref rule just above — this is the
-        //     shape a parked ref actually produces once its sibling is merged, and it is the
-        //     ONLY shape the duplicate rule reaches: before the merge, a ref pointed at the
-        //     sibling's own (not-yet-merged) commit has a non-empty diff (the sibling's real
-        //     files) and is caught by the declared-set violation above instead, never reaching
-        //     this branch at all. Pinned as a FAIL, both pre- and post-merge, in
-        //     `tests/adversarial.test.mjs`.
-        //
-        //     `deriveContext` catches the post-merge shape earlier and more directly: a shared
-        //     sha inside `mergedBranchTips` is reported as a dedicated phaseError naming every
-        //     ref sharing it, so the phase this loop is even asked to check never gets computed
-        //     from ambiguous data. See the comment at that check, above `ownWorkBase`'s loop,
-        //     for why it is a phaseError and not a silent per-task exclusion, and for why
-        //     `mergedBranchTips` membership is the right question — two idle refs sharing a sha
-        //     that is simply not (yet, or any longer) the run tip are NOT in that set, and are
-        //     excluded from both rules for that reason, not because of where the tip happens to
-        //     sit right now.
-        //
-        //     What neither rule rejects is a NEAR-sibling: an empty commit on top of the
-        //     sibling's tip is a distinct sha that was never itself merged, so both rules' own
-        //     membership test misses it by name, and whether the empty-diff test below still
-        //     catches it depends on whether THAT commit is itself a merge parent in range —
-        //     pinned as a LIMIT (near-sibling) test in the same file. Narrow, open, and recorded
-        //     here rather than rediscovered.
-        //
-        // `scripts/doctor.mjs` computes this same test the same way, over the same set, with
-        // the same limits.
+        // What remains open: a teammate that does the integrator's job itself — creating
+        // branches that each carry real work and merging them itself — is indistinguishable
+        // here from legitimate integration, because at this level it IS the same shape; this is
+        // unchanged from every earlier design and was never claimed to be closed.
+        const landed = landedForFiles(mergedFiles, sha, task.files)
         if (!landed) {
           problems.push(`${task.id}: branch ${branch} contributes no file changes past its fork point ${forkPoint} — the work is not on the conventional ref, and merging this task would be a no-op`)
         }
