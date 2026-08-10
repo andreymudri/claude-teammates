@@ -34,6 +34,13 @@ const TASK_BRANCH = /^teammates\/([^/]+)\/([^/]+)$/
 //    So what is identified is: belongs to no run, holds no branch, and is safe to remove ONLY
 //    when no gate is running. That last clause is the caller's to satisfy, and the rendered
 //    output says so rather than claiming a plain "safe to remove" it cannot verify.
+//
+//    Liveness therefore arrives as DATA, in `livePreviews`. scripts/merge-preview.mjs writes a
+//    `.tm-preview-owner` marker into every preview it creates and removes it in its own
+//    `finally`; the caller reads those markers — this module is pure and cannot — and hands in
+//    the paths it found a living owner for. Those are excluded from `previews` and reported in
+//    `skipped`, never dropped. Supplying nothing keeps the old behaviour exactly: every
+//    identified preview is leaked. The set can only ever NARROW what is reaped.
 const PREVIEW_DIR = /[\\/]tm-preview-[^\\/]+$/
 
 function norm(p) {
@@ -48,13 +55,28 @@ function under(path, root) {
   return norm(path).startsWith(`${r}/`)
 }
 
-function isLeakedPreview(w, tempRoot) {
+function isPreviewWorktree(w, tempRoot) {
   return Boolean(w) && Boolean(w.detached) && !w.branch && PREVIEW_DIR.test(norm(w.path)) && under(w.path, tempRoot)
 }
 
-export function leakedPreviews(worktrees = [], { tempRoot = null } = {}) {
+// The caller's paths, normalised the same way every other path here is: separators and trailing
+// slashes only. Case is deliberately NOT folded — this module has no filesystem to ask whether
+// case matters, and the caller hands back the very paths it was given, so folding would buy
+// nothing and claim knowledge the module does not have.
+function liveSet(livePreviews) {
+  const out = new Set()
+  for (const p of livePreviews ?? []) out.add(norm(p))
+  return out
+}
+
+function isLeakedPreview(w, tempRoot, live) {
+  return isPreviewWorktree(w, tempRoot) && !live.has(norm(w.path))
+}
+
+export function leakedPreviews(worktrees = [], { tempRoot = null, livePreviews = null } = {}) {
+  const live = liveSet(livePreviews)
   return worktrees
-    .filter((w) => isLeakedPreview(w, tempRoot))
+    .filter((w) => isLeakedPreview(w, tempRoot, live))
     .map((w) => ({ path: w.path, head: w.head ?? null }))
 }
 
@@ -65,10 +87,12 @@ export function selectPrunableWorktrees({
   taskPhases = null,
   passedPhases = [],
   tempRoot = null,
+  livePreviews = null,
 } = {}) {
   const prunable = []
   const skipped = []
   const passed = new Set(passedPhases ?? [])
+  const live = liveSet(livePreviews)
 
   for (const wt of worktrees) {
     const isMain = mainWorktree != null && norm(wt.path) === norm(mainWorktree)
@@ -81,7 +105,15 @@ export function selectPrunableWorktrees({
     // Reported in `previews` instead, so it is not also reported as a refusal. Anything NOT
     // identified as a preview keeps falling through to the refusals below — a worktree this
     // command mentions in neither list is one the operator was never told about.
-    if (isLeakedPreview(wt, tempRoot)) continue
+    if (isPreviewWorktree(wt, tempRoot)) {
+      // A preview the caller found a living owner for is in neither list by accident: it is a
+      // refusal, with the reason spelled out, because it is the one the operator is likeliest
+      // to come back and ask about.
+      if (live.has(norm(wt.path))) {
+        skipped.push({ path: wt.path, reason: 'a gate owns this preview right now' })
+      }
+      continue
+    }
     if (!wt.branch) {
       skipped.push({ path: wt.path, reason: 'no branch checked out (detached); this run does not own it' })
       continue
@@ -114,7 +146,7 @@ export function selectPrunableWorktrees({
     prunable.push({ path: wt.path, branch: wt.branch, taskId })
   }
 
-  return { runId, prunable, skipped, previews: leakedPreviews(worktrees, { tempRoot }) }
+  return { runId, prunable, skipped, previews: leakedPreviews(worktrees, { tempRoot, livePreviews }) }
 }
 
 export function renderPrunePlan(plan) {

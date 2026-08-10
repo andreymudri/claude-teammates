@@ -1,7 +1,22 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { validateLinkPaths, linkInto } from './preview-links.mjs'
+
+// The liveness marker a preview's owner HOLDS for as long as it owns the preview.
+//
+// The leaked-preview reaper in scripts/cli.mjs classifies a preview by name and location alone,
+// which cannot tell a preview a gate is using right now from one a killed gate abandoned. That
+// is destructive rather than merely untidy: `git worktree remove --force` FOLLOWS a junction and
+// deletes the CONTENTS of the link target, and `preview.link` provisions exactly such junctions
+// into the repository's real node_modules.
+//
+// Anything the reaper SAMPLES — an mtime, a registration age — is check-then-act and only
+// narrows the window. This file is different in kind because it is written before the first link
+// exists and removed only by the owner's own `finally`: there is no instant during the owner's
+// life at which the reaper can observe the preview unmarked. A killed gate skips that `finally`,
+// so its marker survives; the reaper reads the pid out of it and finds nobody home.
+export const PREVIEW_OWNER_MARKER = '.tm-preview-owner'
 
 // The worktree lives under the system temp directory, never inside the repository. An
 // in-repo worktree is untracked, so `git status --porcelain` reports it and the ownership
@@ -21,8 +36,13 @@ export async function withMergePreview({ git, base, branches = [], link = [], re
   if (branches.length === 0) return run({ path: null, merged: [] })
   const dir = await mkdtemp(path.join(tmpdir(), 'tm-preview-'))
   let teardownLinks = null
+  let marker = null
   try {
     await git.addWorktreeDetached(dir, base)
+    // After the worktree exists — `git worktree add` requires an empty directory — and before
+    // any link is provisioned, so no junction of ours can exist while the preview is unmarked.
+    marker = path.join(dir, PREVIEW_OWNER_MARKER)
+    await writeFile(marker, `${process.pid}\n`, 'utf8')
     const conflict = await git.mergeInto(dir, branches)
     if (conflict) {
       // An empty array is not a clean merge and not a reportable conflict: an octopus merge
@@ -41,6 +61,10 @@ export async function withMergePreview({ git, base, branches = [], link = [], re
     teardownLinks = await linkInto(dir, repoRoot, link)
     return await run({ path: dir, merged: branches })
   } finally {
+    // Marker gone, then links gone, then worktree gone. The marker is released FIRST so that
+    // the reaper never sees a preview claiming an owner that has already begun tearing down —
+    // and a killed gate reaches none of these three, which is the case that must stay marked.
+    if (marker) await rm(marker, { force: true }).catch(() => {})
     // Before removeWorktree: `git worktree remove` run against a tree still containing a
     // junction into the repository's real node_modules is not a behaviour to discover in
     // production.

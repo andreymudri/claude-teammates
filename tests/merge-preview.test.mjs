@@ -329,3 +329,82 @@ test('conflictPairs returns one pair naming every branch and path otherwise', ()
   const paths = ['scripts/cli.mjs', 'scripts/gate-runner.mjs']
   assert.deepEqual(conflictPairs(branches, paths), [{ branches, paths }])
 })
+
+// ---------------------------------------------------------------------------
+// The liveness marker. The reaper in scripts/cli.mjs classifies a preview by name and
+// location alone, so a preview a gate is holding RIGHT NOW is indistinguishable from a leaked
+// one — and `git worktree remove --force` follows the junctions `preview.link` provisioned and
+// deletes the CONTENTS of their targets. The marker is the one thing the owner HOLDS across the
+// whole window, rather than a sample the reaper takes at one instant.
+// ---------------------------------------------------------------------------
+
+const MARKER = '.tm-preview-owner'
+
+test('the preview carries a marker naming the owning pid while the callback runs', async () => {
+  const git = fakeGit()
+  let contents = null
+  await withMergePreview({
+    git, base: 'main', branches: ['T1'],
+    run: async ({ path: dir }) => { contents = await readFile(path.join(dir, MARKER), 'utf8') },
+  })
+  assert.equal(contents.trim(), String(process.pid))
+})
+
+// Observed from inside removeWorktree, while the directory still exists: the `finally` deletes
+// the whole tree, so an absence check taken after withMergePreview returns would pass even with
+// the marker removal deleted.
+test('the marker is gone before the worktree is removed after a clean run', async () => {
+  const seen = []
+  const git = {
+    async addWorktreeDetached(dir) { return dir },
+    async mergeInto() { return null },
+    async removeWorktree(dir) { seen.push(existsSync(path.join(dir, MARKER))); return true },
+  }
+  await withMergePreview({ git, base: 'main', branches: ['T1'], run: async () => {} })
+  assert.deepEqual(seen, [false], 'a clean run must not leave its own marker behind')
+})
+
+// A gate whose CALLBACK threw still ran its `finally`, so it leaves nothing behind. Only a
+// killed gate — which skips the `finally` entirely — leaves the marker, which is the case the
+// reaper must read as live.
+test('a callback that throws still removes the marker', async () => {
+  const seen = []
+  const git = {
+    async addWorktreeDetached(dir) { return dir },
+    async mergeInto() { return null },
+    async removeWorktree(dir) { seen.push(existsSync(path.join(dir, MARKER))); return true },
+  }
+  await assert.rejects(
+    withMergePreview({ git, base: 'main', branches: ['T1'], run: async () => { throw new Error('boom') } }),
+    /boom/,
+  )
+  assert.deepEqual(seen, [false])
+})
+
+// The conflict path hands the callback `path: null` and provisions no links, but the worktree
+// it created is registered and just as reapable, so it is marked too.
+test('a conflicting merge still marks the preview it created', async () => {
+  const seen = []
+  const git = {
+    async addWorktreeDetached(dir) { seen.push(existsSync(path.join(dir, MARKER))); return dir },
+    async mergeInto(dir) { seen.push(existsSync(path.join(dir, MARKER))); return ['a.mjs'] },
+    async removeWorktree(dir) { seen.push(existsSync(path.join(dir, MARKER))); return true },
+  }
+  await withMergePreview({ git, base: 'main', branches: ['T1'], run: async () => {} })
+  // Not yet written when the worktree is created — `git worktree add` needs the directory
+  // empty — present for the merge, gone by the removal.
+  assert.deepEqual(seen, [false, true, false])
+})
+
+// The marker must be written where the reaper looks: the preview ROOT, which is the path
+// `git worktree list` reports and the path the reaper hands to `livePreviewPaths`.
+test('the marker sits in the preview root, the same path the worktree is registered under', async () => {
+  const git = fakeGit()
+  let markerDir = null
+  await withMergePreview({
+    git, base: 'main', branches: ['T1'],
+    run: async ({ path: dir }) => { markerDir = existsSync(path.join(dir, MARKER)) ? dir : null },
+  })
+  const addCall = git.calls.find((c) => c.op === 'addWorktreeDetached')
+  assert.equal(markerDir, addCall.dir)
+})
