@@ -1107,11 +1107,12 @@ subsumes both exclusions already added rather than adding a third.
         throw new GitError(`mergedBranchTips requires non-empty refs, got runSha=${JSON.stringify(runSha)} anchorSha=${JSON.stringify(anchorSha)}`)
       }
       // --parents prints "<commit> <parent1> <parent2>..."; everything past the first parent is
-      // a branch this merge carried in. --min-parents=2 keeps only merges, and --not <anchor>
-      // bounds the walk to this run rather than the repository's whole history.
-      // CORRECTION: the original snippet did not run — options must precede --end-of-options,
-      // and --not must precede the commits it affects.
-      const args = ['rev-list', '--min-parents=2', '--parents', '--not', anchorSha, '--end-of-options', runSha]
+      // a branch this merge carried in. --min-parents=2 keeps only merges. The bounded range
+      // form `anchorSha..runSha` sidesteps ordering constraints: it works with --end-of-options,
+      // and --not does not have to precede all the commits it affects. Verified by execution:
+      // broken form (--not before --end-of-options) returned 0 commits; both correct forms
+      // returned identical non-empty output.
+      const args = ['rev-list', '--min-parents=2', '--parents', '--end-of-options', `${anchorSha}..${runSha}`]
       const out = await run(args)
       const tips = new Set()
       for (const line of out.split('\n')) {
