@@ -58,11 +58,24 @@ where the corresponding claim is made:
 
 - **A teammate that runs arbitrary code.** It has Bash with the user's permissions. It can
   write any file, including its own `package.json`, `.git/hooks/`, and `.git/config`.
-- **Self-integration.** A teammate can create its own task branches, do real work on each, and
-  merge them into the run branch itself, bypassing `tm-integrator`. Every branch then carries
-  its own work off its own fork point, which is exactly the shape legitimate integration has;
-  the only difference is who ran the merge, and git does not record that in a form this gate can
-  trust. Confirmed, and out of scope for the same reason as arbitrary code execution.
+- **Self-integration, in two shapes.** Both confirmed, both out of scope for the same reason as
+  arbitrary code execution.
+
+  1. A teammate creates its own task branches, does real work on each, and merges them into the
+     run branch itself, bypassing `tm-integrator`. Every branch then carries its own work off its
+     own fork point, which is exactly the shape legitimate integration has; the only difference
+     is who ran the merge, and git does not record that in a form this gate can trust.
+  2. A teammate points a task ref at a merged SIBLING's tip. T3 commits `c.mjs` and is merged
+     `--no-ff`; T2's ref is then pointed at T3's tip and never moves. T2's sha is a genuine
+     secondary parent of that merge and genuinely inside `anchor..run`, so `deriveContext` hands
+     back T3's fork point and credits T2 with `c.mjs`, while `b.mjs` — T2's only declared file —
+     never reaches the run branch at all. `runFilesetCheck` has the symmetric hole via
+     `mergedBranchTips`, which asks the same membership question. The fork-point base cannot
+     separate these: the ref sits at a commit that really was merged, just not as this task.
+
+     A signal exists and is not checked anywhere today: in this shape **two task refs resolve to
+     the identical sha**, and the gate already reports every task branch's sha in `branchShas`.
+     Recorded here so a future check does not have to rediscover it; nothing implements it yet.
 
   One variant that used to sit in this bullet is now CAUGHT, and is pinned in
   `tests/adversarial.test.mjs` under the defended section: a teammate pointing a task ref at a
@@ -70,7 +83,9 @@ where the corresponding claim is made:
   `deriveContext` measures every task branch against its own fork point off the run branch
   rather than against the run anchor, so such a ref shows no work of its own, its phase does not
   read as integrated, and the fileset check runs against it instead of being skipped by the
-  "every phase in the plan is integrated" fast path. A branch integrated by fast-forward is
+  "every phase in the plan is integrated" fast path. The same base also catches a ref parked at
+  the anchor after a plan amendment merged the base branch in, because the merge index behind it
+  counts only parents inside `anchor..run`. A branch integrated by fast-forward is
   indistinguishable from one parked at the same commit and is failed too — `tm-integrator`'s
   contract is `--no-ff`, so that state is out-of-contract rather than undetected.
 - **A teammate that forges run state.** `.teammates/` is writable. Nothing reads it for a

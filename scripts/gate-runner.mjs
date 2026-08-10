@@ -177,14 +177,30 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
       // What the fork-point base adds is that "did work" now means the branch's OWN work,
       // rather than anything that was already on the run branch when the branch was created.
       //
-      // It also closes one variant of self-integration that the anchor base left open: a
-      // phantom branch pointed at a run tip that already carries someone ELSE'S real commits
-      // used to show those commits as its own work, and now measures against its own tip and
-      // shows nothing. What remains open is the variant where a teammate does the integrator's
-      // job — creating task branches that each carry real work and merging them itself — which
-      // is indistinguishable here from legitimate integration, because at this level it IS the
-      // same shape. The spec's "Not defended against" list records the split, and
-      // `tests/adversarial.test.mjs` pins both halves.
+      // It also closes two variants the anchor base left open: a ref pointed at a run TIP that
+      // already carries someone ELSE'S real commits, and a ref parked at the ANCHOR after a plan
+      // amendment merged the base in. Both used to show commits they had no part in as their own
+      // work; both now measure against a base that yields nothing.
+      //
+      // Two variants remain open. This list is meant to be exhaustive for what this mechanism
+      // cannot see, and an earlier version of this comment named only the first, which is how
+      // the second went unrecorded:
+      //   - A teammate that does the integrator's job — creating task branches that each carry
+      //     real work and merging them itself. Indistinguishable here from legitimate
+      //     integration, because at this level it IS the same shape.
+      //   - A ref parked at a merged SIBLING'S tip. Reproduced: T3 commits `c.mjs` and is merged
+      //     `--no-ff`; T2's ref is then pointed at T3's tip. T2's sha is a genuine secondary
+      //     parent of that merge and genuinely in range, so it is keyed in the index above, and
+      //     `ownWorkBase` hands back T3's fork point — crediting T2 with `c.mjs` while T2's own
+      //     declared file never reaches the run branch. The range filter cannot help: the sha
+      //     really was merged, just not as this task. `runFilesetCheck` has the symmetric hole
+      //     through `mergedBranchTips`, which asks the same membership question.
+      //     A signal exists but is not checked anywhere yet: in this shape two task refs resolve
+      //     to the IDENTICAL sha, which the gate already reports in `branchShas`. Recorded in the
+      //     spec so it is not rediscovered; building the check is not this function's job.
+      //
+      // The spec's "Not defended against" list records the same split, and
+      // `tests/adversarial.test.mjs` pins the defended and undefended halves separately.
       //
       // A branch integrated by FAST-FORWARD leaves no merge commit to name it, so it measures
       // against its own tip and reads as no work even though the work is on the run branch.
