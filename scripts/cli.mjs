@@ -25,7 +25,7 @@ import { validateLinkPaths } from './preview-links.mjs'
 import { planDrift, renderDrift } from './plan-drift.mjs'
 import { summarizeRun, renderRunSummary, suppliedForPhase, validateSuppliedPhases } from './finish.mjs'
 import { selectPrunableWorktrees, renderPrunePlan, leakedPreviews } from './prune.mjs'
-import { PREVIEW_OWNER_MARKER } from './merge-preview.mjs'
+import { previewOwnerMarkerPath } from './merge-preview.mjs'
 import { rebuildRunState } from './rebuild.mjs'
 import { generatePhaseWorkflow } from './workflow-gen.mjs'
 import { createGit, GitError, defaultGitExec } from './git.mjs'
@@ -684,37 +684,55 @@ async function unlinkPreviewLinks(dir, depth = 0) {
 
 // Which of these previews an owner is still HOLDING.
 //
-// scripts/merge-preview.mjs writes `.tm-preview-owner` into a preview as soon as its worktree
-// exists and before any link is provisioned, and removes it in its own `finally` before tearing
-// the links down. So a preview that has ever held one of our junctions and whose owner is alive
-// has the marker on disk for the whole of that window. This is not the mtime heuristic the
-// reaper cannot safely use: the marker is held by the owner rather than sampled by the reaper,
-// so there is no instant at which a living owner reads as absent.
+// scripts/merge-preview.mjs writes a marker BESIDE the preview directory before it calls
+// `git worktree add`, and removes it in its own `finally` before tearing the links down. Git
+// registers a worktree at the START of the add, so the span over which the marker is held
+// strictly contains the span over which the preview is observable here — which is what makes
+// this different in kind from an mtime or a registration age. Those are sampled by the reaper
+// and only narrow the window; this is held by the owner, so there is no instant at which a
+// living owner reads as absent.
 //
-// TWO FAIL-SAFE BRANCHES, both deliberate. A marker that will not parse, and a `process.kill`
-// that fails with anything other than ESRCH (EPERM: the pid exists but belongs to another user),
-// both count as LIVE. When the answer is unknown the preview is not reaped — an unreaped preview
-// costs the operator a directory, and a followed junction costs them their build inputs.
+// THREE FAIL-SAFE BRANCHES, all deliberate, all saying the same thing: an owner that cannot be
+// RULED OUT is an owner.
 //
-// A missing marker is NOT live. A preview from before this marker existed, and one whose owner
-// was killed after its `finally` began, both read as leaked, which is what they are.
-async function livePreviewPaths(previewPaths) {
+//   1. A marker that cannot be READ for any reason other than ENOENT — EACCES, EBUSY, EIO. The
+//      file is there and could not be opened, so its pid is unknown.
+//   2. A marker that will not PARSE as a positive integer.
+//   3. A probe that fails with anything other than ESRCH — EPERM means the pid exists and
+//      belongs to another OS user, which is a gate this process may not signal, not one that
+//      is gone.
+//
+// An unreaped preview costs the operator a directory; a followed junction costs them their
+// repository's build inputs. Only ENOENT and ESRCH — the two answers that positively mean "no
+// owner" — let a preview through.
+//
+// `read` and `probe` are injectable because two of those three branches cannot be staged end to
+// end: EPERM needs a process owned by another user, and EACCES needs a file this user cannot
+// read. Exported for the same reason `isMissingPreviewRoot` is — each branch is on the
+// destructive path and has to be pinned on its own.
+export async function livePreviewPaths(previewPaths, {
+  read = (p) => readFile(p, 'utf8'),
+  // Signal 0 sends nothing: it only asks whether the pid can be signalled at all.
+  probe = (pid) => process.kill(pid, 0),
+} = {}) {
   const live = new Set()
   for (const dir of previewPaths) {
     let raw
     try {
-      raw = await readFile(path.join(dir, PREVIEW_OWNER_MARKER), 'utf8')
-    } catch {
+      raw = await read(previewOwnerMarkerPath(dir))
+    } catch (err) {
+      // ENOENT is the only "no marker": a preview from before markers existed, or one whose
+      // owner has already released it. Every other failure leaves the owner unknown.
+      if (err?.code !== 'ENOENT') live.add(dir)
       continue
     }
-    const pid = Number.parseInt(raw.trim(), 10)
+    const pid = Number.parseInt(String(raw).trim(), 10)
     if (!Number.isInteger(pid) || pid <= 0) { live.add(dir); continue }
     try {
-      // Signal 0 sends nothing: it only asks whether the pid can be signalled at all.
-      process.kill(pid, 0)
+      probe(pid)
       live.add(dir)
     } catch (err) {
-      if (err.code !== 'ESRCH') live.add(dir)
+      if (err?.code !== 'ESRCH') live.add(dir)
     }
   }
   return live
@@ -1644,20 +1662,25 @@ export async function runCli(argv, io = { out: console.log }) {
     // and they are gone before anything is removed. For a LIVE preview the sweep alone could
     // never close it, because a junction the owner creates in the window BETWEEN this sweep and
     // the removal below would still be followed. What closes that window is that a live preview
-    // does not reach this loop at all: `livePreviewPaths` above found the marker its owner HOLDS
-    // from before its first link exists until its own teardown begins, so it is excluded from
-    // `plan.previews` and reported as owned instead.
+    // does not reach this loop at all: `livePreviewPaths` above found the marker its owner holds
+    // from before `git worktree add` is called until its own teardown begins, and the preview is
+    // excluded from `plan.previews` and reported as owned instead.
     //
-    // THE RESIDUAL, stated as what is true rather than as what would be convenient. A pid can be
-    // recycled: a marker naming a pid an unrelated process has since taken makes a DEAD preview
-    // read as live. That direction only leaves a directory on disk and never destroys data. The
-    // opposite direction — a live preview read as dead — is the destructive one, and it is
-    // closed by construction rather than narrowed, because the marker is held across the whole
-    // window instead of sampled at one instant.
+    // THE RESIDUALS, stated as what is true rather than as what would be convenient.
     //
-    // A preview from before the marker existed carries none, and is reaped as leaked. That is
-    // the pre-existing hazard, unchanged and no worse: such a preview belongs to a process that
-    // is long gone.
+    //   - A pid can be RECYCLED. A marker naming a pid an unrelated process has since taken
+    //     makes a dead preview read as live. That direction only leaves a directory on disk; it
+    //     never destroys data, and `prune-run` can be run again once the pid is free.
+    //   - A preview created by a gate from BEFORE this marker existed carries none, and is
+    //     reaped as leaked. That is the pre-existing hazard, unchanged and no worse.
+    //   - The worktree list and the markers are read once, above, and acted on here. A preview
+    //     that appears in between is not in the list at all, so it cannot be reaped; a preview
+    //     already in the list cannot acquire an owner, because its owner would have had to write
+    //     the marker before the add that put it there.
+    //
+    // The destructive direction — a live preview read as dead — is closed by construction rather
+    // than narrowed, because the marker is HELD across a span that contains the whole span over
+    // which the preview is observable, instead of being sampled at one instant.
     //
     // WHAT THE PATTERN MATCHES, since the reaper is force-removing directories nobody named:
     // every detached, branchless worktree registered in this repository whose path lies under

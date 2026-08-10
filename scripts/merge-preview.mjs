@@ -12,11 +12,27 @@ import { validateLinkPaths, linkInto } from './preview-links.mjs'
 // into the repository's real node_modules.
 //
 // Anything the reaper SAMPLES — an mtime, a registration age — is check-then-act and only
-// narrows the window. This file is different in kind because it is written before the first link
-// exists and removed only by the owner's own `finally`: there is no instant during the owner's
-// life at which the reaper can observe the preview unmarked. A killed gate skips that `finally`,
-// so its marker survives; the reaper reads the pid out of it and finds nobody home.
+// narrows the window. This marker is different in kind because the owner holds it for a span
+// that STRICTLY CONTAINS the span over which the preview is observable: written before
+// `git worktree add` is called at all, removed only by the owner's own `finally`. A killed gate
+// skips that `finally`, so its marker survives; the reaper reads the pid out of it and finds
+// nobody home.
+//
+// WHY A SIBLING RATHER THAN A FILE INSIDE THE PREVIEW. `git worktree add` requires its directory
+// to be empty or absent, so a marker inside the preview could only be written once the add
+// RETURNS — and git registers the worktree in `git worktree list` at the START of the add. On a
+// 3000-file fixture the registration was visible at t=83ms and the add returned at t=3868ms:
+// for those seconds the preview is listed, unmarked, and reaped as leaked, with its junctions
+// followed. A sibling path is not the add's to own, so it can be written first, which is what
+// turns "the window is narrow" into "there is no window".
 export const PREVIEW_OWNER_MARKER = '.tm-preview-owner'
+
+// Keyed to the preview's own directory name, so concurrent gates hold distinct markers and no
+// marker can answer for a preview other than its own. The reaper derives the same path from the
+// preview path `git worktree list` reports, which is the only thing the two sides share.
+export function previewOwnerMarkerPath(dir) {
+  return path.join(path.dirname(dir), `${PREVIEW_OWNER_MARKER}-${path.basename(dir)}`)
+}
 
 // The worktree lives under the system temp directory, never inside the repository. An
 // in-repo worktree is untracked, so `git status --porcelain` reports it and the ownership
@@ -35,14 +51,14 @@ export async function withMergePreview({ git, base, branches = [], link = [], re
   }
   if (branches.length === 0) return run({ path: null, merged: [] })
   const dir = await mkdtemp(path.join(tmpdir(), 'tm-preview-'))
+  // Claimed BEFORE the worktree is added, because git registers the worktree at the start of the
+  // add and not at its end (see previewOwnerMarkerPath). Inside the `try`, so a write that fails
+  // still reaches the `finally` that cleans the directory up.
+  const marker = previewOwnerMarkerPath(dir)
   let teardownLinks = null
-  let marker = null
   try {
-    await git.addWorktreeDetached(dir, base)
-    // After the worktree exists — `git worktree add` requires an empty directory — and before
-    // any link is provisioned, so no junction of ours can exist while the preview is unmarked.
-    marker = path.join(dir, PREVIEW_OWNER_MARKER)
     await writeFile(marker, `${process.pid}\n`, 'utf8')
+    await git.addWorktreeDetached(dir, base)
     const conflict = await git.mergeInto(dir, branches)
     if (conflict) {
       // An empty array is not a clean merge and not a reportable conflict: an octopus merge
@@ -64,7 +80,7 @@ export async function withMergePreview({ git, base, branches = [], link = [], re
     // Marker gone, then links gone, then worktree gone. The marker is released FIRST so that
     // the reaper never sees a preview claiming an owner that has already begun tearing down —
     // and a killed gate reaches none of these three, which is the case that must stay marked.
-    if (marker) await rm(marker, { force: true }).catch(() => {})
+    await rm(marker, { force: true }).catch(() => {})
     // Before removeWorktree: `git worktree remove` run against a tree still containing a
     // junction into the repository's real node_modules is not a behaviour to discover in
     // production.

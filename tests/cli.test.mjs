@@ -3,17 +3,19 @@ import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import {
   runCli,
   mergeSuppliedResults,
   parseConstraints,
   promptSafeDirectories,
   isMissingPreviewRoot,
+  livePreviewPaths,
   REQUIRED,
   KNOWN_FLAGS,
   UNIVERSAL_FLAGS,
 } from '../scripts/cli.mjs'
+import { previewOwnerMarkerPath } from '../scripts/merge-preview.mjs'
 
 const PLAN = `### Task 1: A
 
@@ -5683,6 +5685,10 @@ async function withLeakedPreview(g, name, fn) {
     await fn(preview)
   } finally {
     await rm(preview, { recursive: true, force: true })
+    // The owner marker is a SIBLING of the preview, so removing the preview tree does not take
+    // it with it. A test that leaves one behind litters the temp root with a file claiming an
+    // owner for a directory that no longer exists.
+    await rm(previewOwnerMarkerPath(preview), { force: true })
   }
 }
 
@@ -6012,23 +6018,97 @@ test('a results file naming only real phases draws no unmatched-phase note', asy
 // case and is still reaped.
 // ---------------------------------------------------------------------------
 
-const OWNER_MARKER = '.tm-preview-owner'
-
-// A pid that is really gone, rather than a large number guessed to be free. `spawnSync` returns
-// only once the child has exited, so its pid names a process that has certainly terminated.
+// A pid nothing answers for, established with the SAME probe the reaper uses rather than by
+// spawning a child and reusing its pid. Windows recycles pids from a small pool, and several
+// processes start between recording an exited child's pid and the CLI reading the marker, so
+// that pid can come back to life and redden a correct tree.
+//
+// The search runs DOWNWARD from a high value, away from the low, roughly-sequential region the
+// OS is currently handing out, which is what makes a hit here likely to stay dead. Residual,
+// stated rather than papered over: nothing can reserve a pid that is not running, so a recycle
+// between this call and the assertion remains possible — it is made unlikely, not impossible.
 function deadPid() {
-  const done = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' })
-  assert.equal(done.status, 0, 'the throwaway child must have exited cleanly for its pid to be dead')
-  assert.ok(Number.isInteger(done.pid) && done.pid > 0)
-  return done.pid
+  for (let candidate = 0x3ffff; candidate > 0x10000; candidate -= 1) {
+    try {
+      process.kill(candidate, 0)
+    } catch (err) {
+      if (err.code === 'ESRCH') return candidate
+    }
+  }
+  assert.fail('found no pid in the search range that is not running')
 }
+
+// ---------------------------------------------------------------------------
+// The three fail-safe branches of `livePreviewPaths`, each pinned on its own.
+//
+// Unit tests with injected dependencies, deliberately. Two of the three cannot be staged end to
+// end at all: EPERM needs a process owned by ANOTHER OS user, and EACCES/EBUSY on the marker
+// needs a file this test user cannot read. Before these existed, replacing the EPERM branch with
+// `void err` left the whole merged suite green — a fail-safe nothing was holding.
+//
+// All three say the same thing: an owner that cannot be RULED OUT is an owner. An unreaped
+// preview costs the operator a directory; a followed junction costs them their build inputs.
+// ---------------------------------------------------------------------------
+
+const failing = (code) => () => { throw Object.assign(new Error(code), { code }) }
+
+test('a probe failure that is not ESRCH leaves the preview live', async () => {
+  const dir = path.join(tmpdir(), 'tm-preview-eperm')
+  const read = async () => '4242\n'
+  // EPERM: the pid exists and belongs to another user, which is a gate this process may not
+  // signal — not a gate that is gone.
+  assert.deepEqual([...await livePreviewPaths([dir], { read, probe: failing('EPERM') })], [dir])
+  assert.deepEqual([...await livePreviewPaths([dir], { read, probe: failing('EINVAL') })], [dir])
+  // A probe error carrying no code at all is just as unresolved.
+  assert.deepEqual([...await livePreviewPaths([dir], { read, probe: () => { throw new Error('x') } })], [dir])
+  // ESRCH is the one answer that really means gone, and it is the ONLY one.
+  assert.deepEqual([...await livePreviewPaths([dir], { read, probe: failing('ESRCH') })], [])
+  // A probe that returns is a living owner.
+  assert.deepEqual([...await livePreviewPaths([dir], { read, probe: () => true })], [dir])
+})
+
+test('a marker that cannot be read leaves the preview live, and only a missing one does not', async () => {
+  const dir = path.join(tmpdir(), 'tm-preview-eacces')
+  const probe = () => true
+  for (const code of ['EACCES', 'EPERM', 'EBUSY', 'EIO', 'EISDIR']) {
+    assert.deepEqual(
+      [...await livePreviewPaths([dir], { read: failing(code), probe })],
+      [dir],
+      `${code} left the owner unknown and must not be read as no owner`,
+    )
+  }
+  // ENOENT is the one that really means "no marker": a preview from before markers existed, or
+  // one whose owner already released it. That is the pre-existing leaked case.
+  assert.deepEqual([...await livePreviewPaths([dir], { read: failing('ENOENT'), probe })], [])
+})
+
+test('a marker that will not parse leaves the preview live', async () => {
+  const dir = path.join(tmpdir(), 'tm-preview-garbage')
+  // The probe would say ESRCH for anything it was handed, so a preview that survives here
+  // survived on the parse branch alone.
+  const probe = failing('ESRCH')
+  for (const raw of ['not-a-pid\n', '', '   ', '0\n', '-4\n', 'NaN']) {
+    assert.deepEqual([...await livePreviewPaths([dir], { read: async () => raw, probe })], [dir], `parsed ${JSON.stringify(raw)}`)
+  }
+  // A parseable, living pid still reaches the probe rather than short-circuiting.
+  assert.deepEqual([...await livePreviewPaths([dir], { read: async () => '77\n', probe: () => true })], [dir])
+})
+
+// The reaper and the owner have to agree on WHERE the marker is, and they share only the preview
+// path. This pins that `livePreviewPaths` asks for the sibling scripts/merge-preview.mjs writes.
+test('livePreviewPaths reads the same sibling path the owner writes', async () => {
+  const dir = path.join(tmpdir(), 'tm-preview-agree')
+  const asked = []
+  await livePreviewPaths([dir], { read: async (p) => { asked.push(p); return '1\n' }, probe: () => true })
+  assert.deepEqual(asked, [previewOwnerMarkerPath(dir)])
+})
 
 test('prune-run leaves a preview whose marker names a running process', async () => {
   await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     await writePruneManifest(root, g)
     await withLeakedPreview(g, 'owned', async (preview) => {
-      await writeFile(path.join(preview, OWNER_MARKER), `${process.pid}\n`, 'utf8')
+      await writeFile(previewOwnerMarkerPath(preview), `${process.pid}\n`, 'utf8')
       lines.length = 0
       const code = await runCli(
         ['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'],
@@ -6045,8 +6125,16 @@ test('prune-run leaves a preview whose marker names a running process', async ()
 })
 
 // The destructive direction, staged the way it actually happens: the live preview holds a
-// junction into a THROWAWAY fixture standing in for the repository's real node_modules, and the
-// canary inside that fixture is what a followed junction would destroy.
+// junction into a THROWAWAY fixture standing in for the repository's real node_modules.
+//
+// WHAT EACH ASSERTION IS WORTH, since the canary is the eye-catching one and the weakest. The
+// canary does fail when a junction is really followed, but it is NOT coupled to liveness: with
+// liveness alone disabled, the link sweep unlinks the junction before the removal and the canary
+// survives anyway — the sweep is the outer layer, and it is already pinned elsewhere. What this
+// test holds is the two assertions below it: the worktree is still registered, and its junction
+// is still THERE, unswept, because a live preview is not reached at all. Those are what fail
+// when liveness goes. The canary stands as defence in depth, and as the thing that would fire
+// if both layers went at once.
 test('prune-run does not reach through a live preview’s junction into its target', async () => {
   await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
@@ -6055,7 +6143,7 @@ test('prune-run does not reach through a live preview’s junction into its targ
     await writeFile(path.join(target, 'canary.txt'), 'alive', 'utf8')
     try {
       await withLeakedPreview(g, 'ownedlink', async (preview) => {
-        await writeFile(path.join(preview, OWNER_MARKER), `${process.pid}\n`, 'utf8')
+        await writeFile(previewOwnerMarkerPath(preview), `${process.pid}\n`, 'utf8')
         await symlink(target, path.join(preview, 'node_modules'), 'junction')
         lines.length = 0
         await runCli(
@@ -6078,7 +6166,7 @@ test('prune-run reaps a preview whose marker names a pid that is gone', async ()
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     await writePruneManifest(root, g)
     await withLeakedPreview(g, 'stale', async (preview) => {
-      await writeFile(path.join(preview, OWNER_MARKER), `${deadPid()}\n`, 'utf8')
+      await writeFile(previewOwnerMarkerPath(preview), `${deadPid()}\n`, 'utf8')
       lines.length = 0
       const code = await runCli(
         ['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'],
@@ -6119,7 +6207,7 @@ test('prune-run treats an unreadable marker as live rather than as absent', asyn
     await writePruneManifest(root, g)
     for (const [name, contents] of [['garbage', 'not-a-pid\n'], ['empty', ''], ['zero', '0\n'], ['negative', '-4\n']]) {
       await withLeakedPreview(g, `marker-${name}`, async (preview) => {
-        await writeFile(path.join(preview, OWNER_MARKER), contents, 'utf8')
+        await writeFile(previewOwnerMarkerPath(preview), contents, 'utf8')
         lines.length = 0
         const code = await runCli(
           ['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'],
@@ -6145,7 +6233,7 @@ test('prune-run’s dry run reports a live preview as owned, not as leaked', asy
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     await writePruneManifest(root, g)
     await withLeakedPreview(g, 'drylive', async (preview) => {
-      await writeFile(path.join(preview, OWNER_MARKER), `${process.pid}\n`, 'utf8')
+      await writeFile(previewOwnerMarkerPath(preview), `${process.pid}\n`, 'utf8')
       lines.length = 0
       await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
       const out = lines.join('\n')
