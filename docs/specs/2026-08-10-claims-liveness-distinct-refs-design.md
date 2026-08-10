@@ -255,13 +255,16 @@ changes there, and two tasks in one phase cannot declare the same file.
 | Phase | Task | Files |
 |---|---|---|
 | 1 | T1 — distinct task refs | `scripts/gate-runner.mjs`, `tests/gate-runner.test.mjs`, `tests/adversarial.test.mjs` |
-| 1 | T3 — claims lens | `scripts/review-gen.mjs`, `scripts/cli.mjs`, `teammates.gate.json`, `tests/review-gen.test.mjs`, `tests/cli.test.mjs`, `skills/phase-gate/SKILL.md`, `tests/skill-contracts.test.mjs` |
-| 2 | T2 — liveness | `scripts/liveness.mjs`, `scripts/git.mjs`, `scripts/cli.mjs`, `tests/liveness.test.mjs`, `tests/cli.test.mjs`, `skills/fleet-supervision/SKILL.md`, `README.md` |
+| 1 | T2 — liveness | `scripts/liveness.mjs`, `scripts/git.mjs`, `scripts/cli.mjs`, `tests/liveness.test.mjs`, `tests/cli.test.mjs`, `skills/fleet-supervision/SKILL.md`, `README.md` |
+| 2 | T3 — claims lens | `scripts/review-gen.mjs`, `scripts/cli.mjs`, `teammates.gate.json`, `tests/review-gen.test.mjs`, `tests/cli.test.mjs`, `skills/phase-gate/SKILL.md`, `tests/skill-contracts.test.mjs` |
 
-T1 and T3 are independent of each other. T2 is phased second only for the `cli.mjs` collision, not
-because it depends on either. `scripts/cli.mjs` and `tests/cli.test.mjs` appear in two tasks by
-design; being in different phases, they are never written concurrently, and each task declares
-them so the `fileset` check sees what it is enforcing.
+No task depends on another. The split into two phases is forced entirely by `scripts/cli.mjs` and
+`tests/cli.test.mjs`, which T2 and T3 both write; `scripts/phases.mjs` separates them on that
+overlap alone, and either ordering is correct. The table records the assignment `init-run`
+actually produces, verified by running it, rather than the one this spec first guessed.
 
-`README.md` gains the `liveness` command in its command list and a line on the `claims` lens. It
-is declared by T2, the task in the later phase, so exactly one task owns it.
+Both shared files appear in two tasks by design. Being in different phases they are never written
+concurrently, and each task declares them so the `fileset` check enforces what it can see.
+
+`README.md` gains the `liveness` command in its command list and a line on the `claims` lens. It is
+declared by T2 alone, so exactly one task owns it.
