@@ -80,6 +80,23 @@ those you execute:
   judge. Then take every finding at a `blockOn` severity and
   dispatch a second reviewer prompted to **refute** it. Only findings that survive refutation
   block the gate.
+
+  A `claims` finding is a claim whose mutation left the suite green — the code does not deliver
+  what the comment, skill or spec says it does. At `high` that blocks the phase, and the fix is
+  either to make the code deliver the claim or to correct the claim. Weakening the test is not a
+  fix.
+
+  A `claims` reviewer also writes two keys that are not findings, and `collect-reviews` reads
+  neither: `collectReviewResults` reads `lens`, `stamp` and `findings` and ignores every other
+  key. It does not *keep* all three — `stamp` is consumed to reject a stale file and then dropped
+  from the emitted result, exactly like the two keys below. So the CLI cannot tell you about them,
+  and you must open the findings file yourself before treating a clean claims lens as a clean one.
+
+  - `unableToVerify` means the reviewer could not build the phase's tree or get a green baseline
+    in its scratch worktree, so it probed nothing. It is collected today as `status: "pass"` with
+    zero findings: a lens that verified nothing is recorded as a lens that found nothing.
+  - `unprobed` lists claims it enumerated and did not reach. The lens is bounded by its mutation
+    cap, and a review that reached 8 of 40 claims collects identically to an exhaustive clean one.
 - **mcp** — call the declared tool and compare against `passWhen`. If the server is not
   connected and the check is `optional`, record `skip` and say so out loud. A missing optional
   server is never a silent pass.

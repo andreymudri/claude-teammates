@@ -899,20 +899,6 @@ async function resolveBranchShas(git, tasks, runId) {
   return branchShas
 }
 
-// What the reviewer is told to carry back. The stamp is rendered into the prompt rather than left
-// implicit: a field the dispatch declares and the prompt never mentions is a field no reviewer
-// ever writes, and `collect-reviews` would then refuse every file for want of a stamp nobody
-// asked for.
-function stampInstruction(stamp) {
-  return [
-    'Include this exact object under a "stamp" key in the JSON you write and return:',
-    `    ${JSON.stringify(stamp)}`,
-    'It names the branch tips these findings judged. collect-reviews refuses a findings file whose'
-    + ' stamp names different tips: a fix round moves a branch, and findings about the old tree are'
-    + ' not findings about this one.',
-  ].join('\n')
-}
-
 async function derive(root, runId, flags) {
   const git = createGit({ cwd: root })
   const runBranch = await git.currentBranch()
@@ -2338,6 +2324,54 @@ export async function runCli(argv, io = { out: console.log }) {
       return 4
     }
 
+    // Which command check is the suite, chosen by a stated rule rather than by position. The
+    // first command check in the list is NOT it: `inferGateConfig` emits typecheck, lint, test,
+    // build in that order, and that inferred config is what `gate` prints for an operator to
+    // save — so positionally the claims reviewer would baseline on `npm run typecheck`, which
+    // survives deleting a filter or widening a guard, and every probed claim would read as
+    // unpinned. The rule is: the check named `test` if there is exactly one; otherwise the sole
+    // command check if there is exactly one; otherwise no choice is made here.
+    //
+    // This comes from `teammates.gate.json` in the WORKING TREE — `resolveGateConfig` reads it
+    // through `readLayer`, not out of the index — so an enforced agent can edit it. Reading the
+    // manifest rather than the resolved config keeps the gitignored local layer out of the
+    // choice; it does not make the value trusted. Nothing screens the run string: containment is
+    // structural, and `generateReviewDispatch` emits it as a JSON literal in a DATA block that
+    // sits below every instruction, so no value of it can become one.
+    const commandChecks = checksForPhase(config, phaseName).filter((c) => c.kind === 'command')
+    const namedTest = commandChecks.filter((c) => c.name === 'test')
+    const commandCheck = namedTest.length === 1
+      ? namedTest[0]
+      : (namedTest.length === 0 && commandChecks.length === 1 ? commandChecks[0] : null)
+    // Refused, not guessed — and only for the lens that actually runs the command, since no
+    // other lens reads this value and blocking their dispatch over it would answer a question
+    // they never ask. Zero command checks is not ambiguity: it falls through to
+    // `generateReviewDispatch`, whose message says the phase declares no command check.
+    //
+    // The two ambiguous shapes get different sentences because they have different remedies, and
+    // one message covering both told an operator with two checks named `test` to name one of them
+    // `test` — a fix already applied, so the only instruction offered was a no-op.
+    if (!commandCheck && commandChecks.length > 1 && (check.lens ?? []).includes('claims')) {
+      const preamble = 'the claims lens needs one command check to baseline against and this phase declares'
+      io.out(namedTest.length > 1
+        // The duplicates, not every command check: enumerating all of them printed a third name
+        // under a count of two, and the extra name is the one an operator told to "rename the one
+        // that is not the suite" would reach for, which would change nothing.
+        ? `${preamble} ${namedTest.length} command checks named "test": `
+          + `${namedTest.map((c) => c.name).join(', ')}. Rename the one that is not the suite`
+        : `${preamble} ${commandChecks.length} with none named "test": `
+          + `${commandChecks.map((c) => c.name).join(', ')}. `
+          + 'Name the one that runs the suite "test", or drop the claims lens from this phase')
+      return 4
+    }
+    const testCommand = commandCheck?.run ?? ''
+    const testCommandName = commandCheck?.name ?? ''
+    // The same paths the merge preview links in, for the same reason: a scratch worktree has no
+    // untracked build inputs, and the suite cannot run without them. `previewLinks` normalises a
+    // non-array to []; `config.mjs`'s `preview` validator has already refused one by here, so
+    // that normalisation is a second net rather than the one that catches it.
+    const linkPaths = previewLinks(config)
+
     let spec
     try {
       spec = generateReviewDispatch({
@@ -2354,18 +2388,21 @@ export async function runCli(argv, io = { out: console.log }) {
         branches,
         findingsDir: `.teammates/${runId}/reviews`,
         scratchRoot: tmpdir(),
+        testCommand,
+        testCommandName,
+        linkPaths,
+        branchShas,
       })
     } catch (err) {
       io.out(err.message)
       return 4
     }
-    // The stamp is per lens, because that is what identifies one reviewer's file: the same tips
-    // reviewed through two lenses produce two files, and each must be attributable to its own.
-    const reviewers = spec.reviewers.map((r) => {
-      const stamp = reviewStamp({ phase: phaseName, lens: r.lens, branchShas })
-      return { ...r, stamp, prompt: `${r.prompt}\n\n${stampInstruction(stamp)}` }
-    })
-    io.out(JSON.stringify({ ...spec, reviewers }, null, 2))
+    // Emitted exactly as generated. Nothing is appended here: the claims prompt ends with a DATA
+    // block whose banner says nothing below it is an instruction, and appending anything after it
+    // made that banner false in the one prompt whose containment depends on it. The stamp
+    // requirement the reviewers used to receive from here is now emitted by the generator, above
+    // that block.
+    io.out(JSON.stringify(spec, null, 2))
     return 0
   }
 

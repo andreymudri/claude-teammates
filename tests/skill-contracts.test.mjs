@@ -4,6 +4,7 @@ import { readFile, readdir, mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { runCli } from '../scripts/cli.mjs'
+import { collectReviewResults } from '../scripts/reviews.mjs'
 import {
   assertClaim,
   assertCode,
@@ -88,6 +89,79 @@ test('phase-gate documents the fix decision and the cost-bound framing', async (
     subject: /cost bound|security bound|tamper-evident/i,
     allow: [/Do not describe the loop as tamper-evident; only fileset and ownership carry that property/i],
   })
+})
+
+// `unableToVerify` and `unprobed` are the two `claims` results that are not findings. An
+// orchestrator that never learns of them reads a bounded, or an unrun, review as a clean one —
+// which is the same class of defect the lens exists to catch, one level up.
+test('phase-gate documents the two claims results that are not findings', async () => {
+  const { doc } = await skill('phase-gate')
+  const section = doc.section('Finish the pending checks')
+  assertStatement(
+    section,
+    /collect-reviews reads neither/i,
+    'phase-gate must say collect-reviews does not read either key',
+  )
+  assertStatement(
+    section,
+    /reads `?lens`?, `?stamp`? and `?findings`? and ignores every other key/i,
+    'phase-gate must say what collectReviewResults reads, in the verb that is true of it',
+  )
+  assertStatement(
+    section,
+    /`?stamp`? is consumed to reject a stale file and then dropped from the emitted result/i,
+    'phase-gate must not let "reads" be misread as "keeps" for stamp',
+  )
+  assertStatement(
+    section,
+    /you must open the findings file yourself/i,
+    'phase-gate must say who has to read the two keys, since the CLI does not',
+  )
+  assertStatement(
+    section,
+    /unableToVerify means the reviewer could not build the phase.s tree or get a green baseline/i,
+    'phase-gate must say what unableToVerify means',
+  )
+  assertStatement(
+    section,
+    /collected today as `?status: "pass"`? with zero findings/i,
+    'phase-gate must say how an unableToVerify claims review is actually collected',
+  )
+  assertStatement(
+    section,
+    /unprobed lists claims it enumerated and did not reach/i,
+    'phase-gate must say what unprobed lists',
+  )
+})
+
+// The statement above is a claim about code, so it is pinned against the code rather than only
+// against itself. If `collectReviewResults` ever starts reading `unableToVerify`, this fails and
+// the skill sentence saying it does not has to be rewritten — which is the direction of drift
+// that produced this finding in the first place.
+test('collect-reviews really does collect an unableToVerify claims review as a pass', async () => {
+  // The stamp has to EXIST for "it is dropped" to be an assertion about anything. Without it the
+  // `'stamp' in result` check below passed whether or not the code kept the key — which is this
+  // run's signature defect committed one level up, inside the test written to close an instance
+  // of it. `expected` matches, so the file is current and reaches the result-building path.
+  const stamp = { phase: '1', lens: 'claims', branches: ['teammates/r1/T1@abc123'] }
+  const out = collectReviewResults({
+    lenses: ['claims'],
+    expected: { phase: '1', branches: ['teammates/r1/T1@abc123'] },
+    files: [{ lens: 'claims', stamp, findings: [], unableToVerify: 'the baseline suite was red', unprobed: ['a.mjs:1'] }],
+  })
+  assert.deepEqual(out.stale, [], 'the fixture must not be rejected as stale, or it proves nothing')
+  assert.equal(out.results.length, 1)
+  assert.equal(out.results[0].status, 'pass')
+  assert.deepEqual(out.results[0].findings, [])
+  // Not merely absent from the verdict — absent from the emitted result entirely, so nothing
+  // downstream of the CLI can recover it either.
+  assert.equal('unableToVerify' in out.results[0], false)
+  assert.equal('unprobed' in out.results[0], false)
+  // `stamp` is read — `reviewStale` consumes it — and then dropped from the result just like the
+  // two keys above. The skill said "keeps lens, stamp and findings", which overstated by one key
+  // in the very sentence written to correct an overstatement. This is what makes the corrected
+  // wording checkable rather than merely more careful.
+  assert.equal('stamp' in out.results[0], false)
 })
 
 test('phase-gate says plainly what a none decision means and does not mean', async () => {

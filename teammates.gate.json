@@ -11,7 +11,7 @@
           "name": "review",
           "kind": "agent",
           "agent": "tm-reviewer",
-          "lens": ["correctness", "security", "tests"],
+          "lens": ["correctness", "security", "tests", "claims"],
           "blockOn": ["high"]
         }
       ]

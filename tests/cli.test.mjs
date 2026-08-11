@@ -473,6 +473,319 @@ test('review-dispatch refuses a phase whose task branches do not exist', async (
   })
 })
 
+// The `claims` reviewer runs the suite in its own worktree, and the command it runs comes from
+// the phase's own command check in the TRACKED manifest — the same reason its tier does: the
+// party being judged must not pick the command its judge runs.
+test('review-dispatch gives the claims lens the command check from the manifest', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeReviewManifest(root, {
+      preview: { link: ['node_modules'] },
+      phases: {
+        default: {
+          checks: [
+            { name: 'test', kind: 'command', run: 'npm test --silent' },
+            { name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: ['claims'], blockOn: ['high'] },
+          ],
+        },
+      },
+    })
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'T1.mjs'), 'export const x = 1\n', 'utf8')
+    g(['add', 'T1.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    lines.length = 0
+    const code = await runCli(['review-dispatch', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 0)
+    const spec = JSON.parse(lines.join('\n'))
+    assert.equal(spec.reviewers.length, 1)
+    assert.equal(spec.reviewers[0].lens, 'claims')
+    assert.match(spec.reviewers[0].prompt, /npm test --silent/)
+    assert.match(spec.reviewers[0].prompt, /green baseline BEFORE mutating/)
+    assert.match(spec.reviewers[0].prompt, /"unprobed"/)
+    // `preview.link` is what the merge preview links in to make the suite runnable, and the
+    // reviewer's scratch worktree needs the same paths for the same reason.
+    assert.match(spec.reviewers[0].prompt, /node_modules/)
+  })
+})
+
+// A helper so each case below differs only in its check list. The task branch has to exist or
+// review-dispatch refuses before it ever resolves a command.
+async function withClaimsPhase(checks, body, extra = {}) {
+  await withRepo(async (ctx) => {
+    const { root, planPath, io, lines, git: g } = ctx
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeReviewManifest(root, {
+      ...extra,
+      phases: { default: { checks } },
+    })
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'T1.mjs'), 'export const x = 1\n', 'utf8')
+    g(['add', 'T1.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    lines.length = 0
+    const code = await runCli(['review-dispatch', '--run', 'r1', '--phase', '1', '--root', root], io)
+    await body({ code, out: lines.join('\n'), ...ctx })
+  })
+}
+
+const CLAIMS_CHECK = { name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: ['claims'], blockOn: ['high'] }
+
+// `inferGateConfig` emits typecheck, lint, test, build IN THAT ORDER, and that inferred config is
+// what `gate` prints for an operator to save. Taking the first command check positionally would
+// have the reviewer baseline on `npm run typecheck`, which survives every mutation the method
+// describes — eight fabricated high findings, and the suite never runs.
+test('review-dispatch prefers the command check named test over an earlier one', async () => {
+  await withClaimsPhase(
+    [
+      { name: 'typecheck', kind: 'command', run: 'npm run typecheck' },
+      { name: 'lint', kind: 'command', run: 'npm run lint' },
+      { name: 'test', kind: 'command', run: 'npm test' },
+      { name: 'build', kind: 'command', run: 'npm run build' },
+      CLAIMS_CHECK,
+    ],
+    ({ code, out }) => {
+      assert.equal(code, 0)
+      const spec = JSON.parse(out)
+      assert.match(spec.reviewers[0].prompt, /npm test/)
+      assert.doesNotMatch(spec.reviewers[0].prompt, /npm run typecheck/)
+    },
+  )
+})
+
+test('a single command check under any name is the suite', async () => {
+  await withClaimsPhase(
+    [{ name: 'suite', kind: 'command', run: 'make check' }, CLAIMS_CHECK],
+    ({ code, out }) => {
+      assert.equal(code, 0)
+      assert.match(JSON.parse(out).reviewers[0].prompt, /make check/)
+    },
+  )
+})
+
+// Guessing between them is what produced the fabricated findings; refusing names the candidates
+// so the fix is a one-word manifest edit.
+test('review-dispatch refuses to guess between command checks for the claims lens', async () => {
+  await withClaimsPhase(
+    [
+      { name: 'typecheck', kind: 'command', run: 'npm run typecheck' },
+      { name: 'lint', kind: 'command', run: 'npm run lint' },
+      CLAIMS_CHECK,
+    ],
+    ({ code, out }) => {
+      assert.equal(code, 4)
+      assert.match(out, /typecheck/)
+      assert.match(out, /lint/)
+    },
+  )
+})
+
+// Two checks both named `test` fell into the "none named test" branch, whose message told the
+// operator to name one of them `test` — a remedy already satisfied, so the only stated fix was a
+// no-op. The verdict was right and the diagnosis was not.
+test('two command checks named test are diagnosed as duplicates, not as none', async () => {
+  await withClaimsPhase(
+    [
+      { name: 'test', kind: 'command', run: 'npm test' },
+      { name: 'test', kind: 'command', run: 'npm run test:e2e' },
+      CLAIMS_CHECK,
+    ],
+    ({ code, out }) => {
+      assert.equal(code, 4)
+      assert.match(out, /2 command checks named "test"/)
+      assert.match(out, /rename the one that is not the suite/i)
+      // The false remedy must be gone, not merely joined by a true one.
+      assert.doesNotMatch(out, /none named "test"/)
+    },
+  )
+})
+
+// The count came from `namedTest` and the list from `commandChecks`, so a third check appeared
+// under a count of two — and `lint` is exactly the name an operator reading "rename the one that
+// is not the suite" would pick, which changes nothing. Two checks made count and list coincide,
+// which is why the pin above cannot see it.
+test('the duplicate-test message lists the duplicates, not every command check', async () => {
+  await withClaimsPhase(
+    [
+      { name: 'test', kind: 'command', run: 'npm test' },
+      { name: 'test', kind: 'command', run: 'npm run test:e2e' },
+      { name: 'lint', kind: 'command', run: 'npm run lint' },
+      CLAIMS_CHECK,
+    ],
+    ({ code, out }) => {
+      assert.equal(code, 4)
+      assert.match(out, /2 command checks named "test"/)
+      assert.match(out, /: test, test\b/)
+      assert.doesNotMatch(out, /lint/)
+    },
+  )
+})
+
+// `testCommandName` tells the reviewer which check its baseline command came from. It used to
+// exist only for a refusal message; the refusal is gone, so it is pinned where it now lives — the
+// DATA block — and the wiring is still dead if replaced with ''.
+test('the DATA block names the command check the baseline came from', async () => {
+  await withClaimsPhase(
+    [{ name: 'suite', kind: 'command', run: 'npm test' }, CLAIMS_CHECK],
+    ({ code, out }) => {
+      assert.equal(code, 0)
+      const spec = JSON.parse(out)
+      assert.match(spec.reviewers[0].prompt, /from check: "suite"/)
+    },
+  )
+})
+
+// The bug lived in the JOIN, not in the generator: review-dispatch appended the stamp instruction
+// after a prompt whose last block says nothing below it is an instruction. Asserted on what the
+// CLI actually emits, because that is the only place the two halves meet.
+test('nothing follows the DATA block in the prompt review-dispatch emits', async () => {
+  await withClaimsPhase(
+    [{ name: 'test', kind: 'command', run: 'npm test' }, CLAIMS_CHECK],
+    ({ code, out }) => {
+      assert.equal(code, 0)
+      const claims = JSON.parse(out).reviewers.find((r) => r.lens === 'claims')
+      const at = claims.prompt.indexOf('DATA (values from this project')
+      assert.notEqual(at, -1)
+      const after = claims.prompt.slice(at).split('\n').slice(2)
+      for (const line of after) assert.doesNotMatch(line, /^\s*\d+\./, `a step follows DATA: ${line}`)
+      assert.match(claims.prompt.trimEnd().split('\n').at(-1), /^ *("|link paths: \(none\))/)
+      // The stamp requirement is still there — moved above the block, not dropped. A reviewer that
+      // never writes a stamp has its file refused as stale and the phase loses the lens.
+      assert.ok(claims.prompt.slice(0, at).includes('under a "stamp" key'))
+      assert.equal(claims.prompt.slice(at).includes('stamp'), false)
+    },
+  )
+})
+
+test('every dispatched reviewer still carries a stamp object matching its prompt', async () => {
+  await withClaimsPhase(
+    [
+      { name: 'test', kind: 'command', run: 'npm test' },
+      { name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: ['correctness', 'claims'], blockOn: ['high'] },
+    ],
+    ({ code, out }) => {
+      assert.equal(code, 0)
+      for (const r of JSON.parse(out).reviewers) {
+        assert.equal(r.stamp.lens, r.lens)
+        assert.ok(r.stamp.branches.length > 0, 'the stamp must name the tips it judged')
+        assert.ok(r.prompt.includes(JSON.stringify(r.stamp)))
+      }
+    },
+  )
+})
+
+// A backtick in an ordinary command took down the correctness and security dispatches too, for a
+// value neither of them reads. The whole phase must still be reviewable.
+test('an awkward but honest run string does not make a phase unreviewable', async () => {
+  await withClaimsPhase(
+    [
+      { name: 'test', kind: 'command', run: 'node -e "console.log(`ok`)"' },
+      { name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: ['correctness', 'claims'], blockOn: ['high'] },
+    ],
+    ({ code, out }) => {
+      assert.equal(code, 0)
+      const spec = JSON.parse(out)
+      assert.deepEqual(spec.reviewers.map((r) => r.lens), ['correctness', 'claims'])
+      const claims = spec.reviewers.find((r) => r.lens === 'claims')
+      assert.match(claims.prompt, /console\.log\(`ok`\)/)
+    },
+  )
+})
+
+// The ambiguity only matters to the lens that runs the command. Refusing a correctness dispatch
+// over it would block a phase on a question that dispatch never asks.
+test('an ambiguous command list does not refuse a dispatch without the claims lens', async () => {
+  await withClaimsPhase(
+    [
+      { name: 'typecheck', kind: 'command', run: 'npm run typecheck' },
+      { name: 'lint', kind: 'command', run: 'npm run lint' },
+      { name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: ['correctness'], blockOn: ['high'] },
+    ],
+    ({ code, out }) => {
+      assert.equal(code, 0)
+      assert.equal(JSON.parse(out).reviewers[0].lens, 'correctness')
+    },
+  )
+})
+
+// End to end for the containment check: the entry never reaches a prompt telling a reviewer to
+// link it into a worktree it will later remove.
+test('review-dispatch refuses a preview.link entry that escapes the repository', async () => {
+  await withClaimsPhase(
+    [{ name: 'test', kind: 'command', run: 'npm test' }, CLAIMS_CHECK],
+    ({ code, out }) => {
+      assert.equal(code, 4)
+      assert.match(out, /preview\.link/)
+      assert.match(out, /escapes the repository/)
+    },
+    { preview: { link: ['../../../../Users/andre/.ssh'] } },
+  )
+})
+
+// `previewLinks` normalises a non-array to [] where `config.preview?.link ?? []` would hand the
+// string through to `linkPaths.join`. On this path the two cannot be told apart, and this test
+// records why rather than claiming a difference it cannot show: `config.mjs`'s `preview`
+// validator refuses a non-array `link` before `resolveGateConfig` returns, so review-dispatch
+// exits 2 without ever reading the value. The tolerant helper is defence behind that check, not
+// the check itself — which is the whole claim made for it here.
+test('a non-array preview.link is refused by the manifest layer before review-dispatch reads it', async () => {
+  await withClaimsPhase(
+    [{ name: 'test', kind: 'command', run: 'npm test' }, CLAIMS_CHECK],
+    ({ code, out }) => {
+      assert.equal(code, 2)
+      assert.match(out, /preview\.link must be an array of non-empty strings/)
+    },
+    { preview: { link: 'node_modules' } },
+  )
+})
+
+// The one line that turns the lens on for this repository's own runs, and the command check the
+// lens needs in order to be dispatchable at all. Its natural home is tests/self-gate.test.mjs,
+// which is not in this task's file set; it is pinned here so it is pinned somewhere.
+test('this repository dispatches the claims lens and declares a command check it can run', async () => {
+  const manifest = JSON.parse(await readFile(new URL('../teammates.gate.json', import.meta.url), 'utf8'))
+  const checks = manifest.phases.default.checks
+  const review = checks.find((c) => c.kind === 'agent')
+  assert.ok(review.lens.includes('claims'), 'the default phase must dispatch the claims lens')
+  const commands = checks.filter((c) => c.kind === 'command')
+  const named = commands.filter((c) => c.name === 'test')
+  assert.equal(
+    named.length === 1 || commands.length === 1,
+    true,
+    'the claims lens needs an unambiguous command check to baseline against',
+  )
+})
+
+// A dispatch emitted anyway would carry a mutation method with no command to run it, and the
+// reviewer would fall back to reading — a static review reported under a lens whose whole value
+// is that it is not one.
+test('review-dispatch refuses a claims lens on a phase with no command check', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeReviewManifest(root, {
+      phases: {
+        default: {
+          checks: [
+            { name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: ['correctness', 'claims'], blockOn: ['high'] },
+          ],
+        },
+      },
+    })
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'T1.mjs'), 'export const x = 1\n', 'utf8')
+    g(['add', 'T1.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    lines.length = 0
+    const code = await runCli(['review-dispatch', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 4)
+    assert.match(lines.join('\n'), /claims lens/)
+    assert.match(lines.join('\n'), /test command/)
+  })
+})
+
 // The merge check already reports a bad link, but only once a phase is ready to gate — after
 // every teammate has run. This answers the same question before the run starts, when the fix is
 // a one-line manifest edit rather than a re-dispatch.
