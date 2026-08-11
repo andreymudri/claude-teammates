@@ -11,6 +11,23 @@ const root = fileURLToPath(new URL('..', import.meta.url))
 const hookScript = fileURLToPath(new URL('../hooks/session-start', import.meta.url))
 const updateCheckScript = fileURLToPath(new URL('../hooks/update-check', import.meta.url))
 
+// Convert Windows paths to Unix format for bash. On Windows, absolute paths don't work reliably
+// when bash is spawned from PowerShell through Node, so we convert to relative paths.
+function toBashPath(windowsPath) {
+  // Try to compute relative path from CWD to the target - this works on Windows with PowerShell
+  try {
+    const relativePath = path.relative(process.cwd(), windowsPath)
+    if (relativePath) {
+      // Always use relative path when it can be computed (even if it starts with ..)
+      return relativePath.replace(/\\/g, '/')
+    }
+  } catch {
+    // If relative path computation fails, fall through to absolute path conversion
+  }
+  // Fall back to just converting backslashes to forward slashes for absolute paths
+  return windowsPath.replace(/\\/g, '/')
+}
+
 // Every invocation gets its own CLAUDE_CONFIG_DIR. Without it the hook reads and
 // WRITES the developer's real ~/.claude — the update-notice marker would leak out
 // of the suite, and whether a notice appears would depend on test order and on
@@ -18,7 +35,9 @@ const updateCheckScript = fileURLToPath(new URL('../hooks/update-check', import.
 function runHook(env) {
   const configDir = mkdtempSync(path.join(tmpdir(), 'tm-hook-'))
   try {
-    return execFileSync('bash', [hookScript], {
+    const hookScriptPath = toBashPath(hookScript)
+    assert.equal(hookScriptPath.includes('\\'), false, 'bash argument must not contain backslashes')
+    return execFileSync('bash', [hookScriptPath], {
       encoding: 'utf8',
       env: { ...process.env, CLAUDE_PLUGIN_ROOT: root, CLAUDE_CONFIG_DIR: configDir, ...env },
     })
@@ -34,7 +53,9 @@ const installedVersion = JSON.parse(
 // Runs the hook against a caller-owned state dir so a test can observe what the
 // hook wrote, or seed state and run again. Returns the parsed context string.
 function contextWith(configDir, env = {}) {
-  const out = execFileSync('bash', [hookScript], {
+  const hookScriptPath = toBashPath(hookScript)
+  assert.equal(hookScriptPath.includes('\\'), false, 'bash argument must not contain backslashes')
+  const out = execFileSync('bash', [hookScriptPath], {
     encoding: 'utf8',
     env: { ...process.env, CLAUDE_PLUGIN_ROOT: root, CLAUDE_CONFIG_DIR: configDir, ...env },
   })
@@ -192,7 +213,9 @@ test('a notice never breaks the emitted JSON or adds a second context field', ()
 function runUpdateCheck(configDir, { url, ...env } = {}) {
   // The URL is an ARGUMENT, never an environment variable: an env override would let
   // a repo's .envrc retarget the check at an attacker host on every session.
-  const args = url ? [updateCheckScript, url] : [updateCheckScript]
+  const updateCheckScriptPath = toBashPath(updateCheckScript)
+  assert.equal(updateCheckScriptPath.includes('\\'), false, 'bash argument must not contain backslashes')
+  const args = url ? [updateCheckScriptPath, url] : [updateCheckScriptPath]
   return execFileSync('bash', args, {
     encoding: 'utf8',
     env: { ...process.env, CLAUDE_CONFIG_DIR: configDir, ...env },
@@ -273,7 +296,10 @@ test('hooks.json wires update-check async and session-start sync', async () => {
 // a live network request, and the other failed on a clean machine and passed on
 // a rerun, because its first run wrote the marker it then asserted was absent.
 function runUnset(script, args = []) {
-  return execFileSync('env', ['-u', 'HOME', '-u', 'CLAUDE_CONFIG_DIR', 'bash', script, ...args], {
+  const scriptPath = toBashPath(script)
+  assert.equal(scriptPath.includes('\\'), false, 'bash argument must not contain backslashes')
+  const argsPaths = args.map(a => toBashPath(a))
+  return execFileSync('env', ['-u', 'HOME', '-u', 'CLAUDE_CONFIG_DIR', 'bash', scriptPath, ...argsPaths], {
     encoding: 'utf8',
     timeout: 15_000,
     env: { ...process.env, CLAUDE_PLUGIN_ROOT: root },
@@ -355,7 +381,9 @@ test('session-start does not hang on a FIFO in place of a state file', () => {
     } catch {
       return // no mkfifo on this platform; the -f guard is still asserted by review
     }
-    const out = execFileSync('bash', [hookScript], {
+    const hookScriptPath = toBashPath(hookScript)
+    assert.equal(hookScriptPath.includes('\\'), false, 'bash argument must not contain backslashes')
+    const out = execFileSync('bash', [hookScriptPath], {
       encoding: 'utf8',
       timeout: 10_000,
       env: { ...process.env, CLAUDE_PLUGIN_ROOT: root, CLAUDE_CONFIG_DIR: dir },
