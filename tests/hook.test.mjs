@@ -17,25 +17,42 @@ const updateCheckScript = fileURLToPath(new URL('../hooks/update-check', import.
 // This explains why: PowerShell resolves to WSL bash, which cannot read C:\...
 // in any spelling. The fix tests actual capability (can bash see the repo?)
 // rather than platform, so it works on any platform without a hardcoded list.
-let _bashCanAccessRepo = null
+let _probeResult = null  // 'reachable' | 'unreachable' | null (exposed for mechanism test)
 function canBashAccessRepository() {
-  if (_bashCanAccessRepo !== null) return _bashCanAccessRepo
+  if (_probeResult !== null) return _probeResult === 'reachable'
   try {
-    // Test if the bash that will run tests can access the hook script path.
-    // Pass the path as an argument to avoid shell injection vulnerabilities.
-    // Using 'bash -c \'test -e "$1"\' -- <path>' ensures the path is not
-    // reinterpreted by the shell, even if it contains quotes or special chars.
-    execFileSync('bash', ['-c', 'test -e "$1"', '--', toBashPath(hookScript)], {
+    // Probe the repository root (not the hook file itself). If the repo is
+    // unreachable, the probe fails. If a hook file is missing, the repo is
+    // still reachable, and tests should run and fail as expected.
+    //
+    // Require positive evidence: have bash print 'TM_OK' on success. This
+    // prevents forging via exit codes (startup files, etc.). Pass the path
+    // as an argument to avoid shell injection. Scrub BASH_ENV/ENV to prevent
+    // startup files from interfering with the probe itself.
+    const env = { ...process.env }
+    delete env.BASH_ENV
+    delete env.ENV
+    const output = execFileSync('bash', ['-c', 'test -e "$1" && printf TM_OK', '--', toBashPath(root)], {
       timeout: 20000,
+      encoding: 'utf8',
+      env: env,
     })
-    _bashCanAccessRepo = true
+    if (output === 'TM_OK') {
+      _probeResult = 'reachable'
+      return true
+    } else {
+      // bash ran but did not print the token (test -e failed)
+      _probeResult = 'unreachable'
+      return false
+    }
   } catch (err) {
-    // Distinguish between "bash ran and found the path missing" vs
-    // "the probe itself failed to run" (timeout, spawn error, signal).
-    // Exit code 1 from 'test -e' means the path was not found — skip tests.
-    // Any other error means we could not determine accessibility — fail loudly.
+    // Distinguish between "bash ran and reported inaccessible" vs
+    // "the probe itself failed to run". Exit code 1 from 'test -e' means
+    // the repository is not accessible — skip tests. Any other error means
+    // we could not determine accessibility — fail loudly.
     if (err.status === 1) {
-      _bashCanAccessRepo = false
+      _probeResult = 'unreachable'
+      return false
     } else {
       // Timeout, spawn error, signal, or other failure. Failing to determine
       // whether the test environment can run is not a passing state.
@@ -44,7 +61,6 @@ function canBashAccessRepository() {
       )
     }
   }
-  return _bashCanAccessRepo
 }
 
 // Decide whether to skip hook tests based on repository accessibility.
@@ -339,17 +355,29 @@ test('hooks.json wires update-check async and session-start sync', async () => {
 
 // Pin the skip mechanism: verify that the skip decision is correctly extracted and used.
 // This is a plain test (not wrapped in hookTest) so it will FAIL if the skip logic is
-// accidentally disabled, rather than skipping silently. If the accessibility probe
-// times out or fails, this test will error (not silently pass), forcing the suite to
-// visibly report the failure. The assertion verifies that the number of hook tests
-// actually skipped matches the expected decision: all skipped if shouldSkipHookTests()
-// is true, none skipped if false. A mismatch means hookTest was changed to skip
-// unconditionally or never skip. The registered > 0 check catches deletion.
+// accidentally disabled, rather than skipping silently. The first assertion verifies
+// that the number of hook tests actually skipped matches the decision: all skipped if
+// shouldSkipHookTests() is true, none skipped if false. The second assertion verifies
+// the decision itself is correct: if the probe reported reachable, tests must not be
+// skipped (this catches missing hooks and forged exit codes). A failure here means
+// either hookTest was mutated, or the probe gave a wrong answer.
 test('(mechanism) hookTest skips its cases only when the repository is unreachable', () => {
+  // Ensure the probe has run by calling canBashAccessRepository directly. This also
+  // sets _probeResult so we can verify the decision is correct below.
+  const probeReportsReachable = canBashAccessRepository()
+
   assert.ok(hookTestsRegistered > 0, 'hookTest registered nothing — the fixture is broken')
   assert.equal(hookTestsSkipped, shouldSkipHookTests() ? hookTestsRegistered : 0,
     `hookTest: skipped ${hookTestsSkipped} of ${hookTestsRegistered} tests, ` +
     `expected ${shouldSkipHookTests() ? hookTestsRegistered : 0}`)
+
+  // Also verify the decision itself is correct by checking the probe's positive evidence.
+  // If the probe reported reachable (got TM_OK token), no tests should be skipped.
+  // This catches scenarios where the probe gave a wrong answer (missing hooks, forged exits).
+  if (probeReportsReachable) {
+    assert.equal(hookTestsSkipped, 0,
+      `probe reported reachable (TM_OK) but ${hookTestsSkipped} tests were still skipped`)
+  }
 })
 
 // Regression: `${CLAUDE_CONFIG_DIR:-${HOME}/.claude}` looks safe but is not. Under
