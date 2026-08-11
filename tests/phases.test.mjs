@@ -50,3 +50,32 @@ test('throws on an unknown dependency', () => {
 test('handles an empty task list', () => {
   assert.deepEqual(assignPhases([]), [])
 })
+
+test('normalizePath aliases: tasks declaring a.mjs and ./a.mjs land in different phases', () => {
+  // This test pins that assignPhases uses normalizePath to detect file conflicts.
+  // ./a.mjs normalizes to a.mjs, so both tasks touch the same file and must go
+  // to different phases. Fails if assignPhases compares raw strings instead.
+  const out = assignPhases([task('T1', ['a.mjs']), task('T2', ['./a.mjs'])])
+  assert.deepEqual(out.map((t) => t.phase), [1, 2])
+})
+
+test('normalizePath aliases: tasks declaring a/b.mjs and a\\b.mjs land in different phases', () => {
+  // This test pins that assignPhases uses normalizePath to detect file conflicts.
+  // a\b.mjs normalizes to a/b.mjs, so both tasks touch the same file and must go
+  // to different phases. Fails if assignPhases compares raw strings instead.
+  const out = assignPhases([task('T1', ['a/b.mjs']), task('T2', ['a\\b.mjs'])])
+  assert.deepEqual(out.map((t) => t.phase), [1, 2])
+})
+
+test('case-sensitive differences: tasks declaring A.mjs and a.mjs land in the same phase', () => {
+  // This test pins that normalizePath preserves case-sensitivity, a critical
+  // precondition for assignPhases to work correctly. A.mjs and a.mjs normalize
+  // to themselves (case-sensitive), so they are distinct files and can both
+  // go in phase 1. Fails only if normalizePath is case-folded (e.g., by adding
+  // .toLowerCase()). When that happens, both normalize to a single key and
+  // must go to different phases, but the test expects them in the same phase.
+  // This test does not directly pin the assignPhases change, but it pins the
+  // normalizePath behavior that assignPhases depends on.
+  const out = assignPhases([task('T1', ['A.mjs']), task('T2', ['a.mjs'])])
+  assert.deepEqual(out.map((t) => t.phase), [1, 1])
+})

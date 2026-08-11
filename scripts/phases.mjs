@@ -1,3 +1,5 @@
+import { normalizePath } from './enforce.mjs'
+
 export function assignPhases(tasks) {
   const scheduled = new Set()
   const out = []
@@ -11,9 +13,9 @@ export function assignPhases(tasks) {
 
     for (const t of remaining) {
       const depsReady = t.deps.every((d) => scheduled.has(d))
-      const filesFree = t.files.every((f) => !taken.has(f))
+      const filesFree = t.files.every((f) => !taken.has(normalizePath(f)))
       if (depsReady && filesFree) {
-        t.files.forEach((f) => taken.add(f))
+        t.files.forEach((f) => taken.add(normalizePath(f)))
         t.phase = phase
         placed.push(t)
       } else {
