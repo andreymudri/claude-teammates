@@ -32,7 +32,7 @@ function canBashAccessRepository() {
     const env = { ...process.env }
     delete env.BASH_ENV
     delete env.ENV
-    const output = execFileSync('bash', ['-c', 'test -e "$1" && printf TM_OK', '--', toBashPath(root)], {
+    const output = execFileSync('bash', ['-p', '-c', 'test -e "$1" && printf TM_OK', '--', toBashPath(root)], {
       timeout: 20000,
       encoding: 'utf8',
       env: env,
