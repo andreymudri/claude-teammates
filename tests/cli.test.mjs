@@ -637,6 +637,45 @@ test('the DATA block names the command check the baseline came from', async () =
   )
 })
 
+// The bug lived in the JOIN, not in the generator: review-dispatch appended the stamp instruction
+// after a prompt whose last block says nothing below it is an instruction. Asserted on what the
+// CLI actually emits, because that is the only place the two halves meet.
+test('nothing follows the DATA block in the prompt review-dispatch emits', async () => {
+  await withClaimsPhase(
+    [{ name: 'test', kind: 'command', run: 'npm test' }, CLAIMS_CHECK],
+    ({ code, out }) => {
+      assert.equal(code, 0)
+      const claims = JSON.parse(out).reviewers.find((r) => r.lens === 'claims')
+      const at = claims.prompt.indexOf('DATA (values from this project')
+      assert.notEqual(at, -1)
+      const after = claims.prompt.slice(at).split('\n').slice(2)
+      for (const line of after) assert.doesNotMatch(line, /^\s*\d+\./, `a step follows DATA: ${line}`)
+      assert.match(claims.prompt.trimEnd().split('\n').at(-1), /^ *("|link paths: \(none\))/)
+      // The stamp requirement is still there — moved above the block, not dropped. A reviewer that
+      // never writes a stamp has its file refused as stale and the phase loses the lens.
+      assert.ok(claims.prompt.slice(0, at).includes('under a "stamp" key'))
+      assert.equal(claims.prompt.slice(at).includes('stamp'), false)
+    },
+  )
+})
+
+test('every dispatched reviewer still carries a stamp object matching its prompt', async () => {
+  await withClaimsPhase(
+    [
+      { name: 'test', kind: 'command', run: 'npm test' },
+      { name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: ['correctness', 'claims'], blockOn: ['high'] },
+    ],
+    ({ code, out }) => {
+      assert.equal(code, 0)
+      for (const r of JSON.parse(out).reviewers) {
+        assert.equal(r.stamp.lens, r.lens)
+        assert.ok(r.stamp.branches.length > 0, 'the stamp must name the tips it judged')
+        assert.ok(r.prompt.includes(JSON.stringify(r.stamp)))
+      }
+    },
+  )
+})
+
 // A backtick in an ordinary command took down the correctness and security dispatches too, for a
 // value neither of them reads. The whole phase must still be reviewable.
 test('an awkward but honest run string does not make a phase unreviewable', async () => {

@@ -899,20 +899,6 @@ async function resolveBranchShas(git, tasks, runId) {
   return branchShas
 }
 
-// What the reviewer is told to carry back. The stamp is rendered into the prompt rather than left
-// implicit: a field the dispatch declares and the prompt never mentions is a field no reviewer
-// ever writes, and `collect-reviews` would then refuse every file for want of a stamp nobody
-// asked for.
-function stampInstruction(stamp) {
-  return [
-    'Include this exact object under a "stamp" key in the JSON you write and return:',
-    `    ${JSON.stringify(stamp)}`,
-    'It names the branch tips these findings judged. collect-reviews refuses a findings file whose'
-    + ' stamp names different tips: a fix round moves a branch, and findings about the old tree are'
-    + ' not findings about this one.',
-  ].join('\n')
-}
-
 async function derive(root, runId, flags) {
   const git = createGit({ cwd: root })
   const runBranch = await git.currentBranch()
@@ -2349,8 +2335,9 @@ export async function runCli(argv, io = { out: console.log }) {
     // This comes from `teammates.gate.json` in the WORKING TREE — `resolveGateConfig` reads it
     // through `readLayer`, not out of the index — so an enforced agent can edit it. Reading the
     // manifest rather than the resolved config keeps the gitignored local layer out of the
-    // choice; it does not make the value trusted, which is why `generateReviewDispatch` screens
-    // the run string for control characters before interpolating it.
+    // choice; it does not make the value trusted. Nothing screens the run string: containment is
+    // structural, and `generateReviewDispatch` emits it as a JSON literal in a DATA block that
+    // sits below every instruction, so no value of it can become one.
     const commandChecks = checksForPhase(config, phaseName).filter((c) => c.kind === 'command')
     const namedTest = commandChecks.filter((c) => c.name === 'test')
     const commandCheck = namedTest.length === 1
@@ -2404,18 +2391,18 @@ export async function runCli(argv, io = { out: console.log }) {
         testCommand,
         testCommandName,
         linkPaths,
+        branchShas,
       })
     } catch (err) {
       io.out(err.message)
       return 4
     }
-    // The stamp is per lens, because that is what identifies one reviewer's file: the same tips
-    // reviewed through two lenses produce two files, and each must be attributable to its own.
-    const reviewers = spec.reviewers.map((r) => {
-      const stamp = reviewStamp({ phase: phaseName, lens: r.lens, branchShas })
-      return { ...r, stamp, prompt: `${r.prompt}\n\n${stampInstruction(stamp)}` }
-    })
-    io.out(JSON.stringify({ ...spec, reviewers }, null, 2))
+    // Emitted exactly as generated. Nothing is appended here: the claims prompt ends with a DATA
+    // block whose banner says nothing below it is an instruction, and appending anything after it
+    // made that banner false in the one prompt whose containment depends on it. The stamp
+    // requirement the reviewers used to receive from here is now emitted by the generator, above
+    // that block.
+    io.out(JSON.stringify(spec, null, 2))
     return 0
   }
 
