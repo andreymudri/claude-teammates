@@ -79,3 +79,33 @@ test('case-sensitive differences: tasks declaring A.mjs and a.mjs land in the sa
   const out = assignPhases([task('T1', ['A.mjs']), task('T2', ['a.mjs'])])
   assert.deepEqual(out.map((t) => t.phase), [1, 1])
 })
+
+test('interior ./: tasks declaring a/b.mjs and a/./b.mjs land in different phases', () => {
+  // Declared paths can contain redundant interior ./ segments from copy-paste or
+  // typos. These must be normalized to detect the actual file collision, else two
+  // tasks declaring the same file under different spellings are both placed in
+  // phase 1 and dispatched concurrently against the same real file.
+  const out = assignPhases([task('T1', ['a/b.mjs']), task('T2', ['a/./b.mjs'])])
+  assert.deepEqual(out.map((t) => t.phase), [1, 2])
+})
+
+test('repeated separators: tasks declaring a/b.mjs and a//b.mjs land in different phases', () => {
+  // Declared paths can contain repeated separators from typos. These must be
+  // normalized to detect the actual file collision.
+  const out = assignPhases([task('T1', ['a/b.mjs']), task('T2', ['a//b.mjs'])])
+  assert.deepEqual(out.map((t) => t.phase), [1, 2])
+})
+
+test('repeated leading ./: tasks declaring a.mjs and ././a.mjs land in different phases', () => {
+  // Declared paths can contain repeated leading ./ from typos. These must be
+  // normalized to detect the actual file collision.
+  const out = assignPhases([task('T1', ['a.mjs']), task('T2', ['././a.mjs'])])
+  assert.deepEqual(out.map((t) => t.phase), [1, 2])
+})
+
+test('.. segments: tasks declaring a/b.mjs and a/../a/b.mjs land in different phases', () => {
+  // Declared paths can contain .. segments that resolve to the same real file.
+  // These must be normalized to detect the actual file collision.
+  const out = assignPhases([task('T1', ['a/b.mjs']), task('T2', ['a/../a/b.mjs'])])
+  assert.deepEqual(out.map((t) => t.phase), [1, 2])
+})
