@@ -51,31 +51,36 @@ test('handles an empty task list', () => {
   assert.deepEqual(assignPhases([]), [])
 })
 
-test('normalizePath aliases: tasks declaring a.mjs and ./a.mjs land in different phases', () => {
-  // This test pins that assignPhases uses normalizePath to detect file conflicts.
-  // ./a.mjs normalizes to a.mjs, so both tasks touch the same file and must go
-  // to different phases. Fails if assignPhases compares raw strings instead.
+test('normalizeDeclarePath basic aliases: tasks declaring a.mjs and ./a.mjs land in different phases', () => {
+  // This test pins that assignPhases uses normalizeDeclarePath to detect file
+  // conflicts. The ./a.mjs declaration canonicalizes via the same basic rules as
+  // enforce.mjs's normalizePath (remove leading ./), so both tasks touch the same
+  // file and must go to different phases. Fails only if normalizeDeclarePath
+  // reverts to raw string comparison.
   const out = assignPhases([task('T1', ['a.mjs']), task('T2', ['./a.mjs'])])
   assert.deepEqual(out.map((t) => t.phase), [1, 2])
 })
 
-test('normalizePath aliases: tasks declaring a/b.mjs and a\\b.mjs land in different phases', () => {
-  // This test pins that assignPhases uses normalizePath to detect file conflicts.
-  // a\b.mjs normalizes to a/b.mjs, so both tasks touch the same file and must go
-  // to different phases. Fails if assignPhases compares raw strings instead.
+test('normalizeDeclarePath basic aliases: tasks declaring a/b.mjs and a\\b.mjs land in different phases', () => {
+  // This test pins that assignPhases uses normalizeDeclarePath to detect file
+  // conflicts. The a\b.mjs declaration canonicalizes via the same basic rules as
+  // enforce.mjs's normalizePath (replace backslashes), so both tasks touch the same
+  // file and must go to different phases. Fails only if normalizeDeclarePath
+  // reverts to raw string comparison.
   const out = assignPhases([task('T1', ['a/b.mjs']), task('T2', ['a\\b.mjs'])])
   assert.deepEqual(out.map((t) => t.phase), [1, 2])
 })
 
 test('case-sensitive differences: tasks declaring A.mjs and a.mjs land in the same phase', () => {
-  // This test pins that normalizePath preserves case-sensitivity, a critical
-  // precondition for assignPhases to work correctly. A.mjs and a.mjs normalize
-  // to themselves (case-sensitive), so they are distinct files and can both
-  // go in phase 1. Fails only if normalizePath is case-folded (e.g., by adding
-  // .toLowerCase()). When that happens, both normalize to a single key and
-  // must go to different phases, but the test expects them in the same phase.
-  // This test does not directly pin the assignPhases change, but it pins the
-  // normalizePath behavior that assignPhases depends on.
+  // This test pins that normalizeDeclarePath preserves case-sensitivity via its
+  // reliance on enforce.mjs's normalizePath, which does not fold case. A.mjs and
+  // a.mjs remain distinct after normalization, so they are different files and can
+  // both go in phase 1. The test is pinned by normalizeDeclarePath, not by
+  // normalizePath directly: fails only if normalizeDeclarePath is case-folded
+  // (e.g., by adding .toLowerCase() in phases.mjs). This pins the precondition
+  // that assignPhases depends on: if the underlying normalizer changes to fold
+  // case, both declarations would collide and the test would expect phase 1 but
+  // see phase [1, 2].
   const out = assignPhases([task('T1', ['A.mjs']), task('T2', ['a.mjs'])])
   assert.deepEqual(out.map((t) => t.phase), [1, 1])
 })
@@ -108,4 +113,21 @@ test('.. segments: tasks declaring a/b.mjs and a/../a/b.mjs land in different ph
   // These must be normalized to detect the actual file collision.
   const out = assignPhases([task('T1', ['a/b.mjs']), task('T2', ['a/../a/b.mjs'])])
   assert.deepEqual(out.map((t) => t.phase), [1, 2])
+})
+
+test('multiple spellings converge: four redundant spellings of the same file all conflict', () => {
+  // Key invariant: if normalizeDeclarePath uses the same basic cleanup rules as
+  // enforce.mjs's normalizePath, then normalizeDeclarePath(a) === normalizeDeclarePath(b)
+  // implies paths equal under normalizePath. This test verifies the stronger direction:
+  // four different declared spellings that all collapse to the same canonical form must
+  // all conflict with each other. This proves normalizeDeclarePath correctly identifies
+  // multiple representations as a single file.
+  const out = assignPhases([
+    task('T1', ['a/b.mjs']),
+    task('T2', ['a/./b.mjs']),      // Interior ./
+    task('T3', ['a//b.mjs']),       // Repeated separator
+    task('T4', ['a/../a/b.mjs']),   // .. segment
+  ])
+  // All must be in different phases, proving they all normalize to the same file
+  assert.deepEqual(out.map((t) => t.phase), [1, 2, 3, 4])
 })

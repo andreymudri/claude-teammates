@@ -1,20 +1,26 @@
-import { normalizePath } from './enforce.mjs'
-
-// Normalize a DECLARED path for phase-conflict detection. Declared paths are
-// authored by humans in plan files and can contain redundant segments:
-// interior ./ (a/./b.mjs), repeated separators (a//b.mjs), multiple leading ./
-// (././a.mjs), and .. references (a/../a/b.mjs). These must be resolved to their
-// canonical form to detect actual file collisions.
+// Normalize a DECLARED path for phase-conflict detection. This function is
+// normalizeDeclarePath: the declarative normalizer for human-authored plan paths.
+// Declared paths can contain redundant segments: interior ./ (a/./b.mjs), repeated
+// separators (a//b.mjs), multiple leading ./ (././a.mjs), and .. references
+// (a/../a/b.mjs). These must be resolved to their canonical form to detect actual
+// file collisions that filesetViolations would otherwise catch via enforce.mjs's
+// normalizePath.
 //
-// This is stronger than enforce.mjs's normalizePath, which is designed for git
-// output (which is already canonical). Applying this stronger normalization to git
-// output would change enforcement behaviour to fix a plan-authoring problem.
-// That is intentionally not done — normalizePath stays as-is for filesetViolations
-// and landedForFiles. This helper is specifically for comparing two things a human
-// typed in a plan.
+// Relationship to enforce.mjs's normalizePath:
+// normalizeDeclarePath = normalizePath + deterministic segment folding.
+// Critical property: if normalizePath(a) === normalizePath(b), then
+// normalizeDeclarePath(a) === normalizeDeclarePath(b). This invariant ensures no
+// path can escape phase serialization while still passing the fileset check: both
+// checks normalize via the same git-canonical form first, so any collision that
+// filesetViolations catches will also be caught here. Collapsing only over-serializes
+// (forces tasks into different phases), never under-serializes (permits concurrent
+// writes).
+//
+// normalizePath is not applied to git output because git output is already canonical.
+// This helper is specifically for comparing declared paths typed into plans by humans.
 function normalizeDeclarePath(p) {
-  // Start with normalizePath's basic cleanup: backslashes -> slashes,
-  // remove leading ./ and leading slashes
+  // Start with the same basic cleanup as enforce.mjs's normalizePath:
+  // backslashes -> slashes, remove leading ./ and leading slashes
   let path = String(p).replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '')
 
   // Split into segments and canonicalize
