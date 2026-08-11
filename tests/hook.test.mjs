@@ -11,23 +11,26 @@ const root = fileURLToPath(new URL('..', import.meta.url))
 const hookScript = fileURLToPath(new URL('../hooks/session-start', import.meta.url))
 const updateCheckScript = fileURLToPath(new URL('../hooks/update-check', import.meta.url))
 
-// Detect which bash is on PATH. On Windows:
+// The test suite's result depends on which bash is on PATH. On Windows:
 // - Git Bash (MINGW64): spawned by Git Bash shell, can access Windows paths
-// - WSL2 bash (Linux): spawned by PowerShell, cannot access Windows paths
-// This explains why the test suite result depends on which shell launched it:
-// PowerShell spawns node with WSL bash, Git Bash spawns node with MINGW bash.
-// WSL cannot read C:\... paths in any spelling (C:/, /mnt/c, etc), so tests
-// that run bash must skip when WSL is detected.
-let _bashType = null
-function detectBashType() {
-  if (_bashType !== null) return _bashType
+// - WSL2 bash (Linux kernel): spawned by PowerShell, cannot access Windows paths
+// This explains why: PowerShell resolves to WSL bash, which cannot read C:\...
+// in any spelling. The fix tests actual capability (can bash see the repo?)
+// rather than platform, so it works on any platform without a hardcoded list.
+let _bashCanAccessRepo = null
+function canBashAccessRepository() {
+  if (_bashCanAccessRepo !== null) return _bashCanAccessRepo
   try {
-    const uname = execFileSync('bash', ['-c', 'uname -s'], { encoding: 'utf8' }).trim()
-    _bashType = uname === 'Linux' ? 'wsl' : 'mingw'
+    // Test if the bash that will run tests can access the hook script path.
+    // If bash is WSL and hookScript is a Windows path, this will fail.
+    execFileSync('bash', ['-c', `test -e "${toBashPath(hookScript)}"`], {
+      timeout: 5000,
+    })
+    _bashCanAccessRepo = true
   } catch {
-    _bashType = 'mingw' // Default to mingw if detection fails
+    _bashCanAccessRepo = false
   }
-  return _bashType
+  return _bashCanAccessRepo
 }
 
 // Simple path converter for MINGW bash only - just convert backslashes to forward slashes
@@ -88,9 +91,9 @@ function withConfigDir(fn) {
 // is detected, since WSL cannot access Windows repository paths. The environment, not the
 // hook's output, determines whether tests can run.
 function hookTest(name, fn) {
-  if (detectBashType() === 'wsl') {
+  if (!canBashAccessRepository()) {
     test(name, { skip: true }, () => {
-      // Skipped: WSL bash (spawned from PowerShell) cannot access Windows repository paths
+      // Skipped: this bash cannot access the repository path (e.g., WSL cannot access Windows C:\ paths)
     })
   } else {
     test(name, fn)
@@ -301,6 +304,16 @@ test('hooks.json wires update-check async and session-start sync', async () => {
   // and no behavioural test can observe it.
   assert.equal(sync.async, false)
   assert.equal(async.async, true)
+})
+
+// Verify that hookTest runs when bash can access the repository, or skips when it cannot.
+// This test fails if hookTest is accidentally changed to always skip, which would
+// disable the entire test suite without notice.
+hookTest('(meta) hookTest mechanism works: if this skips, the fixture is broken', () => {
+  // This test will ONLY run (not skip) if canBashAccessRepository() returns true.
+  // If canBashAccessRepository() is broken or hookTest is disabled, this will either
+  // skip silently or throw an error, catching the regression.
+  assert.ok(canBashAccessRepository(), 'hookTest should not have skipped; bash can access repo')
 })
 
 // Regression: `${CLAUDE_CONFIG_DIR:-${HOME}/.claude}` looks safe but is not. Under
