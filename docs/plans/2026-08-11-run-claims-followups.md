@@ -117,6 +117,7 @@ export { mergedParentFiles, landedForFiles }
 - Modify: `skills/phase-gate/SKILL.md`
 - Test: `tests/reviews.test.mjs`
 - Test: `tests/cli.test.mjs`
+- Test: `tests/skill-contracts.test.mjs`
 
 - [ ] **Step 1:** `collectReviewResults` keeps only `lens`, `stamp` and `findings`, so a reviewer
   that reports `unableToVerify` — meaning it could not get a green baseline and probed nothing —
@@ -149,6 +150,29 @@ export { mergedParentFiles, landedForFiles }
   `unprobed` reaches the emitted `output`; and a lens carrying an EMPTY `unableToVerify` string is
   treated as verified, so the key's mere presence is not the test. Add a CLI test for the exit-4
   path. Confirm each fails before the change.
+
+- [ ] **Step 6:** Flip the two assertions in `tests/skill-contracts.test.mjs` that pin the old
+  behaviour. This file was added to the declared set by amendment after the first attempt returned
+  `blocked` on it — correctly, since the file was not its to edit.
+
+  `tests/skill-contracts.test.mjs:97` (`phase-gate documents the two claims results that are not
+  findings`) asserts the SKILL.md sentences Step 4 replaces: `/collect-reviews reads neither/i`,
+  `/reads lens, stamp and findings and ignores every other key/`, `/you must open the findings file
+  yourself/`, `/collected today as status: "pass" with zero findings/`. Rewrite them against the
+  new wording, keeping them equally checkable — an `unableToVerify` lens is refused like a missing
+  one, `collect-reviews` exits 4 naming the lens and its reason, and the `unprobed` count reaches
+  the check's `output`.
+
+  `tests/skill-contracts.test.mjs:141` (`collect-reviews really does collect an unableToVerify
+  claims review as a pass`) pins the old behaviour against the code: it asserts
+  `out.results.length === 1` and `status === 'pass'` for a fixture carrying `unableToVerify`.
+  Invert it — `out.results` empty, the lens named in `out.unverified` with its reason — and keep
+  its sibling assertions that `stamp`, `unableToVerify` and `unprobed` are absent as keys from the
+  emitted result, which remain true and are worth holding.
+
+  Rename that test so its name states what it now pins. The two flip together by construction: the
+  code assertion was written as the pin for the prose, which is why widening the file set was the
+  right resolution rather than splitting them across tasks.
 
 ### Task 4: stop the hook tests depending on which bash is on PATH
 
