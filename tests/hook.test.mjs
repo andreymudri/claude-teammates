@@ -22,13 +22,27 @@ function canBashAccessRepository() {
   if (_bashCanAccessRepo !== null) return _bashCanAccessRepo
   try {
     // Test if the bash that will run tests can access the hook script path.
-    // If bash is WSL and hookScript is a Windows path, this will fail.
-    execFileSync('bash', ['-c', `test -e "${toBashPath(hookScript)}"`], {
-      timeout: 5000,
+    // Pass the path as an argument to avoid shell injection vulnerabilities.
+    // Using 'bash -c \'test -e "$1"\' -- <path>' ensures the path is not
+    // reinterpreted by the shell, even if it contains quotes or special chars.
+    execFileSync('bash', ['-c', 'test -e "$1"', '--', toBashPath(hookScript)], {
+      timeout: 20000,
     })
     _bashCanAccessRepo = true
-  } catch {
-    _bashCanAccessRepo = false
+  } catch (err) {
+    // Distinguish between "bash ran and found the path missing" vs
+    // "the probe itself failed to run" (timeout, spawn error, signal).
+    // Exit code 1 from 'test -e' means the path was not found — skip tests.
+    // Any other error means we could not determine accessibility — fail loudly.
+    if (err.status === 1) {
+      _bashCanAccessRepo = false
+    } else {
+      // Timeout, spawn error, signal, or other failure. Failing to determine
+      // whether the test environment can run is not a passing state.
+      throw new Error(
+        `Could not determine if bash can access the repository (${err.code || err.signal || 'unknown'}): ${err.message}`
+      )
+    }
   }
   return _bashCanAccessRepo
 }
@@ -325,15 +339,12 @@ test('hooks.json wires update-check async and session-start sync', async () => {
 
 // Pin the skip mechanism: verify that the skip decision is correctly extracted and used.
 // This is a plain test (not wrapped in hookTest) so it will FAIL if the skip logic is
-// accidentally disabled, rather than skipping silently. If someone changes hookTest to
-// always skip without updating shouldSkipHookTests(), this test will catch it by failing.
-// Pin the skip mechanism by counting registrations and skips. This test runs unwrapped
-// (not via hookTest) so a change to hookTest cannot silence it. The assertion verifies
-// that the number of hook tests actually skipped matches the decision: all skipped if
-// shouldSkipHookTests() is true, none skipped if false. A failure here means hookTest
-// either (1) was changed to skip unconditionally, (2) was changed to never skip, or
-// (3) was deleted. The registered > 0 check catches deletion; the equality check catches
-// both unconditional modes.
+// accidentally disabled, rather than skipping silently. If the accessibility probe
+// times out or fails, this test will error (not silently pass), forcing the suite to
+// visibly report the failure. The assertion verifies that the number of hook tests
+// actually skipped matches the expected decision: all skipped if shouldSkipHookTests()
+// is true, none skipped if false. A mismatch means hookTest was changed to skip
+// unconditionally or never skip. The registered > 0 check catches deletion.
 test('(mechanism) hookTest skips its cases only when the repository is unreachable', () => {
   assert.ok(hookTestsRegistered > 0, 'hookTest registered nothing — the fixture is broken')
   assert.equal(hookTestsSkipped, shouldSkipHookTests() ? hookTestsRegistered : 0,
