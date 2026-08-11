@@ -8,7 +8,9 @@
 //
 // One rule shapes everything here: a lens with no file is a review that was LOST, which is a
 // different fact from a review that found nothing. Collecting it as an empty pass would hand the
-// gate the vacuous PASS that leaving the check `pending` exists to prevent.
+// gate the vacuous PASS that leaving the check `pending` exists to prevent. A lens whose file
+// says it could not verify anything is the same fact arriving by a different route, and takes the
+// same route out.
 
 // A lens name reaches the filesystem, so it is validated as a filename component and nothing
 // else — no separators, no traversal, no absolute path, non-empty.
@@ -58,11 +60,23 @@ export function reviewStale(file, expected) {
   return null
 }
 
+// A reviewer that could not verify anything says so in `unableToVerify`, and the honest answer is
+// a reason string. Any non-empty value counts — a bare `true` is still a reviewer saying it did
+// not look — but an EMPTY string is not a report of failure, so the key's presence alone is never
+// enough to refuse a lens that did its work.
+function cannotVerify(file) {
+  const why = file?.unableToVerify
+  if (typeof why === 'string') return why.trim() === '' ? null : why
+  if (!why) return null
+  return 'the reviewer reported it could not verify this lens'
+}
+
 export function collectReviewResults({ checkName = 'review', lenses = [], files = [], blockOn = ['high'], expected = null } = {}) {
   const blocking = new Set(blockOn ?? [])
   const byLens = new Map()
   const unexpected = []
   const stale = []
+  const unverified = []
   for (const file of files) {
     // Order matters: an unexpected lens is recorded and then dropped, so its findings can never
     // reach the verdict. A file naming a lens the manifest did not ask for is a mistake worth
@@ -72,20 +86,40 @@ export function collectReviewResults({ checkName = 'review', lenses = [], files 
       const why = reviewStale(file, { ...expected, lens: file.lens })
       if (why) { stale.push({ lens: file.lens, reason: why }); continue }
     }
-    byLens.set(file.lens, Array.isArray(file.findings) ? file.findings : [])
+    // A lens that reports it verified nothing is dropped here, before it can be recorded. It is
+    // the same fact as a lens with no file at all — the review did not happen — so it takes the
+    // same route out: nothing emitted, the lens named, the reason reported.
+    const why = cannotVerify(file)
+    if (why) { unverified.push({ lens: file.lens, reason: why }); continue }
+    byLens.set(file.lens, {
+      findings: Array.isArray(file.findings) ? file.findings : [],
+      unprobed: Array.isArray(file.unprobed) ? file.unprobed : [],
+    })
   }
 
   const missing = lenses.filter((lens) => !byLens.has(lens))
   // Nothing is emitted while any lens is unaccounted for. A partial result would be indis-
   // tinguishable from a complete one by the time it reached the gate, and the check would pass
-  // on the strength of the lenses that happened to survive.
-  if (missing.length > 0) return { results: [], missing, unexpected, stale }
+  // on the strength of the lenses that happened to survive. An unverified lens is unaccounted
+  // for in exactly that sense, and is named separately so the caller can say why.
+  if (missing.length > 0 || unverified.length > 0) return { results: [], missing, unexpected, stale, unverified }
 
   const all = []
   for (const lens of lenses) {
-    for (const finding of byLens.get(lens)) all.push({ ...finding, lens })
+    for (const finding of byLens.get(lens).findings) all.push({ ...finding, lens })
   }
   const blockers = all.filter((f) => blocking.has(f?.severity))
+
+  // What the review did NOT reach, carried to where the verdict is read. A lens bounded by its
+  // mutation cap that got to 8 of 40 claims emits the same status as an exhaustive one, so the
+  // status alone cannot carry this and the operator would have to open the findings file.
+  const bounded = lenses
+    .map((lens) => ({ lens, count: byLens.get(lens).unprobed.length }))
+    .filter((u) => u.count > 0)
+  const boundedNote = bounded.length === 0
+    ? ''
+    : `; ${bounded.reduce((n, u) => n + u.count, 0)} enumerated claim(s) NOT reached`
+      + ` (${bounded.map((u) => `${u.lens}: ${u.count}`).join(', ')}) — this review is bounded, not exhaustive`
 
   return {
     results: [{
@@ -96,12 +130,13 @@ export function collectReviewResults({ checkName = 'review', lenses = [], files 
       // Provenance: recovered from the reviewers' files rather than from their returned
       // responses. It does not change the verdict; it records that this review was nearly lost.
       source: 'file',
-      output: blockers.length > 0
+      output: (blockers.length > 0
         ? `${blockers.length} finding(s) at a blocking severity, recovered from the reviewers' findings files`
-        : `${all.length} finding(s), none blocking, recovered from the reviewers' findings files`,
+        : `${all.length} finding(s), none blocking, recovered from the reviewers' findings files`) + boundedNote,
     }],
     missing,
     unexpected,
     stale,
+    unverified,
   }
 }

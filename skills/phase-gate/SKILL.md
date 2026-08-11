@@ -86,17 +86,21 @@ those you execute:
   either to make the code deliver the claim or to correct the claim. Weakening the test is not a
   fix.
 
-  A `claims` reviewer also writes two keys that are not findings, and `collect-reviews` reads
-  neither: `collectReviewResults` reads `lens`, `stamp` and `findings` and ignores every other
-  key. It does not *keep* all three — `stamp` is consumed to reject a stale file and then dropped
-  from the emitted result, exactly like the two keys below. So the CLI cannot tell you about them,
-  and you must open the findings file yourself before treating a clean claims lens as a clean one.
+  A `claims` reviewer also writes two keys that are not findings, and `collect-reviews` acts on
+  both: `collectReviewResults` reads `lens`, `stamp`, `findings`, `unableToVerify` and `unprobed`,
+  and ignores every other key. It does not *keep* all of them — `stamp` is consumed to reject a
+  stale file and then dropped from the emitted result, and neither key below survives into the
+  result as a key either; what survives of `unprobed` is a count in the check's `output`.
 
   - `unableToVerify` means the reviewer could not build the phase's tree or get a green baseline
-    in its scratch worktree, so it probed nothing. It is collected today as `status: "pass"` with
-    zero findings: a lens that verified nothing is recorded as a lens that found nothing.
+    in its scratch worktree, so it probed nothing. A non-empty `unableToVerify` is refused exactly
+    like a lens with no file at all: nothing is emitted, `collect-reviews` names the lens and its
+    reason and exits 4. Respawn that lens; do not record a pass for it. An empty string is not a
+    report of failure and collects normally.
   - `unprobed` lists claims it enumerated and did not reach. The lens is bounded by its mutation
-    cap, and a review that reached 8 of 40 claims collects identically to an exhaustive clean one.
+    cap, and a review that reached 8 of 40 claims would otherwise collect identically to an
+    exhaustive clean one, so the count is surfaced in the emitted check's `output` — for a passing
+    and a failing verdict alike. The list itself is only in the findings file.
 - **mcp** — call the declared tool and compare against `passWhen`. If the server is not
   connected and the check is `optional`, record `skip` and say so out loud. A missing optional
   server is never a silent pass.

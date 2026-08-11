@@ -173,6 +173,97 @@ test('a stale lens is reported and never contributes a pass', () => {
   assert.match(out.stale[0].reason, /old/)
 })
 
+// A `claims` reviewer that could not get a green baseline probed nothing, and says so in
+// `unableToVerify`. Collected as a pass it becomes indistinguishable from a lens that looked at
+// everything and found nothing — the same vacuous PASS a missing file is refused for.
+test('a lens reporting unableToVerify emits nothing and is named with its reason', () => {
+  const out = collectReviewResults({
+    checkName: 'review',
+    lenses: ['claims', 'correctness'],
+    files: [
+      { lens: 'claims', findings: [], unableToVerify: 'the baseline suite was red' },
+      { lens: 'correctness', findings: [] },
+    ],
+    blockOn: ['high'],
+  })
+  assert.deepEqual(out.results, [])
+  assert.equal(out.unverified.length, 1)
+  assert.equal(out.unverified[0].lens, 'claims')
+  assert.match(out.unverified[0].reason, /baseline suite was red/)
+  // Unaccounted for, exactly like a lens whose file never arrived.
+  assert.deepEqual(out.missing, ['claims'])
+})
+
+// The control for the test above: the refusal must be caused by the key, not by anything else
+// about the fixture. Without this, deleting `unableToVerify` from the reason test would still
+// leave it green if the file were being rejected for some unrelated reason.
+test('the same lens file without unableToVerify collects normally', () => {
+  const out = collectReviewResults({
+    checkName: 'review',
+    lenses: ['claims', 'correctness'],
+    files: [
+      { lens: 'claims', findings: [] },
+      { lens: 'correctness', findings: [] },
+    ],
+    blockOn: ['high'],
+  })
+  assert.deepEqual(out.unverified, [])
+  assert.equal(out.results.length, 1)
+  assert.equal(out.results[0].status, 'pass')
+})
+
+// The mere presence of the key is not the test: a reviewer that verified everything and wrote an
+// empty string has not reported a failure to verify, and refusing it would cost a real review.
+test('an empty unableToVerify string is treated as a verified lens', () => {
+  const out = collectReviewResults({
+    checkName: 'review',
+    lenses: ['claims'],
+    files: [{ lens: 'claims', findings: [], unableToVerify: '' }],
+    blockOn: ['high'],
+  })
+  assert.deepEqual(out.unverified, [])
+  assert.equal(out.results.length, 1)
+  assert.equal(out.results[0].status, 'pass')
+})
+
+// A bounded review must not read as an exhaustive one where the operator actually looks: the
+// count belongs in the check output, not only in a file they would have to open.
+test('unprobed claims reach the emitted output with their count and lens', () => {
+  const out = collectReviewResults({
+    checkName: 'review',
+    lenses: ['claims'],
+    files: [{ lens: 'claims', findings: [], unprobed: ['a.mjs:1', 'b.mjs:2', 'c.mjs:3'] }],
+    blockOn: ['high'],
+  })
+  assert.equal(out.results[0].status, 'pass')
+  assert.match(out.results[0].output, /3/)
+  assert.match(out.results[0].output, /claims/)
+  assert.match(out.results[0].output, /not reached/i)
+})
+
+// The same sentence has to survive a failing verdict, or the one review most worth bounding —
+// the one that already found a blocker — is the one that reads as exhaustive.
+test('unprobed reaches the output of a failing check too', () => {
+  const out = collectReviewResults({
+    checkName: 'review',
+    lenses: ['claims'],
+    files: [{ lens: 'claims', findings: findings('high'), unprobed: ['a.mjs:1'] }],
+    blockOn: ['high'],
+  })
+  assert.equal(out.results[0].status, 'fail')
+  assert.match(out.results[0].output, /not reached/i)
+})
+
+// No unprobed claims must not produce the sentence at all, or "bounded" would be printed over
+// every exhaustive review and stop meaning anything.
+test('a lens with nothing unprobed says nothing about being bounded', () => {
+  const out = collectReviewResults({
+    checkName: 'review', lenses: ['claims'],
+    files: [{ lens: 'claims', findings: [], unprobed: [] }], blockOn: ['high'],
+  })
+  assert.doesNotMatch(out.results[0].output, /not reached/i)
+})
+
 test('with no expected stamp supplied, a file without one is still accepted', () => {
   const out = collectReviewResults({
     checkName: 'review', lenses: ['correctness'],

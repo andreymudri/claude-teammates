@@ -374,6 +374,58 @@ test('collect-reviews refuses to emit a results file while a lens is missing', a
   })
 })
 
+// The operator's response is the same as for a lost review — respawn that lens — so the exit
+// code is the same 4, and a results file naming a pass is never printed.
+test('collect-reviews refuses a lens that reports it could not verify anything', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const stampFor = await withStampedPhase(root, planPath, io, g)
+    const config = {
+      lens: ['correctness', 'claims'],
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+    }
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(config), 'utf8')
+    await writeReviewFile(root, 'r1', '1-correctness.json', { stamp: stampFor('correctness'), findings: [] })
+    await writeReviewFile(root, 'r1', '1-claims.json', {
+      stamp: stampFor('claims'),
+      findings: [],
+      unableToVerify: 'the baseline suite was red in the scratch worktree',
+    })
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 4)
+    const out = lines.join('\n')
+    assert.match(out, /claims/)
+    assert.match(out, /baseline suite was red/)
+    assert.doesNotMatch(out, /"status": "pass"/)
+  })
+})
+
+// The count has to survive the trip through the CLI, which builds the `files` array itself: the
+// module can carry `unprobed` into the output and still show the operator nothing if the command
+// never reads the key off the file.
+test('collect-reviews carries unprobed claims through to the emitted check output', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const stampFor = await withStampedPhase(root, planPath, io, g)
+    const config = {
+      lens: ['claims'],
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+    }
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(config), 'utf8')
+    await writeReviewFile(root, 'r1', '1-claims.json', {
+      stamp: stampFor('claims'),
+      findings: [],
+      unprobed: ['a.mjs:1', 'a.mjs:2'],
+    })
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 0)
+    const parsed = JSON.parse(lines.join('\n'))
+    assert.equal(parsed.results[0].status, 'pass')
+    assert.match(parsed.results[0].output, /2/)
+    assert.match(parsed.results[0].output, /not reached/i)
+  })
+})
+
 test('collect-reviews reports a findings file that is not readable JSON instead of skipping it', async () => {
   await withRepo(async ({ root, io, lines }) => {
     const config = {

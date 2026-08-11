@@ -2443,7 +2443,16 @@ export async function runCli(argv, io = { out: console.log }) {
         if (!Array.isArray(found)) { unreadable.push(name); continue }
         // The stamp travels with the findings. A file that carries none is not "probably
         // current" — `reviewStale` refuses it, which is the whole point of stamping.
-        files.push({ lens, findings: found, stamp: Array.isArray(parsed) ? undefined : parsed?.stamp })
+        // `unableToVerify` and `unprobed` travel with the findings too: one decides whether this
+        // lens is a review at all, the other bounds it. Read off the wrapped form only — a bare
+        // array carries findings and nothing else.
+        files.push({
+          lens,
+          findings: found,
+          stamp: Array.isArray(parsed) ? undefined : parsed?.stamp,
+          unableToVerify: Array.isArray(parsed) ? undefined : parsed?.unableToVerify,
+          unprobed: Array.isArray(parsed) ? undefined : parsed?.unprobed,
+        })
       } catch (err) {
         // ENOENT is a missing lens, reported below by name. Anything else is a file that
         // exists and cannot be trusted, which must never be read as "no findings".
@@ -2494,6 +2503,15 @@ export async function runCli(argv, io = { out: console.log }) {
       // phase does not have. Recording a pass on it would be a verdict about another tree.
       for (const s of collected.stale) {
         io.out(`stale findings for lens ${s.lens}: ${s.reason} — respawn that review rather than recording a pass`)
+      }
+      return 4
+    }
+    if (collected.unverified.length > 0) {
+      // Reported before `missing`, which this lens also appears in, so the operator is told the
+      // reason rather than only that a file was absent — it was not. The response is the one a
+      // lost review gets: respawn that lens, never record a pass for it.
+      for (const u of collected.unverified) {
+        io.out(`lens ${u.lens} could not verify anything: ${u.reason} — that review did not happen; respawn that lens rather than recording a pass`)
       }
       return 4
     }
