@@ -99,12 +99,12 @@ test('phase-gate documents the two claims results that are not findings', async 
   const section = doc.section('Finish the pending checks')
   assertStatement(
     section,
-    /collect-reviews reads neither/i,
-    'phase-gate must say collect-reviews does not read either key',
+    /collect-reviews acts on both/i,
+    'phase-gate must say collect-reviews acts on both keys, since it now does',
   )
   assertStatement(
     section,
-    /reads `?lens`?, `?stamp`? and `?findings`? and ignores every other key/i,
+    /reads `?lens`?, `?stamp`?, `?findings`?, `?unableToVerify`? and `?unprobed`?, and ignores every other key/i,
     'phase-gate must say what collectReviewResults reads, in the verb that is true of it',
   )
   assertStatement(
@@ -114,35 +114,52 @@ test('phase-gate documents the two claims results that are not findings', async 
   )
   assertStatement(
     section,
-    /you must open the findings file yourself/i,
-    'phase-gate must say who has to read the two keys, since the CLI does not',
-  )
-  assertStatement(
-    section,
     /unableToVerify means the reviewer could not build the phase.s tree or get a green baseline/i,
     'phase-gate must say what unableToVerify means',
   )
+  // The replacement for "collected today as a pass". The refusal is the whole point of the
+  // change, so the skill has to name all three of its observable parts — refused like a missing
+  // lens, nothing emitted, exit 4 naming the lens and its reason — or an orchestrator reading
+  // only this section would still not know what to do when it happens.
   assertStatement(
     section,
-    /collected today as `?status: "pass"`? with zero findings/i,
-    'phase-gate must say how an unableToVerify claims review is actually collected',
+    /refused exactly like a lens with no file at all/i,
+    'phase-gate must say an unableToVerify lens is refused the way a missing one is',
+  )
+  assertStatement(
+    section,
+    /nothing is emitted, `?collect-reviews`? names the lens and its reason and exits 4/i,
+    'phase-gate must say what the refusal looks like from the CLI, including the exit code',
+  )
+  // The empty-string carve-out is behaviour a reader would otherwise have to guess at, and
+  // guessing it the other way would have them respawn a lens that did its work.
+  assertStatement(
+    section,
+    /an empty string is not a report of failure and collects normally/i,
+    'phase-gate must say that the key\'s mere presence is not what refuses a lens',
   )
   assertStatement(
     section,
     /unprobed lists claims it enumerated and did not reach/i,
     'phase-gate must say what unprobed lists',
   )
+  assertStatement(
+    section,
+    /the count is surfaced in the emitted check.s `?output`?/i,
+    'phase-gate must say where unprobed reaches the operator, now that it does',
+  )
 })
 
-// The statement above is a claim about code, so it is pinned against the code rather than only
-// against itself. If `collectReviewResults` ever starts reading `unableToVerify`, this fails and
-// the skill sentence saying it does not has to be rewritten — which is the direction of drift
-// that produced this finding in the first place.
-test('collect-reviews really does collect an unableToVerify claims review as a pass', async () => {
-  // The stamp has to EXIST for "it is dropped" to be an assertion about anything. Without it the
-  // `'stamp' in result` check below passed whether or not the code kept the key — which is this
-  // run's signature defect committed one level up, inside the test written to close an instance
-  // of it. `expected` matches, so the file is current and reaches the result-building path.
+// The statements above are claims about code, so they are pinned against the code rather than
+// only against themselves. If `collectReviewResults` ever stops refusing an `unableToVerify`
+// lens, this fails and the skill sentences saying it does have to be rewritten — which is the
+// direction of drift that produced this finding in the first place.
+test('collect-reviews really does refuse an unableToVerify claims review rather than passing it', async () => {
+  // The stamp has to EXIST for the refusal to be an assertion about the key rather than about
+  // staleness. Without it the file would be rejected before `unableToVerify` was ever consulted,
+  // and the test would pass whatever the code did with that key — which is this project's
+  // signature defect committed one level up, inside the test written to close an instance of it.
+  // `expected` matches, so the file is current and reaches the point where the key decides.
   const stamp = { phase: '1', lens: 'claims', branches: ['teammates/r1/T1@abc123'] }
   const out = collectReviewResults({
     lenses: ['claims'],
@@ -150,13 +167,33 @@ test('collect-reviews really does collect an unableToVerify claims review as a p
     files: [{ lens: 'claims', stamp, findings: [], unableToVerify: 'the baseline suite was red', unprobed: ['a.mjs:1'] }],
   })
   assert.deepEqual(out.stale, [], 'the fixture must not be rejected as stale, or it proves nothing')
+  assert.deepEqual(out.results, [], 'a lens that verified nothing must emit no result at all')
+  assert.deepEqual(out.unverified, [{ lens: 'claims', reason: 'the baseline suite was red' }])
+  // Unaccounted for in the same sense a lens with no file is, which is what the skill says.
+  assert.deepEqual(out.missing, ['claims'])
+})
+
+// The other half of the same contract, and the reason the fixture above proves anything: with the
+// one key removed, the identical file collects. Without this, "refused because of
+// `unableToVerify`" would be indistinguishable from "refused for some unrelated reason", and the
+// three key-absence assertions below would have nowhere left to live once the result went away.
+test('the same claims file without unableToVerify collects, and keeps none of the three read keys', async () => {
+  const stamp = { phase: '1', lens: 'claims', branches: ['teammates/r1/T1@abc123'] }
+  const out = collectReviewResults({
+    lenses: ['claims'],
+    expected: { phase: '1', branches: ['teammates/r1/T1@abc123'] },
+    files: [{ lens: 'claims', stamp, findings: [], unprobed: ['a.mjs:1'] }],
+  })
+  assert.deepEqual(out.stale, [], 'the fixture must not be rejected as stale, or it proves nothing')
+  assert.deepEqual(out.unverified, [])
   assert.equal(out.results.length, 1)
   assert.equal(out.results[0].status, 'pass')
-  assert.deepEqual(out.results[0].findings, [])
-  // Not merely absent from the verdict — absent from the emitted result entirely, so nothing
-  // downstream of the CLI can recover it either.
+  // Read, and then not kept: neither key survives into the emitted result as a key, so nothing
+  // downstream of the CLI can recover the list. What survives of `unprobed` is a count in
+  // `output`, which is what the skill says and is asserted here rather than merely described.
   assert.equal('unableToVerify' in out.results[0], false)
   assert.equal('unprobed' in out.results[0], false)
+  assert.match(out.results[0].output, /1 enumerated claim\(s\) NOT reached/)
   // `stamp` is read — `reviewStale` consumes it — and then dropped from the result just like the
   // two keys above. The skill said "keeps lens, stamp and findings", which overstated by one key
   // in the very sentence written to correct an overstatement. This is what makes the corrected
