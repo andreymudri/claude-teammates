@@ -11,12 +11,12 @@ const root = fileURLToPath(new URL('..', import.meta.url))
 const hookScript = fileURLToPath(new URL('../hooks/session-start', import.meta.url))
 const updateCheckScript = fileURLToPath(new URL('../hooks/update-check', import.meta.url))
 
-// The test suite's result depends on which bash is on PATH. On Windows:
-// - Git Bash (MINGW64): spawned by Git Bash shell, can access Windows paths
-// - WSL2 bash (Linux kernel): spawned by PowerShell, cannot access Windows paths
-// This explains why: PowerShell resolves to WSL bash, which cannot read C:\...
-// in any spelling. The fix tests actual capability (can bash see the repo?)
-// rather than platform, so it works on any platform without a hardcoded list.
+// The test suite result depends on which bash is on PATH. On Windows, PowerShell
+// spawns WSL2 bash (Linux kernel), while Git Bash spawns MINGW64 bash (Windows-native).
+// WSL bash cannot access Windows absolute paths. This explains why an accessibility
+// probe is needed: the same tests must pass identically on both shells. The probe
+// detects actual capability (can bash access the repo root?) rather than assuming
+// based on platform, so it works everywhere without hardcoded platform logic.
 let _probeResult = null  // 'reachable' | 'unreachable' | null (exposed for mechanism test)
 function canBashAccessRepository() {
   if (_probeResult !== null) return _probeResult === 'reachable'
@@ -77,7 +77,8 @@ function shouldSkipHookTests() {
 let hookTestsRegistered = 0
 let hookTestsSkipped = 0
 
-// Simple path converter for MINGW bash only - just convert backslashes to forward slashes
+// Convert backslashes to forward slashes for bash. Bash on Windows (both MINGW and WSL)
+// interprets forward slashes as path separators; backslashes are literal characters.
 function toBashPath(windowsPath) {
   return windowsPath.replace(/\\/g, '/')
 }
@@ -131,12 +132,11 @@ function withConfigDir(fn) {
   }
 }
 
-// Wrapper for tests that depend on the hook working correctly. Skips tests when WSL bash
-// is detected, since WSL cannot access Windows repository paths. The environment, not the
-// hook's output, determines whether tests can run.
-// Wrapper for tests that depend on the hook working correctly. Skips tests when
-// bash cannot access the repository (e.g., WSL bash cannot access Windows paths).
-// Increments counters so a plain test can verify that the skip decision is obeyed.
+// Wrapper for tests that depend on the hook working correctly. Probes whether bash
+// can access the repository root and requires positive evidence (bash prints TM_OK token).
+// Skips tests only if the probe verifies the repository is unreachable. The environment,
+// not the hook's output, determines whether tests can run. Increments counters so a plain
+// test can verify that the skip decision matches the probe's result.
 function hookTest(name, fn) {
   hookTestsRegistered += 1
   if (shouldSkipHookTests()) {
