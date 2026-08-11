@@ -141,7 +141,7 @@ function checkResult(check, status, output) {
 // keeping only the first` — because "does some merge naming this sha carry a declared file" and
 // "does the declared set intersect the union of every merge naming this sha" are the same
 // existence claim: a file is in the union exactly when it is in at least one member set.
-async function mergedParentFiles(git, { anchorSha, runSha }) {
+export async function mergedParentFiles(git, { anchorSha, runSha }) {
   const commits = await git.commitsBetween({ from: anchorSha, to: runSha })
   const inRange = new Set(commits)
   const filesBySha = new Map()
@@ -223,7 +223,7 @@ async function mergedParentFiles(git, { anchorSha, runSha }) {
 //     merged under its own name`.
 //   - A legitimately merged branch: the merge naming it carried exactly its own declared files.
 //     True. `a compliant two-phase run passes phase 1 ... then derives and passes phase 2`.
-function landedForFiles(filesBySha, sha, declaredFiles) {
+export function landedForFiles(filesBySha, sha, declaredFiles) {
   const carried = filesBySha.get(sha)
   if (!carried) return false
   const declared = new Set((declaredFiles ?? []).map(normalizePath))
@@ -311,6 +311,23 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
       //     at T1's own merged tip; verdict PASS, `b.mjs` never exists. Recorded in the spec's
       //     "Not defended against" list as sibling-tip self-integration; pinned as a LIMIT in
       //     `tests/adversarial.test.mjs`.
+      //   - `ownWorkBase`: a fix round that re-points an ALREADY-INTEGRATED task's branch onto
+      //     the run branch's own current tip — exactly what the brief's own recommended
+      //     `git checkout -B teammates/<runId>/<taskId> <run branch>` step does — reads as
+      //     having done no work, even though the task's files are genuinely already on the run
+      //     branch. `sha` then equals `runSha`, `forkPoint` above also equals `sha` (the
+      //     "already on the run branch" branch is taken), and `landedForFiles` looks the sha up
+      //     in `mergedFiles`, which is keyed only by the NON-FIRST parents `mergedParentFiles`
+      //     visits while walking the chain — the run tip itself is never a value indexed there
+      //     unless some LATER merge happens to name it as a secondary parent. Executed: T1's
+      //     branch is merged `--no-ff` into `run`, then re-pointed with `git branch -f
+      //     teammates/r1/T1 run` (the same tip `checkout -B` would produce); `deriveContext`
+      //     then reads T1 as not integrated, `currentPhase` reopens phase 1, and
+      //     `runFilesetCheck` fails it with "contributes no file changes past its fork point"
+      //     for a task that is genuinely, fully landed. The declared-files predicate does not
+      //     resolve this — it was built to tell a parked ref from a merged one by what a merge
+      //     carried, and a ref sitting exactly at the run tip is not named by any merge at all.
+      //     Not closed by this change; still open.
       states.push(landedForFiles(mergedFiles, sha, t.files) && await git.isAncestor(sha, runSha))
     }
     if (states.length > 0 && states.every(Boolean)) integratedPhases.push(phase)
