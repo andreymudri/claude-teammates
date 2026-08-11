@@ -40,6 +40,13 @@ function shouldSkipHookTests() {
   return !canBashAccessRepository()
 }
 
+// Counters to pin the skip mechanism: track how many hookTests are registered
+// and how many are actually skipped. A plain test at the end verifies these match
+// the expected values, failing if hookTest is accidentally changed to skip
+// unconditionally or never skip.
+let hookTestsRegistered = 0
+let hookTestsSkipped = 0
+
 // Simple path converter for MINGW bash only - just convert backslashes to forward slashes
 function toBashPath(windowsPath) {
   return windowsPath.replace(/\\/g, '/')
@@ -99,13 +106,12 @@ function withConfigDir(fn) {
 // hook's output, determines whether tests can run.
 // Wrapper for tests that depend on the hook working correctly. Skips tests when
 // bash cannot access the repository (e.g., WSL bash cannot access Windows paths).
-// Uses the extracted shouldSkipHookTests() decision so it can be pinned with a
-// plain test that fails if this logic is accidentally broken.
+// Increments counters so a plain test can verify that the skip decision is obeyed.
 function hookTest(name, fn) {
+  hookTestsRegistered += 1
   if (shouldSkipHookTests()) {
-    test(name, { skip: true }, () => {
-      // Skipped: this bash cannot access the repository path (e.g., WSL cannot access Windows C:\ paths)
-    })
+    hookTestsSkipped += 1
+    test(name, { skip: 'bash cannot access the repository path' }, () => {})
   } else {
     test(name, fn)
   }
@@ -321,13 +327,18 @@ test('hooks.json wires update-check async and session-start sync', async () => {
 // This is a plain test (not wrapped in hookTest) so it will FAIL if the skip logic is
 // accidentally disabled, rather than skipping silently. If someone changes hookTest to
 // always skip without updating shouldSkipHookTests(), this test will catch it by failing.
-test('(mechanism) shouldSkipHookTests matches repository accessibility', () => {
-  // The decision to skip should be exactly the inverse of bash's ability to access the repo.
-  // On Git Bash: canBashAccessRepository returns true, so shouldSkipHookTests returns false (run tests)
-  // On WSL bash: canBashAccessRepository returns false, so shouldSkipHookTests returns true (skip tests)
-  // On native Linux CI: canBashAccessRepository returns true, so shouldSkipHookTests returns false (run tests)
-  assert.equal(shouldSkipHookTests(), !canBashAccessRepository(),
-    'Skip decision must be exactly inverse of repository accessibility')
+// Pin the skip mechanism by counting registrations and skips. This test runs unwrapped
+// (not via hookTest) so a change to hookTest cannot silence it. The assertion verifies
+// that the number of hook tests actually skipped matches the decision: all skipped if
+// shouldSkipHookTests() is true, none skipped if false. A failure here means hookTest
+// either (1) was changed to skip unconditionally, (2) was changed to never skip, or
+// (3) was deleted. The registered > 0 check catches deletion; the equality check catches
+// both unconditional modes.
+test('(mechanism) hookTest skips its cases only when the repository is unreachable', () => {
+  assert.ok(hookTestsRegistered > 0, 'hookTest registered nothing — the fixture is broken')
+  assert.equal(hookTestsSkipped, shouldSkipHookTests() ? hookTestsRegistered : 0,
+    `hookTest: skipped ${hookTestsSkipped} of ${hookTestsRegistered} tests, ` +
+    `expected ${shouldSkipHookTests() ? hookTestsRegistered : 0}`)
 })
 
 // Regression: `${CLAUDE_CONFIG_DIR:-${HOME}/.claude}` looks safe but is not. Under
