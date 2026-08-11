@@ -102,7 +102,11 @@ those you execute:
   - `unprobed` lists claims it enumerated and did not reach. The lens is bounded by its mutation
     cap, and a review that reached 8 of 40 claims would otherwise collect identically to an
     exhaustive clean one, so the count is surfaced in the emitted check's `output` — for a passing
-    and a failing verdict alike. The list itself is only in the findings file.
+    and a failing verdict alike. The list itself is only in the findings file. Like the key above
+    it is read only in its documented shape, a list: written as a number, a string, an object or a
+    boolean it is reported as a file that cannot be read rather than counted as nothing, because a
+    review that says it reached a fifth of its claims must never emit a result with no bounded
+    note. An empty list is a review that reached everything it enumerated, and collects silently.
 - **mcp** — call the declared tool and compare against `passWhen`. If the server is not
   connected and the check is `optional`, record `skip` and say so out loud. A missing optional
   server is never a silent pass.

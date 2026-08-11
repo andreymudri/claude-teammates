@@ -60,31 +60,60 @@ export function reviewStale(file, expected) {
   return null
 }
 
-// A reviewer that could not verify anything says so in `unableToVerify`, and the documented shape
-// of that answer is a reason string. This reads exactly that shape, and returns one of three
-// facts, because there are three to tell apart:
-//
-//   `{}`          — the reviewer made no report of failure: the key is absent, `null`, or a
-//                   string that is empty or whitespace only. The lens collects. The key's mere
-//                   presence is never what refuses a review.
-//   `{reason}`    — a non-empty string: the reviewer says it verified nothing. Refused, and the
-//                   string is what the operator is told.
-//   `{malformed}` — any other type. Refused on its own route rather than guessed at.
-//
-// The third route exists because BOTH guesses are wrong for a file somebody plausibly writes.
-// Reading a non-string as a report would refuse `unableToVerify: []` — a reviewer that did full
-// work and wrote an empty list — and tell the operator to respawn a review that already happened.
-// Reading it as absent would collect `unableToVerify: true` as a clean pass, which is the exact
-// vacuous PASS this whole route exists to remove. So the shape is reported instead, and the fix
-// is to the file rather than to the review. This follows the rule the command already applies one
-// level up: a findings file that exists and cannot be parsed is not an empty review.
-function readUnableToVerify(file) {
-  const why = file?.unableToVerify
-  if (why === undefined || why === null) return {}
-  if (typeof why === 'string') return why.trim() === '' ? {} : { reason: why }
-  const shape = Array.isArray(why) ? 'an array' : `a ${typeof why}`
-  return { malformed: `unableToVerify is ${shape}, and this command reads it only as a reason string` }
+// Names the shape a value actually has, for a sentence an operator reads. The article is picked
+// rather than hardcoded, because `typeof` yields both consonant- and vowel-initial words and
+// "a object" is the kind of wrong that makes a reader doubt the rest of the message.
+function shapeOf(value) {
+  if (Array.isArray(value)) return 'an array'
+  const t = typeof value
+  return /^[aeiou]/.test(t) ? `an ${t}` : `a ${t}`
 }
+
+// The two keys a `claims` reviewer writes beside its findings are read by ONE rule, because they
+// fail the same way and must not be given opposite answers. Each returns one of three facts:
+//
+//   `{}`          — the reviewer said nothing: the key is absent, `null`, or present but empty
+//                   (an empty or whitespace-only string, an empty list). The lens collects. The
+//                   key's mere presence is never what refuses a review.
+//   `{value}`     — the documented shape, non-empty. The caller decides what it means.
+//   `{malformed}` — some other type. Refused on its own route rather than guessed at.
+//
+// That third route exists because BOTH guesses are wrong for a file somebody plausibly writes.
+// Reading a wrong-typed value as a report would refuse `unableToVerify: []` — a reviewer that did
+// full work and wrote an empty list — and send the operator to respawn a review that already
+// happened. Reading it as absent would collect `unableToVerify: true` as a clean pass, the exact
+// vacuous PASS this route exists to remove, and would silently drop `unprobed: 32` — a reviewer
+// that counted rather than listed — so a review that reached a fifth of its claims would emit no
+// bounded note and read as exhaustive. So the shape is reported instead, and the fix is to the
+// file rather than to the review. This follows the rule the command already applies one level up:
+// a findings file that exists and cannot be parsed is not an empty review.
+//
+// Emptiness is checked only AFTER the type matches, so the rule stays a rule about type: an empty
+// value of the right shape collects, a value of the wrong shape is refused however empty it looks.
+function readKey(file, key, { type, isEmpty, expected }) {
+  const raw = file?.[key]
+  if (raw === undefined || raw === null) return {}
+  const rightShape = type === 'array' ? Array.isArray(raw) : typeof raw === type && !Array.isArray(raw)
+  if (!rightShape) return { malformed: `${key} is ${shapeOf(raw)}, and this command reads it only as ${expected}` }
+  return isEmpty(raw) ? {} : { value: raw }
+}
+
+// `unableToVerify` is the reviewer saying it verified nothing, and the answer is a reason string.
+const readUnableToVerify = (file) => readKey(file, 'unableToVerify', {
+  type: 'string',
+  isEmpty: (s) => s.trim() === '',
+  expected: 'a reason string',
+})
+
+// `unprobed` is what the review enumerated and did not reach. Any array is accepted and its
+// LENGTH is the whole artefact — the list itself is never emitted — so element type is not
+// load-bearing here, and refusing an array of objects would discard a complete review over a
+// spelling that changes nothing about the count.
+const readUnprobed = (file) => readKey(file, 'unprobed', {
+  type: 'array',
+  isEmpty: (a) => a.length === 0,
+  expected: 'a list of the claims it did not reach',
+})
 
 export function collectReviewResults({ checkName = 'review', lenses = [], files = [], blockOn = ['high'], expected = null } = {}) {
   const blocking = new Set(blockOn ?? [])
@@ -108,11 +137,16 @@ export function collectReviewResults({ checkName = 'review', lenses = [], files 
     // shape this code does not read is a third fact and gets a third route; see
     // `readUnableToVerify` for why it is neither of the other two.
     const verify = readUnableToVerify(file)
-    if (verify.malformed) { malformed.push({ lens: file.lens, reason: verify.malformed }); continue }
-    if (verify.reason) { unverified.push({ lens: file.lens, reason: verify.reason }); continue }
+    const bounds = readUnprobed(file)
+    // Both keys are reported at once when both are wrong, for the reason the CLI reports every
+    // unaccounted lens before it returns: fixing one and re-running only to meet the other costs
+    // a round trip that the command already had the facts to avoid.
+    const badShapes = [verify.malformed, bounds.malformed].filter(Boolean)
+    if (badShapes.length > 0) { malformed.push({ lens: file.lens, reason: badShapes.join('; ') }); continue }
+    if (verify.value) { unverified.push({ lens: file.lens, reason: verify.value }); continue }
     byLens.set(file.lens, {
       findings: Array.isArray(file.findings) ? file.findings : [],
-      unprobed: Array.isArray(file.unprobed) ? file.unprobed : [],
+      unprobed: bounds.value ?? [],
     })
   }
 

@@ -161,6 +161,19 @@ test('phase-gate documents the two claims results that are not findings', async 
     /the count is surfaced in the emitted check.s `?output`?/i,
     'phase-gate must say where unprobed reaches the operator, now that it does',
   )
+  // The two keys fail the same way, so the section must not document a shape rule for one and
+  // leave the other looking permissive — that asymmetry is what let `unprobed: 32` be counted as
+  // nothing while `unableToVerify: 32` was refused.
+  assertStatement(
+    section,
+    /it is read only in its documented shape, a list/i,
+    'phase-gate must say unprobed is read only as a list, as it says of unableToVerify',
+  )
+  assertStatement(
+    section,
+    /an empty list is a review that reached everything it enumerated, and collects silently/i,
+    'phase-gate must say an empty unprobed is not the malformed case',
+  )
 })
 
 // The statements above are claims about code, so they are pinned against the code rather than

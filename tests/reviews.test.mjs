@@ -292,6 +292,84 @@ test('a whitespace-only unableToVerify collects and is not malformed either', ()
   assert.equal(out.results.length, 1)
 })
 
+// The argument for `unableToVerify` above, applied to the field next door. A reviewer that
+// COUNTED rather than listed writes `unprobed: 32`; coerced to `[]` that drops the bounded note,
+// and a review that reached a fifth of its claims collects as an unannotated clean pass — while
+// the skill tells the operator `unprobed` is read and surfaced. Same class as a malformed
+// `unableToVerify`, so it takes the same route rather than the opposite one.
+test('an unprobed that is not an array is reported as malformed, not coerced to empty', () => {
+  for (const value of [32, 'a.mjs:1', true, { count: 2 }]) {
+    const out = collectReviewResults({
+      checkName: 'review',
+      lenses: ['claims'],
+      files: [{ lens: 'claims', findings: [], unprobed: value }],
+      blockOn: ['high'],
+    })
+    const shown = JSON.stringify(value)
+    assert.deepEqual(out.results, [], `${shown} must not emit a result`)
+    assert.equal(out.malformed.length, 1, `${shown} must be reported as malformed`)
+    assert.equal(out.malformed[0].lens, 'claims')
+    assert.match(out.malformed[0].reason, /unprobed/)
+  }
+})
+
+// The same boundary pair pinned for `unableToVerify`, pinned here too: the rule is about TYPE, so
+// an empty array must stay on the collecting side. A rule that decayed into reading emptiness
+// would still pass the malformed cases above while silently refusing a complete review.
+test('an empty unprobed array collects silently, and a non-array is refused', () => {
+  const collect = (value) => collectReviewResults({
+    checkName: 'review', lenses: ['claims'],
+    files: [{ lens: 'claims', findings: [], unprobed: value }], blockOn: ['high'],
+  })
+  const empty = collect([])
+  assert.deepEqual(empty.malformed, [])
+  assert.equal(empty.results.length, 1)
+  assert.doesNotMatch(empty.results[0].output, /not reached/i)
+  const counted = collect(0)
+  assert.equal(counted.malformed.length, 1)
+  assert.deepEqual(counted.results, [])
+})
+
+// One report per lens, naming every key that is wrong — otherwise the operator fixes one, re-runs
+// the whole collection, and meets the other, which is the round trip the CLI's own reporting was
+// changed to avoid one level up.
+test('a lens with both keys malformed is told about both at once', () => {
+  const out = collectReviewResults({
+    checkName: 'review', lenses: ['claims'],
+    files: [{ lens: 'claims', findings: [], unableToVerify: 42, unprobed: 32 }], blockOn: ['high'],
+  })
+  assert.equal(out.malformed.length, 1)
+  assert.match(out.malformed[0].reason, /unableToVerify/)
+  assert.match(out.malformed[0].reason, /unprobed/)
+})
+
+// `null` and absence are the reviewer having said nothing about coverage, which is not a shape
+// this command cannot read.
+test('a null unprobed is the key being absent, and the lens collects', () => {
+  const out = collectReviewResults({
+    checkName: 'review', lenses: ['claims'],
+    files: [{ lens: 'claims', findings: [], unprobed: null }], blockOn: ['high'],
+  })
+  assert.deepEqual(out.malformed, [])
+  assert.equal(out.results.length, 1)
+  assert.doesNotMatch(out.results[0].output, /not reached/i)
+})
+
+// The malformed message names the shape it got, and that sentence is read by an operator: `a
+// object` is the kind of wrong that makes a reader doubt the rest of the message.
+test('the malformed message uses the right article for the shape it names', () => {
+  const shape = (key, value) => collectReviewResults({
+    checkName: 'review', lenses: ['claims'],
+    files: [{ lens: 'claims', findings: [], [key]: value }], blockOn: ['high'],
+  }).malformed[0].reason
+  assert.match(shape('unableToVerify', { why: 'x' }), /is an object/)
+  assert.match(shape('unprobed', { count: 2 }), /is an object/)
+  assert.match(shape('unableToVerify', []), /is an array/)
+  assert.match(shape('unprobed', 32), /is a number/)
+  assert.match(shape('unprobed', 'a.mjs:1'), /is a string/)
+  assert.match(shape('unableToVerify', true), /is a boolean/)
+})
+
 // A bounded review must not read as an exhaustive one where the operator actually looks: the
 // count belongs in the check output, not only in a file they would have to open.
 test('unprobed claims reach the emitted output with their count and lens', () => {

@@ -456,6 +456,28 @@ test('collect-reviews reports an unableToVerify written in a shape it cannot rea
   })
 })
 
+// A reviewer that counted rather than listed must not collect as an exhaustive clean pass: the
+// emitted output would carry no bounded note at all, and the skill promises the operator one.
+test('collect-reviews reports an unprobed written in a shape it cannot read', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const stampFor = await withStampedPhase(root, planPath, io, g)
+    const config = {
+      lens: ['claims'],
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+    }
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(config), 'utf8')
+    await writeReviewFile(root, 'r1', '1-claims.json', { stamp: stampFor('claims'), findings: [], unprobed: 32 })
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 4)
+    const out = lines.join('\n')
+    assert.match(out, /claims/)
+    assert.match(out, /unprobed/)
+    assert.match(out, /fix the file/)
+    assert.doesNotMatch(out, /"status": "pass"/)
+  })
+})
+
 // The count has to survive the trip through the CLI, which builds the `files` array itself: the
 // module can carry `unprobed` into the output and still show the operator nothing if the command
 // never reads the key off the file.
