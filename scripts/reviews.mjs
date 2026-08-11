@@ -60,15 +60,30 @@ export function reviewStale(file, expected) {
   return null
 }
 
-// A reviewer that could not verify anything says so in `unableToVerify`, and the honest answer is
-// a reason string. Any non-empty value counts — a bare `true` is still a reviewer saying it did
-// not look — but an EMPTY string is not a report of failure, so the key's presence alone is never
-// enough to refuse a lens that did its work.
-function cannotVerify(file) {
+// A reviewer that could not verify anything says so in `unableToVerify`, and the documented shape
+// of that answer is a reason string. This reads exactly that shape, and returns one of three
+// facts, because there are three to tell apart:
+//
+//   `{}`          — the reviewer made no report of failure: the key is absent, `null`, or a
+//                   string that is empty or whitespace only. The lens collects. The key's mere
+//                   presence is never what refuses a review.
+//   `{reason}`    — a non-empty string: the reviewer says it verified nothing. Refused, and the
+//                   string is what the operator is told.
+//   `{malformed}` — any other type. Refused on its own route rather than guessed at.
+//
+// The third route exists because BOTH guesses are wrong for a file somebody plausibly writes.
+// Reading a non-string as a report would refuse `unableToVerify: []` — a reviewer that did full
+// work and wrote an empty list — and tell the operator to respawn a review that already happened.
+// Reading it as absent would collect `unableToVerify: true` as a clean pass, which is the exact
+// vacuous PASS this whole route exists to remove. So the shape is reported instead, and the fix
+// is to the file rather than to the review. This follows the rule the command already applies one
+// level up: a findings file that exists and cannot be parsed is not an empty review.
+function readUnableToVerify(file) {
   const why = file?.unableToVerify
-  if (typeof why === 'string') return why.trim() === '' ? null : why
-  if (!why) return null
-  return 'the reviewer reported it could not verify this lens'
+  if (why === undefined || why === null) return {}
+  if (typeof why === 'string') return why.trim() === '' ? {} : { reason: why }
+  const shape = Array.isArray(why) ? 'an array' : `a ${typeof why}`
+  return { malformed: `unableToVerify is ${shape}, and this command reads it only as a reason string` }
 }
 
 export function collectReviewResults({ checkName = 'review', lenses = [], files = [], blockOn = ['high'], expected = null } = {}) {
@@ -77,6 +92,7 @@ export function collectReviewResults({ checkName = 'review', lenses = [], files 
   const unexpected = []
   const stale = []
   const unverified = []
+  const malformed = []
   for (const file of files) {
     // Order matters: an unexpected lens is recorded and then dropped, so its findings can never
     // reach the verdict. A file naming a lens the manifest did not ask for is a mistake worth
@@ -88,9 +104,12 @@ export function collectReviewResults({ checkName = 'review', lenses = [], files 
     }
     // A lens that reports it verified nothing is dropped here, before it can be recorded. It is
     // the same fact as a lens with no file at all — the review did not happen — so it takes the
-    // same route out: nothing emitted, the lens named, the reason reported.
-    const why = cannotVerify(file)
-    if (why) { unverified.push({ lens: file.lens, reason: why }); continue }
+    // same route out: nothing emitted, the lens named, the reason reported. A key written in a
+    // shape this code does not read is a third fact and gets a third route; see
+    // `readUnableToVerify` for why it is neither of the other two.
+    const verify = readUnableToVerify(file)
+    if (verify.malformed) { malformed.push({ lens: file.lens, reason: verify.malformed }); continue }
+    if (verify.reason) { unverified.push({ lens: file.lens, reason: verify.reason }); continue }
     byLens.set(file.lens, {
       findings: Array.isArray(file.findings) ? file.findings : [],
       unprobed: Array.isArray(file.unprobed) ? file.unprobed : [],
@@ -102,7 +121,9 @@ export function collectReviewResults({ checkName = 'review', lenses = [], files 
   // tinguishable from a complete one by the time it reached the gate, and the check would pass
   // on the strength of the lenses that happened to survive. An unverified lens is unaccounted
   // for in exactly that sense, and is named separately so the caller can say why.
-  if (missing.length > 0 || unverified.length > 0) return { results: [], missing, unexpected, stale, unverified }
+  if (missing.length > 0 || unverified.length > 0 || malformed.length > 0) {
+    return { results: [], missing, unexpected, stale, unverified, malformed }
+  }
 
   const all = []
   for (const lens of lenses) {
@@ -138,5 +159,6 @@ export function collectReviewResults({ checkName = 'review', lenses = [], files 
     unexpected,
     stale,
     unverified,
+    malformed,
   }
 }

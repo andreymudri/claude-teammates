@@ -138,6 +138,19 @@ test('phase-gate documents the two claims results that are not findings', async 
     /an empty string is not a report of failure and collects normally/i,
     'phase-gate must say that the key\'s mere presence is not what refuses a lens',
   )
+  // The third route is behaviour an orchestrator meets only when something is already wrong, so
+  // the section has to say the key is read as a string and nothing else — otherwise the response
+  // to it is guessed at, and both guesses are wrong.
+  assertStatement(
+    section,
+    /the key is read only as a reason string/i,
+    'phase-gate must say which shape of unableToVerify is actually read',
+  )
+  assertStatement(
+    section,
+    /the fix is to the file rather than a respawn/i,
+    'phase-gate must say a malformed key is not answered by respawning the review',
+  )
   assertStatement(
     section,
     /unprobed lists claims it enumerated and did not reach/i,

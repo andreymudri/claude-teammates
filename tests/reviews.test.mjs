@@ -226,6 +226,72 @@ test('an empty unableToVerify string is treated as a verified lens', () => {
   assert.equal(out.results[0].status, 'pass')
 })
 
+// The documented shape of the key is a reason string. A value of some other type is neither a
+// stated failure nor a clean review, and guessing it either way is wrong for a plausible file —
+// so it is refused on its own third route rather than folded into one of the other two.
+//
+// An EMPTY array is the case that matters most here, because it is what a reviewer that did full
+// work plausibly writes. Read as truthy it would refuse a complete review; read as absent it
+// would force the same rule to also decide about `true`, where "absent" means a reviewer saying
+// it verified nothing is recorded as a pass.
+test('an unableToVerify that is not a string is reported as malformed, not silently either way', () => {
+  for (const value of [[], ['the baseline suite was red'], true, 0, { why: 'x' }]) {
+    const out = collectReviewResults({
+      checkName: 'review',
+      lenses: ['claims'],
+      files: [{ lens: 'claims', findings: [], unableToVerify: value }],
+      blockOn: ['high'],
+    })
+    const shown = JSON.stringify(value)
+    assert.deepEqual(out.results, [], `${shown} must not emit a result`)
+    assert.deepEqual(out.unverified, [], `${shown} is not a stated reason, so it is not an unverified report`)
+    assert.equal(out.malformed.length, 1, `${shown} must be reported as malformed`)
+    assert.equal(out.malformed[0].lens, 'claims')
+    assert.match(out.malformed[0].reason, /unableToVerify/)
+  }
+})
+
+// The empty array and the non-empty array must land on the SAME route. Pinned as two cases
+// rather than one, because a rule that reads emptiness rather than type would split them — and
+// the next spelling should be caught by this test rather than by a reviewer.
+test('an empty and a non-empty unableToVerify array are both malformed, never one of each', () => {
+  const collect = (value) => collectReviewResults({
+    checkName: 'review', lenses: ['claims'],
+    files: [{ lens: 'claims', findings: [], unableToVerify: value }], blockOn: ['high'],
+  })
+  const empty = collect([])
+  const full = collect(['the baseline suite was red'])
+  assert.equal(empty.malformed.length, 1)
+  assert.equal(full.malformed.length, 1)
+  assert.deepEqual(empty.unverified, [])
+  assert.deepEqual(full.unverified, [])
+})
+
+// `null` is the JSON spelling of "no value", not of "some value this code cannot read", so it is
+// the reviewer having made no report at all — the same answer as leaving the key out.
+test('a null unableToVerify is the key being absent, and the lens collects', () => {
+  const out = collectReviewResults({
+    checkName: 'review', lenses: ['claims'],
+    files: [{ lens: 'claims', findings: [], unableToVerify: null }], blockOn: ['high'],
+  })
+  assert.deepEqual(out.malformed, [])
+  assert.deepEqual(out.unverified, [])
+  assert.equal(out.results.length, 1)
+  assert.equal(out.results[0].status, 'pass')
+})
+
+// A whitespace-only string is an empty one written differently, and the carve-out has to survive
+// the malformed route being added beside it.
+test('a whitespace-only unableToVerify collects and is not malformed either', () => {
+  const out = collectReviewResults({
+    checkName: 'review', lenses: ['claims'],
+    files: [{ lens: 'claims', findings: [], unableToVerify: '   ' }], blockOn: ['high'],
+  })
+  assert.deepEqual(out.malformed, [])
+  assert.deepEqual(out.unverified, [])
+  assert.equal(out.results.length, 1)
+})
+
 // A bounded review must not read as an exhaustive one where the operator actually looks: the
 // count belongs in the check output, not only in a file they would have to open.
 test('unprobed claims reach the emitted output with their count and lens', () => {

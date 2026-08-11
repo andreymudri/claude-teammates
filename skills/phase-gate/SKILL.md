@@ -96,7 +96,9 @@ those you execute:
     in its scratch worktree, so it probed nothing. A non-empty `unableToVerify` is refused exactly
     like a lens with no file at all: nothing is emitted, `collect-reviews` names the lens and its
     reason and exits 4. Respawn that lens; do not record a pass for it. An empty string is not a
-    report of failure and collects normally.
+    report of failure and collects normally. The key is read only as a reason string: written as
+    an array, an object, a boolean or a number it is reported as a file that cannot be read, and
+    the fix is to the file rather than a respawn.
   - `unprobed` lists claims it enumerated and did not reach. The lens is bounded by its mutation
     cap, and a review that reached 8 of 40 claims would otherwise collect identically to an
     exhaustive clean one, so the count is surfaced in the emitted check's `output` — for a passing

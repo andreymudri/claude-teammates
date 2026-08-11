@@ -400,6 +400,62 @@ test('collect-reviews refuses a lens that reports it could not verify anything',
   })
 })
 
+// One round trip per problem is one too many: an operator who respawns the unverified lens and
+// re-runs must not discover only then that a second lens was lost as well. The verdict was always
+// right — it is the diagnosis that has to be complete before the command returns.
+test('collect-reviews names an unverified lens and a lost lens in the same run', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const stampFor = await withStampedPhase(root, planPath, io, g)
+    const config = {
+      lens: ['claims', 'tests'],
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+    }
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(config), 'utf8')
+    await writeReviewFile(root, 'r1', '1-claims.json', {
+      stamp: stampFor('claims'),
+      findings: [],
+      unableToVerify: 'the baseline suite was red',
+    })
+    // `tests` writes no file at all.
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 4)
+    const out = lines.join('\n')
+    assert.match(out, /claims/)
+    assert.match(out, /baseline suite was red/)
+    assert.match(out, /no findings file for lens\(es\): tests/)
+    // The unverified lens's file EXISTS, so it must not also be reported as one that never
+    // arrived — that would send the operator looking for a file they can open.
+    assert.doesNotMatch(out, /no findings file for lens\(es\)[^\n]*claims/)
+    assert.doesNotMatch(out, /"status": "pass"/)
+  })
+})
+
+test('collect-reviews reports an unableToVerify written in a shape it cannot read', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const stampFor = await withStampedPhase(root, planPath, io, g)
+    const config = {
+      lens: ['claims'],
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+    }
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(config), 'utf8')
+    await writeReviewFile(root, 'r1', '1-claims.json', { stamp: stampFor('claims'), findings: [], unableToVerify: [] })
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 4)
+    const out = lines.join('\n')
+    assert.match(out, /claims/)
+    assert.match(out, /unableToVerify/)
+    // The operator must be sent to the file's shape, not to respawning a review that may have
+    // done all its work — that is the whole difference this third route buys. Matched against the
+    // imperatives the other two routes use (`respawn that lens`, `respawn them`) rather than the
+    // bare word, which also occurs in this message telling the reader NOT to respawn.
+    assert.match(out, /fix the file/)
+    assert.doesNotMatch(out, /respawn (that lens|them)\b/)
+    assert.doesNotMatch(out, /"status": "pass"/)
+  })
+})
+
 // The count has to survive the trip through the CLI, which builds the `files` array itself: the
 // module can carry `unprobed` into the output and still show the operator nothing if the command
 // never reads the key off the file.

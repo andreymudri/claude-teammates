@@ -1505,12 +1505,15 @@ export async function runCli(argv, io = { out: console.log }) {
       : await git.currentBranch()
 
     // The anchor is what tells an INTEGRATED branch from an empty one: both have an empty diff
-    // against their own fork point, and what separates them is membership in the run branch's
-    // `mergedBranchTips` — the shas a merge commit in anchor..run names as a parent other than
-    // its first. Computing that set needs both the anchor and the run sha, and without these two
-    // arguments `collectDoctorReport` leaves `landed` false for every task, so every merged
-    // branch is reported as NO CHANGES — the report's loudest problem, on the run's healthiest
-    // state.
+    // against their own fork point. What separates them is the same predicate the gate's fileset
+    // check applies — whether a merge on the run branch's own first-parent chain, inside
+    // anchor..run, named this branch's sha as a secondary parent AND that merge's own diff
+    // carried at least one of the task's DECLARED files. Bare membership in `mergedBranchTips` is
+    // no longer the test on either side: a sha shared with a sibling used to read as landed for
+    // any task that pointed at it. Building that index needs both the anchor and the run sha, and
+    // without these two arguments `collectDoctorReport` leaves `landed` false for every task, so
+    // every merged branch is reported as NO CHANGES — the report's loudest problem, on the run's
+    // healthiest state.
     //
     // Taken from `derive`, so this reads the same anchor the gate enforces at rather than a
     // second computation that could disagree with it. It is allowed to FAIL: `doctor` must keep
@@ -2506,22 +2509,29 @@ export async function runCli(argv, io = { out: console.log }) {
       }
       return 4
     }
-    if (collected.unverified.length > 0) {
-      // Reported before `missing`, which this lens also appears in, so the operator is told the
-      // reason rather than only that a file was absent — it was not. The response is the one a
-      // lost review gets: respawn that lens, never record a pass for it.
-      for (const u of collected.unverified) {
-        io.out(`lens ${u.lens} could not verify anything: ${u.reason} — that review did not happen; respawn that lens rather than recording a pass`)
-      }
-      return 4
+    // Every unaccounted-for lens is reported before anything returns. These are three different
+    // reasons a review is not here, they can hold at once across different lenses, and returning
+    // on the first one costs a full respawn-and-re-run to discover the second.
+    for (const u of collected.unverified) {
+      io.out(`lens ${u.lens} could not verify anything: ${u.reason} — that review did not happen; respawn that lens rather than recording a pass`)
+    }
+    for (const m of collected.malformed) {
+      // Deliberately not "respawn": the reviewer may have done all its work and written the key
+      // in a shape this command does not read. What needs fixing is the file, or whatever wrote it.
+      io.out(`lens ${m.lens} has a findings file this command cannot read: ${m.reason} — fix the file rather than recording a pass or respawning the review`)
     }
     if (collected.unexpected.length > 0) {
       io.out(`ignored findings file(s) for lens(es) this phase did not dispatch: ${collected.unexpected.join(', ')}`)
     }
-    if (collected.missing.length > 0) {
-      io.out(`no findings file for lens(es): ${collected.missing.join(', ')} — those reviews are lost, not empty; respawn them rather than recording a pass`)
-      return 4
+    // A lens already reported above is also in `missing`, and calling its review lost would send
+    // the operator looking for a file that is sitting right there. Only the genuinely absent ones
+    // are named here.
+    const explained = new Set([...collected.unverified, ...collected.malformed].map((e) => e.lens))
+    const lost = collected.missing.filter((lens) => !explained.has(lens))
+    if (lost.length > 0) {
+      io.out(`no findings file for lens(es): ${lost.join(', ')} — those reviews are lost, not empty; respawn them rather than recording a pass`)
     }
+    if (lost.length > 0 || explained.size > 0) return 4
     io.out(JSON.stringify({ results: collected.results }, null, 2))
     return 0
   }
