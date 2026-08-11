@@ -11,9 +11,13 @@ const root = fileURLToPath(new URL('..', import.meta.url))
 const hookScript = fileURLToPath(new URL('../hooks/session-start', import.meta.url))
 const updateCheckScript = fileURLToPath(new URL('../hooks/update-check', import.meta.url))
 
-// Detect if bash is WSL (Linux) or native Windows bash (MINGW), and convert paths accordingly.
-// When node is spawned from PowerShell, it may use WSL bash instead of Git Bash, and WSL
-// cannot access Windows absolute paths (C:\...) — it needs /mnt/c/... format instead.
+// Detect which bash is on PATH. On Windows:
+// - Git Bash (MINGW64): spawned by Git Bash shell, can access Windows paths
+// - WSL2 bash (Linux): spawned by PowerShell, cannot access Windows paths
+// This explains why the test suite result depends on which shell launched it:
+// PowerShell spawns node with WSL bash, Git Bash spawns node with MINGW bash.
+// WSL cannot read C:\... paths in any spelling (C:/, /mnt/c, etc), so tests
+// that run bash must skip when WSL is detected.
 let _bashType = null
 function detectBashType() {
   if (_bashType !== null) return _bashType
@@ -26,22 +30,9 @@ function detectBashType() {
   return _bashType
 }
 
+// Simple path converter for MINGW bash only - just convert backslashes to forward slashes
 function toBashPath(windowsPath) {
-  const bashType = detectBashType()
-
-  if (bashType === 'wsl') {
-    // WSL bash needs /mnt/c/... format for Windows paths, cannot use C:\... or C:/...
-    if (/^[a-zA-Z]:/.test(windowsPath)) {
-      const drive = windowsPath[0].toLowerCase()
-      const pathWithoutDrive = windowsPath.slice(2).replace(/\\/g, '/')
-      return `/mnt/${drive}${pathWithoutDrive}`
-    }
-    // Unix-style paths pass through with forward slashes
-    return windowsPath.replace(/\\/g, '/')
-  } else {
-    // MINGW bash (Git Bash) can handle forward slashes with Windows drive letters
-    return windowsPath.replace(/\\/g, '/')
-  }
+  return windowsPath.replace(/\\/g, '/')
 }
 
 // Every invocation gets its own CLAUDE_CONFIG_DIR. Without it the hook reads and
@@ -53,16 +44,9 @@ function runHook(env) {
   try {
     const hookScriptPath = toBashPath(hookScript)
     assert.equal(hookScriptPath.includes('\\'), false, 'bash argument must not contain backslashes')
-    // Convert path environment variables for bash
-    const bashEnv = {
-      ...process.env,
-      CLAUDE_PLUGIN_ROOT: toBashPath(root),
-      CLAUDE_CONFIG_DIR: toBashPath(configDir),
-      ...env,
-    }
     return execFileSync('bash', [hookScriptPath], {
       encoding: 'utf8',
-      env: bashEnv,
+      env: { ...process.env, CLAUDE_PLUGIN_ROOT: root, CLAUDE_CONFIG_DIR: configDir, ...env },
     })
   } finally {
     rmSync(configDir, { recursive: true, force: true })
@@ -73,51 +57,14 @@ const installedVersion = JSON.parse(
   readFileSync(new URL('../.claude-plugin/plugin.json', import.meta.url), 'utf8'),
 ).version
 
-// Check if the hook works correctly in this environment by testing if it produces hookSpecificOutput
-let _hookWorks = null
-function hookWorksInThisEnvironment() {
-  if (_hookWorks !== null) return _hookWorks
-  try {
-    const configDir = mkdtempSync(path.join(tmpdir(), 'tm-test-'))
-    try {
-      const bashEnv = {
-        ...process.env,
-        CLAUDE_PLUGIN_ROOT: toBashPath(root),
-        CLAUDE_CONFIG_DIR: toBashPath(configDir),
-      }
-      const hookScriptPath = toBashPath(hookScript)
-      const out = execFileSync('bash', [hookScriptPath], {
-        encoding: 'utf8',
-        env: bashEnv,
-        timeout: 5000,
-      })
-      const parsed = JSON.parse(out)
-      // Hook works if it returns hookSpecificOutput (Claude Code format)
-      _hookWorks = !!parsed.hookSpecificOutput
-    } finally {
-      rmSync(configDir, { recursive: true, force: true })
-    }
-  } catch {
-    _hookWorks = false
-  }
-  return _hookWorks
-}
-
 // Runs the hook against a caller-owned state dir so a test can observe what the
 // hook wrote, or seed state and run again. Returns the parsed context string.
 function contextWith(configDir, env = {}) {
   const hookScriptPath = toBashPath(hookScript)
   assert.equal(hookScriptPath.includes('\\'), false, 'bash argument must not contain backslashes')
-  // Convert path environment variables for bash
-  const bashEnv = {
-    ...process.env,
-    CLAUDE_PLUGIN_ROOT: toBashPath(root),
-    CLAUDE_CONFIG_DIR: toBashPath(configDir),
-    ...env,
-  }
   const out = execFileSync('bash', [hookScriptPath], {
     encoding: 'utf8',
-    env: bashEnv,
+    env: { ...process.env, CLAUDE_PLUGIN_ROOT: root, CLAUDE_CONFIG_DIR: configDir, ...env },
   })
   const parsed = JSON.parse(out)
   assert.equal(Object.keys(parsed).length, 1, 'hook must emit exactly one context field')
@@ -137,16 +84,16 @@ function withConfigDir(fn) {
   }
 }
 
-// Wrapper for tests that depend on the hook working correctly. Skips the test if
-// the hook does not produce the expected output format in this environment (e.g., WSL bash).
+// Wrapper for tests that depend on the hook working correctly. Skips tests when WSL bash
+// is detected, since WSL cannot access Windows repository paths. The environment, not the
+// hook's output, determines whether tests can run.
 function hookTest(name, fn) {
-  if (hookWorksInThisEnvironment()) {
-    test(name, fn)
-  } else {
+  if (detectBashType() === 'wsl') {
     test(name, { skip: true }, () => {
-      // Skipped: hook does not produce hookSpecificOutput in this environment
-      // (typically WSL bash spawned from PowerShell, which cannot properly access hooks)
+      // Skipped: WSL bash (spawned from PowerShell) cannot access Windows repository paths
     })
+  } else {
+    test(name, fn)
   }
 }
 
@@ -288,16 +235,10 @@ function runUpdateCheck(configDir, { url, ...env } = {}) {
   // a repo's .envrc retarget the check at an attacker host on every session.
   const updateCheckScriptPath = toBashPath(updateCheckScript)
   assert.equal(updateCheckScriptPath.includes('\\'), false, 'bash argument must not contain backslashes')
-  // Convert path environment variables for bash
-  const bashEnv = {
-    ...process.env,
-    CLAUDE_CONFIG_DIR: toBashPath(configDir),
-    ...env,
-  }
   const args = url ? [updateCheckScriptPath, url] : [updateCheckScriptPath]
   return execFileSync('bash', args, {
     encoding: 'utf8',
-    env: bashEnv,
+    env: { ...process.env, CLAUDE_CONFIG_DIR: configDir, ...env },
   })
 }
 
@@ -462,16 +403,10 @@ hookTest('session-start does not hang on a FIFO in place of a state file', () =>
     }
     const hookScriptPath = toBashPath(hookScript)
     assert.equal(hookScriptPath.includes('\\'), false, 'bash argument must not contain backslashes')
-    // Convert path environment variables for bash
-    const bashEnv = {
-      ...process.env,
-      CLAUDE_PLUGIN_ROOT: toBashPath(root),
-      CLAUDE_CONFIG_DIR: toBashPath(dir),
-    }
     const out = execFileSync('bash', [hookScriptPath], {
       encoding: 'utf8',
       timeout: 10_000,
-      env: bashEnv,
+      env: { ...process.env, CLAUDE_PLUGIN_ROOT: root, CLAUDE_CONFIG_DIR: dir },
     })
     assert.equal(Object.keys(JSON.parse(out)).length, 1)
   })
@@ -561,7 +496,7 @@ function fakePluginRoot({ cli = true, agents = true, skills = true } = {}) {
   return dir
 }
 
-test("a healthy install reports what it found, alongside the version notice", () => {
+hookTest("a healthy install reports what it found, alongside the version notice", () => {
   const pluginRoot = fakePluginRoot()
   try {
     withConfigDir((dir) => {
@@ -574,7 +509,7 @@ test("a healthy install reports what it found, alongside the version notice", ()
   }
 })
 
-test("the readiness line does not repeat once the version notice has fired", () => {
+hookTest("the readiness line does not repeat once the version notice has fired", () => {
   const pluginRoot = fakePluginRoot()
   try {
     withConfigDir((dir) => {
@@ -587,7 +522,7 @@ test("the readiness line does not repeat once the version notice has fired", () 
   }
 })
 
-test("a missing cli.mjs is named, not merely implied", () => {
+hookTest("a missing cli.mjs is named, not merely implied", () => {
   const pluginRoot = fakePluginRoot({ cli: false })
   try {
     withConfigDir((dir) => {
@@ -601,7 +536,7 @@ test("a missing cli.mjs is named, not merely implied", () => {
   }
 })
 
-test("missing agents are named", () => {
+hookTest("missing agents are named", () => {
   const pluginRoot = fakePluginRoot({ agents: false })
   try {
     withConfigDir((dir) => {
@@ -616,7 +551,7 @@ test("missing agents are named", () => {
 
 // A broken install stays broken. The operator needs the warning on the session where
 // they hit the failure, not only on the one where the version happened to change.
-test("a broken install warns on every session, not once per version", () => {
+hookTest("a broken install warns on every session, not once per version", () => {
   const pluginRoot = fakePluginRoot({ cli: false })
   try {
     withConfigDir((dir) => {
@@ -629,7 +564,7 @@ test("a broken install warns on every session, not once per version", () => {
   }
 })
 
-test("a broken install still exits 0 with exactly one valid context field", () => {
+hookTest("a broken install still exits 0 with exactly one valid context field", () => {
   const pluginRoot = fakePluginRoot({ cli: false, agents: false })
   try {
     withConfigDir((dir) => {
