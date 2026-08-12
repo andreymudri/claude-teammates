@@ -475,6 +475,25 @@ test('printable neutralises the 8-bit CSI, which carries no ESC in front of it',
   assert.match(out, /<0x9B>/)
 })
 
+// What these helpers do NOT cover, asserted so the code and the comment above them cannot drift
+// apart. Bidi and format controls pass through untouched — a deliberate scope decision, twice
+// reviewed and twice rated low: they reorder rendered text but cannot erase a line, cannot move
+// the cursor off the value, and cannot start a line of their own, so they garble a quoted value
+// without forging a verdict, and widening the class would mangle legitimate non-Latin text.
+//
+// This test is the coupling: widen the class and it fails, which is the prompt to rewrite the
+// comment rather than leave it claiming a guarantee the code stopped matching.
+test('printable deliberately leaves bidi and format controls alone, as its comment states', () => {
+  // RLO, LRI/RLI/FSI/PDI, LRM/RLM, ALM, LS/PS. Written as code points, not as literals: two of
+  // them are line separators, and a source file carrying them is unreadable in review.
+  for (const cp of [0x202e, 0x2066, 0x2067, 0x2068, 0x2069, 0x200e, 0x200f, 0x061c, 0x2028, 0x2029]) {
+    const ch = String.fromCodePoint(cp)
+    const label = `U+${cp.toString(16).toUpperCase()}`
+    assert.equal(printable(`a${ch}b`), `a${ch}b`, `the character class changed for ${label}`)
+    assert.equal(printableBlock(`a${ch}b`), `a${ch}b`, `the block character class changed for ${label}`)
+  }
+})
+
 test('printable renders undefined and null the way the template literal it replaces did', () => {
   assert.equal(printable(undefined), 'undefined')
   assert.equal(printable(null), 'null')

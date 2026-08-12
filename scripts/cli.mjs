@@ -714,7 +714,10 @@ async function readSuppliedPhases(flags, io) {
   try {
     parsed = JSON.parse(await readFile(flags.results, 'utf8'))
   } catch (err) {
-    io.out(`--results ${flags.results} could not be read as JSON: ${err.message}`)
+    // Node embeds a slice of the parsed input in a JSON parse error, so this message carries
+    // bytes out of the agent-written file it failed on. `printable`, for the reason every other
+    // quoted value here goes through it: see its definition in `reviews.mjs`.
+    io.out(`--results ${printable(flags.results)} could not be read as JSON: ${printable(err.message)}`)
     return SUPPLIED_REJECTED
   }
   const invalid = validateSuppliedPhases(parsed)
@@ -1263,7 +1266,11 @@ export async function runCli(argv, io = { out: console.log }) {
     for (const task of tasks) {
       if (task.tierSource === 'declared') {
         if (!TIERS.includes(task.tier)) {
-          io.out(`${task.id}: unknown model tier '${task.tier}' (expected ${TIERS.join(', ')})`)
+          // The tier is the value being refused, and it was never validated: `plan-parser.mjs`
+          // records `**Model:**` verbatim with `(.+?)`. A refusal is the line most worth
+          // forging — the command exits 2 while the operator reads a pass — so it goes through
+          // `printable` exactly as the phase listing below does.
+          io.out(`${printable(task.id)}: unknown model tier '${printable(task.tier)}' (expected ${TIERS.join(', ')})`)
           return 2
         }
         continue
@@ -2728,7 +2735,10 @@ export async function runCli(argv, io = { out: console.log }) {
     const verdict = aggregateVerdict(results)
     if (verdict.verdict !== 'PASS') {
       const names = [...verdict.failed, ...verdict.pending]
-      io.out(`gate does not pass for phase ${ctx.currentPhase}: ${names.join(', ')}`)
+      // The names come from the gate manifest, which is a file in the worktree this command is
+      // run from — the same source as `r.name` below, which already goes through `printable`.
+      // The summary line was the half that did not, so a check name could erase this refusal.
+      io.out(`gate does not pass for phase ${ctx.currentPhase}: ${names.map(printable).join(', ')}`)
       // A check's output is a block with its own line structure — a captured command output, a
       // fileset check enumerating branch and file names an enforced teammate chose — so it takes
       // the block form: escape sequences are neutralised, the line breaks it legitimately

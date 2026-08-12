@@ -1,3 +1,13 @@
+import { printable } from './reviews.mjs'
+
+// Everything this module renders comes out of `status.json`, and the task titles in it come
+// straight out of the plan a planning agent wrote — `plan-parser.mjs` takes a `### Task 1:`
+// heading's text verbatim. `blockedBy` is written by whoever reported the block. A terminal
+// ACTS on control bytes, so a crafted title can erase the line the digest just drew and write a
+// passing gate over it. Every agent-written value below is therefore spliced through
+// `printable`, the same helper the CLI uses; see its definition in `reviews.mjs` for what it
+// does and what it deliberately leaves alone.
+
 const SECTIONS = [
   { state: 'running', label: 'running' },
   { state: 'done', label: 'done' },
@@ -9,33 +19,38 @@ const SECTIONS = [
 const KNOWN = new Set(SECTIONS.map((s) => s.state))
 
 function describe(task, now) {
+  const title = printable(task.title)
   if (task.state === 'running') {
     // A running task with no startedAt is a bookkeeping bug, not a zero-minute task.
     // Say so rather than rendering NaNm.
-    if (typeof task.startedAt !== 'number') return `${task.title}(?)`
+    if (typeof task.startedAt !== 'number') return `${title}(?)`
     const mins = Math.floor((now - task.startedAt) / 60_000)
-    return `${task.title}(${mins}m)`
+    return `${title}(${mins}m)`
   }
-  if (task.state === 'done') return `${task.title} ✓`
-  if (task.state === 'blocked') return `${task.title} — needs ${task.blockedBy}`
-  return task.title
+  if (task.state === 'done') return `${title} ✓`
+  if (task.state === 'blocked') return `${title} — needs ${printable(task.blockedBy)}`
+  return title
 }
 
 function describeTerse(task, now) {
+  const title = printable(task.title)
   if (task.state === 'running') {
-    if (typeof task.startedAt !== 'number') return `${task.title}?`
-    return `${task.title}${Math.floor((now - task.startedAt) / 60_000)}m`
+    if (typeof task.startedAt !== 'number') return `${title}?`
+    return `${title}${Math.floor((now - task.startedAt) / 60_000)}m`
   }
-  if (task.state === 'blocked') return `${task.title}<${task.blockedBy}`
-  return task.title
+  if (task.state === 'blocked') return `${title}<${printable(task.blockedBy)}`
+  return title
 }
 
 export function renderDigest(status, now, caveman = false) {
   const { runId, phase, totalPhases, maxParallel, tasks } = status
   const say = caveman ? describeTerse : describe
+  // The header's three values are read out of the same file the titles are, so they take the
+  // same route. For the numbers `printable` is `String()` and nothing else; it matters when a
+  // hand-edited status.json carries a string where a number was expected.
   const lines = [caveman
-    ? `${runId} p${phase}/${totalPhases} n${tasks.length}`
-    : `run ${runId} · phase ${phase}/${totalPhases} · ${tasks.length} tasks`]
+    ? `${printable(runId)} p${printable(phase)}/${printable(totalPhases)} n${tasks.length}`
+    : `run ${printable(runId)} · phase ${printable(phase)}/${printable(totalPhases)} · ${tasks.length} tasks`]
 
   const groups = SECTIONS.map(({ state, label }) => ({
     label,

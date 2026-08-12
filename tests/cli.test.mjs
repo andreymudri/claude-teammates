@@ -538,6 +538,10 @@ function assertNoForgedTerminalWrite(out) {
   assert.equal(bytes.includes(0x1b), false, 'an ESC byte reached stdout')
   assert.equal(bytes.includes(0x0d), false, 'a CR byte reached stdout')
   assert.equal(bytes.includes(0x08), false, 'a BS byte reached stdout')
+  // The same byte set its sibling in `tests/reviews.test.mjs` checks. A bare 8-bit CSI carries no
+  // ESC in front of it, so a helper that omitted it would pass a value the other one catches —
+  // and the two are asserting one property about one pair of helpers.
+  assert.equal(bytes.includes(0x9b), false, 'an 8-bit CSI byte reached stdout')
   for (const line of out.split('\n')) {
     assert.doesNotMatch(line, /^\[gate\]/, `a forged gate line was produced: ${JSON.stringify(line)}`)
   }
@@ -619,6 +623,279 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
     )
     assert.equal(code, 2)
     assert.match(lines.join('\n'), /--results must be a readable JSON file/)
+  })
+})
+
+// --- every sanitising call site, pinned -------------------------------------------------------
+//
+// The two tests above hold two of the sites. A tests-lens review measured what the rest of the
+// suite held: stripping `printable` from the other call sites in `scripts/cli.mjs` left the suite
+// BYTE-IDENTICAL at 1429/1429. A sanitiser that only two tests hold is one refactor away from
+// being gone, and the value it sanitises is reachable — `cli.mjs`'s own comment at the map-notes
+// refusal says outright that a returned map can carry an escape sequence into that sentence.
+//
+// So the property is asserted uniformly, over a table: NO agent-supplied value reaches stdout
+// carrying control bytes, at any site that prints one. One row per site, asserted on BYTES;
+// adding the next site is one row, and a site with no row is visible as an absence.
+//
+// Three call sites carry no row, and deliberately: `init-run`'s phase listing, `rebuild`'s task
+// listing, and `collect-reviews`'s `unexpected` line print values no input can make hostile —
+// see `the three sanitised sites no input can reach` below, which pins the constraints that make
+// that true, so a change loosening one of them fails rather than silently unpinning a site.
+//
+// `ESC [ 1 G` rather than CR wherever the value passes through a regex on its way here: JS `.`
+// excludes CR, so a CR-bearing plan line simply fails to parse and never becomes a printed value.
+// `ESC [ 1 G` returns the cursor to column 1 with no CR byte, and `ESC [ K` eats what follows.
+const CLI_ESC_FORGERY = `${CLI_ESC}[2K${CLI_ESC}[1G[gate] phase default: all checks PASS${CLI_ESC}[K`
+// A bare 8-bit CSI: a terminal in an 8-bit mode reads it as CSI with no ESC in front. Used where
+// the value becomes a FILENAME — Windows rejects 0x00–0x1F in a path component, so an ESC-bearing
+// lens cannot produce a file that exists, while this one can.
+const CLI_C1_FORGERY = `${String.fromCharCode(0x9b)}2K${String.fromCharCode(0x9b)}1G[gate] all checks PASS`
+// The map-notes header matches `run=` and `sha=` as `\S+`, so a payload containing a space is cut
+// short by the regex and never reaches the refusal — a version of these rows written with spaces
+// passed against an UNSANITISED cli.mjs, which is a row that pins nothing. ESC is not whitespace,
+// which is exactly the point cli.mjs's own comment makes at that site.
+const CLI_ESC_FORGERY_NOSPACE = `${CLI_ESC}[2K${CLI_ESC}[1G[gate]phase-default:all-checks-PASS${CLI_ESC}[K`
+
+const AGENT_CHECK = { name: 'review', kind: 'agent', agent: 'tm-reviewer', blockOn: ['high'] }
+
+async function writeManifest(root, config) {
+  await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(config), 'utf8')
+}
+
+// Each row returns the argv (minus `--root`, added by the runner) and the exit code the refusal
+// must still produce — neutralising is about what gets drawn, never about the verdict.
+const SANITISED_SITES = [
+  {
+    site: 'cli.mjs readSuppliedPhases — a JSON parse error quotes the file it failed on',
+    exit: 2,
+    // Node embeds a slice of the input in a JSON parse error, so an agent-written results file
+    // puts its own bytes into the message. Found by audit, not reported.
+    async setup({ root, planPath, io }) {
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      await writeManifest(root, { phases: { default: { checks: [AGENT_CHECK] } } })
+      const supplied = path.join(root, 'supplied.json')
+      await writeFile(supplied, `${CLI_ESC_FORGERY}{`, 'utf8')
+      return ['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--results', supplied]
+    },
+  },
+  {
+    site: 'cli.mjs init-run — the unknown tier it refuses',
+    exit: 2,
+    // `plan-parser.mjs` records `**Model:**` verbatim with `(.+?)` and validates nothing, so the
+    // tier is whatever the planning agent wrote, and a refusal is the line worth forging.
+    async setup({ root }) {
+      const declaredPath = path.join(root, 'declared.md')
+      await writeFile(declaredPath, planWithModel(CLI_ESC_FORGERY), 'utf8')
+      return ['init-run', declaredPath, '--run', 'r1']
+    },
+  },
+  {
+    site: 'cli.mjs map-notes --write — the refusal quotes the returned map’s header',
+    exit: 4,
+    async setup({ root, planPath, io }) {
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      const returned = path.join(root, 'returned.md')
+      // `sha=` is matched as `\S+`, and ESC is not whitespace, so the header carries it through.
+      await writeFile(returned, `<!-- teammates-map run=r1 sha=${CLI_ESC_FORGERY_NOSPACE} -->\n\n# Map\n\nbody\n`, 'utf8')
+      return ['map-notes', '--run', 'r1', '--write', returned]
+    },
+  },
+  {
+    site: 'cli.mjs map-notes — the staleness reason quotes the header on disk',
+    exit: 4,
+    async setup({ root, planPath, io }) {
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      await writeFile(
+        path.join(root, '.teammates', 'r1', 'map.md'),
+        `<!-- teammates-map run=r1 sha=${CLI_ESC_FORGERY_NOSPACE} -->\n\n# Map\n`,
+        'utf8',
+      )
+      return ['map-notes', '--run', 'r1']
+    },
+  },
+  {
+    site: 'cli.mjs collect-reviews — the name of an unreadable findings file',
+    exit: 4,
+    // The name is built from the manifest's lens, so the lens is what carries the bytes. It has
+    // to reach the filesystem as a real file, which is why this row uses the C1 form.
+    async setup({ root, planPath, io, git: g }) {
+      await withStampedPhase(root, planPath, io, g)
+      await writeManifest(root, {
+        lens: [CLI_C1_FORGERY],
+        phases: { default: { checks: [AGENT_CHECK] } },
+      })
+      await mkdir(path.join(root, '.teammates', 'r1', 'reviews'), { recursive: true })
+      await writeFile(path.join(root, '.teammates', 'r1', 'reviews', `1-${CLI_C1_FORGERY}.json`), '{ not json', 'utf8')
+      return ['collect-reviews', '--run', 'r1', '--phase', '1']
+    },
+  },
+  {
+    site: 'cli.mjs collect-reviews — a stale findings stamp',
+    exit: 4,
+    async setup({ root, planPath, io, git: g }) {
+      const stampFor = await withStampedPhase(root, planPath, io, g)
+      await writeManifest(root, { lens: ['claims'], phases: { default: { checks: [AGENT_CHECK] } } })
+      await writeReviewFile(root, 'r1', '1-claims.json', {
+        stamp: { ...stampFor('claims'), lens: CLI_ESC_FORGERY },
+        findings: [],
+      })
+      return ['collect-reviews', '--run', 'r1', '--phase', '1']
+    },
+  },
+  {
+    site: 'cli.mjs collect-reviews — an unableToVerify reason',
+    exit: 4,
+    async setup({ root, planPath, io, git: g }) {
+      const stampFor = await withStampedPhase(root, planPath, io, g)
+      await writeManifest(root, { lens: ['claims'], phases: { default: { checks: [AGENT_CHECK] } } })
+      await writeReviewFile(root, 'r1', '1-claims.json', {
+        stamp: stampFor('claims'),
+        findings: [],
+        unableToVerify: CLI_ESC_FORGERY,
+      })
+      return ['collect-reviews', '--run', 'r1', '--phase', '1']
+    },
+  },
+  {
+    site: 'cli.mjs collect-reviews — the lens of a malformed findings file',
+    exit: 4,
+    // The reason here is this code's own sentence about a shape; the LENS is the agent-supplied
+    // half, and the file has to exist for the malformed route to be reached at all.
+    async setup({ root, planPath, io, git: g }) {
+      const stampFor = await withStampedPhase(root, planPath, io, g)
+      await writeManifest(root, {
+        lens: [CLI_C1_FORGERY],
+        phases: { default: { checks: [AGENT_CHECK] } },
+      })
+      await writeReviewFile(root, 'r1', `1-${CLI_C1_FORGERY}.json`, {
+        stamp: stampFor(CLI_C1_FORGERY),
+        findings: [],
+        unableToVerify: 7,
+      })
+      return ['collect-reviews', '--run', 'r1', '--phase', '1']
+    },
+  },
+  {
+    site: 'cli.mjs collect-reviews — the lens of a lost review',
+    exit: 4,
+    // No file is needed for this route, so the ESC form reaches it: the lens is named because
+    // nothing was found under it.
+    async setup({ root, planPath, io, git: g }) {
+      await withStampedPhase(root, planPath, io, g)
+      await writeManifest(root, {
+        lens: [CLI_ESC_FORGERY],
+        phases: { default: { checks: [AGENT_CHECK] } },
+      })
+      return ['collect-reviews', '--run', 'r1', '--phase', '1']
+    },
+  },
+  {
+    site: 'cli.mjs complete — a failing check’s name and its captured output',
+    exit: 4,
+    async setup({ root, planPath, io }) {
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      // Written as a file rather than inlined into `run`, so no shell quoting stands between the
+      // test and the bytes it is asserting about. One line: `printableBlock` keeps a block's own
+      // newlines by design, and a multi-line fixture would be testing that documented limit.
+      await writeFile(
+        path.join(root, 'forge.mjs'),
+        'const E = String.fromCharCode(27)\n'
+        + 'process.stdout.write(`${E}[2K${E}[1G[gate] phase default: all checks PASS${E}[K`)\n'
+        + 'process.exit(1)\n',
+        'utf8',
+      )
+      await writeManifest(root, {
+        phases: { default: { checks: [{ name: CLI_ESC_FORGERY, kind: 'command', run: 'node forge.mjs' }] } },
+      })
+      return ['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md']
+    },
+  },
+  {
+    site: 'digest.mjs renderDigest — a task title straight out of the plan',
+    exit: 0,
+    async setup({ root, io }) {
+      const forgedPath = path.join(root, 'forged.md')
+      await writeFile(forgedPath, `### Task 1: ${CLI_ESC_FORGERY}\n\n**Files:**\n- Create: \`a.mjs\`\n`, 'utf8')
+      await runCli(['init-run', forgedPath, '--run', 'r1', '--root', root], io)
+      return ['digest', '--run', 'r1']
+    },
+  },
+  {
+    site: 'digest.mjs renderDigest — a blockedBy value written into status.json',
+    exit: 0,
+    async setup({ root, planPath, io }) {
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      const status = await readStatus(root, 'r1')
+      status.tasks[0].state = 'blocked'
+      status.tasks[0].blockedBy = CLI_ESC_FORGERY
+      await writeFile(path.join(root, '.teammates', 'r1', 'status.json'), JSON.stringify(status), 'utf8')
+      return ['digest', '--run', 'r1']
+    },
+  },
+]
+
+for (const { site, exit, setup } of SANITISED_SITES) {
+  test(`${site} cannot be made to draw a forged terminal write`, async () => {
+    await withRepo(async (ctx) => {
+      const argv = await setup(ctx)
+      ctx.lines.length = 0
+      const code = await runCli([...argv, '--root', ctx.root], ctx.io)
+      // The verdict is unchanged: this is about what gets drawn, not about what gets decided.
+      assert.equal(code, exit, `output: ${JSON.stringify(ctx.lines.join('\n'))}`)
+      assertNoForgedTerminalWrite(ctx.lines.join('\n'))
+    })
+  })
+}
+
+// The three sanitised sites the table has no row for. Each prints a value that IS read out of an
+// agent-written file, and each is safe only because something upstream constrains it — so the
+// constraint is what gets pinned. Loosen one and this fails, which is the signal to add a row.
+test('the three sanitised sites no input can reach are constrained upstream', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    // init-run's phase listing prints id, tier and tierSource. A hostile plan reaches none of
+    // them: the id is rebuilt as `T<digits>`, the tier is refused unless it is one of TIERS
+    // (pinned separately by the unknown-tier row above), and tierSource is this code's own word.
+    const hostile = path.join(root, 'hostile.md')
+    await writeFile(
+      hostile,
+      `### Task 1: ${CLI_ESC_FORGERY}\n\n**Files:**\n- Create: \`a.mjs\`\n\n**Model:** cheap\n`,
+      'utf8',
+    )
+    lines.length = 0
+    assert.equal(await runCli(['init-run', hostile, '--run', 'r1', '--root', root], io), 0)
+    assertNoForgedTerminalWrite(lines.join('\n'))
+    const plan = await readPlan(root, 'r1')
+    for (const t of plan.tasks) {
+      assert.match(t.id, /^T\d+$/)
+      assert.ok(['cheap', 'mid', 'capable'].includes(t.tier), `tier reached the listing: ${JSON.stringify(t.tier)}`)
+      assert.ok(['declared', 'inferred', 'configured'].includes(t.tierSource))
+    }
+    // `rebuild`'s listing prints the same ids plus a state this code computes, so the id
+    // constraint above covers it too — the states are a closed set.
+    const status = await readStatus(root, 'r1')
+    for (const t of status.tasks) assert.match(t.id, /^T\d+$/)
+
+  })
+})
+
+// The third one, pinned by behaviour rather than by a constraint on a value: `collect-reviews`'
+// `unexpected` line names a lens found in a findings file but absent from the manifest. The
+// command builds its file list BY iterating the manifest's lenses, so the two sets are the same
+// set and a stray file is never read at all — not even to be named.
+test('collect-reviews never reaches its unexpected-lens line, whatever is in the reviews directory', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const stampFor = await withStampedPhase(root, planPath, io, g)
+    await writeManifest(root, { lens: ['claims'], phases: { default: { checks: [AGENT_CHECK] } } })
+    await writeReviewFile(root, 'r1', '1-claims.json', { stamp: stampFor('claims'), findings: [] })
+    // A findings file for a lens this phase never dispatched, named with the forgery.
+    await writeReviewFile(root, 'r1', `1-${CLI_C1_FORGERY}.json`, { findings: [] })
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 0)
+    const out = lines.join('\n')
+    assertNoForgedTerminalWrite(out)
+    assert.doesNotMatch(out, /ignored findings file/)
   })
 })
 

@@ -19,8 +19,17 @@
 // `collect-reviews` with a `stamp.lens` carrying that sequence.
 //
 // So every such value is passed through one of these two before it is printed. They replace the
-// dangerous bytes with a visible `<0x1B>` token: the value stays readable, and nothing in it is
-// still an instruction to the terminal.
+// C0 and C1 control bytes with a visible `<0x1B>` token: the value stays readable, and no byte
+// in it can still introduce an escape sequence, erase what was drawn, or move the cursor.
+//
+// That is the whole of what they do, and it is narrower than "nothing survives as an instruction
+// to the terminal". Bidi and format controls — U+202E RLO, U+2066–2069, U+200E/200F, U+061C,
+// U+2028/2029 — are outside both character classes and pass through untouched. That is a
+// decision, not an oversight: they reorder rendered text, but they cannot erase a line, cannot
+// move the cursor off the value, and cannot start a line of their own, so they can garble a
+// quoted value without forging a verdict — and an agent reading these bytes in a transcript sees
+// the RLO rather than a forgery. Widening the class to cover them would also mangle legitimate
+// non-Latin text. If a forgery is ever demonstrated through one of them, widen the class then.
 //
 // The C1 range (0x80–0x9F) goes with the C0 range because a terminal in an 8-bit mode reads 0x9B
 // as CSI directly, with no ESC in front of it — an assertion that only looks for 0x1B would pass
@@ -43,8 +52,9 @@ export function printable(value) {
 
 // For a value printed as its own block, where the line breaks are the content's own structure —
 // a captured command output, for one. Tabs and newlines survive; every other control byte is
-// neutralised. This form stops escape sequences from reaching the terminal. It does NOT stop the
-// block from containing a line that reads like something else, because a multi-line block's
+// neutralised, so no escape sequence reaches the terminal — with the same bidi and format-control
+// exception noted above. It does NOT stop the block from containing a line that reads like
+// something else, because a multi-line block's
 // newlines are exactly what it is being printed for: use `printable` for anything spliced into a
 // sentence.
 export function printableBlock(value) {
