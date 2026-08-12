@@ -32,27 +32,43 @@ function canBashAccessRepository() {
     const env = { ...process.env }
     delete env.BASH_ENV
     delete env.ENV
-    const output = execFileSync('bash', ['-p', '-c', 'test -e "$1" && printf TM_OK', '--', toBashPath(root)], {
+    const output = execFileSync('bash', ['-p', '-c', 'printf TM_RAN; test -e "$1" && printf TM_OK', '--', toBashPath(root)], {
       timeout: 20000,
       encoding: 'utf8',
       env: env,
     })
-    if (output === 'TM_OK') {
+    // Require TM_RAN prefix to verify bash actually ran (not a fake binary that exited 1).
+    // TM_RANTM_OK -> repository is reachable.
+    // TM_RAN (without TM_OK) -> repository is not reachable (test -e failed).
+    // Anything else -> we did not learn what we asked; throw to fail loudly.
+    if (output === 'TM_RANTM_OK') {
       _probeResult = 'reachable'
       return true
-    } else {
-      // bash ran but did not print the token (test -e failed)
+    } else if (output === 'TM_RAN') {
       _probeResult = 'unreachable'
       return false
+    } else {
+      throw new Error(
+        `Probe gave unexpected result: got "${output}" from bash -p -c 'printf TM_RAN; test -e "$1" && printf TM_OK'`
+      )
     }
   } catch (err) {
-    // Distinguish between "bash ran and reported inaccessible" vs
-    // "the probe itself failed to run". Exit code 1 from 'test -e' means
-    // the repository is not accessible — skip tests. Any other error means
-    // we could not determine accessibility — fail loudly.
+    // Distinguish between "bash ran and test -e failed" vs
+    // "the probe itself failed to run or gave unexpected output".
+    // Exit code 1 from 'test -e' means the path was not found, and if stdout
+    // contains TM_RAN we know the real bash ran. If stdout doesn't contain TM_RAN,
+    // a fake binary answered; we did not learn what we asked.
     if (err.status === 1) {
-      _probeResult = 'unreachable'
-      return false
+      // Exit 1 but check if stdout has TM_RAN prefix
+      if (err.stdout && typeof err.stdout === 'string' && err.stdout.startsWith('TM_RAN')) {
+        _probeResult = 'unreachable'
+        return false
+      } else {
+        // Exit 1 but no TM_RAN in stdout: a fake bash answered, not the real one
+        throw new Error(
+          `Could not verify bash actually ran: got exit 1 but unexpected stdout: "${err.stdout || '(empty)'}"`
+        )
+      }
     } else {
       // Timeout, spawn error, signal, or other failure. Failing to determine
       // whether the test environment can run is not a passing state.
