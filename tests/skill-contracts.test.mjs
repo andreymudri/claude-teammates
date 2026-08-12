@@ -649,6 +649,10 @@ test('phase-gate states reviewers are dispatched without a name and a named one 
       // claim above forbids. The two uses are unrelated and the fallback does not weaken the
       // unnamed-dispatch rule — it covers the case where an unnamed reviewer dies anyway.
       /^Name a findings path per lens in the dispatch/i,
+      // Reviewed: this "name" is a CHECK name out of the gate manifest, listed among the values
+      // printed through `printable`. It says nothing about how a reviewer is dispatched, so it
+      // cannot weaken the unnamed-dispatch rule the claim above states.
+      /^Where a line quotes a value an agent wrote/i,
     ],
     forbid: [/dispatch one tm-reviewer per lens[^.]*with a name/i],
   })

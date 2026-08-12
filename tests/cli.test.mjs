@@ -638,10 +638,29 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 // carrying control bytes, at any site that prints one. One row per site, asserted on BYTES;
 // adding the next site is one row, and a site with no row is visible as an absence.
 //
-// Three call sites carry no row, and deliberately: `init-run`'s phase listing, `rebuild`'s task
-// listing, and `collect-reviews`'s `unexpected` line print values no input can make hostile —
-// see `the three sanitised sites no input can reach` below, which pins the constraints that make
-// that true, so a change loosening one of them fails rather than silently unpinning a site.
+// Sites that carry NO row, all of them, and why each is exempt. An earlier version of this
+// header said "three", counted only the first group, and left four more unlisted — which is the
+// same overstated claim this table exists to catch, in the file whose job is to catch it. The
+// rule is: a site is either a row, or it is named here with the reason it cannot be one.
+//
+// 1. Unreachable by construction (3): `init-run`'s phase listing, `rebuild`'s task listing, and
+//    `collect-reviews`'s `unexpected` line. The two tests below pin the constraints that make
+//    that true, so loosening one fails rather than silently unpinning a site — with the
+//    exception noted on the configured-tier route in the first of them.
+// 2. Printed only INSIDE `JSON.stringify`, which escapes a control byte to `\uXXXX` before it
+//    can reach a terminal: the two `--results names a check ...` refusals, `gate`'s results
+//    JSON, `review-dispatch`'s dispatch spec, `collect-reviews`' results file, every rejection
+//    `validateLinkPaths` returns, and `reviewFileName`'s error. A row here would assert about
+//    `JSON.stringify` rather than about this code.
+// 3. Enum- or integer-validated BEFORE the print, by `config.mjs`'s VALIDATORS running inside
+//    `loadValidatedConfig`: `config list` and `config get` print `maxParallel`, `caveman`,
+//    `agents.<role>.tier` and `agents.<role>.effort`, and a value outside the vocabulary is a
+//    ConfigError before any of them is drawn. Those validators are pinned in
+//    `tests/config.test.mjs`, not here.
+// 4. Computed by this code rather than read from anything: the phase numbers in
+//    `--enforcement-only`'s refusal (integers `assignPhases` produced), `tierSource`, and the
+//    task states, which are a closed set.
+// 5. The one stderr site, which prints a `GitError` message carrying no agent-written value.
 //
 // `ESC [ 1 G` rather than CR wherever the value passes through a regex on its way here: JS `.`
 // excludes CR, so a CR-bearing plan line simply fails to parse and never becomes a printed value.
@@ -833,6 +852,259 @@ const SANITISED_SITES = [
       return ['digest', '--run', 'r1']
     },
   },
+  // --- the gate manifest as a source ----------------------------------------------------------
+  //
+  // `validateGate` checks the SHAPE of the manifest and says outright that it does not check the
+  // CONTENT of a check, "because a lens name or a check's `run` string is policy, not structure".
+  // So a check's `name` and `kind`, a `preview.link` entry, a phase KEY and an `agents.<role>`
+  // field name are all arbitrary agent-written strings, exactly as much as the lens and the
+  // findings file the rows above cover. Two rounds fixed the lens half and left these; the rows
+  // below are the other half.
+  {
+    site: 'cli.mjs reportSkipped — the name of a check that was NOT run',
+    exit: 0,
+    // The worst of the four by consequence: this is `prune-run`, whose `--yes` runs
+    // `git worktree remove --force`, and the erasable line is the one saying a check never ran.
+    async setup({ root, planPath, io, git: g }) {
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      await writeManifest(root, {
+        phases: {
+          default: {
+            checks: [
+              { name: CLI_ESC_FORGERY, kind: 'command', run: 'node -e ""' },
+              { name: 'fileset', kind: 'fileset' },
+            ],
+          },
+        },
+      })
+      g(['add', 'teammates.gate.json'])
+      g(['commit', '--quiet', '-m', 'manifest'])
+      return ['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--enforcement-only']
+    },
+  },
+  {
+    site: 'cli.mjs prune-run — the checks --enforcement-only left unrun, in the not-prunable sentence',
+    exit: 0,
+    // A second, separate site on the same command: `reportSkipped` above says a check was
+    // skipped, and THIS sentence is the one that then declines to remove the worktree. It needs
+    // a phase whose verdict is PASS with checks still unrun, so the task branch has to be merged
+    // and its worktree registered — the state in which `--yes` would otherwise delete it.
+    async setup({ root, planPath, io, git: g }) {
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      await writeManifest(root, {
+        phases: {
+          default: {
+            checks: [
+              { name: CLI_ESC_FORGERY, kind: 'command', run: 'node -e "process.exit(1)"' },
+              { name: 'fileset', kind: 'fileset' },
+            ],
+          },
+        },
+      })
+      g(['add', 'teammates.gate.json'])
+      g(['commit', '--quiet', '-m', 'manifest'])
+      g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+      await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+      g(['add', 'a.mjs'])
+      g(['commit', '--quiet', '-m', 'T1 work'])
+      g(['checkout', '--quiet', 'run-branch'])
+      g(['merge', '--no-ff', '--quiet', '-m', 'integrate T1', 'teammates/r1/T1'])
+      g(['worktree', 'add', '--quiet', path.join(root, '.claude', 'worktrees', 'forged-t1'), 'teammates/r1/T1'])
+      return ['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--enforcement-only', '--yes']
+    },
+  },
+  {
+    site: 'cli.mjs validateSuppliedResults — the kind and name of a check --results may not supply',
+    exit: 2,
+    // `check.kind` and `check.name` are spliced bare into the refusal. `r.status`/`r.source` next
+    // to them go out through `JSON.stringify` and need nothing, which is why only these two moved.
+    async setup({ root, planPath, io, git: g }) {
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      await writeManifest(root, {
+        phases: { default: { checks: [{ name: CLI_ESC_FORGERY, kind: 'fileset' }] } },
+      })
+      g(['add', 'teammates.gate.json'])
+      g(['commit', '--quiet', '-m', 'manifest'])
+      const supplied = path.join(root, 'supplied.json')
+      await writeFile(supplied, JSON.stringify({
+        phases: { 1: { results: [{ name: CLI_ESC_FORGERY, status: 'pass' }] } },
+      }), 'utf8')
+      return ['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--results', supplied]
+    },
+  },
+  {
+    site: 'cli.mjs validateSuppliedResults — the check name beside an unrecognized status',
+    exit: 2,
+    async setup({ root, planPath, io, git: g }) {
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      await writeManifest(root, {
+        phases: { default: { checks: [{ name: CLI_ESC_FORGERY, kind: 'agent', agent: 'tm-reviewer' }] } },
+      })
+      g(['add', 'teammates.gate.json'])
+      g(['commit', '--quiet', '-m', 'manifest'])
+      const supplied = path.join(root, 'supplied.json')
+      await writeFile(supplied, JSON.stringify({
+        phases: { 1: { results: [{ name: CLI_ESC_FORGERY, status: 'nonsense' }] } },
+      }), 'utf8')
+      return ['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--results', supplied]
+    },
+  },
+  {
+    site: 'cli.mjs validateSuppliedResults — the check name beside an unrecognized source',
+    exit: 2,
+    async setup({ root, planPath, io, git: g }) {
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      await writeManifest(root, {
+        phases: { default: { checks: [{ name: CLI_ESC_FORGERY, kind: 'agent', agent: 'tm-reviewer' }] } },
+      })
+      g(['add', 'teammates.gate.json'])
+      g(['commit', '--quiet', '-m', 'manifest'])
+      const supplied = path.join(root, 'supplied.json')
+      await writeFile(supplied, JSON.stringify({
+        phases: { 1: { results: [{ name: CLI_ESC_FORGERY, status: 'pass', source: 'nonsense' }] } },
+      }), 'utf8')
+      return ['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--results', supplied]
+    },
+  },
+  {
+    site: 'cli.mjs configFailureMessage — a manifest that is not valid JSON quotes its own bytes',
+    exit: 2,
+    // Node embeds a slice of the INPUT in a JSON parse error, so a malformed manifest puts its own
+    // bytes into the message — the same hazard the `--results` row at the top of this table
+    // covers, arriving through the manifest instead, and reaching almost every subcommand.
+    async setup({ root, planPath, io }) {
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      await writeFile(path.join(root, 'teammates.gate.json'), `${CLI_ESC_FORGERY}{`, 'utf8')
+      return ['preview-check']
+    },
+  },
+  {
+    site: 'cli.mjs configFailureMessage — the manifest phase key a ConfigError names',
+    exit: 2,
+    // A phase key is an arbitrary JSON object key and `validateGate` echoes it back verbatim.
+    async setup({ root, planPath, io }) {
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      await writeManifest(root, { phases: { [CLI_ESC_FORGERY]: 'not an object' } })
+      return ['preview-check']
+    },
+  },
+  {
+    site: 'cli.mjs preview-check — a declared link target that does not exist',
+    exit: 1,
+    // `validateLinkPaths` screens separators, `..`, absolute paths and duplicates, and quotes what
+    // it rejects through `JSON.stringify` — but a control byte passes every one of those rules, so
+    // the entry arrives at these sentences intact.
+    async setup({ root }) {
+      await writeManifest(root, {
+        preview: { link: [CLI_ESC_FORGERY] },
+        phases: { default: { checks: [] } },
+      })
+      return ['preview-check']
+    },
+  },
+  {
+    site: 'cli.mjs preview-check — the SUCCESS line, printed on a manifest that passed every validator',
+    exit: 0,
+    // The C1 form, because this entry has to exist as a real directory and Windows rejects
+    // 0x00–0x1F in a path component — the same reason the lens rows above use it.
+    async setup({ root }) {
+      await mkdir(path.join(root, CLI_C1_FORGERY), { recursive: true })
+      await writeManifest(root, {
+        preview: { link: [CLI_C1_FORGERY] },
+        phases: { default: { checks: [] } },
+      })
+      return ['preview-check']
+    },
+  },
+  {
+    site: 'cli.mjs review-dispatch — the command-check names the claims lens refusal enumerates',
+    exit: 4,
+    async setup({ root, planPath, io, git: g }) {
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      await writeManifest(root, {
+        lens: ['claims'],
+        phases: {
+          default: {
+            checks: [
+              { name: CLI_ESC_FORGERY, kind: 'command', run: 'node -e ""' },
+              { name: `${CLI_ESC_FORGERY}-two`, kind: 'command', run: 'node -e ""' },
+              { name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: ['claims'], blockOn: ['high'] },
+            ],
+          },
+        },
+      })
+      g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+      await writeFile(path.join(root, 'T1.mjs'), 'export const x = 1\n', 'utf8')
+      g(['add', 'T1.mjs'])
+      g(['commit', '--quiet', '-m', 'T1 work'])
+      g(['checkout', '--quiet', 'run-branch'])
+      return ['review-dispatch', '--run', 'r1', '--phase', '1']
+    },
+  },
+  {
+    site: 'cli.mjs finish — the check names inside the rendered run summary',
+    exit: 1,
+    // The names are spliced into the table by `renderRunSummary` in `scripts/finish.mjs`, so they
+    // arrive at this print site already inside the block. The block form is what fits a table; see
+    // the comment at the call site for the newline case it does not cover.
+    async setup({ root, planPath, io, git: g }) {
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      await writeManifest(root, {
+        phases: {
+          default: {
+            checks: [{ name: CLI_ESC_FORGERY, kind: 'command', run: 'node -e "process.exit(1)"' }],
+          },
+        },
+      })
+      g(['add', 'teammates.gate.json'])
+      g(['commit', '--quiet', '-m', 'manifest'])
+      return ['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main']
+    },
+  },
+  {
+    site: 'cli.mjs collect-reviews — the manifest lens of a findings file carrying NO stamp',
+    exit: 4,
+    // Distinct from the stale-stamp row above, which drives the same line with a payload the
+    // reviewer wrote INTO the stamp — and `reviewStale` wraps that one on its way into the reason,
+    // so that row never exercises this site's own wrapper. Here the reason is this code's own
+    // constant sentence about a missing stamp and the LENS is the manifest's, which is the half
+    // `printable(s.lens)` is for. The C1 form, because the lens becomes a filename.
+    async setup({ root, planPath, io, git: g }) {
+      await withStampedPhase(root, planPath, io, g)
+      await writeManifest(root, {
+        lens: [CLI_C1_FORGERY],
+        phases: { default: { checks: [AGENT_CHECK] } },
+      })
+      await writeReviewFile(root, 'r1', `1-${CLI_C1_FORGERY}.json`, { findings: [] })
+      return ['collect-reviews', '--run', 'r1', '--phase', '1']
+    },
+  },
+  {
+    site: 'digest.mjs describeTerse — a task title in caveman mode',
+    exit: 0,
+    // `describe` has had a row since the sanitiser landed and its caveman sibling had none, so
+    // stripping `printable` from `describeTerse` alone left the whole suite green.
+    async setup({ root, io }) {
+      const forgedPath = path.join(root, 'forged.md')
+      await writeFile(forgedPath, `### Task 1: ${CLI_ESC_FORGERY}\n\n**Files:**\n- Create: \`a.mjs\`\n`, 'utf8')
+      await runCli(['init-run', forgedPath, '--run', 'r1', '--root', root], io)
+      await writeManifest(root, { caveman: 'full', phases: { default: { checks: [] } } })
+      return ['digest', '--run', 'r1']
+    },
+  },
+  {
+    site: 'digest.mjs describeTerse — a blockedBy value in caveman mode',
+    exit: 0,
+    async setup({ root, planPath, io }) {
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      await writeManifest(root, { caveman: 'full', phases: { default: { checks: [] } } })
+      const status = await readStatus(root, 'r1')
+      status.tasks[0].state = 'blocked'
+      status.tasks[0].blockedBy = CLI_ESC_FORGERY
+      await writeFile(path.join(root, '.teammates', 'r1', 'status.json'), JSON.stringify(status), 'utf8')
+      return ['digest', '--run', 'r1']
+    },
+  },
 ]
 
 for (const { site, exit, setup } of SANITISED_SITES) {
@@ -854,8 +1126,19 @@ for (const { site, exit, setup } of SANITISED_SITES) {
 test('the three sanitised sites no input can reach are constrained upstream', async () => {
   await withRepo(async ({ root, io, lines }) => {
     // init-run's phase listing prints id, tier and tierSource. A hostile plan reaches none of
-    // them: the id is rebuilt as `T<digits>`, the tier is refused unless it is one of TIERS
-    // (pinned separately by the unknown-tier row above), and tierSource is this code's own word.
+    // them: the id is rebuilt as `T<digits>`, the tier is refused unless it is one of TIERS,
+    // and tierSource is this code's own word.
+    //
+    // Scope, stated exactly, because the header above promises that loosening a constraint
+    // fails: this test covers the DECLARED tier route only — the plan below declares one, so
+    // deleting the `tier` validator in `scripts/config.mjs` leaves this test GREEN. The
+    // CONFIGURED route, where the tier comes from the manifest instead, is caught by
+    // `tests/config.test.mjs`: 'tier accepts each known tier and rejects an unknown one',
+    // 'validateLocal rejects an unknown agent role and a bad agent field', and 'loadConfig
+    // rejects a misspelled tier in the gate layer rather than dispatching no model' — measured
+    // by deleting that validator, which turns those three red (and three `config set`/`config
+    // unset` tests in this file with them). The unknown-tier ROW above covers neither route's
+    // validator; it covers what the refusal PRINTS.
     const hostile = path.join(root, 'hostile.md')
     await writeFile(
       hostile,

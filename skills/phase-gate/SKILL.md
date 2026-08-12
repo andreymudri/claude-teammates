@@ -75,10 +75,13 @@ those you execute:
   not parse — respawn those lenses instead. A file for a lens this phase did not dispatch is
   reported and ignored, never merged.
 
-  Where those refusals quote a value out of a findings file — a lens, a stamp, a reason — the
-  value is printed with its control bytes replaced by a visible `<0x1B>` token. A findings
-  file could otherwise carry an escape sequence that erases the refusal in the terminal and draws
-  a line reading like a PASS this CLI computed. Read the exit code, not the shape of a line.
+  Where a line quotes a value an agent wrote — a lens, a stamp or a reason out of a findings file,
+  and equally a check name, kind or `preview.link` entry out of the gate manifest, whose contents
+  this CLI validates for shape and not for content — the value is printed with its control bytes
+  replaced by a visible `<0x1B>` token. Either file could otherwise carry an escape sequence that
+  erases the line in the terminal and draws one reading like a PASS this CLI computed. That covers
+  the lines a refusal prints and the ones a passing command prints. Read the exit code, not the
+  shape of a line.
 
   Both come from the tracked manifest only — the reviewer grades the diff, so
   letting the gitignored layer choose its tier would let the party being judged pick its own

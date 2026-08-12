@@ -390,8 +390,14 @@ function announceCommandChecks(io, command, checkCount, phaseCount, recommendEnf
 
 // A phase reports the checks it did not run, every time, whatever put them in that state:
 // `--enforcement-only` here, and the merge-conflict skip `runChecks` produces on its own.
+//
+// The name is the manifest's, and `validateGate` checks the SHAPE of a phase and not the
+// content of a check — so a check name is an arbitrary agent-written string, exactly like the
+// name `complete` already wraps. It reaches a terminal here on the `prune-run` path, which is
+// the command whose `--yes` removes worktrees, so the line saying a check did NOT run is the
+// last one that should be erasable.
 function reportSkipped(io, phase, verdict) {
-  for (const name of verdict.skipped ?? []) io.out(`phase ${phase}: skipped: ${name}`)
+  for (const name of verdict.skipped ?? []) io.out(`phase ${phase}: skipped: ${printable(name)}`)
 }
 
 // A skill branches on this CLI's exit code. A missing argument must produce the usage
@@ -642,15 +648,19 @@ function validateSuppliedResults(supplied, checks) {
     // would let an `agent` result land on the `command` check. Whether the file was accepted
     // would then depend on declaration order rather than on what gets written. Reject the
     // collision instead of resolving it.
+    // `r?.name` goes out through `JSON.stringify`, which escapes a control byte to `\uXXXX`
+    // and is sufficient on its own; `check.kind` and `check.name` below are spliced bare into
+    // the sentence, so those take `printable`. Both halves are agent-written — the difference
+    // is only in how each reaches the line.
     if (duplicated.has(r?.name)) {
       return `--results names a check declared more than once in this phase's manifest: ${JSON.stringify(r?.name)}`
     }
     const check = byName.get(r?.name)
     if (!check) return `--results names a check not in this phase's manifest: ${JSON.stringify(r?.name)}`
-    if (!SUPPLIABLE_KINDS.has(check.kind)) return `--results may not supply a ${check.kind} check: ${check.name}`
-    if (!SUPPLIED_STATUSES.has(r.status)) return `--results carries an unrecognized status for ${check.name}: ${JSON.stringify(r.status)}`
+    if (!SUPPLIABLE_KINDS.has(check.kind)) return `--results may not supply a ${printable(check.kind)} check: ${printable(check.name)}`
+    if (!SUPPLIED_STATUSES.has(r.status)) return `--results carries an unrecognized status for ${printable(check.name)}: ${JSON.stringify(r.status)}`
     if (r.source !== undefined && !SUPPLIED_SOURCES.has(r.source)) {
-      return `--results carries an unrecognized source for ${check.name}: ${JSON.stringify(r.source)} (expected "response" or "file")`
+      return `--results carries an unrecognized source for ${printable(check.name)}: ${JSON.stringify(r.source)} (expected "response" or "file")`
     }
   }
   return null
@@ -949,9 +959,16 @@ async function derive(root, runId, flags) {
 // 1, which a skill branching on this CLI's exit code reads as neither a pass nor a stated
 // failure. `syscall` is what distinguishes an fs error from an ordinary Error carrying a
 // `code` property.
+// Both messages quote the manifest back. A ConfigError names the key it rejected, and a phase
+// key, an `agents.<role>` field name and an unknown role are all arbitrary strings out of the
+// file; the JSON parse error is worse still, because Node embeds a slice of the RAW FILE BYTES
+// in `err.message`. That is the same hazard `readSuppliedPhases` wraps for a `--results` file,
+// arriving through the manifest instead, and it reaches almost every subcommand at exit 2.
+// Wrapped at this single boundary rather than at each `throw` in `config.mjs`, so a message
+// added there is covered on the day it is added.
 function configFailureMessage(err) {
-  if (err instanceof ConfigError) return err.message
-  if (typeof err?.syscall === 'string') return `could not access the config layers: ${err.message}`
+  if (err instanceof ConfigError) return printable(err.message)
+  if (typeof err?.syscall === 'string') return `could not access the config layers: ${printable(err.message)}`
   return null
 }
 
@@ -1844,7 +1861,7 @@ export async function runCli(argv, io = { out: console.log }) {
       if (flagSkipped.length > 0) {
         io.out(
           `phase ${phase} is not prunable: --enforcement-only left ${flagSkipped.length} check(s) unrun`
-          + ` (${flagSkipped.join(', ')}), and a worktree is removed only on checks that ran.`
+          + ` (${flagSkipped.map(printable).join(', ')}), and a worktree is removed only on checks that ran.`
           + ' Re-run without --enforcement-only to prune it.',
         )
         continue
@@ -2040,7 +2057,16 @@ export async function runCli(argv, io = { out: console.log }) {
       phaseResults.push({ phase, supplied: forPhase.length > 0, verdict: aggregateVerdict(results) })
     }
 
-    io.out(renderRunSummary(runId, phaseResults))
+    // `renderRunSummary` builds a multi-line table and splices each failed, pending and skipped
+    // CHECK NAME into it, so the manifest's strings arrive already inside the rendered block.
+    // The block form is what fits a table: it neutralises the escape sequences with which a
+    // name could erase a row, and keeps the newlines that are the table itself.
+    //
+    // Stated exactly: this stops a name from redrawing the table, and does NOT stop one from
+    // containing a `\n` and adding a row that reads like a row this CLI wrote — `printableBlock`
+    // keeps every newline it is given, including a value's own. Closing that needs the wrap to
+    // move to each name inside `renderRunSummary`, in `scripts/finish.mjs`.
+    io.out(printableBlock(renderRunSummary(runId, phaseResults)))
     const summary = summarizeRun(phaseResults)
     if (summary.complete) return 0
     // 1 for a phase that was verified and failed; 4 for one that was never verified at all.
@@ -2274,32 +2300,37 @@ export async function runCli(argv, io = { out: console.log }) {
     const invalid = validateLinkPaths(links)
     if (invalid) { io.out(invalid); return 1 }
 
+    // `validateLinkPaths` above rejects a non-string, an empty string, an absolute path, a `..`
+    // and a duplicate, and quotes what it rejected through `JSON.stringify` — but it does not
+    // screen control bytes, and `"a\u001b[2K"` is a legal relative path by every one of those
+    // rules. So each entry is wrapped again on its way into the sentences below, including the
+    // success line, which is the one printed on a manifest that passed every validator.
     const git = createGit({ cwd: root })
     const problems = []
     for (const entry of links) {
       const target = path.resolve(root, entry)
       try {
         const info = await stat(target)
-        if (!info.isDirectory()) problems.push(`${entry}: exists but is not a directory`)
+        if (!info.isDirectory()) problems.push(`${printable(entry)}: exists but is not a directory`)
       } catch (err) {
         if (err.code !== 'ENOENT') throw err
-        problems.push(`${entry}: does not exist — the preview would be missing it, and every command check would fail on a tree that is otherwise fine`)
+        problems.push(`${printable(entry)}: does not exist — the preview would be missing it, and every command check would fail on a tree that is otherwise fine`)
         continue
       }
       try {
         // Linking over a path the merge produced would shadow the merged result, which is the
         // one thing the preview exists to measure.
         if (await git.tracks(entry)) {
-          problems.push(`${entry}: is tracked by the repository — linking over it would shadow the merged result`)
+          problems.push(`${printable(entry)}: is tracked by the repository — linking over it would shadow the merged result`)
         }
       } catch (err) {
         if (!(err instanceof GitError)) throw err
-        problems.push(`${entry}: ${err.message}`)
+        problems.push(`${printable(entry)}: ${printable(err.message)}`)
       }
     }
 
     if (problems.length === 0) {
-      io.out(`preview.link is usable: ${links.join(', ')}`)
+      io.out(`preview.link is usable: ${links.map(printable).join(', ')}`)
       return 0
     }
     for (const p of problems) io.out(p)
@@ -2375,9 +2406,9 @@ export async function runCli(argv, io = { out: console.log }) {
         // under a count of two, and the extra name is the one an operator told to "rename the one
         // that is not the suite" would reach for, which would change nothing.
         ? `${preamble} ${namedTest.length} command checks named "test": `
-          + `${namedTest.map((c) => c.name).join(', ')}. Rename the one that is not the suite`
+          + `${namedTest.map((c) => printable(c.name)).join(', ')}. Rename the one that is not the suite`
         : `${preamble} ${commandChecks.length} with none named "test": `
-          + `${commandChecks.map((c) => c.name).join(', ')}. `
+          + `${commandChecks.map((c) => printable(c.name)).join(', ')}. `
           + 'Name the one that runs the suite "test", or drop the claims lens from this phase')
       return 4
     }
