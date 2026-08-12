@@ -75,6 +75,17 @@ those you execute:
   not parse — respawn those lenses instead. A file for a lens this phase did not dispatch is
   reported and ignored, never merged.
 
+  Where a line quotes a value an agent wrote — a lens, a stamp or a reason out of a findings file;
+  a check name, kind or `preview.link` entry out of the gate manifest, whose contents this CLI
+  validates for shape and not for content; the bytes a JSON parse error quotes back out of a
+  `--results` file or the verdict file `fix` is handed below — the value is printed with its
+  control bytes and line separators replaced by a visible `<0x1B>`-style token. Any of those files
+  could otherwise carry an escape sequence that erases the line in the terminal and draws one
+  reading like a PASS this CLI computed, or a line break that adds one. That covers the lines a
+  refusal prints, the ones a passing command prints, and the check names inside `finish`'s run
+  summary table. It does not cover the bidi and format controls, which pass through. Read the exit
+  code, not the shape of a line.
+
   Both come from the tracked manifest only — the reviewer grades the diff, so
   letting the gitignored layer choose its tier would let the party being judged pick its own
   judge. Then take every finding at a `blockOn` severity and
@@ -86,17 +97,27 @@ those you execute:
   either to make the code deliver the claim or to correct the claim. Weakening the test is not a
   fix.
 
-  A `claims` reviewer also writes two keys that are not findings, and `collect-reviews` reads
-  neither: `collectReviewResults` reads `lens`, `stamp` and `findings` and ignores every other
-  key. It does not *keep* all three — `stamp` is consumed to reject a stale file and then dropped
-  from the emitted result, exactly like the two keys below. So the CLI cannot tell you about them,
-  and you must open the findings file yourself before treating a clean claims lens as a clean one.
+  A `claims` reviewer also writes two keys that are not findings, and `collect-reviews` acts on
+  both: `collectReviewResults` reads `lens`, `stamp`, `findings`, `unableToVerify` and `unprobed`,
+  and ignores every other key. It does not *keep* all of them — `stamp` is consumed to reject a
+  stale file and then dropped from the emitted result, and neither key below survives into the
+  result as a key either; what survives of `unprobed` is a count in the check's `output`.
 
   - `unableToVerify` means the reviewer could not build the phase's tree or get a green baseline
-    in its scratch worktree, so it probed nothing. It is collected today as `status: "pass"` with
-    zero findings: a lens that verified nothing is recorded as a lens that found nothing.
+    in its scratch worktree, so it probed nothing. A non-empty `unableToVerify` is refused exactly
+    like a lens with no file at all: nothing is emitted, `collect-reviews` names the lens and its
+    reason and exits 4. Respawn that lens; do not record a pass for it. An empty string is not a
+    report of failure and collects normally. The key is read only as a reason string: written as
+    an array, an object, a boolean or a number it is reported as a file that cannot be read, and
+    the fix is to the file rather than a respawn.
   - `unprobed` lists claims it enumerated and did not reach. The lens is bounded by its mutation
-    cap, and a review that reached 8 of 40 claims collects identically to an exhaustive clean one.
+    cap, and a review that reached 8 of 40 claims would otherwise collect identically to an
+    exhaustive clean one, so the count is surfaced in the emitted check's `output` — for a passing
+    and a failing verdict alike. The list itself is only in the findings file. Like the key above
+    it is read only in its documented shape, a list: written as a number, a string, an object or a
+    boolean it is reported as a file that cannot be read rather than counted as nothing, because a
+    review that says it reached a fifth of its claims must never emit a result with no bounded
+    note. An empty list is a review that reached everything it enumerated, and collects silently.
 - **mcp** — call the declared tool and compare against `passWhen`. If the server is not
   connected and the check is `optional`, record `skip` and say so out loud. A missing optional
   server is never a silent pass.

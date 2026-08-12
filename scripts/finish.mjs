@@ -11,6 +11,8 @@
 // together would turn "nobody reviewed phase 3" into "phase 3 is broken", which invites a retry
 // of work that was never wrong.
 
+import { printable } from './reviews.mjs'
+
 // The per-phase counterpart of `gate --results`. `finish` recomputes every phase, and every
 // phase with an `agent` check comes back pending, because nothing runs an agent check — so on
 // this repository's own manifest `finish` could never report a run complete, which it proved on
@@ -76,6 +78,18 @@ export function summarizeRun(phaseResults = []) {
   return { complete, failedPhases, pendingPhases }
 }
 
+// Each check name here is read out of the manifest, so it is agent-written text arriving inside a
+// rendered table. `printable` rather than `printableBlock`: the block form keeps newlines by
+// design, and a name carrying one would ADD A LINE shaped like a row this code wrote — a forged
+// row in the table an operator reads to decide whether a run is finished, needing no escape
+// sequence at all. Wrapping at the print site in cli.mjs cannot close that, because by then the
+// name is already part of a block whose newlines are the table itself.
+//
+// Stated exactly, so the comment claims no more than the code does: this neutralises the C0 and
+// C1 control bytes plus U+2028 and U+2029, replacing each with a visible `<0x..>` token. The bidi
+// and format controls U+202E, U+2066–2069, U+200E/200F and U+061C are NOT neutralised and pass
+// through — they can reorder how a row reads, but cannot erase a line or start one. See the
+// comment on `printable` in `scripts/reviews.mjs` for why that line is drawn where it is.
 export function renderRunSummary(runId, phaseResults = []) {
   const summary = summarizeRun(phaseResults)
   const lines = [`run ${runId} — every verdict below was recomputed from git just now, not read from a record`]
@@ -83,9 +97,9 @@ export function renderRunSummary(runId, phaseResults = []) {
   for (const entry of phaseResults) {
     const verdict = entry.verdict ?? {}
     const blocking = [
-      ...(verdict.failed ?? []).map((n) => `failed: ${n}`),
-      ...(verdict.pending ?? []).map((n) => `pending: ${n}`),
-      ...(verdict.skipped ?? []).map((n) => `skipped: ${n}`),
+      ...(verdict.failed ?? []).map((n) => `failed: ${printable(n)}`),
+      ...(verdict.pending ?? []).map((n) => `pending: ${printable(n)}`),
+      ...(verdict.skipped ?? []).map((n) => `skipped: ${printable(n)}`),
     ]
     lines.push(`  phase ${entry.phase}   ${verdict.verdict ?? 'FAIL'}${entry.supplied ? ' (review supplied)' : ''}${blocking.length ? `   ${blocking.join(', ')}` : ''}`)
   }
