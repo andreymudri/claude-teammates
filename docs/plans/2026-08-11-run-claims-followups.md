@@ -114,6 +114,7 @@ export { mergedParentFiles, landedForFiles }
 **Files:**
 - Modify: `scripts/reviews.mjs`
 - Modify: `scripts/cli.mjs`
+- Modify: `scripts/digest.mjs`
 - Modify: `skills/phase-gate/SKILL.md`
 - Test: `tests/reviews.test.mjs`
 - Test: `tests/cli.test.mjs`
@@ -173,6 +174,42 @@ export { mergedParentFiles, landedForFiles }
   Rename that test so its name states what it now pins. The two flip together by construction: the
   code assertion was written as the pin for the prose, which is why widening the file set was the
   right resolution rather than splitting them across tasks.
+
+- [ ] **Step 7:** Neutralise control bytes in every agent-supplied value this codebase prints.
+  Added by amendment after a security review demonstrated the forgery on the real CLI: a value
+  carrying `ESC[2K ESC[1G … ESC[K` erases the printed line, returns to column 1 and truncates the
+  rest, so a refusal renders to an operator or a reading agent as
+
+      [gate] phase default: all checks PASS
+
+  while the command exited non-zero. A forged PASS line is the sharpest possible violation of this
+  project's premise that a claim is not evidence, so the fix is not optional and not cosmetic.
+
+  Two sites remain after the first attempt, which sanitised `collect-reviews`, `map`, `complete`,
+  `init-run`'s phase listing and `rebuild`'s task listing:
+
+  `scripts/cli.mjs` — `init-run`'s unknown-tier refusal prints `task.tier` raw. `plan-parser.mjs`
+  records `**Model:**` verbatim with `(.+?)` and validates nothing, so the value is agent-written.
+  The sibling listing 63 lines later was wrapped; this one was missed, and it is the worse of the
+  two, because a refusal is the line worth forging. Note `\r` does not reach this site — JS `.`
+  excludes it, so a CR-bearing Model line fails the regex — and `ESC[1G` is the working equivalent.
+
+  `scripts/digest.mjs` — `renderDigest` prints a task title straight from the plan, so a crafted
+  `### Task 1:` heading reaches stdout raw. This file was outside every task's declared set, which
+  is why the whole file set is being widened rather than the finding deferred. `renderLiveness` in
+  `scripts/liveness.mjs` was checked and is NOT affected: `taskId` matches `T<digits>`, `state` is
+  computed, and `staleMinutes` is validated — do not widen the file set further for it.
+
+  Reuse the existing `printable`/`printableBlock` helpers rather than adding a third spelling. Pin
+  each site with a test asserting on BYTES — `Buffer.includes(0x1b)` and no line matching
+  `/^\[gate\]/` — because an assertion on a rendered string is defeated by the very escape it is
+  checking for. Confirm each new test fails before the change.
+
+  Bidi and format controls (U+202E, U+2066–2069, U+200E/200F, U+2028/2029) pass through today and
+  are deliberately NOT in scope: they cannot erase, cannot move the cursor off the value, and
+  cannot start a line, so they reorder rendered text without forging a verdict. Do not claim the
+  helpers stop them — correct any comment that says nothing survives as a terminal instruction, so
+  the prose matches what the code does.
 
 ### Task 4: stop the hook tests depending on which bash is on PATH
 
