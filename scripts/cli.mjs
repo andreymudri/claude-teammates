@@ -17,7 +17,7 @@ import { decideFix } from './fix-loop.mjs'
 import { runChecks, aggregateVerdict } from './gate-runner.mjs'
 import { renderDigest } from './digest.mjs'
 import { collectDoctorReport, renderDoctor } from './doctor.mjs'
-import { collectReviewResults, reviewFileName, reviewStamp } from './reviews.mjs'
+import { collectReviewResults, printable, printableBlock, reviewFileName, reviewStamp } from './reviews.mjs'
 import { generateReviewDispatch } from './review-gen.mjs'
 import { resolveTaskBranch, taskBranchName } from './enforce.mjs'
 import { tmpdir } from 'node:os'
@@ -1325,7 +1325,8 @@ export async function runCli(argv, io = { out: console.log }) {
       // with before the run starts, while a Model line is still cheap to add.
       const ids = tasks
         .filter((t) => t.phase === p)
-        .map((t) => `${t.id} (${t.tier}, ${t.tierSource})`)
+        // Same as `rebuild`'s listing: the id and the tier are read out of the plan file.
+        .map((t) => `${printable(t.id)} (${printable(t.tier)}, ${printable(t.tierSource)})`)
         .join(', ')
       io.out(`phase ${p}: ${ids}`)
     }
@@ -1767,7 +1768,9 @@ export async function runCli(argv, io = { out: console.log }) {
     await writeState(root, runId, 'plan', plan)
     await writeState(root, runId, 'status', status)
 
-    for (const t of status.tasks) io.out(`${t.id}  ${t.state}`)
+    // Task ids come from the plan file a planning agent wrote; `printable` keeps a crafted id
+    // from redrawing this listing.
+    for (const t of status.tasks) io.out(`${printable(t.id)}  ${printable(t.state)}`)
     io.out('rebuilt from git: no gate history, so every phase must be gated again before anything is reported done')
     return 0
   }
@@ -2182,7 +2185,10 @@ export async function runCli(argv, io = { out: console.log }) {
       // Verbatim, and nothing is written. The reason names the mismatch it found — which commit,
       // which run, or a missing body — and that is what tells the caller whether to re-dispatch
       // the agent or to re-save what it already returned.
-      if (refusal) { io.out(refusal); return 4 }
+      // `printable`, because the refusal quotes the header line out of the file the agent
+      // returned — `run=` and `sha=` are matched as `\S+`, and ESC is not whitespace, so a
+      // returned map can carry an escape sequence into this sentence.
+      if (refusal) { io.out(printable(refusal)); return 4 }
       // Written through a uniquely-named temp file and renamed, the same way `writeState` writes
       // every other file under `.teammates/`: a reader must never find a half-written map under
       // a header that vouches for the whole of it.
@@ -2227,7 +2233,8 @@ export async function runCli(argv, io = { out: console.log }) {
     // 4, matching `complete` and `collect-reviews`: this cannot verify what it was asked about.
     // The prompt is printed so the caller dispatches an Explore agent rather than writing prose
     // itself — and a teammate never writes this file.
-    io.out(stale)
+    // Same reason as the write path's refusal above: the reason names the header the agent wrote.
+    io.out(printable(stale))
     io.out('')
     io.out('dispatch an Explore agent with exactly this prompt:')
     io.out('')
@@ -2464,7 +2471,7 @@ export async function runCli(argv, io = { out: console.log }) {
     }
 
     if (unreadable.length > 0) {
-      io.out(`unreadable findings file(s): ${unreadable.join(', ')} — a file that exists and cannot be parsed is not an empty review`)
+      io.out(`unreadable findings file(s): ${unreadable.map(printable).join(', ')} — a file that exists and cannot be parsed is not an empty review`)
       return 4
     }
 
@@ -2504,24 +2511,31 @@ export async function runCli(argv, io = { out: console.log }) {
     if (collected.stale.length > 0) {
       // Reported the way `missing` is, and for the same reason: a stale review is a review this
       // phase does not have. Recording a pass on it would be a verdict about another tree.
+      //
+      // The reason quotes a reviewer's own file, and this line is read in a terminal. `printable`
+      // neutralises the control bytes with which a value could otherwise erase this refusal and
+      // draw a passing gate in its place; see its definition in `reviews.mjs`.
       for (const s of collected.stale) {
-        io.out(`stale findings for lens ${s.lens}: ${s.reason} — respawn that review rather than recording a pass`)
+        io.out(`stale findings for lens ${printable(s.lens)}: ${printable(s.reason)} — respawn that review rather than recording a pass`)
       }
       return 4
     }
     // Every unaccounted-for lens is reported before anything returns. These are three different
     // reasons a review is not here, they can hold at once across different lenses, and returning
     // on the first one costs a full respawn-and-re-run to discover the second.
+    //
+    // `u.reason` is the reviewer's own `unableToVerify` string, straight out of its file, so it
+    // goes through `printable` for the same reason the stale reason above does.
     for (const u of collected.unverified) {
-      io.out(`lens ${u.lens} could not verify anything: ${u.reason} — that review did not happen; respawn that lens rather than recording a pass`)
+      io.out(`lens ${printable(u.lens)} could not verify anything: ${printable(u.reason)} — that review did not happen; respawn that lens rather than recording a pass`)
     }
     for (const m of collected.malformed) {
       // Deliberately not "respawn": the reviewer may have done all its work and written the key
       // in a shape this command does not read. What needs fixing is the file, or whatever wrote it.
-      io.out(`lens ${m.lens} has a findings file this command cannot read: ${m.reason} — fix the file rather than recording a pass or respawning the review`)
+      io.out(`lens ${printable(m.lens)} has a findings file this command cannot read: ${printable(m.reason)} — fix the file rather than recording a pass or respawning the review`)
     }
     if (collected.unexpected.length > 0) {
-      io.out(`ignored findings file(s) for lens(es) this phase did not dispatch: ${collected.unexpected.join(', ')}`)
+      io.out(`ignored findings file(s) for lens(es) this phase did not dispatch: ${collected.unexpected.map(printable).join(', ')}`)
     }
     // A lens already reported above is also in `missing`, and calling its review lost would send
     // the operator looking for a file that is sitting right there. Only the genuinely absent ones
@@ -2529,7 +2543,7 @@ export async function runCli(argv, io = { out: console.log }) {
     const explained = new Set([...collected.unverified, ...collected.malformed].map((e) => e.lens))
     const lost = collected.missing.filter((lens) => !explained.has(lens))
     if (lost.length > 0) {
-      io.out(`no findings file for lens(es): ${lost.join(', ')} — those reviews are lost, not empty; respawn them rather than recording a pass`)
+      io.out(`no findings file for lens(es): ${lost.map(printable).join(', ')} — those reviews are lost, not empty; respawn them rather than recording a pass`)
     }
     if (lost.length > 0 || explained.size > 0) return 4
     io.out(JSON.stringify({ results: collected.results }, null, 2))
@@ -2715,8 +2729,12 @@ export async function runCli(argv, io = { out: console.log }) {
     if (verdict.verdict !== 'PASS') {
       const names = [...verdict.failed, ...verdict.pending]
       io.out(`gate does not pass for phase ${ctx.currentPhase}: ${names.join(', ')}`)
+      // A check's output is a block with its own line structure — a captured command output, a
+      // fileset check enumerating branch and file names an enforced teammate chose — so it takes
+      // the block form: escape sequences are neutralised, the line breaks it legitimately
+      // contains are kept.
       for (const r of results) {
-        if (names.includes(r.name) && r.output) io.out(`${r.name}: ${r.output}`)
+        if (names.includes(r.name) && r.output) io.out(`${printable(r.name)}: ${printableBlock(r.output)}`)
       }
       return 4
     }

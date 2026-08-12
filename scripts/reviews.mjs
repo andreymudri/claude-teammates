@@ -12,6 +12,45 @@
 // says it could not verify anything is the same fact arriving by a different route, and takes the
 // same route out.
 
+// Values read out of an agent-written file end up in sentences an operator reads in a terminal
+// and another agent reads in a transcript. A terminal ACTS on control bytes: a value carrying
+// `ESC [ 2 K` `CR` erases the line that was just drawn and writes its own over it, so a refusal
+// this CLI printed can be redrawn as a passing gate. A reviewer demonstrated exactly that against
+// `collect-reviews` with a `stamp.lens` carrying that sequence.
+//
+// So every such value is passed through one of these two before it is printed. They replace the
+// dangerous bytes with a visible `<0x1B>` token: the value stays readable, and nothing in it is
+// still an instruction to the terminal.
+//
+// The C1 range (0x80–0x9F) goes with the C0 range because a terminal in an 8-bit mode reads 0x9B
+// as CSI directly, with no ESC in front of it — an assertion that only looks for 0x1B would pass
+// over that.
+const CONTROL_ANY = /[\u0000-\u001f\u007f-\u009f]/g
+// Tab (0x09) and newline (0x0A) are the two the block form keeps; see `printableBlock`.
+const CONTROL_EXCEPT_LAYOUT = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g
+
+const controlToken = (ch) => `<0x${ch.codePointAt(0).toString(16).toUpperCase().padStart(2, '0')}>`
+
+// For a value spliced into a one-line sentence. Newline is neutralised along with everything
+// else, so a value cannot end this CLI's sentence and open a line of its own that impersonates a
+// line this CLI printed — a forgery that needs no escape sequence at all.
+//
+// `String(value)` rather than a default, so `undefined` still renders as "undefined" exactly as
+// the template literal it replaces did.
+export function printable(value) {
+  return String(value).replace(CONTROL_ANY, controlToken)
+}
+
+// For a value printed as its own block, where the line breaks are the content's own structure —
+// a captured command output, for one. Tabs and newlines survive; every other control byte is
+// neutralised. This form stops escape sequences from reaching the terminal. It does NOT stop the
+// block from containing a line that reads like something else, because a multi-line block's
+// newlines are exactly what it is being printed for: use `printable` for anything spliced into a
+// sentence.
+export function printableBlock(value) {
+  return String(value).replace(CONTROL_EXCEPT_LAYOUT, controlToken)
+}
+
 // A lens name reaches the filesystem, so it is validated as a filename component and nothing
 // else — no separators, no traversal, no absolute path, non-empty.
 export function reviewFileName(phase, lens) {
@@ -50,13 +89,17 @@ export function reviewStale(file, expected) {
   if (!file || typeof file !== 'object' || Array.isArray(file)) return 'the findings file is not an object'
   const stamp = file.stamp
   if (!stamp) return 'the findings file carries no stamp, so nothing says which diff it judged'
+  // Every value taken off the stamp is written by the reviewer, and this string is printed to a
+  // terminal, so each one goes through `printable` on its way into the sentence. The comparisons
+  // themselves are made on the raw values — neutralising is about what gets DRAWN, never about
+  // what counts as a match.
   if (String(stamp.phase) !== String(expected.phase)) {
-    return `the findings describe phase ${stamp.phase}, not phase ${expected.phase}`
+    return `the findings describe phase ${printable(stamp.phase)}, not phase ${expected.phase}`
   }
-  if (stamp.lens !== expected.lens) return `the findings are for lens ${stamp.lens}, not ${expected.lens}`
+  if (stamp.lens !== expected.lens) return `the findings are for lens ${printable(stamp.lens)}, not ${expected.lens}`
   const a = (stamp.branches ?? []).join(' ')
   const b = (expected.branches ?? []).join(' ')
-  if (a !== b) return `the findings judged ${a || '(nothing)'}, but this phase is at ${b || '(nothing)'}`
+  if (a !== b) return `the findings judged ${printable(a) || '(nothing)'}, but this phase is at ${b || '(nothing)'}`
   return null
 }
 

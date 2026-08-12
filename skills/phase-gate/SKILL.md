@@ -75,6 +75,11 @@ those you execute:
   not parse — respawn those lenses instead. A file for a lens this phase did not dispatch is
   reported and ignored, never merged.
 
+  Where those refusals quote a value out of a findings file — a lens, a stamp, a reason — the
+  value is printed with its control bytes replaced by a visible `<0x1B>` token. A findings
+  file could otherwise carry an escape sequence that erases the refusal in the terminal and draws
+  a line reading like a PASS this CLI computed. Read the exit code, not the shape of a line.
+
   Both come from the tracked manifest only — the reviewer grades the diff, so
   letting the gitignored layer choose its tier would let the party being judged pick its own
   judge. Then take every finding at a `blockOn` severity and
