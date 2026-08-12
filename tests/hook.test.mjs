@@ -591,15 +591,20 @@ test('hooks.json declares a SessionStart matcher', async () => {
 //
 // What that does and does not prove. A swallow wrapper around a body whose assertions FAIL
 // is caught here: the body throws before its marker, the completion set comes up short, and
-// this file goes red naming the missing lines. A swallow wrapper around bodies that all
-// genuinely pass is NOT distinguished by these markers — soundly, since if every assertion
-// really passed then swallowing changed nothing observable. That wrapper is nonetheless
-// caught, by the other leg: the mechanism test at the end of this file compares the source
-// text of every body node:test received against the text this file spells at that
-// registration, and a wrapper's source is not that text. An earlier version of this
-// sentence credited the registerHookCase identity assertion with that. It does not reach:
-// it pins one hop of a two-hop path, so the identical wrapper written into hookTest instead
-// left this file at 48 pass / 0 fail / 0 skipped.
+// this file goes red naming the missing lines. That was measured, not assumed — three
+// failing assertions injected into bodies under such a wrapper produced red output naming
+// the lines. It is the honest core of what these markers buy: the HARM a swallow wrapper
+// does is caught, even when the wrapper itself is not. A swallow wrapper around bodies that
+// all genuinely pass is NOT distinguished by these markers — soundly, since if every
+// assertion really passed then swallowing changed nothing observable. The other leg, the
+// source-text comparison in the mechanism test at the end of this file, catches the ordinary
+// spellings of that wrapper, because a wrapper's own source text is not what this file
+// spells at that registration. It does not catch one that also carries its own `toString`:
+// a one-line `Object.assign(function (...a) { try { … } catch {} },
+// { toString: () => fn.toString() })` ran 48 pass / 0 fail / 0 skipped. An earlier version
+// of this sentence credited the registerHookCase identity assertion with catching the
+// wrapper. It does not reach: it pins one hop of a two-hop path, so the identical wrapper
+// written into hookTest instead left this file at 48 pass / 0 fail / 0 skipped.
 //
 // Why the call site and not just a count: the body is supplied by the registration path, so
 // that path can substitute a body that calls the marker and does nothing else.
@@ -610,21 +615,32 @@ test('hooks.json declares a SessionStart matcher', async () => {
 // thirty-one arrive from the ONE line inside the registration path instead of from the
 // thirty-one marker lines this file's text carries.
 //
-// What that buys, exactly, and what it does not buy. Two independent legs now stand between
-// a forgery in the registration path and a green file: these marker lines, and the
-// source-text comparison in the mechanism test at the end. A one-line substitution is
-// caught by both — `register(name, () => hookBodyRan())` leaves every call on one line, and
-// its text is not what this file spells at those registrations — and a stub that forges its
-// stack frames onto the right marker lines still fails the source-text leg. So both legs
-// have to fall to the SAME edit. Both can: measured at this tip, substituting a
-// `new Function` stub whose forged frames land on each case's marker line AND giving that
-// stub an own `toString` returning the case's own source slice left this file at
-// 48 pass / 0 fail / 0 skipped in 363ms — against roughly twelve seconds for a healthy run
-// — with all thirty-one real bodies discarded. Without that second line it is
-// 47 pass / 1 fail, naming the substituted cases. That is the honest size of what these
-// markers add: a forgery written inside hookTest or registerHookCase costs two lines
-// instead of one. It is not an impossibility proof, and no count of edits stated here
-// should be read as one.
+// What that buys, exactly, and what it does not buy. Two independent legs stand between a
+// forgery in the registration path and a green file: these marker lines, derived from the
+// stack frames the marker calls arrive on, and the source-text comparison in the mechanism
+// test at the end, which compares each body node:test received against this file's own text.
+// A forgery has to satisfy BOTH.
+//
+// What that is worth is the CASUAL edit, and that is the realistic regression here. A
+// wrapper added while refactoring the registration path keeps every marker line but arrives
+// with the wrapper's source text; a body replaced by a stub, or a case skipped by mistake,
+// loses its marker line. Either way at least one leg fails and this file goes red naming the
+// case. Neither leg has to be defeated on purpose for those to be caught.
+//
+// A DELIBERATE forgery satisfies both, and does it in a single expression. Measured at this
+// tip: replacing the one registerHookCase call inside hookTest with a stub that pads a
+// `new Function` body so its forged frames land on each case's marker line AND carries an
+// own `toString` returning that case's source slice left this file at
+// 48 pass / 0 fail / 0 skipped in 398ms, against roughly fifteen seconds for a healthy run,
+// with all thirty-one real bodies discarded. Ten consecutive rounds of this comment have
+// each named a price for forging these markers — thirty-one edits, then one edit, then two
+// lines — and every one of them was falsified by the next reader, twice within a single
+// round. No count of lines or edits bounds this, and none is stated here.
+//
+// The runtime gap is an observation, NOT a defense: a forged run finishes in a fraction of
+// the healthy time precisely because no real body executes. Nothing in this file asserts on
+// runtime, so nothing goes red for being fast, and this paragraph must not be read as though
+// something did.
 let hookBodyRuns = 0
 // Line numbers in this file that hookBodyRan() was called from.
 const hookBodyMarkerLines = new Set()
@@ -2073,13 +2089,18 @@ test('(mechanism) a reachable probe means EVERY hook case body executed', (t) =>
   // and HOOK_CASES_IN_SOURCE hold: `bodySource` is the exact source slice of each case's
   // function expression, and Function.prototype.toString returns that same slice for the
   // function object node:test received. Editing what either hop DOES cannot change what the
-  // text says, so a wrapper — at either hop, in any spelling — arrives here as a function
-  // whose source is the wrapper's, and this assertion names the case it replaced.
+  // text says, so an ordinary wrapper — at either hop — arrives here as a function whose
+  // source is the wrapper's, and this assertion names the case it replaced.
   //
-  // What it does NOT close, tried and stated rather than assumed: a registration path that
-  // built its substitute by evaluating this file's own text for that case would produce a
-  // matching source string, and the thirty-one-stub forgery described below still satisfies
-  // it, since both compare text against text.
+  // What it does NOT close, tried and stated rather than assumed: this leg compares text
+  // against text, so anything that produces the right text passes it. A registration path
+  // that built its substitute by evaluating this file's own text for that case produces a
+  // matching source string. So does a stub carrying an own `toString` that returns the case's
+  // source slice — which is how the single-expression forgery described at the hookBodyRan
+  // definition satisfies this leg while forging its stack frames to satisfy the marker leg,
+  // and how a one-line swallow wrapper with `toString: () => fn.toString()` passes it too.
+  // So do not read this assertion as covering a wrapper "in any spelling"; an earlier
+  // version of this comment said exactly that, and it was false.
   assert.equal(nodeTestRegistrations.length, HOOK_CASES_FROM_SOURCE.cases.length,
     `node:test received ${nodeTestRegistrations.length} hook case registrations for the ` +
     `${HOOK_CASES_FROM_SOURCE.cases.length} this file's source registers — a registration ` +
