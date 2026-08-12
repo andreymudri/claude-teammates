@@ -115,6 +115,7 @@ export { mergedParentFiles, landedForFiles }
 - Modify: `scripts/reviews.mjs`
 - Modify: `scripts/cli.mjs`
 - Modify: `scripts/digest.mjs`
+- Modify: `scripts/finish.mjs`
 - Modify: `skills/phase-gate/SKILL.md`
 - Test: `tests/reviews.test.mjs`
 - Test: `tests/cli.test.mjs`
@@ -210,6 +211,27 @@ export { mergedParentFiles, landedForFiles }
   cannot start a line, so they reorder rendered text without forging a verdict. Do not claim the
   helpers stop them — correct any comment that says nothing survives as a terminal instruction, so
   the prose matches what the code does.
+
+  Amended once more: U+2028/2029 ARE in scope after all. They are LINE SEPARATOR and PARAGRAPH
+  SEPARATOR, so in a CSS-rendered `pre` block — which is how agent transcripts are actually read —
+  they start a line (UAX#14 class BK) and a forged verdict line follows. Neutralise those two only.
+  The reordering controls (U+202E, U+2066–2069, U+200E/200F, U+061C) stay out of scope, keep passing
+  through, and keep their pinned test: they reorder rendered text without starting a line.
+
+- [ ] **Step 8:** `renderRunSummary` in `scripts/finish.mjs` splices manifest check names into a
+  rendered table. Added by amendment because Step 7's fix stops at the `cli.mjs` boundary and cannot
+  reach it: wrapping there with `printableBlock` prevents a name REDRAWING the table, but
+  `printableBlock` preserves newlines by design, so a check name containing `\n` still ADDS A ROW to
+  the summary an operator reads to decide whether a run is finished. A forged row in that table is
+  the same class of defect as a forged `[gate] … PASS` line, which is why the file set is widened
+  rather than the finding deferred.
+
+  Sanitise the check names where the table is built, not only where it is printed. `printableBlock`
+  is the wrong helper at this site precisely because it keeps `\n`; use `printable`, whose whole
+  purpose is that a value cannot become a line. Pin it with a test asserting on BYTES that a check
+  name containing a newline plus a plausible summary row cannot add a row to the rendered table, and
+  confirm the test fails before the change. Do not alter what the summary reports or any exit code —
+  only how a name renders.
 
 ### Task 4: stop the hook tests depending on which bash is on PATH
 
