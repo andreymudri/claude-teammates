@@ -19,9 +19,32 @@ const updateCheckScript = fileURLToPath(new URL('../hooks/update-check', import.
 // based on platform, so it works everywhere without hardcoded platform logic.
 let _probeResult = null  // 'reachable' | 'unreachable' | null (exposed for mechanism test)
 
+// The one place the probe's command line is built. Both canBashAccessRepository
+// and the -p defense test call this, so the test spawns the argv the probe really
+// uses instead of a private copy that could drift from it.
+const PROBE_SCRIPT = 'printf TM_RAN; test -e "$1" && printf TM_OK'
+
+function buildProbeInvocation(targetPath) {
+  // -p (privileged mode) makes bash ignore exported shell functions such as
+  // BASH_FUNC_test, and refuse BASH_ENV/ENV startup files, so neither can forge
+  // a positive answer. The path is passed as an argument, not interpolated into
+  // the script, so it cannot be read as shell syntax.
+  return {
+    command: 'bash',
+    args: ['-p', '-c', PROBE_SCRIPT, '--', targetPath],
+    options: {
+      timeout: 20000,
+      encoding: 'utf8',
+      env: { ...process.env },
+    },
+  }
+}
+
 // Shared classification logic: converts probe output or error into 'reachable' or 'unreachable'.
 // Returns 'reachable' | 'unreachable', or throws when the probe's own execution cannot be established.
 // Called by canBashAccessRepository with actual output/error, and by test 2 with synthesized inputs.
+// Decides only from structured facts — exit status and the presence of the TM_RAN /
+// TM_OK tokens in stdout — never from the wording of an error message.
 function classifyProbeOutcome({ output, err }) {
   if (output !== undefined) {
     // Success path: bash ran and printed output
@@ -31,7 +54,7 @@ function classifyProbeOutcome({ output, err }) {
       return 'unreachable'
     } else {
       throw new Error(
-        `Probe gave unexpected result: got "${output}" from bash -p -c 'printf TM_RAN; test -e "$1" && printf TM_OK'`
+        `Probe gave unexpected result: got "${output}" from bash running '${PROBE_SCRIPT}'`
       )
     }
   } else if (err !== undefined) {
@@ -58,42 +81,33 @@ function classifyProbeOutcome({ output, err }) {
   }
 }
 
+// Spawns the probe once and hands back exactly what classifyProbeOutcome consumes.
+// The catch records the error and nothing else: no branch here inspects the error's
+// message, so an execFileSync failure whose text happens to resemble one of the
+// classifier's own messages cannot change the outcome. `spawn` is injectable so a
+// test can drive the error path on a machine where bash reaches the repo fine.
+function runProbe(spawn = execFileSync) {
+  // Probe the repository root (not the hook file itself). If the repo is
+  // unreachable, the probe fails. If a hook file is missing, the repo is
+  // still reachable, and tests should run and fail as expected.
+  //
+  // Require positive evidence: have bash print 'TM_OK' on success. This
+  // prevents forging via exit codes (startup files, etc.).
+  const { command, args, options } = buildProbeInvocation(toBashPath(root))
+  try {
+    return { output: spawn(command, args, options) }
+  } catch (err) {
+    return { err }
+  }
+}
+
 function canBashAccessRepository() {
   if (_probeResult !== null) return _probeResult === 'reachable'
-  try {
-    // Probe the repository root (not the hook file itself). If the repo is
-    // unreachable, the probe fails. If a hook file is missing, the repo is
-    // still reachable, and tests should run and fail as expected.
-    //
-    // Require positive evidence: have bash print 'TM_OK' on success. This
-    // prevents forging via exit codes (startup files, etc.). Pass the path
-    // as an argument to avoid shell injection. Scrub BASH_ENV/ENV to prevent
-    // startup files from interfering with the probe itself.
-    const env = { ...process.env }
-    delete env.BASH_ENV
-    delete env.ENV
-    const output = execFileSync('bash', ['-p', '-c', 'printf TM_RAN; test -e "$1" && printf TM_OK', '--', toBashPath(root)], {
-      timeout: 20000,
-      encoding: 'utf8',
-      env: env,
-    })
-    const result = classifyProbeOutcome({ output })
-    _probeResult = result
-    return result === 'reachable'
-  } catch (err) {
-    // If err came from classifyProbeOutcome, re-throw it
-    if (err.message && err.message.includes('Could not')) {
-      throw err
-    }
-    // Otherwise it's from execFileSync, so classify the error
-    try {
-      const result = classifyProbeOutcome({ err })
-      _probeResult = result
-      return result === 'reachable'
-    } catch (classificationError) {
-      throw classificationError
-    }
-  }
+  // Classification runs outside runProbe's try, so an error it raises reaches the
+  // caller with its own message instead of being caught and re-wrapped.
+  const result = classifyProbeOutcome(runProbe())
+  _probeResult = result
+  return result === 'reachable'
 }
 
 // Decide whether to skip hook tests based on repository accessibility.
@@ -413,35 +427,37 @@ test('(mechanism) hookTest skips its cases only when the repository is unreachab
   }
 })
 
-// Probe defense tests: pin the three defenses against forged answers.
-// Each must fail when the defense is removed. These tests execute the probe
-// logic directly against known-hostile conditions.
+// Probe defense tests. Three properties keep a broken or hostile bash from quietly
+// turning this suite into skips, and each test below fails when its property is
+// removed from the implementation above:
+//   - the -p flag in buildProbeInvocation, which blocks exported-function forgery;
+//   - the TM_RAN token gate in classifyProbeOutcome, which requires evidence that
+//     real bash ran before an exit-1 answer is accepted as 'unreachable';
+//   - runProbe classifying from status and stdout alone, so the ordinary
+//     WSL-cannot-read-C:\ skip is not derailed by whatever text bash put on stderr.
+// All three exercise the shipped code — buildProbeInvocation, runProbe,
+// classifyProbeOutcome — rather than a copy of it.
 
 test('(probe defense pinned) -p flag resists BASH_FUNC_test shadowing', () => {
-  // PIN: Removing the -p flag from the probe will fail this test.
+  // PIN: Removing the -p flag from buildProbeInvocation will fail this test.
   // Verify that -p prevents BASH_FUNC_test from forging a true answer.
   // When BASH_FUNC_test is exported to return 0, and the probe is called with
   // -p against a nonexistent path, the real test runs and correctly identifies
   // the path as missing. Without -p, the forged test shadows builtin and returns 0.
 
-  const env = { ...process.env }
-  delete env.BASH_ENV
-  delete env.ENV
-  env['BASH_FUNC_test%%'] = '() { return 0; }'  // Bash function: forged test always succeeds
-
   const nonexistentPath = toBashPath(path.join(root, 'nonexist-' + Date.now()))
 
-  // The probe uses: bash -p -c 'printf TM_RAN; test -e "$1" && printf TM_OK'
+  // Spawn the probe's real argv, not a copy, so a change to it is felt here.
+  const { command, args, options } = buildProbeInvocation(nonexistentPath)
+  const env = { ...options.env }
+  env['BASH_FUNC_test%%'] = '() { return 0; }'  // Bash function: forged test always succeeds
+
   // With -p, the forged BASH_FUNC_test is blocked, so real test runs and fails.
   // Result should be TM_RAN (exit 1), NOT TM_RANTM_OK (which would mean test succeeded).
 
   let result = null
   try {
-    result = execFileSync('bash', ['-p', '-c', 'printf TM_RAN; test -e "$1" && printf TM_OK', '--', nonexistentPath], {
-      timeout: 20000,
-      encoding: 'utf8',
-      env: env,
-    })
+    result = execFileSync(command, args, { ...options, env })
   } catch (err) {
     result = err.stdout || ''
   }
@@ -468,12 +484,18 @@ test('(probe defense pinned) TM_RAN token requirement prevents fake bash', () =>
   assert.equal(classifyProbeOutcome({ output: 'TM_RAN' }), 'unreachable',
     'output TM_RAN should classify as unreachable')
 
-  // Case 3: TM_RAN + exit 1 -> unreachable (real bash ran and test failed)
-  const errWithToken = new Error('path not found')
+  // Case 3: TM_RAN + exit 1 -> unreachable (real bash ran and test failed).
+  // This is the genuine WSL-cannot-read-C:\ path: the TM_RAN gate must let it
+  // skip rather than throw, so tightening the gate cannot break those users.
+  // execFileSync appends the child's stderr and command line to err.message, so
+  // this case also carries stderr text that classification must ignore.
+  const errWithToken = new Error(
+    "Command failed: bash -p -c ...\nbash: line 1: Could not open a connection to your authentication agent\n"
+  )
   errWithToken.status = 1
   errWithToken.stdout = 'TM_RAN'
   assert.equal(classifyProbeOutcome({ err: errWithToken }), 'unreachable',
-    'exit 1 with TM_RAN stdout should classify as unreachable')
+    'exit 1 with TM_RAN stdout should classify as unreachable regardless of stderr wording')
 
   // Case 4: exit 1 without TM_RAN -> throws (fake bash answered)
   const errNoToken = new Error('fake bash exited 1')
@@ -494,34 +516,42 @@ test('(probe defense pinned) TM_RAN token requirement prevents fake bash', () =>
   )
 })
 
-test('(probe defense) genuine unreachable path still skips, with TM_RAN evidence present', () => {
-  // Verify that the TM_RAN requirement doesn't break the legitimate skip case.
-  // When bash runs but the path is genuinely not found, we get status 1 with
-  // stdout = "TM_RAN" (the printf succeeded, then test -e failed). This MUST
-  // be classified as "unreachable" and skip the tests. Removing the TM_RAN
-  // check would break WSL users.
-
-  const err = new Error('path not found')
-  err.status = 1
-  err.stdout = 'TM_RAN'  // Bash ran and printed the prefix, then test -e returned 1
-
-  let classified = null
-  try {
-    // This is the classification logic from the probe
-    if (err.status === 1) {
-      if (err.stdout && typeof err.stdout === 'string' && err.stdout.startsWith('TM_RAN')) {
-        // Correct: TM_RAN is present, so bash definitely ran. Exit 1 means unreachable.
-        classified = 'unreachable'
-      } else {
-        throw new Error(`Could not verify bash actually ran`)
-      }
-    }
-  } catch (e) {
-    assert.fail(`genuine unreachable case threw unexpectedly: ${e.message}`)
+test('(probe defense pinned) a spawn failure is classified from status and stdout, not its message', () => {
+  // PIN: re-introducing any `err.message.includes(...)` branch on the path from
+  // runProbe to classifyProbeOutcome will fail this test.
+  //
+  // execFileSync appends the child's stderr AND the command line to err.message.
+  // The ordinary WSL case — bash runs, prints TM_RAN, cannot stat the Windows
+  // path, exits 1 — routinely carries stderr text of its own. That must still
+  // classify as 'unreachable' and skip, whatever the child said on stderr.
+  const wslLikeFailure = () => {
+    const err = new Error(
+      "Command failed: bash -p -c 'printf TM_RAN; test -e \"$1\" && printf TM_OK'\n" +
+      'bash: Could not open the current directory: Permission denied\n'
+    )
+    err.status = 1
+    err.stdout = 'TM_RAN'
+    err.stderr = 'bash: Could not open the current directory: Permission denied\n'
+    throw err
   }
 
-  assert.equal(classified, 'unreachable',
-    'probe should classify "TM_RAN + exit 1" as unreachable, not throw')
+  assert.equal(classifyProbeOutcome(runProbe(wslLikeFailure)), 'unreachable',
+    'a genuine exit-1-with-TM_RAN failure must skip, not throw, whatever its message says')
+
+  // And a spawn failure with no TM_RAN evidence must still be refused, so the
+  // clause above is a narrowing of the error path rather than a blanket pass.
+  const fakeBash = () => {
+    const err = new Error('Command failed: bash')
+    err.status = 1
+    err.stdout = ''
+    throw err
+  }
+
+  assert.throws(
+    () => classifyProbeOutcome(runProbe(fakeBash)),
+    /Could not verify bash actually ran/,
+    'a spawn failure without TM_RAN must still throw rather than silently skip'
+  )
 })
 
 // Regression: `${CLAUDE_CONFIG_DIR:-${HOME}/.claude}` looks safe but is not. Under
