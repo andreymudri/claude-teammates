@@ -1,6 +1,7 @@
 import { resolveTaskBranch } from './enforce.mjs'
 import { GitError } from './git.mjs'
 import { mergedParentFiles, landedForFiles } from './gate-runner.mjs'
+import { printable } from './reviews.mjs'
 
 // Read-only diagnosis of a run, computed entirely from git.
 //
@@ -158,26 +159,44 @@ export async function collectDoctorReport({ git, runId, runBranch, baseBranch, t
   return { runId, runBranch, baseBranch, mainBranch, dirty, worktrees, tasks: taskReports, problems }
 }
 
+// A terminal ACTS on control bytes, and most of what this prints was written by the very
+// teammates being diagnosed: a teammate writes its own commit subjects and names its own branches
+// and worktrees. A subject carrying `ESC [ 2 K` `ESC [ 1 A` erases the line reporting it and the
+// line above, so the report says something other than what this function assembled — and `doctor`
+// is the command whose whole purpose is telling an operator that a teammate's `done` was a claim
+// rather than evidence.
+//
+// Neutralised here: the run id and the two branch names in the header, the branch the main
+// worktree is on, each worktree's branch and path, each task's id, branch and commit subject, and
+// every problem line — one wrap at the point each is spliced in, which covers the values the
+// problem sentences embed (branch names, paths, task ids, git error text) without restating them.
+// NOT touched: the counts and the fixed words (`MISSING`, `SIDE DOOR`, `integrated`), which this
+// module writes itself. `printable`, not `printableBlock`: every one of these renders as a single
+// line, and a surviving newline is enough to forge a line without any escape sequence at all.
+//
+// Wrapping happens only here. `collectDoctorReport` returns the values as git reported them, so a
+// caller reading the report as data is unaffected, and no problem, task or exit code changes —
+// only how a value renders. This covers the sites in this function and says nothing about others.
 export function renderDoctor(report) {
-  const lines = [`run ${report.runId} · run branch ${report.runBranch} · base ${report.baseBranch}`]
-  lines.push(`main worktree on ${report.mainBranch}${report.dirty.length ? ` · ${report.dirty.length} dirty path(s)` : ' · clean'}`)
+  const lines = [`run ${printable(report.runId)} · run branch ${printable(report.runBranch)} · base ${printable(report.baseBranch)}`]
+  lines.push(`main worktree on ${printable(report.mainBranch)}${report.dirty.length ? ` · ${report.dirty.length} dirty path(s)` : ' · clean'}`)
 
   if (report.worktrees.length) {
     lines.push('worktrees')
     for (const wt of report.worktrees) {
-      lines.push(`  ${wt.detached ? '(detached)' : wt.branch ?? '(none)'}  ${wt.path}`)
+      lines.push(`  ${wt.detached ? '(detached)' : printable(wt.branch ?? '(none)')}  ${printable(wt.path)}`)
     }
   }
 
   if (report.tasks.length) {
     lines.push('tasks')
     for (const t of report.tasks) {
-      if (!t.exists) { lines.push(`  ${t.id}  ${t.branch}  MISSING`); continue }
+      if (!t.exists) { lines.push(`  ${printable(t.id)}  ${printable(t.branch)}  MISSING`); continue }
       const files = t.landed
         ? 'integrated'
         : (t.changed.length === 0 ? 'NO CHANGES' : `${t.changed.length} file(s)`)
-      lines.push(`  ${t.id}  ${t.branch}  ${files}${t.sideDoor ? '  SIDE DOOR' : ''}`)
-      lines.push(`      ${t.tip}`)
+      lines.push(`  ${printable(t.id)}  ${printable(t.branch)}  ${files}${t.sideDoor ? '  SIDE DOOR' : ''}`)
+      lines.push(`      ${printable(t.tip)}`)
     }
   }
 
@@ -185,7 +204,7 @@ export function renderDoctor(report) {
     lines.push('no problems found')
   } else {
     lines.push(`${report.problems.length} problem${report.problems.length === 1 ? '' : 's'}`)
-    for (const p of report.problems) lines.push(`  - ${p}`)
+    for (const p of report.problems) lines.push(`  - ${printable(p)}`)
   }
   return lines.join('\n')
 }

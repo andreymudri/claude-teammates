@@ -434,3 +434,92 @@ test('doctor agrees with the gate on a task ref parked at a merged sibling tip (
     await rm(root, { recursive: true, force: true })
   }
 })
+
+// A teammate writes its own commit subjects and creates its own branches and worktrees, and every
+// one of those reaches `renderDoctor`. A terminal ACTS on control bytes: a subject carrying
+// `ESC [ 2 K` `ESC [ 1 A` erases the line reporting it and the line above, and a bare newline lets
+// a value close this CLI's line and open one of its own that reads like a line the CLI printed.
+// That matters most here, of all commands: `doctor` exists to tell an operator that a teammate's
+// `done` was a claim rather than evidence, so a teammate editing what `doctor` says about it
+// defeats the check where it is used.
+//
+// One row per render site. The assertion is on BYTES, because a regex over the rendered string
+// matches happily while the payload is still sitting in the output.
+const ESC = String.fromCharCode(0x1b)
+const FORGED = 'no problems found'
+const PAYLOAD = [ESC + '[2K' + ESC + '[1A', String.fromCharCode(0x0d), String.fromCharCode(0x0a), FORGED].join('')
+
+// Every report below carries a problem, so the genuine `no problems found` line is never printed
+// and any line reading that way came from the payload.
+const doctorReport = (over = {}) => ({
+  runId: RUN_ID,
+  runBranch: RUN_BRANCH,
+  baseBranch: BASE_BRANCH,
+  mainBranch: RUN_BRANCH,
+  dirty: [],
+  worktrees: [],
+  tasks: [],
+  problems: ['an ordinary problem'],
+  ...over,
+})
+
+function assertNeutralised(out) {
+  const bytes = Buffer.from(out, 'utf8')
+  assert.equal(bytes.includes(0x1b), false, 'an ESC byte reached the terminal')
+  assert.equal(bytes.includes(0x0d), false, 'a CR byte reached the terminal')
+  for (const line of out.split('\n')) {
+    assert.notEqual(line.trim(), FORGED, 'a value forged a line of its own')
+  }
+}
+
+test('renderDoctor neutralises control bytes in the run header', () => {
+  const out = renderDoctor(doctorReport({ runId: PAYLOAD, runBranch: PAYLOAD, baseBranch: PAYLOAD }))
+  assert.match(out, /run branch/)
+  assertNeutralised(out)
+})
+
+test('renderDoctor neutralises control bytes in the branch the main worktree is on', () => {
+  const out = renderDoctor(doctorReport({ mainBranch: PAYLOAD }))
+  assert.match(out, /main worktree on/)
+  assertNeutralised(out)
+})
+
+test('renderDoctor neutralises control bytes in a worktree branch name and path', () => {
+  const out = renderDoctor(doctorReport({
+    worktrees: [{ path: PAYLOAD, branch: PAYLOAD, detached: false }],
+  }))
+  assert.match(out, /worktrees/)
+  assertNeutralised(out)
+})
+
+test('renderDoctor neutralises control bytes in a missing task id and branch', () => {
+  const out = renderDoctor(doctorReport({
+    tasks: [{ id: PAYLOAD, branch: PAYLOAD, exists: false, tip: null, changed: [], sideDoor: false, landed: false }],
+  }))
+  assert.match(out, /MISSING/)
+  assertNeutralised(out)
+})
+
+test('renderDoctor neutralises control bytes in a present task id and branch', () => {
+  const out = renderDoctor(doctorReport({
+    tasks: [{ id: PAYLOAD, branch: PAYLOAD, exists: true, tip: 'abc1234 work', changed: ['a.mjs'], sideDoor: false, landed: false }],
+  }))
+  assert.match(out, /file\(s\)/)
+  assertNeutralised(out)
+})
+
+// The site the security review reproduced live, with `doctor` still exiting 0: a subject the
+// teammate being diagnosed wrote itself.
+test('renderDoctor neutralises control bytes in a commit subject the teammate wrote', () => {
+  const out = renderDoctor(doctorReport({
+    tasks: [{ id: 'T1', branch: 'teammates/r1/T1', exists: true, tip: PAYLOAD, changed: ['a.mjs'], sideDoor: false, landed: false }],
+  }))
+  assert.match(out, /T1/)
+  assertNeutralised(out)
+})
+
+test('renderDoctor neutralises control bytes in a problem message', () => {
+  const out = renderDoctor(doctorReport({ problems: [`T1: branch ${PAYLOAD} does not exist`] }))
+  assert.match(out, /1 problem/)
+  assertNeutralised(out)
+})
