@@ -13,6 +13,11 @@
 //
 // Pure: it compares two parsed plans and a list of integrated phases. Reading either plan, and
 // deciding which phases are integrated, belongs to the caller.
+//
+// `planDrift` returns the values as they were read; only the rendering below neutralises control
+// bytes, so a caller consuming the report as data still sees the plan's own text.
+
+import { printable } from './reviews.mjs'
 
 const FIELDS = ['title', 'phase', 'brief']
 
@@ -83,18 +88,29 @@ export function planDrift({ anchored = [], current = [], integratedPhases = [] }
   return { added, removed, changed, tooLate, effective }
 }
 
+// Everything spliced into a line here came out of the plan file, which is text someone committed
+// on the base branch — a higher bar than a commit message, but the terminal treats the bytes the
+// same. Neutralised below: the task id, the phase, and the four file and dep lists, each entry
+// wrapped on its own so a control byte cannot survive the `join`. NOT wrapped: `entry.fields`,
+// whose members are the literals this module itself pushes (`FIELDS`, plus `files`, `deps` and
+// `removed`) and never plan text. `printable`, not `printableBlock`: each of these renders as one
+// line, and a newline surviving would let a value close the line and open one that reads like a
+// line this command printed. This covers the sites below and claims nothing about any other file.
 function describe(entry) {
-  const parts = [`  ${entry.id} (phase ${entry.phase ?? '?'}): ${entry.fields.join(', ')}`]
-  if (entry.filesAdded.length) parts.push(`      files added: ${entry.filesAdded.join(', ')}`)
-  if (entry.filesRemoved.length) parts.push(`      files removed: ${entry.filesRemoved.join(', ')}`)
-  if (entry.depsAdded.length) parts.push(`      deps added: ${entry.depsAdded.join(', ')}`)
-  if (entry.depsRemoved.length) parts.push(`      deps removed: ${entry.depsRemoved.join(', ')}`)
+  const list = (values) => values.map((v) => printable(v)).join(', ')
+  const parts = [`  ${printable(entry.id)} (phase ${printable(entry.phase ?? '?')}): ${entry.fields.join(', ')}`]
+  if (entry.filesAdded.length) parts.push(`      files added: ${list(entry.filesAdded)}`)
+  if (entry.filesRemoved.length) parts.push(`      files removed: ${list(entry.filesRemoved)}`)
+  if (entry.depsAdded.length) parts.push(`      deps added: ${list(entry.depsAdded)}`)
+  if (entry.depsRemoved.length) parts.push(`      deps removed: ${list(entry.depsRemoved)}`)
   return parts.join('\n')
 }
 
 export function renderDrift(report) {
   const lines = []
-  if (report.added.length) lines.push(`added since the anchor: ${report.added.join(', ')}`)
+  // Task ids straight out of the working-tree plan, wrapped per entry for the same reason the
+  // lists in `describe` are.
+  if (report.added.length) lines.push(`added since the anchor: ${report.added.map((id) => printable(id)).join(', ')}`)
 
   if (report.tooLate.length) {
     lines.push('changed TOO LATE — these phases are already integrated, so the brief the work was done from no longer exists:')

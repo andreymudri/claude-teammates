@@ -11,6 +11,8 @@ import {
   deriveContext,
   runFilesetCheck,
   runOwnershipCheck,
+  mergedParentFiles,
+  landedForFiles,
 } from '../scripts/gate-runner.mjs'
 import { GitError, createGit, defaultGitExec } from '../scripts/git.mjs'
 
@@ -544,6 +546,23 @@ test('mergedParentFiles unions file sets across two merges naming the same sha, 
   const ctx = { git, runId: RUN_ID, runSha: 'M2', anchorSha: 'anchorSha1', tasks: [declaresSecondFile], currentPhase: 1, phaseError: null }
   const res = await runFilesetCheck(check, ctx)
   assert.equal(res.status, 'pass')
+})
+
+// `mergedParentFiles` and `landedForFiles` are exported so `scripts/doctor.mjs` can decide
+// `landed` with the exact same predicate `runFilesetCheck` enforces with, rather than keeping a
+// second implementation that could silently disagree with the gate. Called directly here,
+// outside `runFilesetCheck`, to pin the export itself — not just behaviour reachable only
+// through the check.
+test('mergedParentFiles and landedForFiles are exported and usable directly', async () => {
+  const git = fakeGit({
+    commitsBetween: async () => ['M1', 'sharedParent'],
+    commitParents: async (sha) => (sha === 'M1' ? ['anchorSha1', 'sharedParent'] : []),
+    changedFiles: async ({ base, branch }) => (base === 'anchorSha1' && branch === 'sharedParent' ? ['x.mjs'] : []),
+  })
+  const index = await mergedParentFiles(git, { anchorSha: 'anchorSha1', runSha: 'M1' })
+  assert.equal(landedForFiles(index, 'sharedParent', ['x.mjs']), true)
+  assert.equal(landedForFiles(index, 'sharedParent', ['y.mjs']), false)
+  assert.equal(landedForFiles(index, 'someOtherSha', ['x.mjs']), false)
 })
 
 // One merge-history walk for the whole phase, not one per task: `mergedParentFiles` is called
@@ -2378,4 +2397,46 @@ test('a solo run builds no preview and consults no links even when ctx.previewLi
   const results = await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], ctx)
   assert.deepEqual(results.map((r) => [r.name, r.status]), [['test', 'pass']])
   assert.deepEqual(calls.map((c) => c.cwd), ['/project/root'])
+})
+
+// --- LIMIT: ownWorkBase (real repo) ---------------------------------------------------------
+//
+// Settled, not closed, by the plan's Task 2 Step 5: T1 (run `claims`) isolated this shape and
+// confirmed it against the pre-task baseline. The declared-files predicate does not resolve it
+// — see the `ownWorkBase` entry in the "What remains open" comment above `states.push(...)` in
+// `deriveContext`, in this file, for why. Pinned here as a LIMIT (the gate FAILs a task that is
+// genuinely, fully landed) so a future change that happens to fix it is noticed rather than
+// silently assumed to still be open.
+test('LIMIT (ownWorkBase): a fix round re-pointing an already-integrated branch at the run tip reads as having done no work (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'plan.md'), singleTaskPlan(), 'utf8')
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+
+    // The brief's own recommended fix-round step: `git checkout -B teammates/r1/T1 run`. T1's
+    // work is already, genuinely, on the run branch — this only moves where the CONVENTIONAL
+    // REF points, at a commit that is already the run tip.
+    await sh(['branch', '-f', 'teammates/r1/T1', 'run'])
+
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+    // The limit: a genuinely-landed task reads as not integrated, reopening a phase that has
+    // nothing left to do.
+    assert.deepEqual(ctx.integratedPhases, [])
+    assert.equal(ctx.currentPhase, 1)
+
+    const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
+    // And the gate FAILs it outright, naming a cause ("contributes no file changes") that is
+    // not the true one — the work is on the run branch; only the ref's own history is empty.
+    assert.equal(res.status, 'fail')
+    assert.match(res.output, /T1: branch teammates\/r1\/T1 contributes no file changes past its fork point/)
+  })
 })
