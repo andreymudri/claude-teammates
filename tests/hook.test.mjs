@@ -610,11 +610,21 @@ test('hooks.json declares a SessionStart matcher', async () => {
 // thirty-one arrive from the ONE line inside the registration path instead of from the
 // thirty-one marker lines this file's text carries.
 //
-// What that buys, exactly: a forgery must now be written as thirty-one separate stub
-// bodies, each with its own bare `hookBodyRan()` line sitting under its own `hookTest(`
-// registration — thirty-one edits in the bodies, where they are legible — rather than as
-// one edit in hookTest or registerHookCase. It is not an impossibility proof: those
-// thirty-one stubs would satisfy this test.
+// What that buys, exactly, and what it does not buy. Two independent legs now stand between
+// a forgery in the registration path and a green file: these marker lines, and the
+// source-text comparison in the mechanism test at the end. A one-line substitution is
+// caught by both — `register(name, () => hookBodyRan())` leaves every call on one line, and
+// its text is not what this file spells at those registrations — and a stub that forges its
+// stack frames onto the right marker lines still fails the source-text leg. So both legs
+// have to fall to the SAME edit. Both can: measured at this tip, substituting a
+// `new Function` stub whose forged frames land on each case's marker line AND giving that
+// stub an own `toString` returning the case's own source slice left this file at
+// 48 pass / 0 fail / 0 skipped in 363ms — against roughly twelve seconds for a healthy run
+// — with all thirty-one real bodies discarded. Without that second line it is
+// 47 pass / 1 fail, naming the substituted cases. That is the honest size of what these
+// markers add: a forgery written inside hookTest or registerHookCase costs two lines
+// instead of one. It is not an impossibility proof, and no count of edits stated here
+// should be read as one.
 let hookBodyRuns = 0
 // Line numbers in this file that hookBodyRan() was called from.
 const hookBodyMarkerLines = new Set()
