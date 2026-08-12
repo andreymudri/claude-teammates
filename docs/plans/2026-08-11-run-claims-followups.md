@@ -69,8 +69,10 @@ import { normalizePath } from './enforce.mjs'
 **Files:**
 - Modify: `scripts/gate-runner.mjs`
 - Modify: `scripts/doctor.mjs`
+- Modify: `scripts/plan-drift.mjs`
 - Test: `tests/gate-runner.test.mjs`
 - Test: `tests/doctor.test.mjs`
+- Test: `tests/plan-drift.test.mjs`
 
 - [ ] **Step 1:** Run `claims` replaced the gate's `landed` test — it no longer asks whether a sha
   is in `mergedBranchTips`, but whether a merge on the run branch's own first-parent chain carried
@@ -108,6 +110,37 @@ export { mergedParentFiles, landedForFiles }
   the declared-files predicate already resolves it, say so and pin it with a test. If it does not,
   record it in the `deriveContext` "what remains open" list with the exact reproduction — an
   accurate open limit is worth more than a silent one.
+
+- [ ] **Step 6:** Neutralise control bytes where these two commands print values an enforced
+  teammate controls. Added by amendment: Task 3 introduced `printable`/`printableBlock` in
+  `scripts/reviews.mjs` and swept `cli.mjs`, `digest.mjs` and `finish.mjs`, but a security review
+  found the same hazard in two files outside that sweep, and no file outside it has ever been
+  wrapped.
+
+  `scripts/doctor.mjs` prints `git.commitSubject` for a teammate's own branch. A teammate writes
+  its own commit messages, so a subject carrying `ESC[2K ESC[1A` erases the line reporting it and
+  the line above — reproduced live, with `doctor` still exiting 0. This is the command whose whole
+  purpose is telling the operator that a teammate's `done` was a claim rather than evidence, so a
+  teammate editing what `doctor` says about it defeats the check at its point of use.
+
+  `scripts/plan-drift.mjs` prints plan-declared file paths. The plan is read from git at the
+  anchor, so reaching this needs a commit on the base branch — a higher bar than a commit message,
+  which is why it is the milder of the two — but the rendering hazard is identical.
+
+  Import `printable` from `scripts/reviews.mjs`; do not add a third spelling and do not edit
+  `reviews.mjs`, which is Task 3's file. Use `printable`, not `printableBlock`: both sites render
+  one line per entry, and `printableBlock` deliberately preserves newlines, which is what let a
+  check name add a row to `finish`'s summary table earlier in this run.
+
+  Pin each site with a test asserting on BYTES — `Buffer.includes(0x1b)` is false and no line
+  matching the forged shape appears — and verify each test FAILS with its own wrapper removed
+  INDIVIDUALLY. Stripping every wrapper at once hides a row that passes for the wrong reason; that
+  trap has already caught two rows in this run, once where a `\S+` capture truncated the payload
+  before it reached the print site, and once where the value was sanitised upstream.
+
+  Do not change what either command reports, and do not change any exit code — only how a value
+  renders. Say in the comment which values are neutralised and which are not; do not write that
+  the file is safe from forgery generally, because these two sites are all this step covers.
 
 ### Task 3: make an unverified review stop being a pass
 
