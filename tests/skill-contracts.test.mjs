@@ -4,6 +4,7 @@ import { readFile, readdir, mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { runCli } from '../scripts/cli.mjs'
+import { collectReviewResults } from '../scripts/reviews.mjs'
 import {
   assertClaim,
   assertCode,
@@ -88,6 +89,142 @@ test('phase-gate documents the fix decision and the cost-bound framing', async (
     subject: /cost bound|security bound|tamper-evident/i,
     allow: [/Do not describe the loop as tamper-evident; only fileset and ownership carry that property/i],
   })
+})
+
+// `unableToVerify` and `unprobed` are the two `claims` results that are not findings. An
+// orchestrator that never learns of them reads a bounded, or an unrun, review as a clean one —
+// which is the same class of defect the lens exists to catch, one level up.
+test('phase-gate documents the two claims results that are not findings', async () => {
+  const { doc } = await skill('phase-gate')
+  const section = doc.section('Finish the pending checks')
+  assertStatement(
+    section,
+    /collect-reviews acts on both/i,
+    'phase-gate must say collect-reviews acts on both keys, since it now does',
+  )
+  assertStatement(
+    section,
+    /reads `?lens`?, `?stamp`?, `?findings`?, `?unableToVerify`? and `?unprobed`?, and ignores every other key/i,
+    'phase-gate must say what collectReviewResults reads, in the verb that is true of it',
+  )
+  assertStatement(
+    section,
+    /`?stamp`? is consumed to reject a stale file and then dropped from the emitted result/i,
+    'phase-gate must not let "reads" be misread as "keeps" for stamp',
+  )
+  assertStatement(
+    section,
+    /unableToVerify means the reviewer could not build the phase.s tree or get a green baseline/i,
+    'phase-gate must say what unableToVerify means',
+  )
+  // The replacement for "collected today as a pass". The refusal is the whole point of the
+  // change, so the skill has to name all three of its observable parts — refused like a missing
+  // lens, nothing emitted, exit 4 naming the lens and its reason — or an orchestrator reading
+  // only this section would still not know what to do when it happens.
+  assertStatement(
+    section,
+    /refused exactly like a lens with no file at all/i,
+    'phase-gate must say an unableToVerify lens is refused the way a missing one is',
+  )
+  assertStatement(
+    section,
+    /nothing is emitted, `?collect-reviews`? names the lens and its reason and exits 4/i,
+    'phase-gate must say what the refusal looks like from the CLI, including the exit code',
+  )
+  // The empty-string carve-out is behaviour a reader would otherwise have to guess at, and
+  // guessing it the other way would have them respawn a lens that did its work.
+  assertStatement(
+    section,
+    /an empty string is not a report of failure and collects normally/i,
+    'phase-gate must say that the key\'s mere presence is not what refuses a lens',
+  )
+  // The third route is behaviour an orchestrator meets only when something is already wrong, so
+  // the section has to say the key is read as a string and nothing else — otherwise the response
+  // to it is guessed at, and both guesses are wrong.
+  assertStatement(
+    section,
+    /the key is read only as a reason string/i,
+    'phase-gate must say which shape of unableToVerify is actually read',
+  )
+  assertStatement(
+    section,
+    /the fix is to the file rather than a respawn/i,
+    'phase-gate must say a malformed key is not answered by respawning the review',
+  )
+  assertStatement(
+    section,
+    /unprobed lists claims it enumerated and did not reach/i,
+    'phase-gate must say what unprobed lists',
+  )
+  assertStatement(
+    section,
+    /the count is surfaced in the emitted check.s `?output`?/i,
+    'phase-gate must say where unprobed reaches the operator, now that it does',
+  )
+  // The two keys fail the same way, so the section must not document a shape rule for one and
+  // leave the other looking permissive — that asymmetry is what let `unprobed: 32` be counted as
+  // nothing while `unableToVerify: 32` was refused.
+  assertStatement(
+    section,
+    /it is read only in its documented shape, a list/i,
+    'phase-gate must say unprobed is read only as a list, as it says of unableToVerify',
+  )
+  assertStatement(
+    section,
+    /an empty list is a review that reached everything it enumerated, and collects silently/i,
+    'phase-gate must say an empty unprobed is not the malformed case',
+  )
+})
+
+// The statements above are claims about code, so they are pinned against the code rather than
+// only against themselves. If `collectReviewResults` ever stops refusing an `unableToVerify`
+// lens, this fails and the skill sentences saying it does have to be rewritten — which is the
+// direction of drift that produced this finding in the first place.
+test('collect-reviews really does refuse an unableToVerify claims review rather than passing it', async () => {
+  // The stamp has to EXIST for the refusal to be an assertion about the key rather than about
+  // staleness. Without it the file would be rejected before `unableToVerify` was ever consulted,
+  // and the test would pass whatever the code did with that key — which is this project's
+  // signature defect committed one level up, inside the test written to close an instance of it.
+  // `expected` matches, so the file is current and reaches the point where the key decides.
+  const stamp = { phase: '1', lens: 'claims', branches: ['teammates/r1/T1@abc123'] }
+  const out = collectReviewResults({
+    lenses: ['claims'],
+    expected: { phase: '1', branches: ['teammates/r1/T1@abc123'] },
+    files: [{ lens: 'claims', stamp, findings: [], unableToVerify: 'the baseline suite was red', unprobed: ['a.mjs:1'] }],
+  })
+  assert.deepEqual(out.stale, [], 'the fixture must not be rejected as stale, or it proves nothing')
+  assert.deepEqual(out.results, [], 'a lens that verified nothing must emit no result at all')
+  assert.deepEqual(out.unverified, [{ lens: 'claims', reason: 'the baseline suite was red' }])
+  // Unaccounted for in the same sense a lens with no file is, which is what the skill says.
+  assert.deepEqual(out.missing, ['claims'])
+})
+
+// The other half of the same contract, and the reason the fixture above proves anything: with the
+// one key removed, the identical file collects. Without this, "refused because of
+// `unableToVerify`" would be indistinguishable from "refused for some unrelated reason", and the
+// three key-absence assertions below would have nowhere left to live once the result went away.
+test('the same claims file without unableToVerify collects, and keeps none of the three read keys', async () => {
+  const stamp = { phase: '1', lens: 'claims', branches: ['teammates/r1/T1@abc123'] }
+  const out = collectReviewResults({
+    lenses: ['claims'],
+    expected: { phase: '1', branches: ['teammates/r1/T1@abc123'] },
+    files: [{ lens: 'claims', stamp, findings: [], unprobed: ['a.mjs:1'] }],
+  })
+  assert.deepEqual(out.stale, [], 'the fixture must not be rejected as stale, or it proves nothing')
+  assert.deepEqual(out.unverified, [])
+  assert.equal(out.results.length, 1)
+  assert.equal(out.results[0].status, 'pass')
+  // Read, and then not kept: neither key survives into the emitted result as a key, so nothing
+  // downstream of the CLI can recover the list. What survives of `unprobed` is a count in
+  // `output`, which is what the skill says and is asserted here rather than merely described.
+  assert.equal('unableToVerify' in out.results[0], false)
+  assert.equal('unprobed' in out.results[0], false)
+  assert.match(out.results[0].output, /1 enumerated claim\(s\) NOT reached/)
+  // `stamp` is read — `reviewStale` consumes it — and then dropped from the result just like the
+  // two keys above. The skill said "keeps lens, stamp and findings", which overstated by one key
+  // in the very sentence written to correct an overstatement. This is what makes the corrected
+  // wording checkable rather than merely more careful.
+  assert.equal('stamp' in out.results[0], false)
 })
 
 test('phase-gate says plainly what a none decision means and does not mean', async () => {
@@ -512,6 +649,10 @@ test('phase-gate states reviewers are dispatched without a name and a named one 
       // claim above forbids. The two uses are unrelated and the fallback does not weaken the
       // unnamed-dispatch rule — it covers the case where an unnamed reviewer dies anyway.
       /^Name a findings path per lens in the dispatch/i,
+      // Reviewed: this "name" is a CHECK name out of the gate manifest, listed among the values
+      // printed through `printable`. It says nothing about how a reviewer is dispatched, so it
+      // cannot weaken the unnamed-dispatch rule the claim above states.
+      /^Where a line quotes a value an agent wrote/i,
     ],
     forbid: [/dispatch one tm-reviewer per lens[^.]*with a name/i],
   })

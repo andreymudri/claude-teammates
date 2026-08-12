@@ -1,4 +1,5 @@
 import { readFile, writeFile, mkdir, rename, lstat, readdir, unlink } from 'node:fs/promises'
+import { livenessRows, renderLiveness, hasStall, hasUnknown, DEFAULT_STALE_MINUTES } from './liveness.mjs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parsePlan } from './plan-parser.mjs'
@@ -16,9 +17,9 @@ import { decideFix } from './fix-loop.mjs'
 import { runChecks, aggregateVerdict } from './gate-runner.mjs'
 import { renderDigest } from './digest.mjs'
 import { collectDoctorReport, renderDoctor } from './doctor.mjs'
-import { collectReviewResults, reviewFileName, reviewStamp } from './reviews.mjs'
+import { collectReviewResults, printable, printableBlock, reviewFileName, reviewStamp } from './reviews.mjs'
 import { generateReviewDispatch } from './review-gen.mjs'
-import { resolveTaskBranch } from './enforce.mjs'
+import { resolveTaskBranch, taskBranchName } from './enforce.mjs'
 import { tmpdir } from 'node:os'
 import { realpathSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
@@ -64,10 +65,11 @@ function resolvedTempRoot() {
   }
 }
 
-const USAGE = `usage: cli.mjs <init-run|gate|doctor|digest|claim|unclaim|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|config> [options]
+const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclaim|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|config> [options]
 
   init-run <planPath> --run <id> [--root <path>]
   doctor   --run <id> --plan <path> [--base <branch>] [--run-branch <name>] [--root <path>]
+  liveness --run <id> --plan <path> [--stale <minutes>] [--root <path>]
   finish   --run <id> --plan <path> [--base <branch>] [--root <path>] [--results <path>] [--enforcement-only]
   prune-run --run <id> --plan <path> [--base <branch>] [--yes] [--root <path>] [--results <path>] [--enforcement-only]
   rebuild-state --run <id> --plan <path> [--base <branch>] [--force] [--root <path>]
@@ -190,6 +192,7 @@ export const REQUIRED = {
   'init-run': ['run'],
   gate: ['run', 'plan'],
   doctor: ['run', 'plan'],
+  liveness: ['run', 'plan'],
   // `--phase` is the manifest phase key, not a plan phase number, so it stays out of
   // NUMERIC_PHASE_COMMANDS and defaults to `default` exactly as `gate`'s does.
   'collect-reviews': ['run'],
@@ -231,6 +234,7 @@ export const KNOWN_FLAGS = {
   'init-run': ['run'],
   gate: ['run', 'plan', 'base', 'phase', 'no-fleet', 'results'],
   doctor: ['run', 'plan', 'base', 'run-branch'],
+  liveness: ['run', 'plan', 'stale'],
   digest: ['run'],
   claim: ['run', 'task', 'by'],
   unclaim: ['run', 'task'],
@@ -386,8 +390,14 @@ function announceCommandChecks(io, command, checkCount, phaseCount, recommendEnf
 
 // A phase reports the checks it did not run, every time, whatever put them in that state:
 // `--enforcement-only` here, and the merge-conflict skip `runChecks` produces on its own.
+//
+// The name is the manifest's, and `validateGate` checks the SHAPE of a phase and not the
+// content of a check — so a check name is an arbitrary agent-written string, exactly like the
+// name `complete` already wraps. It reaches a terminal here on the `prune-run` path, which is
+// the command whose `--yes` removes worktrees, so the line saying a check did NOT run is the
+// last one that should be erasable.
 function reportSkipped(io, phase, verdict) {
-  for (const name of verdict.skipped ?? []) io.out(`phase ${phase}: skipped: ${name}`)
+  for (const name of verdict.skipped ?? []) io.out(`phase ${phase}: skipped: ${printable(name)}`)
 }
 
 // A skill branches on this CLI's exit code. A missing argument must produce the usage
@@ -410,6 +420,76 @@ function numericWindow(value, fallback) {
   if (value === undefined) return fallback
   if (typeof value !== 'string') return NaN
   return Number(value)
+}
+
+// Newest mtime under a directory, pruning what git says the project ignores and visiting at most
+// MAX_WALK_ENTRIES entries. `floored: true` means the cap stopped the walk, so the answer is a
+// lower bound on freshness rather than a measurement — `livenessRows` reports such a row as
+// `unknown` rather than as either working or stalled.
+//
+// `ignored` is supplied by the caller from `git.ignoredPaths`, not decided here, and it replaced a
+// hardcoded `.git`/`node_modules` pair that was the wrong filter twice over: it missed every other
+// generated directory (`dist`, `.next`, `target`, `.venv`), and it named `node_modules` in a
+// project that might legitimately track it. A repository with any of those floored every walk, and
+// a floored row could never be stalled, so the command's only failure signal was inert on exactly
+// the repositories it exists to supervise.
+//
+// `.git` stays hardcoded because git does not report it as ignored — it is not ignored, it is
+// simply not part of the working tree — so nothing in the supplied set can cover it.
+//
+// Both the cap and this function are exported so the suite walks a real tree of MAX_WALK_ENTRIES+1
+// entries rather than being told the flag: a walk that always floors reports no stall ever, while
+// every unit test on the synthetic flag stays green. That is not hypothetical — it is how the
+// branch was found unpinned.
+export const MAX_WALK_ENTRIES = 5000
+const WALK_SKIP = new Set(['.git'])
+
+// What each unmeasured row means and what to do about it. `livenessRows` names the reason and this
+// supplies the prose, so the pure module stays free of wording and the two cannot be conflated in
+// the output — they call for different actions, and "not measured" with no cause named is close to
+// useless to whoever is holding the heartbeat.
+const UNMEASURED_REASONS = [
+  ['walk-capped', `the worktree walk hit its ${MAX_WALK_ENTRIES}-entry cap, so the newest file may be one it never`
+    + ' reached. Add the generated directory to the project .gitignore — the walk skips what git ignores.'],
+  ['no-worktree-measurement', 'no worktree of that branch could be read, so nothing looked at whether files are'
+    + ' being edited. Either none is registered — a teammate dispatched without worktree isolation, or working in'
+    + ' the main worktree — or its directory is gone. This is not a stall; look at that teammate directly.'],
+]
+
+export async function newestMtime(dir, { ignored = new Set() } = {}) {
+  let newest = null
+  let visited = 0
+  const stack = [dir]
+  while (stack.length > 0) {
+    const current = stack.pop()
+    let entries
+    try {
+      entries = await readdir(current, { withFileTypes: true })
+    } catch {
+      // A worktree deleted without `git worktree prune` is still listed by git, so this is a state
+      // git produces routinely rather than a rare race. It is not an error worth failing the
+      // report over; it is the absence of evidence, which the caller already represents as a
+      // missing touch record.
+      continue
+    }
+    for (const entry of entries) {
+      if (visited >= MAX_WALK_ENTRIES) return { at: newest, floored: true }
+      visited += 1
+      if (WALK_SKIP.has(entry.name)) continue
+      const full = path.join(current, entry.name)
+      // git reports ignored paths relative to the worktree root, with forward slashes, and a
+      // whole ignored directory carries a trailing slash. Both spellings are tested, because a
+      // rule can ignore a single file as easily as a directory.
+      const rel = path.relative(dir, full).split(path.sep).join('/')
+      if (ignored.has(rel) || ignored.has(`${rel}/`)) continue
+      if (entry.isDirectory()) { stack.push(full); continue }
+      try {
+        const st = await stat(full)
+        if (newest == null || st.mtimeMs > newest) newest = st.mtimeMs
+      } catch { /* a link whose target is gone, or a file removed mid-walk; same reasoning */ }
+    }
+  }
+  return { at: newest, floored: false }
 }
 
 function missingArgs(command, flags, positional) {
@@ -568,15 +648,19 @@ function validateSuppliedResults(supplied, checks) {
     // would let an `agent` result land on the `command` check. Whether the file was accepted
     // would then depend on declaration order rather than on what gets written. Reject the
     // collision instead of resolving it.
+    // `r?.name` goes out through `JSON.stringify`, which escapes a control byte to `\uXXXX`
+    // and is sufficient on its own; `check.kind` and `check.name` below are spliced bare into
+    // the sentence, so those take `printable`. Both halves are agent-written — the difference
+    // is only in how each reaches the line.
     if (duplicated.has(r?.name)) {
       return `--results names a check declared more than once in this phase's manifest: ${JSON.stringify(r?.name)}`
     }
     const check = byName.get(r?.name)
     if (!check) return `--results names a check not in this phase's manifest: ${JSON.stringify(r?.name)}`
-    if (!SUPPLIABLE_KINDS.has(check.kind)) return `--results may not supply a ${check.kind} check: ${check.name}`
-    if (!SUPPLIED_STATUSES.has(r.status)) return `--results carries an unrecognized status for ${check.name}: ${JSON.stringify(r.status)}`
+    if (!SUPPLIABLE_KINDS.has(check.kind)) return `--results may not supply a ${printable(check.kind)} check: ${printable(check.name)}`
+    if (!SUPPLIED_STATUSES.has(r.status)) return `--results carries an unrecognized status for ${printable(check.name)}: ${JSON.stringify(r.status)}`
     if (r.source !== undefined && !SUPPLIED_SOURCES.has(r.source)) {
-      return `--results carries an unrecognized source for ${check.name}: ${JSON.stringify(r.source)} (expected "response" or "file")`
+      return `--results carries an unrecognized source for ${printable(check.name)}: ${JSON.stringify(r.source)} (expected "response" or "file")`
     }
   }
   return null
@@ -640,7 +724,10 @@ async function readSuppliedPhases(flags, io) {
   try {
     parsed = JSON.parse(await readFile(flags.results, 'utf8'))
   } catch (err) {
-    io.out(`--results ${flags.results} could not be read as JSON: ${err.message}`)
+    // Node embeds a slice of the parsed input in a JSON parse error, so this message carries
+    // bytes out of the agent-written file it failed on. `printable`, for the reason every other
+    // quoted value here goes through it: see its definition in `reviews.mjs`.
+    io.out(`--results ${printable(flags.results)} could not be read as JSON: ${printable(err.message)}`)
     return SUPPLIED_REJECTED
   }
   const invalid = validateSuppliedPhases(parsed)
@@ -659,6 +746,16 @@ async function readSuppliedPhases(flags, io) {
 //
 // Reported, never refused. Dropping the block is already the safe direction — unmatched evidence
 // changes no verdict — so this exists only so the output stops lying by omission.
+//
+// The keys are printed BARE, and that is safe only because of a constraint stated elsewhere:
+// `validateSuppliedPhases` in `scripts/finish.mjs` refuses any key for which
+// `String(Number(key)) !== key`, so every key that reaches here is the canonical decimal form of
+// an integer and can carry no control byte. Both callers run that validator first —
+// `readSuppliedPhases` returns SUPPLIED_REJECTED on its refusal and both return 2 on it — so a
+// key with bytes in it never gets this far. That refusal is pinned by 'a numeric phase key that
+// is not its own canonical form is refused' in `tests/finish.test.mjs`; if it is ever loosened,
+// these keys need `printable` like every other quoted value here. The `phases` half of the
+// sentence is a list of integers `assignPhases` computed, never read from anything.
 function reportUnmatchedSuppliedPhases(io, supplied, phases) {
   const byPhase = supplied?.phases
   if (!byPhase || typeof byPhase !== 'object') return
@@ -825,20 +922,6 @@ async function resolveBranchShas(git, tasks, runId) {
   return branchShas
 }
 
-// What the reviewer is told to carry back. The stamp is rendered into the prompt rather than left
-// implicit: a field the dispatch declares and the prompt never mentions is a field no reviewer
-// ever writes, and `collect-reviews` would then refuse every file for want of a stamp nobody
-// asked for.
-function stampInstruction(stamp) {
-  return [
-    'Include this exact object under a "stamp" key in the JSON you write and return:',
-    `    ${JSON.stringify(stamp)}`,
-    'It names the branch tips these findings judged. collect-reviews refuses a findings file whose'
-    + ' stamp names different tips: a fix round moves a branch, and findings about the old tree are'
-    + ' not findings about this one.',
-  ].join('\n')
-}
-
 async function derive(root, runId, flags) {
   const git = createGit({ cwd: root })
   const runBranch = await git.currentBranch()
@@ -886,9 +969,16 @@ async function derive(root, runId, flags) {
 // 1, which a skill branching on this CLI's exit code reads as neither a pass nor a stated
 // failure. `syscall` is what distinguishes an fs error from an ordinary Error carrying a
 // `code` property.
+// Both messages quote the manifest back. A ConfigError names the key it rejected, and a phase
+// key, an `agents.<role>` field name and an unknown role are all arbitrary strings out of the
+// file; the JSON parse error is worse still, because Node embeds a slice of the RAW FILE BYTES
+// in `err.message`. That is the same hazard `readSuppliedPhases` wraps for a `--results` file,
+// arriving through the manifest instead, and it reaches almost every subcommand at exit 2.
+// Wrapped at this single boundary rather than at each `throw` in `config.mjs`, so a message
+// added there is covered on the day it is added.
 function configFailureMessage(err) {
-  if (err instanceof ConfigError) return err.message
-  if (typeof err?.syscall === 'string') return `could not access the config layers: ${err.message}`
+  if (err instanceof ConfigError) return printable(err.message)
+  if (typeof err?.syscall === 'string') return `could not access the config layers: ${printable(err.message)}`
   return null
 }
 
@@ -1203,7 +1293,11 @@ export async function runCli(argv, io = { out: console.log }) {
     for (const task of tasks) {
       if (task.tierSource === 'declared') {
         if (!TIERS.includes(task.tier)) {
-          io.out(`${task.id}: unknown model tier '${task.tier}' (expected ${TIERS.join(', ')})`)
+          // The tier is the value being refused, and it was never validated: `plan-parser.mjs`
+          // records `**Model:**` verbatim with `(.+?)`. A refusal is the line most worth
+          // forging — the command exits 2 while the operator reads a pass — so it goes through
+          // `printable` exactly as the phase listing below does.
+          io.out(`${printable(task.id)}: unknown model tier '${printable(task.tier)}' (expected ${TIERS.join(', ')})`)
           return 2
         }
         continue
@@ -1265,7 +1359,8 @@ export async function runCli(argv, io = { out: console.log }) {
       // with before the run starts, while a Model line is still cheap to add.
       const ids = tasks
         .filter((t) => t.phase === p)
-        .map((t) => `${t.id} (${t.tier}, ${t.tierSource})`)
+        // Same as `rebuild`'s listing: the id and the tier are read out of the plan file.
+        .map((t) => `${printable(t.id)} (${printable(t.tier)}, ${printable(t.tierSource)})`)
         .join(', ')
       io.out(`phase ${p}: ${ids}`)
     }
@@ -1445,12 +1540,15 @@ export async function runCli(argv, io = { out: console.log }) {
       : await git.currentBranch()
 
     // The anchor is what tells an INTEGRATED branch from an empty one: both have an empty diff
-    // against their own fork point, and what separates them is membership in the run branch's
-    // `mergedBranchTips` — the shas a merge commit in anchor..run names as a parent other than
-    // its first. Computing that set needs both the anchor and the run sha, and without these two
-    // arguments `collectDoctorReport` leaves `landed` false for every task, so every merged
-    // branch is reported as NO CHANGES — the report's loudest problem, on the run's healthiest
-    // state.
+    // against their own fork point. What separates them is the same predicate the gate's fileset
+    // check applies — whether a merge on the run branch's own first-parent chain, inside
+    // anchor..run, named this branch's sha as a secondary parent AND that merge's own diff
+    // carried at least one of the task's DECLARED files. Bare membership in `mergedBranchTips` is
+    // no longer the test on either side: a sha shared with a sibling used to read as landed for
+    // any task that pointed at it. Building that index needs both the anchor and the run sha, and
+    // without these two arguments `collectDoctorReport` leaves `landed` false for every task, so
+    // every merged branch is reported as NO CHANGES — the report's loudest problem, on the run's
+    // healthiest state.
     //
     // Taken from `derive`, so this reads the same anchor the gate enforces at rather than a
     // second computation that could disagree with it. It is allowed to FAIL: `doctor` must keep
@@ -1507,6 +1605,154 @@ export async function runCli(argv, io = { out: console.log }) {
     return report.problems.length === 0 ? 0 : 1
   }
 
+  if (command === 'liveness') {
+    const git = createGit({ cwd: root })
+    // Same reasoning as `doctor`: the plan is read from the working tree, because a report that
+    // enforces nothing has no reason to read it at the anchor, and a diagnostic that needs a
+    // committed plan is useless at the moment a run is going wrong.
+    let tasks = []
+    try {
+      tasks = assignPhases(parsePlan(await readFile(path.resolve(root, flags.plan), 'utf8')))
+    } catch (err) {
+      io.out(`cannot read the plan at ${flags.plan}: ${err.message}`)
+      return 2
+    }
+
+    const staleMinutes = numericWindow(flags.stale, DEFAULT_STALE_MINUTES)
+    if (!Number.isFinite(staleMinutes) || staleMinutes <= 0) {
+      io.out(`--stale takes a positive number of minutes, got ${JSON.stringify(flags.stale)}`)
+      return 2
+    }
+
+    // Existence only, never the contents. The constraint that no CHECK may read `.teammates/`
+    // binds the checks whose verdict must not be influenced by the agents they enforce; this is a
+    // report that records nothing and decides nothing, and the state it reads is a directory name
+    // the orchestrator created, not a claim a teammate wrote. The exception is stated here rather
+    // than left to look like an oversight.
+    //
+    // Without it a mistyped run id is the quietest failure this command has: `--run r11` for a run
+    // named `r1` matches no branch and no worktree, so every row takes the not-started path and
+    // the heartbeat reads as an all-clear for a run nothing ever looked at.
+    try {
+      await stat(runDir(root, runId))
+    } catch {
+      io.out(
+        `run ${runId} has no directory under .teammates — check --run, because a run id that`
+        + ' matches nothing produces a report about no teammate at all',
+      )
+      return 2
+    }
+
+    // The current phase's tasks only. An earlier phase's teammates have returned, and a later
+    // phase's have not been dispatched; reporting either as stalled would be noise on every run.
+    //
+    // There is deliberately no fallback to "every task in the run". Three states reach here with
+    // no phase to name, and rows for all of them is what made a finished run print a full board of
+    // stalls and exit 1 — the supervision skill's signal that a teammate has HUNG, raised on a run
+    // whose teammates all returned. None of the three is a hang, so each is stated instead:
+    //
+    //   - the derivation FAILED (the main worktree parked on the base branch, a plan absent from
+    //     the anchor). Surfaced the way `doctor` surfaces the same failure, not swallowed: without
+    //     it the output was byte-identical to a real stall report.
+    //   - `derivePhase` refused to name a phase (`phaseError`: phases integrated out of order, a
+    //     plan parsing to zero tasks at the anchor).
+    //   - every phase is integrated, which is a finished run and not a stall.
+    //
+    // The first two exit 2 — this report could not be produced — rather than 0 or 1, because both
+    // of those are assertions about teammates that nothing here measured.
+    let derived = null
+    let deriveError = null
+    try {
+      derived = await derive(root, runId, { ...flags, plan: flags.plan })
+    } catch (err) {
+      deriveError = err.message
+    }
+    const phaseProblem = deriveError ?? derived?.phaseError ?? null
+    if (phaseProblem) {
+      io.out(
+        `liveness could not derive the current phase: ${phaseProblem}`
+        + ' — without a current phase this report cannot tell a hung teammate from a finished one,'
+        + ' so it reports nothing rather than raising a stall it has not measured',
+      )
+      return 2
+    }
+    if (derived.currentPhase == null) {
+      io.out(`every phase of run ${runId} is integrated — no teammate of this run is expected to be working`)
+      return 0
+    }
+    const subject = tasks.filter((t) => t.phase === derived.currentPhase)
+    // The phase is derived from the plan at the ANCHOR; these rows come from the plan in the
+    // WORKING TREE. Amending a plan mid-run is a documented procedure in this plugin — `plan-drift`
+    // exists because it happens — and an amendment that drops the derived phase's tasks left this
+    // printing a bare header at exit 0: an all-clear covering nobody. Same class as the three
+    // states above, so it gets the same answer.
+    if (subject.length === 0) {
+      io.out(
+        `the plan in the working tree has no task in phase ${derived.currentPhase}, which is the`
+        + ` phase derived from the plan at the anchor — reporting nothing rather than an all-clear`
+        + ' covering no teammate. Run plan-drift to see what changed.',
+      )
+      return 2
+    }
+
+    // Worktree paths come from git rather than from `.teammates/`, which is written by the very
+    // teammates being reported on. This is NOT a claim that the path is trustworthy: `git worktree
+    // list` reports whatever path was passed to `git worktree add`, so the directory is still the
+    // teammate's choice, and `liveness.mjs`'s header concedes both signals are forgeable anyway.
+    // What it buys is narrower and worth stating exactly — the report follows the directory git
+    // has checked out for that branch right now, so redirecting it means moving a real worktree
+    // rather than editing a JSON file the teammate already owns.
+    const byBranch = new Map()
+    for (const wt of await git.worktrees()) {
+      if (wt.branch) byBranch.set(wt.branch, wt.path)
+    }
+
+    const tips = {}
+    const touches = {}
+    for (const task of subject) {
+      const branch = taskBranchName(runId, task.id)
+      if (await git.branchExists(branch)) {
+        const sha = await git.resolveRef(`refs/heads/${branch}`)
+        tips[task.id] = { branch, at: await git.commitTime(sha) }
+      }
+      const dir = byBranch.get(branch)
+      if (dir) {
+        // The project's own ignore rules prune the walk. A failure here is not fatal: an empty set
+        // walks everything, which can only floor the row into `unknown` — the honest answer — and
+        // never invent freshness. The likeliest cause is the worktree directory being gone, which
+        // the walk itself already treats as no measurement.
+        const ignored = new Set(await git.ignoredPaths(dir).catch(() => []))
+        const walked = await newestMtime(dir, { ignored })
+        touches[task.id] = { branch, at: walked.at, floored: walked.floored }
+      }
+    }
+
+    const rows = livenessRows({ tasks: subject, tips, touches, now: Date.now(), staleMinutes })
+    io.out(renderLiveness(rows, { staleMinutes }))
+
+    // Said before the exit code is decided, and independently of it: precedence chooses the code,
+    // never what the operator is told. A board carrying both a stall and an unmeasured row reports
+    // both.
+    for (const [reason, explanation] of UNMEASURED_REASONS) {
+      const names = rows.filter((row) => row.unknownReason === reason).map((row) => row.taskId)
+      if (names.length > 0) io.out(`freshness was not measured for ${names.join(', ')}: ${explanation}`)
+    }
+
+    // Precedence is deliberate, and the two codes answer different questions. A stall is a
+    // MEASUREMENT and the one thing a supervisor must act on, so it wins outright: masking a
+    // measured hang behind an unrelated unmeasured row would lose the signal this command exists
+    // for. Every row and every explanation is printed either way, so the ordering hides nothing.
+    //
+    // Exit 1 on a stall mirrors `doctor`. It remains a report: it records nothing, and no verdict
+    // is issued or implied.
+    if (hasStall(rows)) return 1
+    // Freshness that was never measured is not an all-clear. Exit 2 is what this command already
+    // returns wherever it could not measure, rather than 0, which would say every teammate is fine
+    // on the strength of something nobody looked at.
+    if (hasUnknown(rows)) return 2
+    return 0
+  }
+
   if (command === 'rebuild-state') {
     // Refused by default: the gate history is the one thing git cannot vouch for, so replacing
     // a live run's status would destroy the only record of what passed and what it cost.
@@ -1556,7 +1802,9 @@ export async function runCli(argv, io = { out: console.log }) {
     await writeState(root, runId, 'plan', plan)
     await writeState(root, runId, 'status', status)
 
-    for (const t of status.tasks) io.out(`${t.id}  ${t.state}`)
+    // Task ids come from the plan file a planning agent wrote; `printable` keeps a crafted id
+    // from redrawing this listing.
+    for (const t of status.tasks) io.out(`${printable(t.id)}  ${printable(t.state)}`)
     io.out('rebuilt from git: no gate history, so every phase must be gated again before anything is reported done')
     return 0
   }
@@ -1623,7 +1871,7 @@ export async function runCli(argv, io = { out: console.log }) {
       if (flagSkipped.length > 0) {
         io.out(
           `phase ${phase} is not prunable: --enforcement-only left ${flagSkipped.length} check(s) unrun`
-          + ` (${flagSkipped.join(', ')}), and a worktree is removed only on checks that ran.`
+          + ` (${flagSkipped.map(printable).join(', ')}), and a worktree is removed only on checks that ran.`
           + ' Re-run without --enforcement-only to prune it.',
         )
         continue
@@ -1819,7 +2067,17 @@ export async function runCli(argv, io = { out: console.log }) {
       phaseResults.push({ phase, supplied: forPhase.length > 0, verdict: aggregateVerdict(results) })
     }
 
-    io.out(renderRunSummary(runId, phaseResults))
+    // `renderRunSummary` builds a multi-line table and splices each failed, pending and skipped
+    // CHECK NAME into it, so the manifest's strings arrive already inside the rendered block.
+    // The block form is what fits a table: it neutralises the escape sequences with which a
+    // name could erase a row, and keeps the newlines that are the table itself.
+    //
+    // Stated exactly: `printableBlock` keeps every newline it is given, including a value's own,
+    // so on its own it stops a name from redrawing the table but not from adding a row that reads
+    // like a row this CLI wrote. That second half is closed where the table is BUILT —
+    // `renderRunSummary` in `scripts/finish.mjs` puts each name through `printable`, so no name
+    // still carries a newline by the time it reaches this wrap.
+    io.out(printableBlock(renderRunSummary(runId, phaseResults)))
     const summary = summarizeRun(phaseResults)
     if (summary.complete) return 0
     // 1 for a phase that was verified and failed; 4 for one that was never verified at all.
@@ -1971,7 +2229,10 @@ export async function runCli(argv, io = { out: console.log }) {
       // Verbatim, and nothing is written. The reason names the mismatch it found — which commit,
       // which run, or a missing body — and that is what tells the caller whether to re-dispatch
       // the agent or to re-save what it already returned.
-      if (refusal) { io.out(refusal); return 4 }
+      // `printable`, because the refusal quotes the header line out of the file the agent
+      // returned — `run=` and `sha=` are matched as `\S+`, and ESC is not whitespace, so a
+      // returned map can carry an escape sequence into this sentence.
+      if (refusal) { io.out(printable(refusal)); return 4 }
       // Written through a uniquely-named temp file and renamed, the same way `writeState` writes
       // every other file under `.teammates/`: a reader must never find a half-written map under
       // a header that vouches for the whole of it.
@@ -2016,7 +2277,8 @@ export async function runCli(argv, io = { out: console.log }) {
     // 4, matching `complete` and `collect-reviews`: this cannot verify what it was asked about.
     // The prompt is printed so the caller dispatches an Explore agent rather than writing prose
     // itself — and a teammate never writes this file.
-    io.out(stale)
+    // Same reason as the write path's refusal above: the reason names the header the agent wrote.
+    io.out(printable(stale))
     io.out('')
     io.out('dispatch an Explore agent with exactly this prompt:')
     io.out('')
@@ -2049,32 +2311,37 @@ export async function runCli(argv, io = { out: console.log }) {
     const invalid = validateLinkPaths(links)
     if (invalid) { io.out(invalid); return 1 }
 
+    // `validateLinkPaths` above rejects a non-string, an empty string, an absolute path, a `..`
+    // and a duplicate, and quotes what it rejected through `JSON.stringify` — but it does not
+    // screen control bytes, and `"a\u001b[2K"` is a legal relative path by every one of those
+    // rules. So each entry is wrapped again on its way into the sentences below, including the
+    // success line, which is the one printed on a manifest that passed every validator.
     const git = createGit({ cwd: root })
     const problems = []
     for (const entry of links) {
       const target = path.resolve(root, entry)
       try {
         const info = await stat(target)
-        if (!info.isDirectory()) problems.push(`${entry}: exists but is not a directory`)
+        if (!info.isDirectory()) problems.push(`${printable(entry)}: exists but is not a directory`)
       } catch (err) {
         if (err.code !== 'ENOENT') throw err
-        problems.push(`${entry}: does not exist — the preview would be missing it, and every command check would fail on a tree that is otherwise fine`)
+        problems.push(`${printable(entry)}: does not exist — the preview would be missing it, and every command check would fail on a tree that is otherwise fine`)
         continue
       }
       try {
         // Linking over a path the merge produced would shadow the merged result, which is the
         // one thing the preview exists to measure.
         if (await git.tracks(entry)) {
-          problems.push(`${entry}: is tracked by the repository — linking over it would shadow the merged result`)
+          problems.push(`${printable(entry)}: is tracked by the repository — linking over it would shadow the merged result`)
         }
       } catch (err) {
         if (!(err instanceof GitError)) throw err
-        problems.push(`${entry}: ${err.message}`)
+        problems.push(`${printable(entry)}: ${printable(err.message)}`)
       }
     }
 
     if (problems.length === 0) {
-      io.out(`preview.link is usable: ${links.join(', ')}`)
+      io.out(`preview.link is usable: ${links.map(printable).join(', ')}`)
       return 0
     }
     for (const p of problems) io.out(p)
@@ -2116,6 +2383,54 @@ export async function runCli(argv, io = { out: console.log }) {
       return 4
     }
 
+    // Which command check is the suite, chosen by a stated rule rather than by position. The
+    // first command check in the list is NOT it: `inferGateConfig` emits typecheck, lint, test,
+    // build in that order, and that inferred config is what `gate` prints for an operator to
+    // save — so positionally the claims reviewer would baseline on `npm run typecheck`, which
+    // survives deleting a filter or widening a guard, and every probed claim would read as
+    // unpinned. The rule is: the check named `test` if there is exactly one; otherwise the sole
+    // command check if there is exactly one; otherwise no choice is made here.
+    //
+    // This comes from `teammates.gate.json` in the WORKING TREE — `resolveGateConfig` reads it
+    // through `readLayer`, not out of the index — so an enforced agent can edit it. Reading the
+    // manifest rather than the resolved config keeps the gitignored local layer out of the
+    // choice; it does not make the value trusted. Nothing screens the run string: containment is
+    // structural, and `generateReviewDispatch` emits it as a JSON literal in a DATA block that
+    // sits below every instruction, so no value of it can become one.
+    const commandChecks = checksForPhase(config, phaseName).filter((c) => c.kind === 'command')
+    const namedTest = commandChecks.filter((c) => c.name === 'test')
+    const commandCheck = namedTest.length === 1
+      ? namedTest[0]
+      : (namedTest.length === 0 && commandChecks.length === 1 ? commandChecks[0] : null)
+    // Refused, not guessed — and only for the lens that actually runs the command, since no
+    // other lens reads this value and blocking their dispatch over it would answer a question
+    // they never ask. Zero command checks is not ambiguity: it falls through to
+    // `generateReviewDispatch`, whose message says the phase declares no command check.
+    //
+    // The two ambiguous shapes get different sentences because they have different remedies, and
+    // one message covering both told an operator with two checks named `test` to name one of them
+    // `test` — a fix already applied, so the only instruction offered was a no-op.
+    if (!commandCheck && commandChecks.length > 1 && (check.lens ?? []).includes('claims')) {
+      const preamble = 'the claims lens needs one command check to baseline against and this phase declares'
+      io.out(namedTest.length > 1
+        // The duplicates, not every command check: enumerating all of them printed a third name
+        // under a count of two, and the extra name is the one an operator told to "rename the one
+        // that is not the suite" would reach for, which would change nothing.
+        ? `${preamble} ${namedTest.length} command checks named "test": `
+          + `${namedTest.map((c) => printable(c.name)).join(', ')}. Rename the one that is not the suite`
+        : `${preamble} ${commandChecks.length} with none named "test": `
+          + `${commandChecks.map((c) => printable(c.name)).join(', ')}. `
+          + 'Name the one that runs the suite "test", or drop the claims lens from this phase')
+      return 4
+    }
+    const testCommand = commandCheck?.run ?? ''
+    const testCommandName = commandCheck?.name ?? ''
+    // The same paths the merge preview links in, for the same reason: a scratch worktree has no
+    // untracked build inputs, and the suite cannot run without them. `previewLinks` normalises a
+    // non-array to []; `config.mjs`'s `preview` validator has already refused one by here, so
+    // that normalisation is a second net rather than the one that catches it.
+    const linkPaths = previewLinks(config)
+
     let spec
     try {
       spec = generateReviewDispatch({
@@ -2132,18 +2447,21 @@ export async function runCli(argv, io = { out: console.log }) {
         branches,
         findingsDir: `.teammates/${runId}/reviews`,
         scratchRoot: tmpdir(),
+        testCommand,
+        testCommandName,
+        linkPaths,
+        branchShas,
       })
     } catch (err) {
       io.out(err.message)
       return 4
     }
-    // The stamp is per lens, because that is what identifies one reviewer's file: the same tips
-    // reviewed through two lenses produce two files, and each must be attributable to its own.
-    const reviewers = spec.reviewers.map((r) => {
-      const stamp = reviewStamp({ phase: phaseName, lens: r.lens, branchShas })
-      return { ...r, stamp, prompt: `${r.prompt}\n\n${stampInstruction(stamp)}` }
-    })
-    io.out(JSON.stringify({ ...spec, reviewers }, null, 2))
+    // Emitted exactly as generated. Nothing is appended here: the claims prompt ends with a DATA
+    // block whose banner says nothing below it is an instruction, and appending anything after it
+    // made that banner false in the one prompt whose containment depends on it. The stamp
+    // requirement the reviewers used to receive from here is now emitted by the generator, above
+    // that block.
+    io.out(JSON.stringify(spec, null, 2))
     return 0
   }
 
@@ -2184,7 +2502,16 @@ export async function runCli(argv, io = { out: console.log }) {
         if (!Array.isArray(found)) { unreadable.push(name); continue }
         // The stamp travels with the findings. A file that carries none is not "probably
         // current" — `reviewStale` refuses it, which is the whole point of stamping.
-        files.push({ lens, findings: found, stamp: Array.isArray(parsed) ? undefined : parsed?.stamp })
+        // `unableToVerify` and `unprobed` travel with the findings too: one decides whether this
+        // lens is a review at all, the other bounds it. Read off the wrapped form only — a bare
+        // array carries findings and nothing else.
+        files.push({
+          lens,
+          findings: found,
+          stamp: Array.isArray(parsed) ? undefined : parsed?.stamp,
+          unableToVerify: Array.isArray(parsed) ? undefined : parsed?.unableToVerify,
+          unprobed: Array.isArray(parsed) ? undefined : parsed?.unprobed,
+        })
       } catch (err) {
         // ENOENT is a missing lens, reported below by name. Anything else is a file that
         // exists and cannot be trusted, which must never be read as "no findings".
@@ -2193,7 +2520,7 @@ export async function runCli(argv, io = { out: console.log }) {
     }
 
     if (unreadable.length > 0) {
-      io.out(`unreadable findings file(s): ${unreadable.join(', ')} — a file that exists and cannot be parsed is not an empty review`)
+      io.out(`unreadable findings file(s): ${unreadable.map(printable).join(', ')} — a file that exists and cannot be parsed is not an empty review`)
       return 4
     }
 
@@ -2233,18 +2560,41 @@ export async function runCli(argv, io = { out: console.log }) {
     if (collected.stale.length > 0) {
       // Reported the way `missing` is, and for the same reason: a stale review is a review this
       // phase does not have. Recording a pass on it would be a verdict about another tree.
+      //
+      // The reason quotes a reviewer's own file, and this line is read in a terminal. `printable`
+      // neutralises the control bytes with which a value could otherwise erase this refusal and
+      // draw a passing gate in its place; see its definition in `reviews.mjs`.
       for (const s of collected.stale) {
-        io.out(`stale findings for lens ${s.lens}: ${s.reason} — respawn that review rather than recording a pass`)
+        io.out(`stale findings for lens ${printable(s.lens)}: ${printable(s.reason)} — respawn that review rather than recording a pass`)
       }
       return 4
     }
+    // Every unaccounted-for lens is reported before anything returns. These are three different
+    // reasons a review is not here, they can hold at once across different lenses, and returning
+    // on the first one costs a full respawn-and-re-run to discover the second.
+    //
+    // `u.reason` is the reviewer's own `unableToVerify` string, straight out of its file, so it
+    // goes through `printable` for the same reason the stale reason above does.
+    for (const u of collected.unverified) {
+      io.out(`lens ${printable(u.lens)} could not verify anything: ${printable(u.reason)} — that review did not happen; respawn that lens rather than recording a pass`)
+    }
+    for (const m of collected.malformed) {
+      // Deliberately not "respawn": the reviewer may have done all its work and written the key
+      // in a shape this command does not read. What needs fixing is the file, or whatever wrote it.
+      io.out(`lens ${printable(m.lens)} has a findings file this command cannot read: ${printable(m.reason)} — fix the file rather than recording a pass or respawning the review`)
+    }
     if (collected.unexpected.length > 0) {
-      io.out(`ignored findings file(s) for lens(es) this phase did not dispatch: ${collected.unexpected.join(', ')}`)
+      io.out(`ignored findings file(s) for lens(es) this phase did not dispatch: ${collected.unexpected.map(printable).join(', ')}`)
     }
-    if (collected.missing.length > 0) {
-      io.out(`no findings file for lens(es): ${collected.missing.join(', ')} — those reviews are lost, not empty; respawn them rather than recording a pass`)
-      return 4
+    // A lens already reported above is also in `missing`, and calling its review lost would send
+    // the operator looking for a file that is sitting right there. Only the genuinely absent ones
+    // are named here.
+    const explained = new Set([...collected.unverified, ...collected.malformed].map((e) => e.lens))
+    const lost = collected.missing.filter((lens) => !explained.has(lens))
+    if (lost.length > 0) {
+      io.out(`no findings file for lens(es): ${lost.map(printable).join(', ')} — those reviews are lost, not empty; respawn them rather than recording a pass`)
     }
+    if (lost.length > 0 || explained.size > 0) return 4
     io.out(JSON.stringify({ results: collected.results }, null, 2))
     return 0
   }
@@ -2427,9 +2777,16 @@ export async function runCli(argv, io = { out: console.log }) {
     const verdict = aggregateVerdict(results)
     if (verdict.verdict !== 'PASS') {
       const names = [...verdict.failed, ...verdict.pending]
-      io.out(`gate does not pass for phase ${ctx.currentPhase}: ${names.join(', ')}`)
+      // The names come from the gate manifest, which is a file in the worktree this command is
+      // run from — the same source as `r.name` below, which already goes through `printable`.
+      // The summary line was the half that did not, so a check name could erase this refusal.
+      io.out(`gate does not pass for phase ${ctx.currentPhase}: ${names.map(printable).join(', ')}`)
+      // A check's output is a block with its own line structure — a captured command output, a
+      // fileset check enumerating branch and file names an enforced teammate chose — so it takes
+      // the block form: escape sequences are neutralised, the line breaks it legitimately
+      // contains are kept.
       for (const r of results) {
-        if (names.includes(r.name) && r.output) io.out(`${r.name}: ${r.output}`)
+        if (names.includes(r.name) && r.output) io.out(`${printable(r.name)}: ${printableBlock(r.output)}`)
       }
       return 4
     }
@@ -2461,7 +2818,11 @@ export async function runCli(argv, io = { out: console.log }) {
     try {
       verdict = JSON.parse(await readFile(flags.verdict, 'utf8'))
     } catch (err) {
-      io.out(`cannot read verdict at ${flags.verdict}: ${err.message}`)
+      // The verdict file is written by the agent that ran the gate — `skills/phase-gate/SKILL.md`
+      // instructs it to — and Node embeds a slice of the parsed input in a JSON parse error, so
+      // this message carries bytes out of that file. `printable` on both halves, exactly as
+      // `readSuppliedPhases` does for a `--results` file: see its definition in `reviews.mjs`.
+      io.out(`cannot read verdict at ${printable(flags.verdict)}: ${printable(err.message)}`)
       return 1
     }
 
@@ -2475,7 +2836,14 @@ export async function runCli(argv, io = { out: console.log }) {
     // silently selects the wrong task set and reports `unattributable` for findings that
     // are perfectly attributable to the phase that actually failed.
     if (Number.isInteger(verdict?.phase) && verdict.phase !== phase) {
-      io.out(`--phase ${flags.phase} does not match the verdict's phase ${verdict.phase} at ${flags.verdict}\n\n${USAGE}`)
+      // `verdict.phase` is a real integer by the guard above. The other two are not: `flags.phase`
+      // is the STRING that was typed, and `missingArgs` admits it on `Number.isInteger(Number(x))`
+      // — which `Number` reaches through leading and trailing whitespace, so `\r1`, `\n1` and
+      // ` 1` are all accepted and would put that byte on this line. Only whitespace can
+      // arrive that way, never attacker-chosen text, but a line break here is still a line this
+      // CLI did not mean to draw. Both it and the path are wrapped, for the same reason the
+      // parse-error line above wraps what it quotes.
+      io.out(`--phase ${printable(flags.phase)} does not match the verdict's phase ${verdict.phase} at ${printable(flags.verdict)}\n\n${USAGE}`)
       return 2
     }
 

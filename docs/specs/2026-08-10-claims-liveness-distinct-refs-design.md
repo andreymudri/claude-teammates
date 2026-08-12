@@ -64,65 +64,95 @@ is deliberate:
 - **Liveness** is neither. It is an operator report with no verdict, so its forgeable inputs cost
   nothing that was previously guaranteed.
 
-## T1 — Distinct task refs, in the fileset check
+## T1 — A declared-files predicate for "landed", replacing sha membership
+
+What shipped is not a duplicate-sha discriminator layered in front of the empty-diff test — no
+such mechanism exists in any form. Instead, the sha-membership test that `deriveContext` and
+`runFilesetCheck` both used (whether a branch's sha was merely a member of `git.mergedBranchTips`)
+was replaced outright by a single per-task predicate that both call.
 
 ### Rule
 
-`runFilesetCheck` builds a run-wide map of task ref to sha — every task in `ctx.tasks`, not just
-the current phase's. For each branch of the phase under check, if its sha equals the sha of any
-other task ref in the run, that is a violation naming both refs and both task ids.
+`mergedParentFiles(git, { anchorSha, runSha })` walks only the run branch's own first-parent chain,
+from `runSha` back to `anchorSha` — not every commit in `anchor..run`. For each chain commit with
+more than one parent, and for each secondary parent that is itself inside `anchor..run`, it records
+that parent's own contribution since it diverged from the chain's prior tip — a three-dot diff,
+`changedFiles({ base: firstParent, branch: parent })` — indexed by that parent's sha. A sha named
+by more than one chain commit has its file sets unioned, not kept per-merge, because "does some
+merge naming this sha carry a declared file" and "does the declared set intersect the union of
+every merge naming this sha" are the same existence claim.
 
-### Why the subject is the phase and the comparison set is the run
+`landedForFiles(filesBySha, sha, declaredFiles)` is true when the indexed set for `sha` intersects
+`declaredFiles`, both sides compared through the same path normalization `filesetViolations` uses.
+A branch already on the run branch — its own diff against its fork point is empty — reads as landed
+only when `landedForFiles` is true for its own declared files. Walking the chain rather than every
+commit in range, and crediting a secondary parent with only its own diverged files rather than the
+whole merge's first-parent diff, both matter: an earlier version of this walk double-credited a
+sync merge's target, reading an idle sibling as landed with a file it never touched, purely because
+some other task's own `git merge --no-ff run-branch` happened to name the idle sha as a secondary
+parent.
 
-Two shapes have to be told apart:
+### Where it lives
 
-- T4 (phase 2, under check) sits at T1's tip (phase 1, merged). A violation. Only visible if the
-  comparison set includes phases other than the one being gated.
-- T8 and T9 (phase 3, not yet started) both sit at the run tip because that is where
-  `git checkout -B` put them. Not a violation of anything, and must not fail the phase-2 gate.
+Not a step run before the empty-diff test — the predicate IS how the empty-diff branch decides
+"landed" now, in both `runFilesetCheck` and `deriveContext`'s phase-integration loop, sharing one
+`mergedParentFiles` index built once per invocation.
 
-A run-wide subject — putting the rule in `runOwnershipCheck`, which is already run-wide — fails
-the second. A phase-wide comparison set misses the first. Phase subject, run-wide comparison is
-the only combination that gets both.
+### The limit
 
-### Order
+The precondition the predicate needs: the parked task's declared set must not intersect what the
+integrating merge actually carried. Within one phase that always holds, because
+`scripts/phases.mjs` assigns two tasks to the same phase only when their declared files are
+disjoint — but declared sets routinely overlap ACROSS phases, since a later task modifies a file an
+earlier task created. When they do overlap, the predicate cannot tell a parked ref from a genuine
+one; both read `landedForFiles` true from the identical, real intersection. This is sibling-tip
+self-integration with an overlapping declared set, and it is NOT closed:
 
-Before the empty-diff test at `scripts/gate-runner.mjs:339`. A ref parked at a merged sibling's
-tip currently reaches that test and passes it, so checking duplicates first is what changes the
-verdict; it also produces the accurate message ("T4 is parked at T1's tip") rather than a pass.
+- T1 creates `a.mjs`, merged. T2 declares `Modify a.mjs, Create b.mjs`, writes nothing, and its ref
+  is pointed at T1's own merged tip. Verdict PASS; `b.mjs` never exists. Executed and pinned as a
+  LIMIT in `tests/adversarial.test.mjs`.
 
-A ref parked at the *run tip* keeps failing the empty-diff test exactly as it does today. The new
-rule does not need to cover it, and must not be written up as though it does.
+What the predicate does close, each confirmed by executing the shape against a real repository:
 
-### What it does not catch
-
-Stated in the module comment as what is true, in the style `gate-runner.mjs` already uses for its
-other limits:
-
-- **A near-sibling ref that is not byte-identical.** An empty commit on top of the sibling's tip
-  produces a distinct sha, so the duplicate rule does not fire. Its diff against its fork point is
-  empty, so the empty-diff test does fire — but only if that commit is not itself a merge parent
-  in range. The residual case is narrow and open, and recording it is the point.
-- **Two refs both parked at the run tip.** Caught by the empty-diff test, not by this rule.
-- **Fast-forward and squash integration.** Unchanged; the existing comment's statement of those
-  limits stands and must not be edited to imply otherwise.
+- A ref parked at a merged sibling's tip with a DISJOINT declared set — `landedForFiles` false,
+  correctly failed.
+- The same shape after the sibling makes a further fix-round commit moving its own ref off the
+  shared sha — the predicate depends only on what the merge already carried, not on where any ref
+  currently sits, so it still fails.
+- Two idle refs sharing an old run tip that an unrelated merge turned into a secondary parent (a
+  plan-amendment merge, or a third task's own sync merge) where neither idle task's declared file
+  intersects what that merge carried — both fail on the ordinary "contributes no file changes"
+  message, neither is accused of parking.
+- A near-sibling — an empty commit built one commit above a merged sibling's tip, merged under its
+  own name — whose own merge diff against its own first parent is empty, so it can never intersect
+  a non-empty declared set. Closed as a side effect of the predicate, not by design intent.
+- Fast-forward integration is unaffected and out of scope: a fast-forward leaves no merge commit to
+  name the branch at all, so it is not a key in `mergedParentFiles` and reads as not-landed even
+  though the work is genuinely on the run branch — `tm-integrator`'s contract is `--no-ff` for
+  exactly this reason, and the out-of-contract state fails closed by design.
+- **A teammate that does the integrator's own job** — creating task branches that each carry real
+  work and merging them itself — is indistinguishable here from legitimate integration, because at
+  this level it IS the same shape. Unchanged from every earlier design, and out of scope for the
+  same reason self-integration proper is a non-goal of this spec.
 
 ### Cost
 
-One `resolveRef` per task outside the current phase, on a check that already resolves every task
-of the current phase. `branchShas` continues to record only what it records today — the rule reads
-the wider map, it does not widen what the verdict carries, because widening it would make a
-sibling's branch movement invalidate this phase's verdict through `verdictCoversTree`.
+One `commitsBetween`/first-parent walk per gate or `complete` invocation, shared by every task and
+phase it checks, rather than a separate `resolveRef` per task ref.
 
 ### Tests
 
-- `tests/gate-runner.test.mjs`: a phase branch equal to another phase's branch fails; two branches
-  outside the current phase sharing a sha do not fail the current phase; the message names both
-  refs and both task ids.
-- `tests/adversarial.test.mjs`: the reproduction recorded at `gate-runner.mjs:191` — T3 commits,
-  is merged `--no-ff`, T2's ref moves to T3's tip — asserted as FAIL. This file currently pins
-  that shape as a documented limit; that assertion is inverted, not deleted, and the near-sibling
-  variant above is added as the limit that remains.
+- `tests/gate-runner.test.mjs`: `mergedParentFiles unions file sets across two merges naming the
+  same sha, rather than keeping only the first`; `runFilesetCheck does not read a ref parked at the
+  anchor as landed even when a coincidental filename matches`.
+- `tests/adversarial.test.mjs`: `gate fails when a task ref is parked at a merged SIBLING's tip`;
+  `gate still fails a parked ref after the sibling it parked on makes a further fix-round commit`;
+  `gate does not treat two idle siblings as parked when an unrelated commit moves the run tip past
+  them`; `gate does not credit an idle ref parked on a run tip that only a sibling's own sync merge
+  later named`; `gate fails a ref built one empty commit above a merged sibling's tip, even merged
+  under its own name`; `a compliant two-phase run passes phase 1 ... then derives and passes phase
+  2`; and the LIMIT test for the overlapping-declared-set shape above, pinning it as open rather
+  than asserting it closed.
 
 ## T2 — `liveness`
 
@@ -141,32 +171,56 @@ and testable without a repository. `scripts/cli.mjs` gathers the two evidence st
 `.teammates/`: a teammate that picked its own directory could otherwise point the report at
 whatever looks busiest.
 
-**Worktree freshness** is the newest mtime under that directory, skipping `.git` and
-`node_modules`, visiting at most 5000 entries. If the cap trips, the row says the number is a
-floor rather than reporting it as a measurement — the newest file may be one the walk never
-reached, so the task can only be more recently touched than reported, never less. A floored row
-is therefore never reported as `stalled`.
+**Worktree freshness** is the newest mtime under that directory, pruning what `git.ignoredPaths`
+reports the project ignores (plus a hardcoded `.git`, which git never reports as ignored because it
+is not part of the working tree), visiting at most 5000 entries. A fixed `.git`/`node_modules` skip
+list was tried and rejected during review: it missed every other generated directory (`dist`,
+`.next`, `target`, `.venv`), so a repository with any of those floored every walk, and the floored
+row was read as `working` — the command's only failure signal was inert on exactly the repositories
+it exists to supervise. If the cap trips, the row says the number is a floor rather than a
+measurement: the newest file may be one the walk never reached, so the task can only be more
+recently touched than reported, never less.
 
 ### States
 
-Subject is the current phase's tasks. Three states, because two would misreport:
+Subject is the current phase's tasks. Four states, not three, because a floored or unmeasured
+freshness signal is a distinct case from either `working` or `stalled`:
 
 | State | Condition |
 |---|---|
-| `working` | tip or worktree touched within the threshold |
-| `stalled` | both older than the threshold, or no commits and worktree older than the threshold |
+| `working` | tip or worktree freshness measured and within the threshold |
+| `stalled` | tip and worktree both measured and older than the threshold (or no branch at all, which is itself a measured negative, with a worktree older than the threshold) |
+| `unknown` | freshness was not measured — the walk was capped (`unknownReason: 'walk-capped'`), or no worktree is registered for the branch and there is a branch (`unknownReason: 'no-worktree-measurement'`) |
 | `not started` | no task branch and no worktree |
 
-A queued task has no branch and no worktree, and must never read as a stall.
+A queued task has no branch and no worktree, and must never read as a stall. A floored row was
+originally specified to read `working` — "a floored row is never reported as stalled" — but that
+rule was replaced during review: reporting `working` on a measurement that never happened is an
+all-clear about a teammate nothing looked at. A floored row reads `unknown` instead. The same is
+true of a task with a branch but no registered worktree at all: absence of evidence, not evidence
+of absence, so it is `unknown` rather than a measured stall. A missing TIP is different — git is
+authoritative that nothing has been committed on that ref — so a stale worktree with no branch is a
+genuine, measured `stalled`.
 
 ### Interface
 
     liveness --run <id> --plan <path> [--stale <minutes>] [--root <path>]
 
-Default threshold 20 minutes, matching the heartbeat `fleet-supervision` already prescribes. Exit
-1 when any row is `stalled`, 0 otherwise. It decides nothing and records nothing — the same
-contract `doctor` has, which is why this is a separate command rather than a widening of `doctor`:
-`doctor`'s exit 1 means a structural fault, and a slow-but-healthy teammate is not one.
+Default threshold 20 minutes, matching the heartbeat `fleet-supervision` already prescribes. Three
+exit codes, not two. Exit 1 when any row is `stalled` — this wins outright even alongside an
+unmeasured row, because the stall is the one thing a supervisor must act on and every row is still
+printed either way. Exit 2 when nothing is stalled but some row is `unknown`, or when the report
+itself could not be produced: an unreadable plan; a `--stale` that is not a positive number; a run
+id whose `.teammates/<runId>` directory does not exist (checked by existence only, never contents —
+the one exception to "no check may read anything under `.teammates/`", because this report enforces
+nothing and the state it reads is a directory name the orchestrator created, not a teammate's
+claim); a failed phase derivation; a `phaseError`; or the derived phase selecting no task from the
+plan as currently checked out (the plan has drifted since the anchor). Exit 0 otherwise, including
+when every phase of the run is already integrated — a finished run reports "no teammate of this run
+is expected to be working" rather than a stall board covering nobody. It decides nothing and
+records nothing — the same contract `doctor` has, which is why this is a separate command rather
+than a widening of `doctor`: `doctor`'s exit 1 means a structural fault, and a slow-but-healthy
+teammate is not one.
 
 `skills/fleet-supervision/SKILL.md` gains a heartbeat section that calls it. The orchestrator does
 the nudging, through the harness's `SendMessage`; the CLI has no handle on a subagent and must not
@@ -181,9 +235,12 @@ It is not evidence for any gate, and nothing reads it.
 
 ### Tests
 
-`tests/liveness.test.mjs` covers the pure module: each of the three states, the threshold boundary
-in both directions, a task with a branch but no worktree, a task with a worktree but no commits,
-and the capped-walk row rendering. CLI-level tests cover exit codes and the `--stale` flag.
+`tests/liveness.test.mjs` covers the pure module: each of the four states, the `unknownReason` for
+both `unknown` causes, the threshold boundary in both directions, a task with a branch but no
+worktree, a task with a worktree but no commits, a stale branch with no commits at all reading
+`stalled` rather than `unknown`, and the capped-walk row rendering. CLI-level tests cover all three
+exit codes — including the stall/unknown precedence and every input-validation and derivation
+failure path — and the `--stale` flag.
 
 ## T3 — The `claims` lens
 
@@ -246,6 +303,18 @@ through it.
 unprobed-list requirement; `claims` without a test command throws; the cap is configurable and
 appears in the prompt. `tests/skill-contracts.test.mjs` covers the `phase-gate` skill text
 describing what a `claims` finding means at the gate.
+
+## What this cost
+
+Run `claims`, which implemented this spec, measured: 45 findings across ten review rounds. T1 took
+five fix rounds, T2 three, T3 five. Two fix-round budget overrides were needed, both recorded. The
+single largest defect class was a claim stronger than the code — a comment, skill sentence, or spec
+line asserting a guarantee the adjacent code did not deliver — with eight instances in T3 alone,
+four of them in tests rather than comments. Every one of those eight was found by executing or
+mutating something, never by rereading the claim. Three teammates separately stalled on
+backgrounded commands during the run and were recovered by messaging them directly, not by any
+mechanism in this spec. Whoever plans the next fleet run should see this number before estimating
+one: a spec of this size, on this codebase, cost ten review rounds and thirteen fix rounds to land.
 
 ## Delivery
 
