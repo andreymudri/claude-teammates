@@ -7,128 +7,68 @@ Spec: `docs/specs/2026-08-10-claims-liveness-distinct-refs-design.md`
 - Node >= 24.2.0
 - Zero runtime dependencies and zero dev dependencies; tests use the built-in `node:test` runner
 - git >= 2.24; every git invocation passes `--end-of-options`, and a trailing `--` wherever the
-  command accepts a pathspec
+  command accepts a pathspec. One tested exception exists: `git status --porcelain --ignored`
+  returns nothing when given `--end-of-options --` on git 2.53, so `scripts/git.mjs`'s
+  `ignoredPaths` deliberately omits both and a test pins their absence
 - Commit messages: single-line, commitlint style, English
 - No check may read anything under `.teammates/`; that state is written by the agents being enforced
 - Comments state what the code does, never a guarantee it does not deliver — this plan adds a
   reviewer lens whose whole job is finding the difference
 
-### Task 1: reject duplicate task refs in the fileset check
+### Task 1: replace the sha-membership landed test with a declared-files predicate
 
 **Files:**
 - Modify: `scripts/gate-runner.mjs`
 - Test: `tests/gate-runner.test.mjs`
 - Test: `tests/adversarial.test.mjs`
 
-- [ ] **Step 1:** Add a run-wide sha collector to `scripts/gate-runner.mjs`, directly above
-  `runFilesetCheck`:
+This section originally planned a separate "reject duplicate task refs" step — a run-wide map of
+task ref to sha, with a twin-detection test run before the empty-diff test in `runFilesetCheck`.
+That mechanism was not built; no `runWideTaskShas` function, and no identical-sha rejection, exist
+anywhere in `scripts/gate-runner.mjs`. What shipped instead replaces the old sha-membership test
+outright, in both `deriveContext` and `runFilesetCheck`, with a single per-task predicate. This
+section records what that predicate is, not the discarded design above.
 
-```js
-// Run-wide, deliberately, and the asymmetry is the point: the SUBJECT of the duplicate rule is
-// the phase under check, but the COMPARISON SET is every task ref in the run. A ref parked at a
-// merged sibling's tip is the shape the empty-diff test below cannot see — the sibling's sha
-// genuinely is a merge parent in range, so `mergedBranchTips` vouches for it — and the sibling
-// is usually in an earlier phase, so a phase-wide comparison set would never meet it.
-//
-// Widening the SUBJECT instead, by asking this of every task in the run, would fail a phase for
-// two not-yet-started refs of a LATER phase both sitting exactly where `git checkout -B <task>
-// <run branch>` put them. That is not a violation of anything, which is why this does not live
-// in `runOwnershipCheck` despite ownership being the run-wide check.
-async function runWideTaskShas(git, tasks, runId) {
-  const shas = new Map()
-  for (const task of tasks ?? []) {
-    const branch = resolveTaskBranch(task, runId)
-    if (!branch) continue
-    if (!(await git.branchExists(branch))) continue
-    shas.set(branch, { sha: await git.resolveRef(`refs/heads/${branch}`), taskId: task.id })
-  }
-  return shas
-}
-```
+**What shipped.** `mergedParentFiles(git, { anchorSha, runSha })` walks only the run branch's own
+first-parent chain from `runSha` back to `anchorSha` — not every commit in `anchor..run`. For each
+chain commit with more than one parent, and for each secondary parent that is itself in
+`anchor..run`, it records that parent's own contribution since it diverged from the chain's prior
+tip (`changedFiles({ base: firstParent, branch: parent })`, a three-dot diff), indexed by that
+parent's sha. A sha named by more than one chain commit has its file sets unioned rather than kept
+per-merge.
 
-- [ ] **Step 2:** In `runFilesetCheck`, build that map once before the `for (const task of
-  phaseTasks)` loop, next to the existing `mergedTips` memo, and fail the check if the walk
-  itself fails:
+`landedForFiles(filesBySha, sha, declaredFiles)` is then: true when the indexed file set for `sha`
+intersects `declaredFiles`, comparing both sides through the same path normalization
+`filesetViolations` uses. A branch already on the run branch (`forkPoint === sha`, so its own diff
+is empty) reads as landed only when `landedForFiles` is true for its own declared files — replacing
+the old test of whether the sha was merely a member of `mergedBranchTips`. `deriveContext`'s
+phase-integration loop and `runFilesetCheck`'s empty-diff branch both call `landedForFiles` against
+one shared `mergedParentFiles` index built once per invocation.
 
-```js
-  let allTaskShas
-  try {
-    allTaskShas = await runWideTaskShas(git, ctx.tasks ?? [], runId)
-  } catch (err) {
-    if (!(err instanceof GitError)) throw err
-    return checkResult(check, 'fail', `could not resolve this run's task refs: ${err.message}`)
-  }
-```
+**The limit, carried over rather than the reassuring half of it.** The precondition this predicate
+needs is that the parked task's declared set must not intersect what the integrating merge actually
+carried. Within one phase that always holds, because `scripts/phases.mjs` assigns two tasks to the
+same phase only when their declared files are disjoint — but declared sets routinely overlap ACROSS
+phases, since a later task modifies a file an earlier task created. When they do overlap, the
+predicate cannot tell a parked ref from a genuine one: both read `landedForFiles` true from the
+identical, real intersection. This is sibling-tip self-integration with an overlapping declared
+set, and it is NOT closed. Executed reproduction: `T1: Create a.mjs`, `T2: Modify a.mjs, Create
+b.mjs`; T2 writes nothing and its ref is pointed at T1's own merged tip; verdict PASS, `b.mjs` never
+exists. Pinned as a LIMIT in `tests/adversarial.test.mjs`, and named in the "what remains open"
+comment above `deriveContext`'s per-task loop in `scripts/gate-runner.mjs`.
 
-- [ ] **Step 3:** Inside the loop, immediately after `branchShas[branch] = sha` and before the
-  `mergeBase` call, add the duplicate test. It comes first because a ref parked at a merged
-  sibling's tip reaches the empty-diff test below and PASSES it; running the cheap ref comparison
-  first is what changes the verdict, and it also produces the accurate message:
-
-```js
-      // Before the diff, not after: this shape's diff is empty and `mergedBranchTips` contains
-      // its sha, so the empty-diff test below passes it. Two task refs of one run resolving to
-      // the same commit has no legitimate shape once the phase is being gated — one of them was
-      // moved onto the other.
-      const twin = [...allTaskShas].find(([name, rec]) => name !== branch && rec.sha === sha)
-      if (twin) {
-        problems.push(`${task.id}: branch ${branch} and ${twin[0]} (task ${twin[1].taskId}) are both at commit ${sha} — one is parked at the other's tip and would be credited with work it did not do`)
-        continue
-      }
-```
-
-- [ ] **Step 4:** Extend the block comment above the empty-diff test (currently
-  `scripts/gate-runner.mjs:366-382`, the "What this does NOT distinguish" list). Replace its third
-  bullet — `Two branches whose tips are the identical sha are indistinguishable here, because
-  there is nothing to tell apart.` — with:
-
-```js
-      //   - Two branches whose tips are the identical sha are rejected before this test runs, by
-      //     the duplicate-ref rule above. What that rule does NOT reject is a NEAR-sibling: an
-      //     empty commit on top of the sibling's tip is a distinct sha, so the duplicate test
-      //     does not fire, and whether this test fires depends on whether that commit is itself
-      //     a merge parent in range. Narrow, open, and recorded here rather than rediscovered.
-```
-
-Leave the fast-forward and squash bullets exactly as they are — neither is changed by this task,
-and editing them to imply otherwise is the defect class this plan's Task 3 exists to catch.
-
-- [ ] **Step 5:** Update the recorded limitation at `scripts/gate-runner.mjs:191-200`. The bullet
-  beginning `A ref parked at a merged SIBLING'S tip` currently ends `A signal exists but is not
-  checked anywhere yet ... building the check is not this function's job.` Replace that closing
-  sentence with:
-
-```js
-      //     `runFilesetCheck` now rejects this by the identical-sha signal named here. What
-      //     remains open is the near-sibling variant: a distinct sha one empty commit above the
-      //     sibling's tip. This function's own `integratedPhases` computation is unchanged and
-      //     still cannot see either shape.
-```
-
-- [ ] **Step 6:** Add to `tests/gate-runner.test.mjs`:
-
-```js
-test('runFilesetCheck fails a phase branch parked at another task ref', async () => {
-  // T2 (phase 2, under check) sits at T1's tip (phase 1, merged). T2's own diff is empty and
-  // T1's sha IS a merged tip, so without the duplicate rule this passes.
-})
-
-test('runFilesetCheck does not fail the current phase for two refs of a later phase sharing a sha', async () => {
-  // T8 and T9 (phase 3, untouched) both sit at the run tip while phase 2 is gated.
-})
-
-test('runFilesetCheck names both refs and both task ids in a duplicate failure', async () => {
-})
-```
-
-Fill each body against the existing fake-git harness in that file, following the shape of
-`runFilesetCheck passes on declared changes and records branchShas`.
-
-- [ ] **Step 7:** In `tests/adversarial.test.mjs`, invert the assertion pinning the sibling-tip
-  shape as a documented limit: the reproduction (T3 commits, is merged `--no-ff`, T2's ref moves
-  to T3's tip) must now assert FAIL. Add a sibling test pinning the near-sibling variant — one
-  empty commit above T3's tip — as the limit that remains, so the file records the boundary
-  rather than implying the class is closed.
+What the predicate does close, each confirmed by executing the shape against a real repository
+rather than asserted from the design alone: a ref parked at a merged sibling's tip with a disjoint
+declared set (fails, correctly); the same shape after the sibling makes a further fix-round commit
+that moves its own ref off the shared sha (still fails — the predicate depends on what the merge
+carried, not on where any ref currently sits); two idle refs sharing an old run tip that an
+unrelated merge turned into a secondary parent, such as a plan-amendment merge or a third task's own
+sync merge (neither is accused of parking; both fail on the ordinary "contributes no file changes"
+message instead); and a near-sibling — an empty commit built one commit above a merged sibling's
+tip, merged under its own name — whose own merge diff is empty and so can never intersect a
+non-empty declared set. Fast-forward integration is unchanged and out of scope for this predicate:
+a fast-forward leaves no merge commit to name the branch at all, so it is not a key in
+`mergedParentFiles` and reads as not-landed regardless.
 
 ### Task 2: add the `liveness` command
 
@@ -172,16 +112,28 @@ export function livenessRows({ tasks = [], tips = {}, touches = {}, now, staleMi
     const tipAgeMs = tip?.at == null ? null : now - tip.at
     const touchAgeMs = touch?.at == null ? null : now - touch.at
     if (tip == null && touch == null) {
-      return { taskId: task.id, branch: tip?.branch ?? null, tipAgeMs: null, touchAgeMs: null, floored: false, state: 'not started' }
+      return { taskId: task.id, branch: tip?.branch ?? null, tipAgeMs: null, touchAgeMs: null, floored: false, state: 'not started', unknownReason: null }
     }
     // A floored measurement is a LOWER bound on freshness: the walk stopped early, so the newest
     // file may be one it never reached. The task can only be more recently touched than reported,
-    // never less — so a floored row is never called stalled.
+    // never less — so a floored row cannot be called stalled. It cannot be called working either:
+    // on a project whose worktree holds more entries than the walk's cap, every walk floors, every
+    // row would read working, and the command's only failure signal could never fire on exactly
+    // the repositories it exists to supervise. `unknown` is the third answer, meaning freshness was
+    // NOT measured, reported rather than dressed up as an all-clear. A fresh TIP still settles the
+    // row as working on its own; only when nothing measured is fresh does the touch signal decide
+    // between `unknown` and `stalled`. A missing tip is NOT treated as unknown — `branchExists`
+    // returning false is a measured negative, so a stale worktree with no branch is a genuine
+    // stall.
     const floored = touch?.floored === true
+    const touchMeasured = touch != null && touch.at != null && !floored
     const ages = [tipAgeMs, touchAgeMs].filter((a) => a != null)
     const fresh = ages.some((age) => age <= thresholdMs)
-    const state = fresh || floored ? 'working' : 'stalled'
-    return { taskId: task.id, branch: tip?.branch ?? touch?.branch ?? null, tipAgeMs, touchAgeMs, floored, state }
+    const unknownReason = fresh || touchMeasured
+      ? null
+      : (floored ? 'walk-capped' : 'no-worktree-measurement')
+    const state = fresh ? 'working' : (unknownReason ? 'unknown' : 'stalled')
+    return { taskId: task.id, branch: tip?.branch ?? touch?.branch ?? null, tipAgeMs, touchAgeMs, floored, state, unknownReason }
   })
 }
 
@@ -198,7 +150,20 @@ export function renderLiveness(rows = [], { staleMinutes = DEFAULT_STALE_MINUTES
 export function hasStall(rows = []) {
   return rows.some((row) => row.state === 'stalled')
 }
+
+// Rows whose freshness was never measured. Separate from `hasStall` because the two answer
+// different questions: a stall is a measurement, this is the absence of one, and the CLI reports
+// them with different exit codes.
+export function hasUnknown(rows = []) {
+  return rows.some((row) => row.state === 'unknown')
+}
 ```
+
+Four states shipped, not two: `working`, `stalled`, `not started`, and `unknown` — with an
+`unknownReason` of `walk-capped` or `no-worktree-measurement`. The rule originally planned here —
+"a floored row is never reported as stalled", collapsed into `working` — was replaced during
+review. Reporting a floored row as `working` was an all-clear about a teammate nothing had actually
+measured; a floored row now reads `unknown`, and the CLI exits 2 for it rather than 0.
 
 - [ ] **Step 2:** Add `commitTime` to the object returned by `createGit` in `scripts/git.mjs`,
   next to `commitSubject`. It takes a sha, not a name — the caller resolves through `resolveRef`
@@ -230,14 +195,21 @@ export function hasStall(rows = []) {
   `liveness.mjs` because that module is pure by design:
 
 ```js
-// Newest mtime under a directory, skipping `.git` and `node_modules` and visiting at most
+// Newest mtime under a directory, pruning what git says the project ignores and visiting at most
 // MAX_WALK_ENTRIES entries. `floored: true` means the cap stopped the walk, so the answer is a
-// lower bound on freshness rather than a measurement — `livenessRows` refuses to call a floored
-// row stalled for exactly that reason.
-const MAX_WALK_ENTRIES = 5000
-const WALK_SKIP = new Set(['.git', 'node_modules'])
+// lower bound on freshness rather than a measurement — `livenessRows` reports such a row as
+// `unknown` rather than as either working or stalled.
+//
+// `ignored` is supplied by the caller from `git.ignoredPaths`, not hardcoded: a fixed `.git`/
+// `node_modules` pair missed every other generated directory (`dist`, `.next`, `target`, `.venv`)
+// and named `node_modules` in a project that might legitimately track it, so a repository with any
+// of those floored every walk and the command's only failure signal was inert exactly where it was
+// needed most. `.git` stays hardcoded — git does not report it as ignored, it is simply not part of
+// the working tree — so nothing in the supplied set can cover it.
+export const MAX_WALK_ENTRIES = 5000
+const WALK_SKIP = new Set(['.git'])
 
-async function newestMtime(dir) {
+export async function newestMtime(dir, { ignored = new Set() } = {}) {
   let newest = null
   let visited = 0
   const stack = [dir]
@@ -247,14 +219,14 @@ async function newestMtime(dir) {
     try {
       entries = await readdir(current, { withFileTypes: true })
     } catch {
-      // A worktree removed mid-walk is not an error worth failing the report over; it is the
-      // absence of evidence, which the caller already represents as a missing touch record.
+      // A worktree deleted without `git worktree prune` is still listed by git; not an error
+      // worth failing the report over, only the absence of evidence.
       continue
     }
     for (const entry of entries) {
       if (visited >= MAX_WALK_ENTRIES) return { at: newest, floored: true }
       visited += 1
-      if (WALK_SKIP.has(entry.name)) continue
+      if (WALK_SKIP.has(entry.name) || ignored.has(entry.name)) continue
       const full = path.join(current, entry.name)
       if (entry.isDirectory()) { stack.push(full); continue }
       try {
@@ -267,7 +239,10 @@ async function newestMtime(dir) {
 }
 ```
 
-Import `readdir` and `stat` from `node:fs/promises` alongside the existing `readFile` import.
+Import `readdir` and `stat` from `node:fs/promises` alongside the existing `readFile` import. Both
+the cap and this function are exported so the suite can walk a real tree of `MAX_WALK_ENTRIES + 1`
+entries rather than being told the flag — a walk that always floors reports no stall ever, while a
+unit test that merely asserts the synthetic flag stays green regardless.
 
 - [ ] **Step 4:** Register the command. Add `liveness: ['run', 'plan']` to `REQUIRED`
   (`scripts/cli.mjs:189`), `liveness: ['run', 'plan', 'stale']` to `KNOWN_FLAGS`, `liveness` to
@@ -330,25 +305,52 @@ Import `readdir` and `stat` from `node:fs/promises` alongside the existing `read
 
     const rows = livenessRows({ tasks: subject, tips, touches, now: Date.now(), staleMinutes })
     io.out(renderLiveness(rows, { staleMinutes }))
-    // Exit 1 on a stall, mirroring `doctor`, so a caller can branch on it. Still a report: it
-    // records nothing and no verdict is issued or implied.
-    return hasStall(rows) ? 1 : 0
+    for (const [reason, explanation] of UNMEASURED_REASONS) {
+      const names = rows.filter((row) => row.unknownReason === reason).map((row) => row.taskId)
+      if (names.length > 0) io.out(`freshness was not measured for ${names.join(', ')}: ${explanation}`)
+    }
+    // Precedence is deliberate: a stall is a MEASUREMENT and wins outright over an unmeasured row,
+    // so masking a hang behind an unrelated unknown never happens. Every row and every explanation
+    // is printed either way.
+    if (hasStall(rows)) return 1
+    if (hasUnknown(rows)) return 2
+    return 0
   }
 ```
 
-Import `livenessRows`, `renderLiveness`, `hasStall` and `DEFAULT_STALE_MINUTES` from
+Import `livenessRows`, `renderLiveness`, `hasStall`, `hasUnknown` and `DEFAULT_STALE_MINUTES` from
 `./liveness.mjs`.
 
-- [ ] **Step 6:** Create `tests/liveness.test.mjs` covering the pure module: a fresh tip with a
-  stale worktree reads `working`; a stale tip with a fresh worktree reads `working`; both stale
-  reads `stalled`; no branch and no worktree reads `not started`; a worktree with no commits and a
-  stale mtime reads `stalled`; a floored touch never reads `stalled` however old; the threshold
-  boundary is inclusive at exactly `staleMinutes` and stalls one millisecond past it; a
-  non-numeric `now` throws.
+What shipped has three exit codes, not two, and exit 2 is reached from more places than the stall
+count: an unreadable plan; a `--stale` that is not a positive number; a run id whose
+`.teammates/<runId>` directory does not exist (checked with `stat`, existence only, never
+contents — the one exception to the constraint that no check may read under `.teammates/`, because
+this is a report that decides and records nothing, and the state read is a directory name the
+orchestrator created rather than a claim a teammate wrote); a failed phase derivation; a
+`phaseError` (phases integrated out of order, or a plan parsing to zero tasks at the anchor); the
+derived phase selecting no working-tree task (the plan in the working tree has drifted from the
+plan at the anchor); and any row reading `unknown`. `derived.currentPhase == null` — every phase
+integrated — exits 0 with a message, not a stall board covering nobody. A stall (exit 1) always
+outranks an unknown row (exit 2) when both are present, because the stall is the one thing a
+supervisor must act on.
 
-- [ ] **Step 7:** Add CLI-level tests to `tests/cli.test.mjs`: exit 0 when every task is working,
-  exit 1 when any is stalled, exit 2 on a `--stale` that is not a positive number, exit 2 on an
-  unreadable plan, and that a bare `--stale` with no value is refused rather than read as `1`.
+- [ ] **Step 6:** Create `tests/liveness.test.mjs` covering the pure module: a fresh tip with a
+  stale worktree reads `working`; a stale tip with a fresh worktree reads `working`; both stale and
+  the touch genuinely measured reads `stalled`; no branch and no worktree reads `not started`; a
+  worktree with no commits and a stale, measured mtime reads `stalled`; a floored touch reads
+  `unknown` with `unknownReason: 'walk-capped'`, never `stalled`, however old; a task with a branch
+  but no registered worktree reads `unknown` with `unknownReason: 'no-worktree-measurement'`; a
+  stale branch with a measured negative (no branch at all) still reads `stalled`, not `unknown`;
+  the threshold boundary is inclusive at exactly `staleMinutes` and stalls or unknowns one
+  millisecond past it; a non-numeric `now` throws.
+
+- [ ] **Step 7:** Add CLI-level tests to `tests/cli.test.mjs`: exit 0 when every task is working;
+  exit 1 when any is stalled, even alongside an unknown row; exit 2 when any row is `unknown` and
+  none is stalled; exit 2 on a `--stale` that is not a positive number; exit 2 on an unreadable
+  plan; exit 2 on a run id with no `.teammates` directory; exit 2 on a failed derivation or
+  `phaseError`; exit 0 with a message when every phase is integrated; exit 2 when the working-tree
+  plan has no task in the derived phase; and that a bare `--stale` with no value is refused rather
+  than read as `1`.
 
 - [ ] **Step 8:** Add a heartbeat section to `skills/fleet-supervision/SKILL.md`, under
   "Event-driven, not polling":
