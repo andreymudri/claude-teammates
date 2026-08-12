@@ -281,11 +281,12 @@ function runProbe(spawn = execFileSync, target = root) {
   // Probe the repository root (not the hook file itself), so that bash is asked one
   // question — can you see this repository — rather than one question per hook.
   //
-  // A missing hook file is NOT tolerated here, though this comment used to say it was:
-  // PROBE_TARGET_MARKERS lists hooks/session-start, so a root without that file fails the
-  // Node-side check below and the probe REFUSES. Every hook case is then registered as a
-  // failure naming the refusal, which is louder than the individual assertion failures the
-  // old wording promised, and never a skip.
+  // The two files PROBE_TARGET_MARKERS names are NOT tolerated missing: hooks/session-start
+  // is one of them, so a root without it fails the Node-side check below and the probe
+  // REFUSES, registering every hook case as a failure naming the refusal rather than a skip.
+  // That covers those two paths and no others — hooks/update-check, which several cases
+  // exercise, is not a marker, so a root missing it still probes, and those cases fail
+  // individually on their own assertions.
   //
   // Require positive evidence: have bash print 'TM_OK' on success. This
   // prevents forging via exit codes (startup files, etc.).
@@ -524,11 +525,13 @@ test('(probe defense pinned) the live probe ran the real execFileSync, and a rea
     // verdict for the SAME path. A recorder that returned a canned PROBE_UNREACHABLE
     // while the real bash reports the repo reachable fails here.
     //
-    // What this does not close: a stub that returns the answer real bash would have
-    // returned anyway is indistinguishable from the real spawn by this assertion. That
-    // residue is unclosable from inside the process for the unreachable answer, because
-    // the only out-of-process witness — a file — needs the shared filesystem this answer
-    // says is missing.
+    // MEASURED at this tip, on a machine whose bash DOES reach the repository: a lying
+    // recorder in this direction — `_lastSpawnUsed = spawn` beside a stub returning
+    // PROBE_UNREACHABLE, in either spelling filed against it — leaves the suite at
+    // 16 pass / 1 fail / 31 skipped, exit 1, failing here. Identity alone passed both.
+    //
+    // The one residue: a stub returning the answer real bash would have returned anyway is
+    // indistinguishable from the real spawn by this assertion.
     const { command, args, options } = buildProbeInvocation(toBashPath(root))
     let corroboration
     try {
@@ -555,73 +558,223 @@ test('hooks.json declares a SessionStart matcher', async () => {
   assert.match(cfg.hooks.SessionStart[0].matcher, /startup/)
 })
 
-// How many hook case bodies actually executed. Incremented by the hookBodyRan() call that
-// is the first statement of every hookTest body below, and by nothing else — not by
-// hookTest, not by registerHookCase.
+// Which hook case bodies ran to COMPLETION, identified by WHERE each marker call came
+// from. Every real body's LAST statement is a bare `hookBodyRan()` on a line of its own, so
+// the set of source lines these calls arrive from is the set of bodies that reached their
+// end, one distinct line per case.
 //
-// Why a COUNT and not the boolean that stood here: the boolean was set by the FIRST of the
-// hookTest registrations, so it proved that one body ran and said nothing about the other
-// thirty. An edit to hookTest that ran the first case and registered the rest as skips left
-// this file at 18 pass / 0 fail / 30 skipped and exit 0 — green, testing one case out of
-// thirty-one — and the counters hookTest maintains did not object either, because leaving
-// hookTestsRegistered incrementing while hookTestsSkipped stays at zero satisfies their
-// assertion with both sides equal.
+// Completions, not entries, and that is the whole point. The marker used to be the FIRST
+// statement of each body, which made it an invocation count: it fired before the body's
+// assertions, so wrapping the registration in `register(name, () => { try { fn() } catch {} })`
+// left all thirty-one markers reached, every counter in agreement, and the suite
+// BYTE-IDENTICAL to a healthy run — 48 pass / 0 fail / 0 skipped — even with
+// `assert.equal(1, 2)` injected into a body. Called last, the marker is reached only if
+// nothing in the body threw.
 //
-// What this is NOT: proof that a registration edit cannot move this number. It can — an
-// edit that registered `() => hookBodyRan()` in place of each real body would count
-// thirty-one runs having tested nothing. What the design buys is that the number it must
-// reach comes from OUTSIDE the registration path (see HOOK_CASES_IN_SOURCE), so an edit
-// confined to hookTest cannot both shrink the work and shrink the expectation; it must
-// forge every case individually, in the bodies, where the forgery is legible.
+// What that does and does not prove. A swallow wrapper around a body whose assertions FAIL
+// is caught here: the body throws before its marker, the completion set comes up short, and
+// this file goes red naming the missing lines. A swallow wrapper around bodies that all
+// genuinely pass is NOT distinguished by these markers — soundly, since if every assertion
+// really passed then swallowing changed nothing observable. That wrapper is nonetheless
+// caught, by the other leg: the registerHookCase test asserts the body handed to node:test
+// is the caller's own function object, and a wrapper is not.
+//
+// Why the call site and not just a count: the body is supplied by the registration path, so
+// that path can substitute a body that calls the marker and does nothing else.
+// `register(name, () => hookBodyRan())` in registerHookCase discarded all thirty-one real
+// bodies and left this file at 48 pass / 0 fail / 0 skipped — every counter satisfied, the
+// suite done in 426ms instead of its usual twenty seconds, and nothing red. A count cannot
+// tell those thirty-one calls from the real ones; their line numbers can, because all
+// thirty-one arrive from the ONE line inside the registration path instead of from the
+// thirty-one marker lines this file's text carries.
+//
+// What that buys, exactly: a forgery must now be written as thirty-one separate stub
+// bodies, each with its own bare `hookBodyRan()` line sitting under its own `hookTest(`
+// registration — thirty-one edits in the bodies, where they are legible — rather than as
+// one edit in hookTest or registerHookCase. It is not an impossibility proof: those
+// thirty-one stubs would satisfy this test.
 let hookBodyRuns = 0
+// Line numbers in this file that hookBodyRan() was called from.
+const hookBodyMarkerLines = new Set()
+// Calls whose origin could not be attributed to a line of this file. Any entry here is a
+// failure: it means a hookBodyRan() call came from somewhere this file cannot account for.
+const hookBodyForeignCalls = []
 function hookBodyRan() {
   hookBodyRuns += 1
+  // Frame 0 is the "Error" header, frame 1 is this function, frame 2 is the caller.
+  const frame = ((new Error().stack || '').split('\n')[2] || '').trim()
+  const at = /(\d+):\d+\)?$/.exec(frame)
+  if (at && frame.includes('hook.test.mjs')) hookBodyMarkerLines.add(Number(at[1]))
+  else hookBodyForeignCalls.push(frame || '(no stack frame)')
 }
 
-// The expectation, read from this file's own source rather than computed by the code under
-// scrutiny. This is the principle that made probeTargetProblem hold where four rounds of
-// in-band pins did not: the observer is independent of the thing observed. `hookTest(` at
+// How many registrations this file's own source contains, read from the text rather than
+// computed by the code under scrutiny. This is the principle that made probeTargetProblem
+// hold where four rounds of in-band pins did not: the observer is independent of the thing
+// observed. `hookTest(` at
 // the start of a line is a registration and nothing else — the definition of hookTest is
 // indented behind `function`, and this regex is not at a line start either — so editing
 // what hookTest DOES cannot change this number. Only adding or deleting a registration can.
 //
-// A hookTest body added without a leading hookBodyRan() call therefore fails the mechanism
+// A hookTest body added without a closing hookBodyRan() call therefore fails the mechanism
 // test at the end of this file, naming the shortfall. That is deliberate: the marker is
 // part of what registering a hook case means here.
 const SELF_SOURCE = readFileSync(fileURLToPath(import.meta.url), 'utf8')
 const HOOK_CASES_IN_SOURCE = (SELF_SOURCE.match(/^hookTest\(/gm) || []).length
 
+// Each hook case as this file's TEXT describes it: the name it registers under and the
+// line its bare `hookBodyRan()` marker sits on. Same independent-observer principle as the
+// count above, extended with the two facts the mechanism test needs — the name, so a
+// node:test name filter can be applied to it here, and the marker line, so the bodies that
+// ran can be identified rather than merely counted.
+//
+// Both patterns are anchored at a line start (`^hookTest(`) or at leading indentation
+// (`^\s+hookBodyRan()$`), and the regex literals below match neither shape themselves.
+function readHookCasesFromSource(source) {
+  const lines = source.split('\n')
+  const cases = []
+  const problems = []
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!/^hookTest\(/.test(lines[i])) continue
+    const registration = /^hookTest\((['"])(.*?)\1\s*,/.exec(lines[i])
+    if (!registration) {
+      problems.push(`line ${i + 1}: a hookTest registration whose name this file cannot read`)
+      continue
+    }
+    const name = registration[2]
+    if (name.includes('\\')) {
+      problems.push(`line ${i + 1}: the case name contains a backslash escape this file does not decode`)
+      continue
+    }
+    let markerLine = null
+    for (let j = i + 1; j < lines.length && !/^hookTest\(/.test(lines[j]); j += 1) {
+      if (/^\s+hookBodyRan\(\)\s*$/.test(lines[j])) { markerLine = j + 1; break }
+    }
+    if (markerLine === null) {
+      problems.push(`line ${i + 1}: the case "${name}" has no bare hookBodyRan() marker line of its own`)
+      continue
+    }
+    cases.push({ name, markerLine, registrationLine: i + 1 })
+  }
+  return { cases, problems }
+}
+const HOOK_CASES_FROM_SOURCE = readHookCasesFromSource(SELF_SOURCE)
+
 // node:test's own filters suppress bodies without touching this file, so under one of them
-// the count above is not the number of bodies that SHOULD run, and asserting it would fail
-// on a healthy tree. `--test-name-pattern` is how people debug a single case; a mechanism
-// test that goes red there gets deleted by the next person who hits it.
+// fewer bodies SHOULD run, and demanding the full count would fail a healthy tree.
+// `--test-name-pattern` is how people debug a single case; a mechanism test that goes red
+// there gets deleted by the next person who hits it.
 //
-// Detected from the flags rather than from a shortfall in the count, because a shortfall is
-// exactly what a broken hookTest produces: inferring "filtering" from a low count would let
-// the mutation this file exists to catch excuse itself. When any of these is present the
-// mechanism test below stands down to a bound (no more bodies ran than exist) and says so
-// in its message; with none present it asserts the exact count.
+// What this does NOT do is stand the assertion down on the mere PRESENCE of a filter flag.
+// That is what stood here before, and it was the hole: `NODE_OPTIONS=--test-name-pattern=.`
+// suppresses nothing at all — `.` matches every name — yet it relaxed the assertion to a
+// bound, and the skip-everything mutation then passed at 17 pass / 0 fail / 31 skipped,
+// exit 0, with zero bodies run. Instead the filter is APPLIED here, to the case names read
+// from the source, and the number of bodies that ran must equal the number of cases the
+// filter selects. A pattern that matches everything therefore selects everything and the
+// bound is unchanged; a genuinely narrow pattern selects exactly what it narrows to.
 //
-// Both spellings of a run are covered: `node --test --test-name-pattern=X file` forwards
-// the flag into the per-file child's execArgv, and `node --test-name-pattern=X file` runs
-// in process with the flag in its own execArgv. NODE_OPTIONS is scanned as a third route.
+// Forms that are computed, and how: `--test-name-pattern=X` and `--test-skip-pattern=X`
+// are compiled with `new RegExp(X)` and tested against the case name (node v24 does not
+// treat a leading/trailing `/` as a delimiter, and every hook case is a TOP-LEVEL test, so
+// the name is the whole of what node matches); repeated patterns of the same flag are
+// OR'd; a case runs when it matches some name pattern (or none was given) and no skip
+// pattern. `--test-only` selects nothing in this file, because no test here carries
+// `only: true` — registerHookCase registers every running case with no options object at
+// all, pinned by the registerHookCase test above — and under a genuine --test-only run node
+// does not execute the mechanism test either.
+//
+// Forms that FAIL LOUD rather than stand down: a filter flag that reaches execArgv without
+// a resolvable value, a `--test-only=<value>` spelling, a pattern that is not a valid
+// regular expression, and a filter flag named in NODE_OPTIONS that left no resolved token
+// in execArgv. An assertion that cannot bound anything must say so, not pass quietly.
+//
+// A filter that node never applied is refused too: the mechanism test requires the filter to
+// select the mechanism test's OWN name, which a flag pushed into process.execArgv from
+// inside this file cannot arrange while also suppressing the hook cases — unless the pattern
+// is crafted to match that one name and no case name, which this file does not detect.
+//
+// process.execArgv is the single source read, because node normalises every route into it:
+// measured on v24.14.0, `node --test --test-name-pattern=X file`, `node
+// --test-name-pattern=X --test file` and `NODE_OPTIONS=--test-name-pattern=X node --test
+// file` all leave the token `--test-name-pattern=X` there, and a run with no filter leaves
+// none of these flags in it. NODE_OPTIONS is still read, as a cross-check that nothing it
+// asks for went unresolved.
 const TEST_FILTER_FLAGS = ['--test-name-pattern', '--test-skip-pattern', '--test-only']
-const ACTIVE_TEST_FILTERS = (() => {
-  const seen = new Set()
-  const scan = (tokens) => {
-    for (const token of tokens) {
-      for (const flag of TEST_FILTER_FLAGS) {
-        if (token === flag || token.startsWith(`${flag}=`)) seen.add(flag)
-      }
+function readTestFilters(execArgv, nodeOptions) {
+  const patterns = { '--test-name-pattern': [], '--test-skip-pattern': [] }
+  const bareFlags = new Set()
+  const unresolved = []
+  let onlyMode = false
+  for (const token of execArgv) {
+    for (const flag of ['--test-name-pattern', '--test-skip-pattern']) {
+      if (token.startsWith(`${flag}=`)) patterns[flag].push(token.slice(flag.length + 1))
+      else if (token === flag) bareFlags.add(flag)
+    }
+    if (token === '--test-only') onlyMode = true
+    else if (token.startsWith('--test-only=')) {
+      unresolved.push(`process.execArgv carries "${token}", a --test-only spelling this file does not interpret`)
     }
   }
-  scan(process.execArgv)
-  scan((process.env.NODE_OPTIONS || '').split(/\s+/).filter(Boolean))
-  return [...seen]
-})()
+  for (const flag of bareFlags) {
+    if (!patterns[flag].length) {
+      unresolved.push(`process.execArgv carries a bare "${flag}" with no resolved value, so its pattern is unknown`)
+    }
+  }
+  for (const flag of TEST_FILTER_FLAGS) {
+    const resolved = flag === '--test-only' ? onlyMode : patterns[flag].length > 0
+    if (nodeOptions.includes(flag) && !resolved) {
+      unresolved.push(`NODE_OPTIONS names "${flag}" but process.execArgv carries no resolved value for it`)
+    }
+  }
+  return {
+    namePatterns: patterns['--test-name-pattern'],
+    skipPatterns: patterns['--test-skip-pattern'],
+    onlyMode,
+    unresolved,
+  }
+}
+
+// The filters as a predicate over a top-level test name. Compilation failures become
+// `unresolved` entries rather than exceptions, so the mechanism test reports them as a
+// named failure instead of an anonymous throw.
+//
+// `selects` answers for any top-level test that carries no `only: true` — which is every
+// test in this file. Under --test-only it therefore answers false for all of them, which is
+// what node does too.
+function compileFilters(filters) {
+  const unresolved = [...filters.unresolved]
+  const compile = (source, flag) => {
+    try {
+      return new RegExp(source)
+    } catch (err) {
+      unresolved.push(`${flag}=${source} is not a regular expression this file can apply: ${err.message}`)
+      return null
+    }
+  }
+  const name = filters.namePatterns.map((p) => compile(p, '--test-name-pattern')).filter(Boolean)
+  const skip = filters.skipPatterns.map((p) => compile(p, '--test-skip-pattern')).filter(Boolean)
+  const selects = (testName) => !filters.onlyMode &&
+    (name.length === 0 || name.some((re) => re.test(testName))) &&
+    !skip.some((re) => re.test(testName))
+  return { selects, unresolved }
+}
+
+function selectHookCases(cases, filters) {
+  const { selects, unresolved } = compileFilters(filters)
+  if (unresolved.length) return { selected: [], unresolved, selects }
+  return { selected: cases.filter((c) => selects(c.name)), unresolved, selects }
+}
+
+function describeFilters(filters) {
+  const parts = []
+  for (const p of filters.namePatterns) parts.push(`--test-name-pattern=${p}`)
+  for (const p of filters.skipPatterns) parts.push(`--test-skip-pattern=${p}`)
+  if (filters.onlyMode) parts.push('--test-only')
+  return parts.length ? `under ${parts.join(' ')}` : 'with no test filter active'
+}
 
 hookTest('(canary) a hook case body runs and the hook really answers', () => {
-  hookBodyRan()
   // Do real work, so this case cannot be reduced to its hookBodyRan() marker: it is the
   // same hook invocation the cases below depend on, and it fails if the hook cannot run.
   // It covers only ITSELF — proving thirty-one bodies ran is the count's job, not this
@@ -629,39 +782,40 @@ hookTest('(canary) a hook case body runs and the hook really answers', () => {
   const parsed = JSON.parse(runHook({}))
   assert.equal(typeof parsed.hookSpecificOutput.additionalContext, 'string',
     'the canary must exercise a real hook invocation, not merely count itself')
+  hookBodyRan()
 })
 
 hookTest('emits valid JSON containing the entrypoint content', () => {
-  hookBodyRan()
   const parsed = JSON.parse(runHook({}))
   const ctx = parsed.hookSpecificOutput.additionalContext
   assert.match(ctx, /using-teammates/)
   assert.match(ctx, /Using \[skill\]|routing|Skill/i)
+  hookBodyRan()
 })
 
 hookTest('emits exactly one context field for Claude Code', () => {
-  hookBodyRan()
   const parsed = JSON.parse(runHook({}))
   assert.ok(parsed.hookSpecificOutput, 'expected hookSpecificOutput')
   assert.equal(parsed.additional_context, undefined)
   assert.equal(parsed.additionalContext, undefined)
+  hookBodyRan()
 })
 
 hookTest('emits the cursor field shape when CURSOR_PLUGIN_ROOT is set', () => {
-  hookBodyRan()
   const parsed = JSON.parse(runHook({ CURSOR_PLUGIN_ROOT: root }))
   assert.ok(typeof parsed.additional_context === 'string')
   assert.equal(parsed.hookSpecificOutput, undefined)
+  hookBodyRan()
 })
 
 hookTest('a missing entrypoint file produces a loud warning, valid JSON, and exit 0', () => {
-  hookBodyRan()
   const out = runHook({ CLAUDE_PLUGIN_ROOT: '/nonexistent-plugin-root' })
   const parsed = JSON.parse(out)
   const ctx = parsed.hookSpecificOutput.additionalContext
   assert.match(ctx, /claude-teammates/i)
   assert.match(ctx, /not active|missing|WARNING/i)
   assert.match(ctx, /using-teammates\/SKILL\.md/)
+  hookBodyRan()
 })
 
 // --- update notice -------------------------------------------------------
@@ -671,7 +825,6 @@ hookTest('a missing entrypoint file produces a loud warning, valid JSON, and exi
 // nothing, so none of these tests touch the network.
 
 hookTest('reports the installed version once when no marker exists, and writes the marker', () => {
-  hookBodyRan()
   withConfigDir((dir) => {
     const ctx = contextWith(dir)
     assert.ok(ctx.includes(`claude-teammates ${installedVersion} is active`))
@@ -679,30 +832,30 @@ hookTest('reports the installed version once when no marker exists, and writes t
     const marker = readFileSync(path.join(stateDir(dir), 'last-seen-version'), 'utf8').trim()
     assert.equal(marker, installedVersion)
   })
+  hookBodyRan()
 })
 
 hookTest('does not repeat the notice on a second run — once per version is the feature', () => {
-  hookBodyRan()
   withConfigDir((dir) => {
     contextWith(dir)
     const second = contextWith(dir)
     assert.doesNotMatch(second, /is active/)
     assert.doesNotMatch(second, /updated:/)
   })
+  hookBodyRan()
 })
 
 hookTest('reports an upgrade when the marker holds an older version', () => {
-  hookBodyRan()
   withConfigDir((dir) => {
     mkdirSync(stateDir(dir), { recursive: true })
     writeFileSync(path.join(stateDir(dir), 'last-seen-version'), '0.0.1\n')
     const ctx = contextWith(dir)
     assert.ok(ctx.includes(`updated: 0.0.1 -> ${installedVersion}`))
   })
+  hookBodyRan()
 })
 
 hookTest('reports a newer published version from the async check cache', () => {
-  hookBodyRan()
   withConfigDir((dir) => {
     mkdirSync(stateDir(dir), { recursive: true })
     writeFileSync(path.join(stateDir(dir), 'last-seen-version'), `${installedVersion}\n`)
@@ -711,12 +864,12 @@ hookTest('reports a newer published version from the async check cache', () => {
     assert.match(ctx, /999\.0\.0 is available/)
     assert.match(ctx, /\/plugin update claude-teammates/)
   })
+  hookBodyRan()
 })
 
 // The direction check. A plain string comparison reports an OLDER published
 // version as available, which is why the hook uses `sort -V`.
 hookTest('does not report an older published version as available', () => {
-  hookBodyRan()
   withConfigDir((dir) => {
     mkdirSync(stateDir(dir), { recursive: true })
     writeFileSync(path.join(stateDir(dir), 'last-seen-version'), `${installedVersion}\n`)
@@ -724,12 +877,12 @@ hookTest('does not report an older published version as available', () => {
     const ctx = contextWith(dir)
     assert.doesNotMatch(ctx, /is available/)
   })
+  hookBodyRan()
 })
 
 // 0.10.0 sorts BEFORE 0.9.0 as a string and AFTER it as a version. This is the
 // case the naive comparison gets wrong, so it is pinned explicitly.
 hookTest('orders versions numerically, not lexically: 0.10.0 is newer than 0.9.0', () => {
-  hookBodyRan()
   // Pinned against a FAKE plugin root at 0.9.0 rather than the repo's own version.
   // The earlier version of this test read the real version and guarded itself with
   // `installedVersion < '0.10.0' || installedVersion.startsWith('0.')` — a tautology
@@ -753,10 +906,10 @@ hookTest('orders versions numerically, not lexically: 0.10.0 is newer than 0.9.0
   } finally {
     rmSync(fakeRoot, { recursive: true, force: true })
   }
+  hookBodyRan()
 })
 
 hookTest('a notice never breaks the emitted JSON or adds a second context field', () => {
-  hookBodyRan()
   withConfigDir((dir) => {
     mkdirSync(stateDir(dir), { recursive: true })
     writeFileSync(path.join(stateDir(dir), 'update-check.json'), '{"published":"999.0.0","checkedAt":1}')
@@ -765,6 +918,7 @@ hookTest('a notice never breaks the emitted JSON or adds a second context field'
     assert.match(ctx, /999\.0\.0 is available/)
     assert.match(ctx, /using-teammates/)
   })
+  hookBodyRan()
 })
 
 // --- update-check (the async, network-touching hook) ---------------------
@@ -782,16 +936,15 @@ function runUpdateCheck(configDir, { url, ...env } = {}) {
 }
 
 hookTest('update-check makes no request and writes nothing when opted out', () => {
-  hookBodyRan()
   withConfigDir((dir) => {
     const out = runUpdateCheck(dir, { CLAUDE_TEAMMATES_UPDATE_CHECK: '0' })
     assert.equal(out, '', 'the async hook must emit nothing')
     assert.equal(existsSync(path.join(stateDir(dir), 'update-check.json')), false)
   })
+  hookBodyRan()
 })
 
 hookTest('update-check writes the published version to its cache', () => {
-  hookBodyRan()
   withConfigDir((dir) => {
     const fixture = path.join(dir, 'published.json')
     writeFileSync(fixture, '{"name":"claude-teammates","version":"0.9.9"}')
@@ -803,10 +956,10 @@ hookTest('update-check writes the published version to its cache', () => {
     assert.equal(cache.published, '0.9.9')
     assert.ok(Number.isInteger(cache.checkedAt))
   })
+  hookBodyRan()
 })
 
 hookTest('update-check refuses a version that is not digits and dots', () => {
-  hookBodyRan()
   withConfigDir((dir) => {
     const fixture = path.join(dir, 'published.json')
     writeFileSync(fixture, '<html>"version": "not-a-version"</html>')
@@ -818,10 +971,10 @@ hookTest('update-check refuses a version that is not digits and dots', () => {
     const body = existsSync(cachePath) ? readFileSync(cachePath, 'utf8') : ''
     assert.doesNotMatch(body, /published/, 'an HTML error page must not be cached as a version')
   })
+  hookBodyRan()
 })
 
 hookTest('update-check throttles: a fresh cache is not overwritten', () => {
-  hookBodyRan()
   withConfigDir((dir) => {
     const fixture = path.join(dir, 'published.json')
     const url = `file:///${fixture.split(path.sep).join("/")}`
@@ -832,6 +985,7 @@ hookTest('update-check throttles: a fresh cache is not overwritten', () => {
     const cache = JSON.parse(readFileSync(path.join(stateDir(dir), 'update-check.json'), 'utf8'))
     assert.equal(cache.published, '0.9.9', 'the second run must be throttled out')
   })
+  hookBodyRan()
 })
 
 test('hooks.json wires update-check async and session-start sync', async () => {
@@ -954,12 +1108,21 @@ test('(mechanism) a refused probe registers a failing case, never a skip', () =>
   assert.deepEqual(other[0][1], { skip: 'bash cannot access the repository path' },
     'the skip must travel as node:test options, with a reason')
 
+  // IDENTITY, not merely "some function": registerHookCase receives `fn` and is free to
+  // discard it. `register(name, () => hookBodyRan())` on that one line threw away all
+  // thirty-one real bodies and left the file at 48 pass / 0 fail / 0 skipped, every counter
+  // satisfied, in 426ms. The body that reaches node:test must be the caller's
+  // own object; the marker-line set in the last test of this file catches the same edit
+  // from the other end, on the live registrations.
+  const realBody = () => {}
   assert.equal(
     registerHookCase({ reachable: true, error: null, result: 'reachable' },
-      'reachable case', () => {}, otherRecord),
+      'reachable case', realBody, otherRecord),
     'run',
     'a probe that answered reachable must register the real body')
-  assert.equal(typeof other[1][1], 'function', 'a running case registers a body')
+  assert.equal(other[1][1], realBody,
+    'a running case must register the body it was handed, not a stand-in that would run ' +
+    'nothing while every counter still adds up')
   assert.equal(other[1][2], undefined, 'a running case carries no options object')
 })
 
@@ -1000,8 +1163,10 @@ test('(mechanism) a refused probe registers a failing case, never a skip', () =>
 // Three of these guard the same property from different sides, because each of the three
 // was separately found to leave the suite green: the probe's answer must be honest (the
 // live-probe evidence test), the target it answers about must be this repository (the
-// Node-side check), and the answer must actually cause EVERY registered body to run (the
-// body-count mechanism test at the end of this file). No one of them implies the others.
+// Node-side check), and the answer must actually cause every selected body to run — the
+// marker-line mechanism test at the end of this file, which identifies the bodies that ran
+// by the source line each hookBodyRan() call came from, so a substituted body that only
+// calls the marker is not one of them. No one of them implies the others.
 // Which code each test reaches differs, and the difference matters: the first, second
 // and fourth spawn the argv buildProbeInvocation returns and observe what bash printed;
 // the wiring test inspects that argv without spawning it; the TM_RAN gate test calls
@@ -1436,7 +1601,6 @@ function runUnset(script, args = []) {
 }
 
 hookTest('env -u actually unsets HOME for bash, which delete env.HOME does not', () => {
-  hookBodyRan()
   // The premise the two tests below depend on. Without it they would silently stop
   // testing the unset case and start testing the developer's home directory.
   const viaEnvU = execFileSync('env', ['-u', 'HOME', 'bash', '-c', 'echo ${HOME:-UNSET}'], {
@@ -1452,10 +1616,10 @@ hookTest('env -u actually unsets HOME for bash, which delete env.HOME does not',
   }).trim()
   // Documents WHY env -u is used. On Windows this is a real path, not UNSET.
   assert.ok(typeof viaDelete === 'string')
+  hookBodyRan()
 })
 
 hookTest('session-start survives HOME and CLAUDE_CONFIG_DIR both being unset', () => {
-  hookBodyRan()
   const parsed = JSON.parse(runUnset(hookScript))
   assert.equal(Object.keys(parsed).length, 1)
   const ctx = parsed.hookSpecificOutput.additionalContext
@@ -1463,20 +1627,20 @@ hookTest('session-start survives HOME and CLAUDE_CONFIG_DIR both being unset', (
   // With no state directory the notice cannot be once-only, so it is suppressed
   // rather than repeated every session.
   assert.doesNotMatch(ctx, /is active|updated:|is available/)
+  hookBodyRan()
 })
 
 hookTest('update-check survives HOME and CLAUDE_CONFIG_DIR both being unset', () => {
-  hookBodyRan()
   // A file:// argument is passed so that a regression reaching the fetch cannot
   // silently make a live network request from the test suite.
   const fixture = path.join(tmpdir(), 'tm-never-fetched.json')
   writeFileSync(fixture, '{"version":"9.9.9"}')
   const out = runUnset(updateCheckScript, [`file:///${fixture.split(path.sep).join('/')}`])
   assert.equal(out, '')
+  hookBodyRan()
 })
 
 hookTest('both hooks tolerate a config dir containing a space', () => {
-  hookBodyRan()
   const base = mkdtempSync(path.join(tmpdir(), 'tm-sp-'))
   const dir = path.join(base, 'has space')
   mkdirSync(dir, { recursive: true })
@@ -1487,6 +1651,7 @@ hookTest('both hooks tolerate a config dir containing a space', () => {
   } finally {
     rmSync(base, { recursive: true, force: true })
   }
+  hookBodyRan()
 })
 
 // Regression: the throttle used to be a side effect of SUCCESS, so every failing
@@ -1494,7 +1659,6 @@ hookTest('both hooks tolerate a config dir containing a space', () => {
 // users who can never succeed (offline, or a proxy serving a block page), while
 // README and SECURITY.md both promised at most one request a day.
 hookTest('update-check throttles a FAILED check, not just a successful one', () => {
-  hookBodyRan()
   withConfigDir((dir) => {
     const missing = path.join(dir, 'does-not-exist.json')
     runUpdateCheck(dir, { url: `file:///${missing.split(path.sep).join("/")}` })
@@ -1502,12 +1666,12 @@ hookTest('update-check throttles a FAILED check, not just a successful one', () 
     assert.ok(existsSync(cachePath), 'a failed check must still stamp the throttle')
     assert.doesNotMatch(readFileSync(cachePath, 'utf8'), /published/)
   })
+  hookBodyRan()
 })
 
 // A FIFO is readable but blocks forever. session-start is declared "async": false,
 // so a blocking read there hangs session start with no timeout.
 hookTest('session-start does not hang on a FIFO in place of a state file', () => {
-  hookBodyRan()
   withConfigDir((dir) => {
     const sd = path.join(dir, 'claude-teammates')
     mkdirSync(sd, { recursive: true })
@@ -1525,12 +1689,12 @@ hookTest('session-start does not hang on a FIFO in place of a state file', () =>
     })
     assert.equal(Object.keys(JSON.parse(out)).length, 1)
   })
+  hookBodyRan()
 })
 
 // The cache lives in the user's config dir, so its contents are re-validated on read
 // rather than trusted. Without that, a crafted value lands verbatim in context.
 hookTest('session-start refuses a non-version published value from the cache', () => {
-  hookBodyRan()
   withConfigDir((dir) => {
     const sd = path.join(dir, 'claude-teammates')
     mkdirSync(sd, { recursive: true })
@@ -1543,6 +1707,7 @@ hookTest('session-start refuses a non-version published value from the cache', (
     assert.doesNotMatch(ctx, /IGNORE ALL PREVIOUS/)
     assert.doesNotMatch(ctx, /is available/)
   })
+  hookBodyRan()
 })
 
 
@@ -1551,7 +1716,6 @@ hookTest('session-start refuses a non-version published value from the cache', (
 // a dead ".../releases/tag/v" link. A partially unpacked or mid-update install is
 // exactly when plugin.json is unreadable, so this is a reachable state.
 hookTest('emits no notice at all when the plugin manifest cannot be read', () => {
-  hookBodyRan()
   withConfigDir((dir) => {
     const sd = stateDir(dir)
     mkdirSync(sd, { recursive: true })
@@ -1566,6 +1730,7 @@ hookTest('emits no notice at all when the plugin manifest cannot be read', () =>
     assert.doesNotMatch(ctx, /is available/, 'no availability line without a known installed version')
     assert.ok(!/releases\/tag\/v(?![0-9])/.test(ctx), 'never a version-less release link')
   })
+  hookBodyRan()
 })
 
 // This pins temp-file CLEANUP, not atomicity. Replacing the temp+rename with a
@@ -1575,7 +1740,6 @@ hookTest('emits no notice at all when the plugin manifest cannot be read', () =>
 // needs a scheduled interleaving this suite has no way to force, and a timing-based
 // one would be flaky. Treating that as covered would be worse than saying so here.
 hookTest('update-check leaves no temp file behind after writing its cache', () => {
-  hookBodyRan()
   withConfigDir((dir) => {
     const fixture = path.join(dir, 'published.json')
     writeFileSync(fixture, '{"version":"0.9.9"}')
@@ -1584,6 +1748,7 @@ hookTest('update-check leaves no temp file behind after writing its cache', () =
     assert.deepEqual(entries.filter((e) => e.includes('update-check.json.')), [])
     assert.ok(entries.includes('update-check.json'))
   })
+  hookBodyRan()
 })
 
 // --- install self-check -------------------------------------------------
@@ -1615,7 +1780,6 @@ function fakePluginRoot({ cli = true, agents = true, skills = true } = {}) {
 }
 
 hookTest("a healthy install reports what it found, alongside the version notice", () => {
-  hookBodyRan()
   const pluginRoot = fakePluginRoot()
   try {
     withConfigDir((dir) => {
@@ -1626,10 +1790,10 @@ hookTest("a healthy install reports what it found, alongside the version notice"
   } finally {
     rmSync(pluginRoot, { recursive: true, force: true })
   }
+  hookBodyRan()
 })
 
 hookTest("the readiness line does not repeat once the version notice has fired", () => {
-  hookBodyRan()
   const pluginRoot = fakePluginRoot()
   try {
     withConfigDir((dir) => {
@@ -1640,10 +1804,10 @@ hookTest("the readiness line does not repeat once the version notice has fired",
   } finally {
     rmSync(pluginRoot, { recursive: true, force: true })
   }
+  hookBodyRan()
 })
 
 hookTest("a missing cli.mjs is named, not merely implied", () => {
-  hookBodyRan()
   const pluginRoot = fakePluginRoot({ cli: false })
   try {
     withConfigDir((dir) => {
@@ -1655,10 +1819,10 @@ hookTest("a missing cli.mjs is named, not merely implied", () => {
   } finally {
     rmSync(pluginRoot, { recursive: true, force: true })
   }
+  hookBodyRan()
 })
 
 hookTest("missing agents are named", () => {
-  hookBodyRan()
   const pluginRoot = fakePluginRoot({ agents: false })
   try {
     withConfigDir((dir) => {
@@ -1669,12 +1833,12 @@ hookTest("missing agents are named", () => {
   } finally {
     rmSync(pluginRoot, { recursive: true, force: true })
   }
+  hookBodyRan()
 })
 
 // A broken install stays broken. The operator needs the warning on the session where
 // they hit the failure, not only on the one where the version happened to change.
 hookTest("a broken install warns on every session, not once per version", () => {
-  hookBodyRan()
   const pluginRoot = fakePluginRoot({ cli: false })
   try {
     withConfigDir((dir) => {
@@ -1685,10 +1849,10 @@ hookTest("a broken install warns on every session, not once per version", () => 
   } finally {
     rmSync(pluginRoot, { recursive: true, force: true })
   }
+  hookBodyRan()
 })
 
 hookTest("a broken install still exits 0 with exactly one valid context field", () => {
-  hookBodyRan()
   const pluginRoot = fakePluginRoot({ cli: false, agents: false })
   try {
     withConfigDir((dir) => {
@@ -1698,6 +1862,7 @@ hookTest("a broken install still exits 0 with exactly one valid context field", 
   } finally {
     rmSync(pluginRoot, { recursive: true, force: true })
   }
+  hookBodyRan()
 })
 
 // Read at the END of module evaluation: every hookTest above has been REGISTERED, and
@@ -1716,10 +1881,11 @@ const hookBodyRunsAfterRegistration = hookBodyRuns
 // Registered LAST on purpose. node:test runs top-level cases in registration order, so by
 // the time this body executes every hookTest above has either run or been skipped, and
 // hookBodyRuns holds the count.
-test('(mechanism) a reachable probe means EVERY hook case body executed', () => {
+test('(mechanism) a reachable probe means EVERY hook case body executed', (t) => {
   // PIN, and the property this whole file exists to defend: not "which spawn ran", not
-  // "what the counters say", and — since the fifth round — not "that A body ran", but that
-  // AS MANY bodies ran as this file registers, when the probe said they could.
+  // "what the counters say", and not "that A body ran", but that the bodies which ran are
+  // EXACTLY the cases this file's own text registers and node's own filters select, when
+  // the probe said they could run.
   //
   // MEASURED, twice, and the reason the shape changed:
   //   - turning hookTest into an unconditional skip AND dropping its `hookTestsSkipped += 1`
@@ -1728,14 +1894,17 @@ test('(mechanism) a reachable probe means EVERY hook case body executed', () => 
   //   - the boolean flag that replaced those counters was set by the FIRST registration, so
   //     running only that case and registering the other thirty as skips left the suite at
   //     18 pass / 0 fail / 30 skipped — green again, with one case of thirty-one tested.
-  // The second is why the expectation is HOOK_CASES_IN_SOURCE, read from this file's text:
-  // an edit to the registration logic changes what that logic does, never how many
-  // registrations the source contains, so it cannot move the bar it has to clear.
+  // The second is why the expectation is read from this file's TEXT — the case names and
+  // their marker lines — rather than from anything the registration path maintains: an edit
+  // to that logic changes what it does, never what the source says, so it cannot move the
+  // bar it has to clear.
   //
-  // What it does not close, stated plainly: a registration edit that put a hookBodyRan()
-  // call into each of thirty-one empty bodies would satisfy this count. That forgery has to
-  // be written into the bodies one at a time rather than into hookTest once, which is the
-  // whole of the improvement — not an impossibility proof.
+  // What it does not close, stated plainly: thirty-one stub bodies, each a bare
+  // hookBodyRan() on its own line under its own hookTest( registration, would satisfy both
+  // the count and the marker lines below. What it does close is the one-line version of
+  // that forgery: `register(name, () => hookBodyRan())` inside registerHookCase discarded
+  // all thirty-one real bodies at 48 pass / 0 fail / 0 skipped, and every hookBodyRan()
+  // call then arrives from that single line instead of from thirty-one distinct ones.
   //
   // The when, not just the how many: bodies that ran during registration were not run by
   // node:test, so their assertions were not reported by it either.
@@ -1748,27 +1917,61 @@ test('(mechanism) a reachable probe means EVERY hook case body executed', () => 
     'no `hookTest(` registrations found in this file\'s own source — the reader is broken, ' +
     'and a zero expectation would be satisfied by a suite that ran nothing')
 
+  // The source reader must account for every registration it found, or the expectation
+  // below is built from a shorter list than the file registers.
+  assert.deepEqual(HOOK_CASES_FROM_SOURCE.problems, [],
+    'this file\'s own text could not be read as a list of hook cases')
+  assert.equal(HOOK_CASES_FROM_SOURCE.cases.length, HOOK_CASES_IN_SOURCE,
+    `read ${HOOK_CASES_FROM_SOURCE.cases.length} hook cases from this file's source but ` +
+    `${HOOK_CASES_IN_SOURCE} registrations are present`)
+
+  // Every hookBodyRan() call must be attributable to a line of this file; one that is not
+  // cannot be matched against the marker lines below, so it is reported rather than ignored.
+  assert.deepEqual(hookBodyForeignCalls, [],
+    'hookBodyRan() was called from outside this file, so those calls cannot be attributed ' +
+    'to a hook case body')
+
+  // Apply node:test's own filters to the source-derived case names, and require the bodies
+  // that ran to be EXACTLY the cases the filters select — never a bound relaxed by the mere
+  // presence of a flag, which a pattern matching every name would satisfy while suppressing
+  // nothing. A filter form this file cannot reproduce fails here instead of standing down.
+  const filters = readTestFilters(process.execArgv, process.env.NODE_OPTIONS || '')
+  const { selected, unresolved, selects } = selectHookCases(HOOK_CASES_FROM_SOURCE.cases, filters)
+  assert.deepEqual(unresolved, [],
+    'a node:test filter is active in a form this file cannot apply to the case names, so ' +
+    'the number of bodies that should have run is unknown and no bound can be asserted')
+
+  // The filter must be one node ACTED on, not one written into process.execArgv afterwards.
+  // The evidence is this test itself: it is running, and it carries no `only: true`, so a
+  // filter that does not select its own name cannot be the filter node applied. Pushing
+  // `--test-only` onto process.execArgv at module scope was how an earlier round forged a
+  // stand-down; under a genuine --test-only run node never executes this test, so this
+  // assertion cannot fire there.
+  assert.ok(selects(t.name),
+    `a node:test filter ${describeFilters(filters)} does not select this test's own name, ` +
+    `yet this test is running — the filter was not applied by node, so the count it implies ` +
+    'says nothing about how many hook bodies should have run')
+
+  const sortLines = (lines) => [...lines].sort((a, b) => a - b)
+
   if (liveProbe.error) {
     assert.equal(hookBodyRuns, 0,
       'a probe that determined nothing must not have run a hook body')
     return
   }
   if (liveProbe.result === 'reachable') {
-    if (ACTIVE_TEST_FILTERS.length) {
-      // node:test is suppressing cases by name, so the bodies that did not run were
-      // filtered, not skipped by hookTest, and the exact count is unavailable. Stand down
-      // to the half of the property that survives filtering — no more bodies ran than this
-      // file registers — rather than fail a healthy tree under the flag people debug with.
-      assert.ok(hookBodyRuns <= HOOK_CASES_IN_SOURCE,
-        `${hookBodyRuns} hook bodies ran but only ${HOOK_CASES_IN_SOURCE} are registered ` +
-        `in this file's source (running under ${ACTIVE_TEST_FILTERS.join(', ')})`)
-      return
-    }
-    assert.equal(hookBodyRuns, HOOK_CASES_IN_SOURCE,
-      `the probe reported the repository reachable, so all ${HOOK_CASES_IN_SOURCE} hook ` +
-      `case bodies must have executed, but ${hookBodyRuns} did. A case that registers as a ` +
-      'skip, or a body missing its leading hookBodyRan() call, reports green while testing ' +
-      'less than this file claims to test')
+    const expectedLines = sortLines(selected.map((c) => c.markerLine))
+    assert.deepEqual(sortLines(hookBodyMarkerLines), expectedLines,
+      `the probe reported the repository reachable, so the ${selected.length} hook case ` +
+      `bodies selected ${describeFilters(filters)} must have executed — one hookBodyRan() ` +
+      `call from each of the marker lines ${JSON.stringify(expectedLines)} — but the calls ` +
+      `arrived from ${JSON.stringify(sortLines(hookBodyMarkerLines))}. A case registered as ` +
+      'a skip, a body that threw before its closing hookBodyRan() call, or a body replaced ' +
+      'by a stub that only calls the marker, all report green while testing less than this ' +
+      'file claims')
+    assert.equal(hookBodyRuns, selected.length,
+      `${hookBodyRuns} hookBodyRan() calls arrived for ${selected.length} selected cases ` +
+      `${describeFilters(filters)}; each body must call the marker exactly once`)
   } else {
     // The honest skip, kept honest in the other direction: a probe that answered
     // unreachable must NOT have run bodies, or the skip decision is not being applied.
@@ -1776,5 +1979,7 @@ test('(mechanism) a reachable probe means EVERY hook case body executed', () => 
     // filtering can only remove runs, never add them.
     assert.equal(hookBodyRuns, 0,
       'the probe reported the repository unreachable, so no hook case body should have run')
+    assert.deepEqual(sortLines(hookBodyMarkerLines), [],
+      'the probe reported the repository unreachable, so no marker line should have been reached')
   }
 })
