@@ -18,6 +18,46 @@ const updateCheckScript = fileURLToPath(new URL('../hooks/update-check', import.
 // detects actual capability (can bash access the repo root?) rather than assuming
 // based on platform, so it works everywhere without hardcoded platform logic.
 let _probeResult = null  // 'reachable' | 'unreachable' | null (exposed for mechanism test)
+
+// Shared classification logic: converts probe output or error into 'reachable' or 'unreachable'.
+// Returns 'reachable' | 'unreachable', or throws when the probe's own execution cannot be established.
+// Called by canBashAccessRepository with actual output/error, and by test 2 with synthesized inputs.
+function classifyProbeOutcome({ output, err }) {
+  if (output !== undefined) {
+    // Success path: bash ran and printed output
+    if (output === 'TM_RANTM_OK') {
+      return 'reachable'
+    } else if (output === 'TM_RAN') {
+      return 'unreachable'
+    } else {
+      throw new Error(
+        `Probe gave unexpected result: got "${output}" from bash -p -c 'printf TM_RAN; test -e "$1" && printf TM_OK'`
+      )
+    }
+  } else if (err !== undefined) {
+    // Error path: execFileSync threw
+    if (err.status === 1) {
+      // Exit 1 from bash: check if stdout has TM_RAN to verify bash actually ran
+      if (err.stdout && typeof err.stdout === 'string' && err.stdout.startsWith('TM_RAN')) {
+        // Real bash ran and test -e failed: repository is not accessible
+        return 'unreachable'
+      } else {
+        // Exit 1 but no TM_RAN: a fake bash answered, not the real one
+        throw new Error(
+          `Could not verify bash actually ran: got exit 1 but unexpected stdout: "${err.stdout || '(empty)'}"`
+        )
+      }
+    } else {
+      // Timeout, spawn error, signal, or other failure
+      throw new Error(
+        `Could not determine if bash can access the repository (${err.code || err.signal || 'unknown'}): ${err.message}`
+      )
+    }
+  } else {
+    throw new Error('classifyProbeOutcome requires either output or err')
+  }
+}
+
 function canBashAccessRepository() {
   if (_probeResult !== null) return _probeResult === 'reachable'
   try {
@@ -37,44 +77,21 @@ function canBashAccessRepository() {
       encoding: 'utf8',
       env: env,
     })
-    // Require TM_RAN prefix to verify bash actually ran (not a fake binary that exited 1).
-    // TM_RANTM_OK -> repository is reachable.
-    // TM_RAN (without TM_OK) -> repository is not reachable (test -e failed).
-    // Anything else -> we did not learn what we asked; throw to fail loudly.
-    if (output === 'TM_RANTM_OK') {
-      _probeResult = 'reachable'
-      return true
-    } else if (output === 'TM_RAN') {
-      _probeResult = 'unreachable'
-      return false
-    } else {
-      throw new Error(
-        `Probe gave unexpected result: got "${output}" from bash -p -c 'printf TM_RAN; test -e "$1" && printf TM_OK'`
-      )
-    }
+    const result = classifyProbeOutcome({ output })
+    _probeResult = result
+    return result === 'reachable'
   } catch (err) {
-    // Distinguish between "bash ran and test -e failed" vs
-    // "the probe itself failed to run or gave unexpected output".
-    // Exit code 1 from 'test -e' means the path was not found, and if stdout
-    // contains TM_RAN we know the real bash ran. If stdout doesn't contain TM_RAN,
-    // a fake binary answered; we did not learn what we asked.
-    if (err.status === 1) {
-      // Exit 1 but check if stdout has TM_RAN prefix
-      if (err.stdout && typeof err.stdout === 'string' && err.stdout.startsWith('TM_RAN')) {
-        _probeResult = 'unreachable'
-        return false
-      } else {
-        // Exit 1 but no TM_RAN in stdout: a fake bash answered, not the real one
-        throw new Error(
-          `Could not verify bash actually ran: got exit 1 but unexpected stdout: "${err.stdout || '(empty)'}"`
-        )
-      }
-    } else {
-      // Timeout, spawn error, signal, or other failure. Failing to determine
-      // whether the test environment can run is not a passing state.
-      throw new Error(
-        `Could not determine if bash can access the repository (${err.code || err.signal || 'unknown'}): ${err.message}`
-      )
+    // If err came from classifyProbeOutcome, re-throw it
+    if (err.message && err.message.includes('Could not')) {
+      throw err
+    }
+    // Otherwise it's from execFileSync, so classify the error
+    try {
+      const result = classifyProbeOutcome({ err })
+      _probeResult = result
+      return result === 'reachable'
+    } catch (classificationError) {
+      throw classificationError
     }
   }
 }
@@ -440,53 +457,41 @@ test('(probe defense pinned) -p flag resists BASH_FUNC_test shadowing', () => {
 
 test('(probe defense pinned) TM_RAN token requirement prevents fake bash', () => {
   // PIN: Removing the TM_RAN check from the probe will fail this test.
-  // Verify that a bash exiting 1 without printing TM_RAN cannot forge "unreachable".
-  // A fake bash on PATH (e.g., a stub script that exits 1) would output nothing.
-  // The probe must require TM_RAN evidence that bash actually ran.
+  // This test calls classifyProbeOutcome directly, so mutations to the probe's
+  // classification logic are caught. Verify that TM_RAN is required for "unreachable".
 
-  // First, verify that WITH TM_RAN and exit 1, it correctly means unreachable
-  let errWithToken = new Error('path not found')
+  // Case 1: TM_RANTM_OK -> reachable
+  assert.equal(classifyProbeOutcome({ output: 'TM_RANTM_OK' }), 'reachable',
+    'output TM_RANTM_OK should classify as reachable')
+
+  // Case 2: TM_RAN (exit 0) -> unreachable
+  assert.equal(classifyProbeOutcome({ output: 'TM_RAN' }), 'unreachable',
+    'output TM_RAN should classify as unreachable')
+
+  // Case 3: TM_RAN + exit 1 -> unreachable (real bash ran and test failed)
+  const errWithToken = new Error('path not found')
   errWithToken.status = 1
   errWithToken.stdout = 'TM_RAN'
+  assert.equal(classifyProbeOutcome({ err: errWithToken }), 'unreachable',
+    'exit 1 with TM_RAN stdout should classify as unreachable')
 
-  let classified1 = null
-  try {
-    if (errWithToken.status === 1) {
-      if (errWithToken.stdout && typeof errWithToken.stdout === 'string' && errWithToken.stdout.startsWith('TM_RAN')) {
-        classified1 = 'unreachable'
-      } else {
-        throw new Error(`Could not verify bash actually ran`)
-      }
-    }
-  } catch (e) {
-    assert.fail(`should not throw for valid unreachable case: ${e.message}`)
-  }
-
-  assert.equal(classified1, 'unreachable',
-    'with TM_RAN + exit 1, should classify as unreachable')
-
-  // Second, verify that WITHOUT TM_RAN and exit 1, it throws (doesn't silently skip)
-  let errNoToken = new Error('fake bash exited 1')
+  // Case 4: exit 1 without TM_RAN -> throws (fake bash answered)
+  const errNoToken = new Error('fake bash exited 1')
   errNoToken.status = 1
   errNoToken.stdout = ''  // No TM_RAN: fake bash produced this
 
-  let threw = false
-  let message = ''
-  try {
-    if (errNoToken.status === 1) {
-      if (errNoToken.stdout && typeof errNoToken.stdout === 'string' && errNoToken.stdout.startsWith('TM_RAN')) {
-        assert.fail('should not accept exit 1 without TM_RAN as unreachable')
-      } else {
-        throw new Error(`Could not verify bash actually ran: got exit 1 but unexpected stdout: "${errNoToken.stdout || '(empty)'}"`)
-      }
-    }
-  } catch (e) {
-    threw = true
-    message = e.message
-  }
+  assert.throws(
+    () => classifyProbeOutcome({ err: errNoToken }),
+    /Could not verify bash actually ran/,
+    'exit 1 without TM_RAN should throw, proving TM_RAN gate is required'
+  )
 
-  assert.ok(threw && message.includes('Could not verify bash actually ran'),
-    `without TM_RAN, should throw when bash exits 1, not return false - got: ${message}`)
+  // Case 5: unexpected output -> throws
+  assert.throws(
+    () => classifyProbeOutcome({ output: 'garbage' }),
+    /Probe gave unexpected result/,
+    'unexpected output should throw'
+  )
 })
 
 test('(probe defense) genuine unreachable path still skips, with TM_RAN evidence present', () => {
