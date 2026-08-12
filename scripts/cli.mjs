@@ -2062,10 +2062,11 @@ export async function runCli(argv, io = { out: console.log }) {
     // The block form is what fits a table: it neutralises the escape sequences with which a
     // name could erase a row, and keeps the newlines that are the table itself.
     //
-    // Stated exactly: this stops a name from redrawing the table, and does NOT stop one from
-    // containing a `\n` and adding a row that reads like a row this CLI wrote — `printableBlock`
-    // keeps every newline it is given, including a value's own. Closing that needs the wrap to
-    // move to each name inside `renderRunSummary`, in `scripts/finish.mjs`.
+    // Stated exactly: `printableBlock` keeps every newline it is given, including a value's own,
+    // so on its own it stops a name from redrawing the table but not from adding a row that reads
+    // like a row this CLI wrote. That second half is closed where the table is BUILT —
+    // `renderRunSummary` in `scripts/finish.mjs` puts each name through `printable`, so no name
+    // still carries a newline by the time it reaches this wrap.
     io.out(printableBlock(renderRunSummary(runId, phaseResults)))
     const summary = summarizeRun(phaseResults)
     if (summary.complete) return 0

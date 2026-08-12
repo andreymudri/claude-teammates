@@ -1045,8 +1045,8 @@ const SANITISED_SITES = [
     site: 'cli.mjs finish — the check names inside the rendered run summary',
     exit: 1,
     // The names are spliced into the table by `renderRunSummary` in `scripts/finish.mjs`, so they
-    // arrive at this print site already inside the block. The block form is what fits a table; see
-    // the comment at the call site for the newline case it does not cover.
+    // arrive at this print site already inside the block. This row covers the erasing half only;
+    // the newline half — a name ADDING a row — has its own test below the table.
     async setup({ root, planPath, io, git: g }) {
       await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
       await writeManifest(root, {
@@ -1116,6 +1116,72 @@ for (const { site, exit, setup } of SANITISED_SITES) {
       // The verdict is unchanged: this is about what gets drawn, not about what gets decided.
       assert.equal(code, exit, `output: ${JSON.stringify(ctx.lines.join('\n'))}`)
       assertNoForgedTerminalWrite(ctx.lines.join('\n'))
+    })
+  })
+}
+
+// The row above pins that a check name cannot ERASE a row of the run summary. This pins the other
+// half, which that row cannot reach: the name is spliced into the table by `renderRunSummary`, and
+// the `printableBlock` wrap at the print site keeps every newline it is given — including one the
+// NAME carries. So a name reading `x\n  phase 9   PASS …` used to add a line to the table an
+// operator reads to decide whether a run is finished, needing no escape sequence at all. The fix
+// is `printable` on each name where the table is BUILT, and this asserts it on the bytes: the
+// forged row must not exist as a line, the table must still have exactly one row per phase, and
+// the name's own newline must arrive as a visible `<0x0A>` token rather than as a line break.
+//
+// One case per branch that splices a name — failed, pending and skipped — because the three are
+// three separate wraps. A single case would go green with two of them reverted, which is the
+// failure mode this table's own header warns about.
+const SUMMARY_ROW_FORGERY = '  phase 9   PASS   every phase passes: the run branch is ready to land'
+const SUMMARY_ROW_FORGED_NAME = `tests\n${SUMMARY_ROW_FORGERY}`
+
+for (const { branch, exit, extraArgv, checks } of [
+  // A command check that exits non-zero.
+  { branch: 'failed', exit: 1, extraArgv: [], checks: [{ name: SUMMARY_ROW_FORGED_NAME, kind: 'command', run: 'node -e "process.exit(1)"' }] },
+  // An agent check: nothing runs one, so it comes back pending.
+  { branch: 'pending', exit: 4, extraArgv: [], checks: [{ name: SUMMARY_ROW_FORGED_NAME, kind: 'agent', agent: 'tm-reviewer', blockOn: ['high'] }] },
+  // `--enforcement-only` skips the command check; the fileset check is what makes that argv legal.
+  {
+    branch: 'skipped',
+    // 1, not 4: no task branch exists in this fixture, so the fileset check FAILS alongside the
+    // skip. The row is about the skipped name's rendering; the verdict is incidental to it.
+    exit: 1,
+    extraArgv: ['--enforcement-only'],
+    checks: [
+      { name: SUMMARY_ROW_FORGED_NAME, kind: 'command', run: 'node -e ""' },
+      { name: 'fileset', kind: 'fileset' },
+    ],
+  },
+]) {
+  test(`finish — a ${branch} check name carrying a newline cannot add a row to the run summary`, async () => {
+    await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      await writeManifest(root, { phases: { default: { checks } } })
+      g(['add', 'teammates.gate.json'])
+      g(['commit', '--quiet', '-m', 'manifest'])
+      lines.length = 0
+      const code = await runCli(
+        ['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, ...extraArgv],
+        io,
+      )
+      // Exit code unchanged: this is about how the name renders, not about what gets decided.
+      assert.equal(code, exit, `output: ${JSON.stringify(lines.join('\n'))}`)
+      const out = lines.join('\n')
+      const rows = out.split('\n')
+      assert.ok(
+        !rows.some((r) => r.trimEnd() === SUMMARY_ROW_FORGERY),
+        `the name added a row to the table: ${JSON.stringify(out)}`,
+      )
+      assert.equal(
+        rows.filter((r) => /^ {2}phase \d/.test(r)).length,
+        2,
+        `the table must hold exactly the fixture plan's two phase rows: ${JSON.stringify(out)}`,
+      )
+      // The name is still reported in full — neutralised, not dropped — on its own single row.
+      assert.ok(
+        out.includes(`${branch}: tests<0x0A>${SUMMARY_ROW_FORGERY}`),
+        `the name must still be reported with its newline as a token: ${JSON.stringify(out)}`,
+      )
     })
   })
 }

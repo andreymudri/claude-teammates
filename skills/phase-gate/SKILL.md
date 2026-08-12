@@ -78,10 +78,12 @@ those you execute:
   Where a line quotes a value an agent wrote — a lens, a stamp or a reason out of a findings file,
   and equally a check name, kind or `preview.link` entry out of the gate manifest, whose contents
   this CLI validates for shape and not for content — the value is printed with its control bytes
-  replaced by a visible `<0x1B>` token. Either file could otherwise carry an escape sequence that
-  erases the line in the terminal and draws one reading like a PASS this CLI computed. That covers
-  the lines a refusal prints and the ones a passing command prints. Read the exit code, not the
-  shape of a line.
+  and line separators replaced by a visible `<0x1B>`-style token. Either file could otherwise carry
+  an escape sequence that erases the line in the terminal and draws one reading like a PASS this
+  CLI computed, or a line break that adds one. That covers the lines a refusal prints, the ones a
+  passing command prints, and the check names inside `finish`'s run summary table. It does not
+  cover the bidi and format controls, which pass through. Read the exit code, not the shape of a
+  line.
 
   Both come from the tracked manifest only — the reviewer grades the diff, so
   letting the gitignored layer choose its tier would let the party being judged pick its own
