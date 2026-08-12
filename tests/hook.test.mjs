@@ -41,7 +41,8 @@ let _probeResult = null  // 'reachable' | 'unreachable' | null (exposed for mech
 // answer, the corroborating spawn in the evidence test below.
 //
 // The write is wrapped in a brace group with stderr discarded and `|| true` so a witness
-// path bash cannot write (a WSL bash handed a Windows temp path) changes neither the
+// path bash cannot write — a bash whose filesystem view does not include this process's
+// temp dir, or a run where the temp dir could not be created at all — changes neither the
 // probe's stdout nor its exit status.
 //
 // Reading the witness back from Node presumes the spawned bash and this process see the
@@ -255,13 +256,16 @@ const PROBE_TARGET_MARKERS = ['.claude-plugin/plugin.json', 'hooks/session-start
 // is not lying.
 //
 // Why it does NOT break the legitimate skip: the case the skip exists to serve is a bash
-// that cannot see a path NODE CAN — a WSL bash handed a Windows path. Node's check passes
-// there and the skip proceeds untouched. The two are distinguishable precisely because the
-// observers are independent.
+// that FORWARDS its arguments and still cannot see a path NODE CAN — a bash confined to a
+// different filesystem view than this process. (Not WSL: WSL drops the argument and is
+// refused loudly instead, per classifyProbeOutcome.) Node's check passes there and the skip
+// proceeds untouched. The two are distinguishable precisely because the observers are
+// independent.
 //
 // It does NOT subsume the other two pins, and is not claimed to: a lying recorder and a
-// hookTest that registers every case as a skip both leave `root` perfectly valid. Those
-// are pinned by the live-probe evidence test and the canary respectively.
+// hookTest that registers some or all of its cases as skips both leave `root` perfectly
+// valid. Those are pinned by the live-probe evidence test and by the body-count mechanism
+// test at the end of this file respectively.
 function probeTargetProblem(target) {
   if (!existsSync(target)) return 'Node cannot see it at all'
   const missing = PROBE_TARGET_MARKERS.filter((m) => !existsSync(path.join(target, m)))
@@ -274,9 +278,14 @@ function probeTargetProblem(target) {
 // and hoping runProbe still calls it. Both defaults are evaluated here and nowhere else,
 // so runProbe.length stays 0 and canBashAccessRepository keeps its single parameter.
 function runProbe(spawn = execFileSync, target = root) {
-  // Probe the repository root (not the hook file itself). If the repo is
-  // unreachable, the probe fails. If a hook file is missing, the repo is
-  // still reachable, and tests should run and fail as expected.
+  // Probe the repository root (not the hook file itself), so that bash is asked one
+  // question — can you see this repository — rather than one question per hook.
+  //
+  // A missing hook file is NOT tolerated here, though this comment used to say it was:
+  // PROBE_TARGET_MARKERS lists hooks/session-start, so a root without that file fails the
+  // Node-side check below and the probe REFUSES. Every hook case is then registered as a
+  // failure naming the refusal, which is louder than the individual assertion failures the
+  // old wording promised, and never a skip.
   //
   // Require positive evidence: have bash print 'TM_OK' on success. This
   // prevents forging via exit codes (startup files, etc.).
@@ -546,24 +555,84 @@ test('hooks.json declares a SessionStart matcher', async () => {
   assert.match(cfg.hooks.SessionStart[0].matcher, /startup/)
 })
 
-// Set by the canary hookTest below, from INSIDE its body. Deliberately not touched by
-// hookTest or registerHookCase: every counter those functions maintain can be dropped by
-// the same edit that breaks them, which is how a skip-everything mutation stayed green
-// through four rounds. This flag lives where only an executing body can reach it, so no
-// edit to the registration logic can set it. The plain test at the end of this file reads
-// it, and a plain test cannot be turned into a skip by anything hookTest does.
-let hookBodyCanaryRan = false
+// How many hook case bodies actually executed. Incremented by the hookBodyRan() call that
+// is the first statement of every hookTest body below, and by nothing else — not by
+// hookTest, not by registerHookCase.
+//
+// Why a COUNT and not the boolean that stood here: the boolean was set by the FIRST of the
+// hookTest registrations, so it proved that one body ran and said nothing about the other
+// thirty. An edit to hookTest that ran the first case and registered the rest as skips left
+// this file at 18 pass / 0 fail / 30 skipped and exit 0 — green, testing one case out of
+// thirty-one — and the counters hookTest maintains did not object either, because leaving
+// hookTestsRegistered incrementing while hookTestsSkipped stays at zero satisfies their
+// assertion with both sides equal.
+//
+// What this is NOT: proof that a registration edit cannot move this number. It can — an
+// edit that registered `() => hookBodyRan()` in place of each real body would count
+// thirty-one runs having tested nothing. What the design buys is that the number it must
+// reach comes from OUTSIDE the registration path (see HOOK_CASES_IN_SOURCE), so an edit
+// confined to hookTest cannot both shrink the work and shrink the expectation; it must
+// forge every case individually, in the bodies, where the forgery is legible.
+let hookBodyRuns = 0
+function hookBodyRan() {
+  hookBodyRuns += 1
+}
+
+// The expectation, read from this file's own source rather than computed by the code under
+// scrutiny. This is the principle that made probeTargetProblem hold where four rounds of
+// in-band pins did not: the observer is independent of the thing observed. `hookTest(` at
+// the start of a line is a registration and nothing else — the definition of hookTest is
+// indented behind `function`, and this regex is not at a line start either — so editing
+// what hookTest DOES cannot change this number. Only adding or deleting a registration can.
+//
+// A hookTest body added without a leading hookBodyRan() call therefore fails the mechanism
+// test at the end of this file, naming the shortfall. That is deliberate: the marker is
+// part of what registering a hook case means here.
+const SELF_SOURCE = readFileSync(fileURLToPath(import.meta.url), 'utf8')
+const HOOK_CASES_IN_SOURCE = (SELF_SOURCE.match(/^hookTest\(/gm) || []).length
+
+// node:test's own filters suppress bodies without touching this file, so under one of them
+// the count above is not the number of bodies that SHOULD run, and asserting it would fail
+// on a healthy tree. `--test-name-pattern` is how people debug a single case; a mechanism
+// test that goes red there gets deleted by the next person who hits it.
+//
+// Detected from the flags rather than from a shortfall in the count, because a shortfall is
+// exactly what a broken hookTest produces: inferring "filtering" from a low count would let
+// the mutation this file exists to catch excuse itself. When any of these is present the
+// mechanism test below stands down to a bound (no more bodies ran than exist) and says so
+// in its message; with none present it asserts the exact count.
+//
+// Both spellings of a run are covered: `node --test --test-name-pattern=X file` forwards
+// the flag into the per-file child's execArgv, and `node --test-name-pattern=X file` runs
+// in process with the flag in its own execArgv. NODE_OPTIONS is scanned as a third route.
+const TEST_FILTER_FLAGS = ['--test-name-pattern', '--test-skip-pattern', '--test-only']
+const ACTIVE_TEST_FILTERS = (() => {
+  const seen = new Set()
+  const scan = (tokens) => {
+    for (const token of tokens) {
+      for (const flag of TEST_FILTER_FLAGS) {
+        if (token === flag || token.startsWith(`${flag}=`)) seen.add(flag)
+      }
+    }
+  }
+  scan(process.execArgv)
+  scan((process.env.NODE_OPTIONS || '').split(/\s+/).filter(Boolean))
+  return [...seen]
+})()
 
 hookTest('(canary) a hook case body runs and the hook really answers', () => {
-  hookBodyCanaryRan = true
-  // Do real work, so the flag cannot be set by a body that was emptied out: this is the
+  hookBodyRan()
+  // Do real work, so this case cannot be reduced to its hookBodyRan() marker: it is the
   // same hook invocation the cases below depend on, and it fails if the hook cannot run.
+  // It covers only ITSELF — proving thirty-one bodies ran is the count's job, not this
+  // one's, which is precisely the confusion that kept the fourth round green.
   const parsed = JSON.parse(runHook({}))
   assert.equal(typeof parsed.hookSpecificOutput.additionalContext, 'string',
-    'the canary must exercise a real hook invocation, not merely set its flag')
+    'the canary must exercise a real hook invocation, not merely count itself')
 })
 
 hookTest('emits valid JSON containing the entrypoint content', () => {
+  hookBodyRan()
   const parsed = JSON.parse(runHook({}))
   const ctx = parsed.hookSpecificOutput.additionalContext
   assert.match(ctx, /using-teammates/)
@@ -571,6 +640,7 @@ hookTest('emits valid JSON containing the entrypoint content', () => {
 })
 
 hookTest('emits exactly one context field for Claude Code', () => {
+  hookBodyRan()
   const parsed = JSON.parse(runHook({}))
   assert.ok(parsed.hookSpecificOutput, 'expected hookSpecificOutput')
   assert.equal(parsed.additional_context, undefined)
@@ -578,12 +648,14 @@ hookTest('emits exactly one context field for Claude Code', () => {
 })
 
 hookTest('emits the cursor field shape when CURSOR_PLUGIN_ROOT is set', () => {
+  hookBodyRan()
   const parsed = JSON.parse(runHook({ CURSOR_PLUGIN_ROOT: root }))
   assert.ok(typeof parsed.additional_context === 'string')
   assert.equal(parsed.hookSpecificOutput, undefined)
 })
 
 hookTest('a missing entrypoint file produces a loud warning, valid JSON, and exit 0', () => {
+  hookBodyRan()
   const out = runHook({ CLAUDE_PLUGIN_ROOT: '/nonexistent-plugin-root' })
   const parsed = JSON.parse(out)
   const ctx = parsed.hookSpecificOutput.additionalContext
@@ -599,6 +671,7 @@ hookTest('a missing entrypoint file produces a loud warning, valid JSON, and exi
 // nothing, so none of these tests touch the network.
 
 hookTest('reports the installed version once when no marker exists, and writes the marker', () => {
+  hookBodyRan()
   withConfigDir((dir) => {
     const ctx = contextWith(dir)
     assert.ok(ctx.includes(`claude-teammates ${installedVersion} is active`))
@@ -609,6 +682,7 @@ hookTest('reports the installed version once when no marker exists, and writes t
 })
 
 hookTest('does not repeat the notice on a second run — once per version is the feature', () => {
+  hookBodyRan()
   withConfigDir((dir) => {
     contextWith(dir)
     const second = contextWith(dir)
@@ -618,6 +692,7 @@ hookTest('does not repeat the notice on a second run — once per version is the
 })
 
 hookTest('reports an upgrade when the marker holds an older version', () => {
+  hookBodyRan()
   withConfigDir((dir) => {
     mkdirSync(stateDir(dir), { recursive: true })
     writeFileSync(path.join(stateDir(dir), 'last-seen-version'), '0.0.1\n')
@@ -627,6 +702,7 @@ hookTest('reports an upgrade when the marker holds an older version', () => {
 })
 
 hookTest('reports a newer published version from the async check cache', () => {
+  hookBodyRan()
   withConfigDir((dir) => {
     mkdirSync(stateDir(dir), { recursive: true })
     writeFileSync(path.join(stateDir(dir), 'last-seen-version'), `${installedVersion}\n`)
@@ -640,6 +716,7 @@ hookTest('reports a newer published version from the async check cache', () => {
 // The direction check. A plain string comparison reports an OLDER published
 // version as available, which is why the hook uses `sort -V`.
 hookTest('does not report an older published version as available', () => {
+  hookBodyRan()
   withConfigDir((dir) => {
     mkdirSync(stateDir(dir), { recursive: true })
     writeFileSync(path.join(stateDir(dir), 'last-seen-version'), `${installedVersion}\n`)
@@ -652,6 +729,7 @@ hookTest('does not report an older published version as available', () => {
 // 0.10.0 sorts BEFORE 0.9.0 as a string and AFTER it as a version. This is the
 // case the naive comparison gets wrong, so it is pinned explicitly.
 hookTest('orders versions numerically, not lexically: 0.10.0 is newer than 0.9.0', () => {
+  hookBodyRan()
   // Pinned against a FAKE plugin root at 0.9.0 rather than the repo's own version.
   // The earlier version of this test read the real version and guarded itself with
   // `installedVersion < '0.10.0' || installedVersion.startsWith('0.')` — a tautology
@@ -678,6 +756,7 @@ hookTest('orders versions numerically, not lexically: 0.10.0 is newer than 0.9.0
 })
 
 hookTest('a notice never breaks the emitted JSON or adds a second context field', () => {
+  hookBodyRan()
   withConfigDir((dir) => {
     mkdirSync(stateDir(dir), { recursive: true })
     writeFileSync(path.join(stateDir(dir), 'update-check.json'), '{"published":"999.0.0","checkedAt":1}')
@@ -703,6 +782,7 @@ function runUpdateCheck(configDir, { url, ...env } = {}) {
 }
 
 hookTest('update-check makes no request and writes nothing when opted out', () => {
+  hookBodyRan()
   withConfigDir((dir) => {
     const out = runUpdateCheck(dir, { CLAUDE_TEAMMATES_UPDATE_CHECK: '0' })
     assert.equal(out, '', 'the async hook must emit nothing')
@@ -711,6 +791,7 @@ hookTest('update-check makes no request and writes nothing when opted out', () =
 })
 
 hookTest('update-check writes the published version to its cache', () => {
+  hookBodyRan()
   withConfigDir((dir) => {
     const fixture = path.join(dir, 'published.json')
     writeFileSync(fixture, '{"name":"claude-teammates","version":"0.9.9"}')
@@ -725,6 +806,7 @@ hookTest('update-check writes the published version to its cache', () => {
 })
 
 hookTest('update-check refuses a version that is not digits and dots', () => {
+  hookBodyRan()
   withConfigDir((dir) => {
     const fixture = path.join(dir, 'published.json')
     writeFileSync(fixture, '<html>"version": "not-a-version"</html>')
@@ -739,6 +821,7 @@ hookTest('update-check refuses a version that is not digits and dots', () => {
 })
 
 hookTest('update-check throttles: a fresh cache is not overwritten', () => {
+  hookBodyRan()
   withConfigDir((dir) => {
     const fixture = path.join(dir, 'published.json')
     const url = `file:///${fixture.split(path.sep).join("/")}`
@@ -899,8 +982,12 @@ test('(mechanism) a refused probe registers a failing case, never a skip', () =>
 //   - the spawn the LIVE probe used, pinned above by identity against the child_process
 //     namespace, and corroborated for whichever answer it gave — by the witness file a
 //     real bash wrote when it answered reachable, by a fresh real-bash spawn of the same
-//     argv when it answered unreachable — so the default that decides the skip is not
-//     itself a stub;
+//     argv when it answered unreachable. Neither leg rules a stub out, and the summary
+//     here used to claim they did: a stub that also writes the witness path it is handed
+//     satisfies the first, and a stub returning the answer real bash would have given is
+//     indistinguishable by the second. What they establish is narrower — the recorded
+//     spawn IS child_process.execFileSync, and the answer it produced is corroborated by
+//     a process outside this one;
 //   - the TM_ARG token, which separates "bash never got the path" from "the path is not
 //     there", so a shell that drops positional arguments is refused rather than skipped;
 //   - the arm that fires when no bash exit status exists at all — ENOENT, timeout,
@@ -913,8 +1000,8 @@ test('(mechanism) a refused probe registers a failing case, never a skip', () =>
 // Three of these guard the same property from different sides, because each of the three
 // was separately found to leave the suite green: the probe's answer must be honest (the
 // live-probe evidence test), the target it answers about must be this repository (the
-// Node-side check), and the answer must actually cause bodies to run (the canary at the
-// end of this file). No one of them implies the others.
+// Node-side check), and the answer must actually cause EVERY registered body to run (the
+// body-count mechanism test at the end of this file). No one of them implies the others.
 // Which code each test reaches differs, and the difference matters: the first, second
 // and fourth spawn the argv buildProbeInvocation returns and observe what bash printed;
 // the wiring test inspects that argv without spawning it; the TM_RAN gate test calls
@@ -1200,8 +1287,9 @@ test('(probe defense pinned) a bash that drops its argument is refused, not skip
   assert.throws(() => classifyProbeOutcome({ output: 'TM_RAN' }), /Git Bash/)
 
   // And the neighbouring shape — bash DID receive the path, the path is absent — must
-  // still skip. Without this, tightening the gate would break the genuine WSL-cannot-
-  // read-C:\ users the skip exists for.
+  // still skip. Without this, tightening the gate would break the users the skip exists
+  // for: a bash that forwards its arguments and cannot see this filesystem. WSL is not
+  // among them, and the assertion one line below is the shape it cannot produce.
   assert.equal(classifyProbeOutcome({ output: 'TM_RANTM_ARG' }), 'unreachable',
     'TM_ARG without TM_OK is a real determination: the path is not there')
 
@@ -1308,8 +1396,9 @@ test('(probe defense pinned) canBashAccessRepository classifies from status and 
   // PIN: canBashAccessRepository is itself on the path from runProbe to
   // classifyProbeOutcome, and a message-matching branch added between its own two
   // calls is invisible to the test above. Re-introducing one there — say
-  // `if (probe.err.message.includes('Could not')) throw probe.err` — turns the
-  // ordinary WSL failure back into a thrown error, which fails this test.
+  // `if (probe.err.message.includes('Could not')) throw probe.err` — turns the ordinary
+  // cannot-see-the-filesystem failure (unreachableFilesystemSpawn, which is not a WSL
+  // shape) back into a thrown error, which fails this test.
   //
   // The memo is nulled so the injected spawn is actually consulted, and restored
   // afterwards so the rest of the suite keeps the answer the live probe gave.
@@ -1347,6 +1436,7 @@ function runUnset(script, args = []) {
 }
 
 hookTest('env -u actually unsets HOME for bash, which delete env.HOME does not', () => {
+  hookBodyRan()
   // The premise the two tests below depend on. Without it they would silently stop
   // testing the unset case and start testing the developer's home directory.
   const viaEnvU = execFileSync('env', ['-u', 'HOME', 'bash', '-c', 'echo ${HOME:-UNSET}'], {
@@ -1365,6 +1455,7 @@ hookTest('env -u actually unsets HOME for bash, which delete env.HOME does not',
 })
 
 hookTest('session-start survives HOME and CLAUDE_CONFIG_DIR both being unset', () => {
+  hookBodyRan()
   const parsed = JSON.parse(runUnset(hookScript))
   assert.equal(Object.keys(parsed).length, 1)
   const ctx = parsed.hookSpecificOutput.additionalContext
@@ -1375,6 +1466,7 @@ hookTest('session-start survives HOME and CLAUDE_CONFIG_DIR both being unset', (
 })
 
 hookTest('update-check survives HOME and CLAUDE_CONFIG_DIR both being unset', () => {
+  hookBodyRan()
   // A file:// argument is passed so that a regression reaching the fetch cannot
   // silently make a live network request from the test suite.
   const fixture = path.join(tmpdir(), 'tm-never-fetched.json')
@@ -1384,6 +1476,7 @@ hookTest('update-check survives HOME and CLAUDE_CONFIG_DIR both being unset', ()
 })
 
 hookTest('both hooks tolerate a config dir containing a space', () => {
+  hookBodyRan()
   const base = mkdtempSync(path.join(tmpdir(), 'tm-sp-'))
   const dir = path.join(base, 'has space')
   mkdirSync(dir, { recursive: true })
@@ -1401,6 +1494,7 @@ hookTest('both hooks tolerate a config dir containing a space', () => {
 // users who can never succeed (offline, or a proxy serving a block page), while
 // README and SECURITY.md both promised at most one request a day.
 hookTest('update-check throttles a FAILED check, not just a successful one', () => {
+  hookBodyRan()
   withConfigDir((dir) => {
     const missing = path.join(dir, 'does-not-exist.json')
     runUpdateCheck(dir, { url: `file:///${missing.split(path.sep).join("/")}` })
@@ -1413,6 +1507,7 @@ hookTest('update-check throttles a FAILED check, not just a successful one', () 
 // A FIFO is readable but blocks forever. session-start is declared "async": false,
 // so a blocking read there hangs session start with no timeout.
 hookTest('session-start does not hang on a FIFO in place of a state file', () => {
+  hookBodyRan()
   withConfigDir((dir) => {
     const sd = path.join(dir, 'claude-teammates')
     mkdirSync(sd, { recursive: true })
@@ -1435,6 +1530,7 @@ hookTest('session-start does not hang on a FIFO in place of a state file', () =>
 // The cache lives in the user's config dir, so its contents are re-validated on read
 // rather than trusted. Without that, a crafted value lands verbatim in context.
 hookTest('session-start refuses a non-version published value from the cache', () => {
+  hookBodyRan()
   withConfigDir((dir) => {
     const sd = path.join(dir, 'claude-teammates')
     mkdirSync(sd, { recursive: true })
@@ -1455,6 +1551,7 @@ hookTest('session-start refuses a non-version published value from the cache', (
 // a dead ".../releases/tag/v" link. A partially unpacked or mid-update install is
 // exactly when plugin.json is unreadable, so this is a reachable state.
 hookTest('emits no notice at all when the plugin manifest cannot be read', () => {
+  hookBodyRan()
   withConfigDir((dir) => {
     const sd = stateDir(dir)
     mkdirSync(sd, { recursive: true })
@@ -1478,6 +1575,7 @@ hookTest('emits no notice at all when the plugin manifest cannot be read', () =>
 // needs a scheduled interleaving this suite has no way to force, and a timing-based
 // one would be flaky. Treating that as covered would be worse than saying so here.
 hookTest('update-check leaves no temp file behind after writing its cache', () => {
+  hookBodyRan()
   withConfigDir((dir) => {
     const fixture = path.join(dir, 'published.json')
     writeFileSync(fixture, '{"version":"0.9.9"}')
@@ -1517,6 +1615,7 @@ function fakePluginRoot({ cli = true, agents = true, skills = true } = {}) {
 }
 
 hookTest("a healthy install reports what it found, alongside the version notice", () => {
+  hookBodyRan()
   const pluginRoot = fakePluginRoot()
   try {
     withConfigDir((dir) => {
@@ -1530,6 +1629,7 @@ hookTest("a healthy install reports what it found, alongside the version notice"
 })
 
 hookTest("the readiness line does not repeat once the version notice has fired", () => {
+  hookBodyRan()
   const pluginRoot = fakePluginRoot()
   try {
     withConfigDir((dir) => {
@@ -1543,6 +1643,7 @@ hookTest("the readiness line does not repeat once the version notice has fired",
 })
 
 hookTest("a missing cli.mjs is named, not merely implied", () => {
+  hookBodyRan()
   const pluginRoot = fakePluginRoot({ cli: false })
   try {
     withConfigDir((dir) => {
@@ -1557,6 +1658,7 @@ hookTest("a missing cli.mjs is named, not merely implied", () => {
 })
 
 hookTest("missing agents are named", () => {
+  hookBodyRan()
   const pluginRoot = fakePluginRoot({ agents: false })
   try {
     withConfigDir((dir) => {
@@ -1572,6 +1674,7 @@ hookTest("missing agents are named", () => {
 // A broken install stays broken. The operator needs the warning on the session where
 // they hit the failure, not only on the one where the version happened to change.
 hookTest("a broken install warns on every session, not once per version", () => {
+  hookBodyRan()
   const pluginRoot = fakePluginRoot({ cli: false })
   try {
     withConfigDir((dir) => {
@@ -1585,6 +1688,7 @@ hookTest("a broken install warns on every session, not once per version", () => 
 })
 
 hookTest("a broken install still exits 0 with exactly one valid context field", () => {
+  hookBodyRan()
   const pluginRoot = fakePluginRoot({ cli: false, agents: false })
   try {
     withConfigDir((dir) => {
@@ -1596,34 +1700,81 @@ hookTest("a broken install still exits 0 with exactly one valid context field", 
   }
 })
 
+// Read at the END of module evaluation: every hookTest above has been REGISTERED, and
+// node:test has not yet run a single body, so this must be zero. A body that had already
+// run by this point ran from the registration path rather than from node:test.
+//
+// MEASURED, and why it is worth a second variable: replacing hookTest's body with
+// `try { fn() } catch {}; test(name, () => {})` really does run all thirty-one bodies —
+// during registration, with every assertion they make swallowed — and registers thirty-one
+// empty cases in their place. The body count is satisfied honestly and the file was green
+// at 48 pass / 0 fail / 0 skipped, testing nothing. This snapshot is what makes that edit
+// red, and it holds on every branch below: no probe answer and no name filter can make a
+// hook body run before the module finishes loading.
+const hookBodyRunsAfterRegistration = hookBodyRuns
+
 // Registered LAST on purpose. node:test runs top-level cases in registration order, so by
 // the time this body executes every hookTest above has either run or been skipped, and
-// hookBodyCanaryRan holds the answer.
-test('(mechanism) a reachable probe means hook bodies actually executed', () => {
-  // PIN, and the property this whole file exists to defend: not "which spawn ran" and not
-  // "what the counters say", but THAT A HOOK BODY RAN when the probe said it could.
+// hookBodyRuns holds the count.
+test('(mechanism) a reachable probe means EVERY hook case body executed', () => {
+  // PIN, and the property this whole file exists to defend: not "which spawn ran", not
+  // "what the counters say", and — since the fifth round — not "that A body ran", but that
+  // AS MANY bodies ran as this file registers, when the probe said they could.
   //
-  // MEASURED, and the reason this is a separate test: turning hookTest into an
-  // unconditional skip AND dropping its `hookTestsSkipped += 1` in the same edit left the
-  // suite at 14 pass / 0 fail / 30 skipped — green — because every other mechanism here
-  // reads a counter that the same edit deleted. The live-probe evidence test does not
-  // catch it either: it pins which function was spawned, which stays true while no hook
-  // body runs at all. This assertion reads a flag set only from inside an executing body,
-  // so no edit to the registration logic can satisfy it without actually running one.
+  // MEASURED, twice, and the reason the shape changed:
+  //   - turning hookTest into an unconditional skip AND dropping its `hookTestsSkipped += 1`
+  //     in the same edit left the suite at 14 pass / 0 fail / 30 skipped — green — because
+  //     every other mechanism here reads a counter that the same edit deleted;
+  //   - the boolean flag that replaced those counters was set by the FIRST registration, so
+  //     running only that case and registering the other thirty as skips left the suite at
+  //     18 pass / 0 fail / 30 skipped — green again, with one case of thirty-one tested.
+  // The second is why the expectation is HOOK_CASES_IN_SOURCE, read from this file's text:
+  // an edit to the registration logic changes what that logic does, never how many
+  // registrations the source contains, so it cannot move the bar it has to clear.
+  //
+  // What it does not close, stated plainly: a registration edit that put a hookBodyRan()
+  // call into each of thirty-one empty bodies would satisfy this count. That forgery has to
+  // be written into the bodies one at a time rather than into hookTest once, which is the
+  // whole of the improvement — not an impossibility proof.
+  //
+  // The when, not just the how many: bodies that ran during registration were not run by
+  // node:test, so their assertions were not reported by it either.
+  assert.equal(hookBodyRunsAfterRegistration, 0,
+    `${hookBodyRunsAfterRegistration} hook bodies had already run when this module finished ` +
+    'loading — a body executed from the registration path has its failures swallowed by ' +
+    'whatever called it, instead of being reported as a failing case')
+
+  assert.ok(HOOK_CASES_IN_SOURCE > 0,
+    'no `hookTest(` registrations found in this file\'s own source — the reader is broken, ' +
+    'and a zero expectation would be satisfied by a suite that ran nothing')
+
   if (liveProbe.error) {
-    assert.equal(hookBodyCanaryRan, false,
+    assert.equal(hookBodyRuns, 0,
       'a probe that determined nothing must not have run a hook body')
     return
   }
   if (liveProbe.result === 'reachable') {
-    assert.equal(hookBodyCanaryRan, true,
-      'the probe reported the repository reachable, so at least one hook case body must ' +
-      'have executed — a suite that registered every case as a skip reports green while ' +
-      'testing nothing')
+    if (ACTIVE_TEST_FILTERS.length) {
+      // node:test is suppressing cases by name, so the bodies that did not run were
+      // filtered, not skipped by hookTest, and the exact count is unavailable. Stand down
+      // to the half of the property that survives filtering — no more bodies ran than this
+      // file registers — rather than fail a healthy tree under the flag people debug with.
+      assert.ok(hookBodyRuns <= HOOK_CASES_IN_SOURCE,
+        `${hookBodyRuns} hook bodies ran but only ${HOOK_CASES_IN_SOURCE} are registered ` +
+        `in this file's source (running under ${ACTIVE_TEST_FILTERS.join(', ')})`)
+      return
+    }
+    assert.equal(hookBodyRuns, HOOK_CASES_IN_SOURCE,
+      `the probe reported the repository reachable, so all ${HOOK_CASES_IN_SOURCE} hook ` +
+      `case bodies must have executed, but ${hookBodyRuns} did. A case that registers as a ` +
+      'skip, or a body missing its leading hookBodyRan() call, reports green while testing ' +
+      'less than this file claims to test')
   } else {
     // The honest skip, kept honest in the other direction: a probe that answered
     // unreachable must NOT have run bodies, or the skip decision is not being applied.
-    assert.equal(hookBodyCanaryRan, false,
+    // Zero is the expectation on this branch whether or not a filter is active, since
+    // filtering can only remove runs, never add them.
+    assert.equal(hookBodyRuns, 0,
       'the probe reported the repository unreachable, so no hook case body should have run')
   }
 })
