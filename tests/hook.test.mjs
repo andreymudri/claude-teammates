@@ -422,7 +422,25 @@ function hookTest(name, fn) {
 //
 // Returns the mode it chose, so a caller can assert on the choice as well as on the
 // registration it produced.
-function registerHookCase(probe, name, fn, register = test) {
+//
+// What node:test was actually handed, recorded at the last hop before it. Each entry is the
+// full argument list of one live registration, in registration order. This is the ONLY
+// route from this file into node:test for a hook case — registerHookCase's default
+// `register` is the recorder, not `test` — so a registration that bypasses it leaves this
+// list short, which the mechanism test at the end of this file reports as a failure.
+//
+// Why record at all: the body a hook case ends up with is decided by TWO hops, hookTest and
+// registerHookCase, and a wrapper inserted at either one produces a suite that is otherwise
+// byte-identical to a healthy run. Comparing what arrives here against this file's own TEXT
+// — see bodySource in readHookCasesFromSource — is what makes both hops visible, because
+// the text does not move when either hop's code does.
+const nodeTestRegistrations = []
+function recordingTest(...args) {
+  nodeTestRegistrations.push(args)
+  return test(...args)
+}
+
+function registerHookCase(probe, name, fn, register = recordingTest) {
   if (probe.error) {
     // The probe refused to classify. Registering these as FAILURES rather than skips is
     // the whole point of the distinction: an undetermined probe that skipped would be
@@ -576,8 +594,12 @@ test('hooks.json declares a SessionStart matcher', async () => {
 // this file goes red naming the missing lines. A swallow wrapper around bodies that all
 // genuinely pass is NOT distinguished by these markers — soundly, since if every assertion
 // really passed then swallowing changed nothing observable. That wrapper is nonetheless
-// caught, by the other leg: the registerHookCase test asserts the body handed to node:test
-// is the caller's own function object, and a wrapper is not.
+// caught, by the other leg: the mechanism test at the end of this file compares the source
+// text of every body node:test received against the text this file spells at that
+// registration, and a wrapper's source is not that text. An earlier version of this
+// sentence credited the registerHookCase identity assertion with that. It does not reach:
+// it pins one hop of a two-hop path, so the identical wrapper written into hookTest instead
+// left this file at 48 pass / 0 fail / 0 skipped.
 //
 // Why the call site and not just a count: the body is supplied by the registration path, so
 // that path can substitute a body that calls the marker and does nothing else.
@@ -616,9 +638,11 @@ function hookBodyRan() {
 // indented behind `function`, and this regex is not at a line start either — so editing
 // what hookTest DOES cannot change this number. Only adding or deleting a registration can.
 //
-// A hookTest body added without a closing hookBodyRan() call therefore fails the mechanism
-// test at the end of this file, naming the shortfall. That is deliberate: the marker is
-// part of what registering a hook case means here.
+// A hookTest body whose LAST statement is not a bare `hookBodyRan()` — absent, duplicated,
+// leading, indented into a branch, or followed by further statements — is refused by
+// readHookCasesFromSource below, and the mechanism test at the end of this file reports the
+// refusal as a failure naming the case. That is deliberate: a closing marker is part of what
+// registering a hook case means here, and it is enforced rather than merely asked for.
 const SELF_SOURCE = readFileSync(fileURLToPath(import.meta.url), 'utf8')
 const HOOK_CASES_IN_SOURCE = (SELF_SOURCE.match(/^hookTest\(/gm) || []).length
 
@@ -632,11 +656,21 @@ const HOOK_CASES_IN_SOURCE = (SELF_SOURCE.match(/^hookTest\(/gm) || []).length
 // (`^\s+hookBodyRan()$`), and the regex literals below match neither shape themselves.
 function readHookCasesFromSource(source) {
   const lines = source.split('\n')
+  // Byte offset of each line's first character, so a case's body can be sliced out of the
+  // source verbatim and compared against what node:test was handed.
+  const lineOffsets = []
+  {
+    let offset = 0
+    for (const line of lines) {
+      lineOffsets.push(offset)
+      offset += line.length + 1
+    }
+  }
   const cases = []
   const problems = []
   for (let i = 0; i < lines.length; i += 1) {
     if (!/^hookTest\(/.test(lines[i])) continue
-    const registration = /^hookTest\((['"])(.*?)\1\s*,/.exec(lines[i])
+    const registration = /^hookTest\((['"])(.*?)\1,[ \t]*/.exec(lines[i])
     if (!registration) {
       problems.push(`line ${i + 1}: a hookTest registration whose name this file cannot read`)
       continue
@@ -646,15 +680,59 @@ function readHookCasesFromSource(source) {
       problems.push(`line ${i + 1}: the case name contains a backslash escape this file does not decode`)
       continue
     }
-    let markerLine = null
+    // The case's own closing line: `})` alone at column 0, the shape every registration in
+    // this file ends with. Read first, because both rules below are stated relative to it.
+    let closeLine = null
     for (let j = i + 1; j < lines.length && !/^hookTest\(/.test(lines[j]); j += 1) {
-      if (/^\s+hookBodyRan\(\)\s*$/.test(lines[j])) { markerLine = j + 1; break }
+      if (lines[j] === '})') { closeLine = j; break }
     }
-    if (markerLine === null) {
-      problems.push(`line ${i + 1}: the case "${name}" has no bare hookBodyRan() marker line of its own`)
+    if (closeLine === null) {
+      problems.push(
+        `line ${i + 1}: the case "${name}" has no closing "})" line of its own at column 0, ` +
+        'so this file cannot tell where its body ends')
       continue
     }
-    cases.push({ name, markerLine, registrationLine: i + 1 })
+    // EXACTLY ONE marker, and it must be the LAST statement of the body — the line
+    // immediately above the closing `})`, at the body's own top-level indentation.
+    //
+    // Both halves are load-bearing, and neither was enforced before. Taking the FIRST bare
+    // marker line and stopping, as this reader used to, accepted a LEADING marker: the
+    // shape every case in this file had one commit ago, and the shape that turns the marker
+    // back into an invocation count that fires before the body's assertions. Measured at
+    // the previous tip: one added case with a leading marker ran 49 pass / 0 fail, and the
+    // same case with its body reduced to `assert.equal(1, 2)` ran 49 pass / 0 fail too.
+    const markerLines = []
+    for (let j = i + 1; j < closeLine; j += 1) {
+      if (/^\s*hookBodyRan\(\)\s*;?\s*$/.test(lines[j])) markerLines.push(j + 1)
+    }
+    if (markerLines.length !== 1) {
+      problems.push(
+        `line ${i + 1}: the case "${name}" has ${markerLines.length} bare hookBodyRan() ` +
+        `marker lines (${JSON.stringify(markerLines)}); exactly one is required, so the ` +
+        'marker set identifies bodies rather than counting calls')
+      continue
+    }
+    const markerLine = markerLines[0]
+    if (markerLine !== closeLine) {
+      problems.push(
+        `line ${i + 1}: the case "${name}" calls hookBodyRan() at line ${markerLine}, but the ` +
+        `last statement of its body is at line ${closeLine} — the marker must be the last ` +
+        'statement, or it fires before the assertions above it and reports entry, not completion')
+      continue
+    }
+    if (lines[markerLine - 1] !== '  hookBodyRan()') {
+      problems.push(
+        `line ${i + 1}: the case "${name}" spells its marker as ${JSON.stringify(lines[markerLine - 1])}; ` +
+        'it must be exactly "  hookBodyRan()", a top-level statement of the body rather than ' +
+        'one nested inside a branch that may not be taken')
+      continue
+    }
+    // The body EXACTLY as this file spells it, from the `(` of its parameter list to the
+    // `}` that closes it. Function.prototype.toString returns this same slice for the
+    // function object, which is what lets the mechanism test compare the two.
+    const bodySource = source.slice(
+      lineOffsets[i] + registration[0].length, lineOffsets[closeLine] + 1)
+    cases.push({ name, markerLine, registrationLine: i + 1, bodySource })
   }
   return { cases, problems }
 }
@@ -684,47 +762,88 @@ const HOOK_CASES_FROM_SOURCE = readHookCasesFromSource(SELF_SOURCE)
 // all, pinned by the registerHookCase test above — and under a genuine --test-only run node
 // does not execute the mechanism test either.
 //
-// Forms that FAIL LOUD rather than stand down: a filter flag that reaches execArgv without
-// a resolvable value, a `--test-only=<value>` spelling, a pattern that is not a valid
-// regular expression, and a filter flag named in NODE_OPTIONS that left no resolved token
-// in execArgv. An assertion that cannot bound anything must say so, not pass quietly.
+// Forms that FAIL LOUD rather than stand down: a filter flag that is the LAST token of its
+// source, so no value follows it anywhere; a `--test-only=<value>` spelling; a pattern that
+// is not a valid regular expression; and a filter flag named in NODE_OPTIONS that neither
+// source resolved a value for. An assertion that cannot bound anything must say so, not pass
+// quietly.
+//
+// Failing loud is only defensible where the form is genuinely unresolvable, and the previous
+// tip proved how narrow that line is: reading `=` spellings alone reddened a HEALTHY tree
+// under `node --test-name-pattern . tests/hook.test.mjs` and under
+// `NODE_OPTIONS=--test-name-pattern=. node tests/hook.test.mjs` — 47 pass / 1 fail, exit 1,
+// on two invocations a developer debugging one case would plausibly type. A mechanism test
+// that reddens there is deleted by the next person who hits it, and the property goes with
+// it. Both spellings are resolved below rather than refused.
 //
 // A filter that node never applied is refused too: the mechanism test requires the filter to
 // select the mechanism test's OWN name, which a flag pushed into process.execArgv from
 // inside this file cannot arrange while also suppressing the hook cases — unless the pattern
 // is crafted to match that one name and no case name, which this file does not detect.
 //
-// process.execArgv is the single source read, because node normalises every route into it:
-// measured on v24.14.0, `node --test --test-name-pattern=X file`, `node
-// --test-name-pattern=X --test file` and `NODE_OPTIONS=--test-name-pattern=X node --test
-// file` all leave the token `--test-name-pattern=X` there, and a run with no filter leaves
-// none of these flags in it. NODE_OPTIONS is still read, as a cross-check that nothing it
-// asks for went unresolved.
+// TWO sources are read, because which one carries the filter depends on how node was
+// invoked, and reading only the first reddened a healthy tree. Measured on v24.14.0:
+//
+//   - `node --test --test-name-pattern=X file`, `node --test-name-pattern=X --test file`
+//     and `NODE_OPTIONS=--test-name-pattern=X node --test file` all normalise into
+//     process.execArgv as the single token `--test-name-pattern=X`. Normalisation into
+//     execArgv is a property of the `--test` RUNNER CHILD, not of node's argument parsing;
+//   - without `--test`, a space-separated value is NOT joined: execArgv carries the two
+//     tokens `["--test-name-pattern", "X"]`, so the value is the token after the flag;
+//   - without `--test`, a NODE_OPTIONS filter leaves execArgv EMPTY ALTOGETHER, and the
+//     flag is only visible in the NODE_OPTIONS string itself.
+//
+// So both sources are tokenised and parsed the same way, and a value may be attached with
+// `=` or supplied as the following token. Node's own parser takes the next element of a
+// value-taking option unconditionally, and so does this, which is safe because execArgv
+// holds node's options only — the script path and its arguments are in process.argv.
+//
+// A pattern that appears in both sources resolves twice; that is harmless, because repeated
+// patterns of a flag are OR'd and the same pattern OR'd with itself selects the same names.
+//
+// NODE_OPTIONS is split on whitespace. A quoted NODE_OPTIONS value containing a space would
+// be split wrongly here; nothing in this file detects that, and no acceptance case uses one.
 const TEST_FILTER_FLAGS = ['--test-name-pattern', '--test-skip-pattern', '--test-only']
+const PATTERN_FLAGS = ['--test-name-pattern', '--test-skip-pattern']
 function readTestFilters(execArgv, nodeOptions) {
   const patterns = { '--test-name-pattern': [], '--test-skip-pattern': [] }
-  const bareFlags = new Set()
   const unresolved = []
   let onlyMode = false
-  for (const token of execArgv) {
-    for (const flag of ['--test-name-pattern', '--test-skip-pattern']) {
-      if (token.startsWith(`${flag}=`)) patterns[flag].push(token.slice(flag.length + 1))
-      else if (token === flag) bareFlags.add(flag)
-    }
-    if (token === '--test-only') onlyMode = true
-    else if (token.startsWith('--test-only=')) {
-      unresolved.push(`process.execArgv carries "${token}", a --test-only spelling this file does not interpret`)
+  const sources = [
+    { label: 'process.execArgv', tokens: [...execArgv] },
+    { label: 'NODE_OPTIONS', tokens: nodeOptions.split(/\s+/).filter(Boolean) },
+  ]
+  for (const { label, tokens } of sources) {
+    for (let i = 0; i < tokens.length; i += 1) {
+      const token = tokens[i]
+      const attached = PATTERN_FLAGS.find((flag) => token.startsWith(`${flag}=`))
+      if (attached) {
+        patterns[attached].push(token.slice(attached.length + 1))
+        continue
+      }
+      const bare = PATTERN_FLAGS.find((flag) => token === flag)
+      if (bare) {
+        if (i + 1 < tokens.length) {
+          patterns[bare].push(tokens[i + 1])
+          i += 1
+        } else {
+          unresolved.push(
+            `${label} ends with a bare "${bare}", so no value follows it and its pattern is unknown`)
+        }
+        continue
+      }
+      if (token === '--test-only') onlyMode = true
+      else if (token.startsWith('--test-only=')) {
+        unresolved.push(`${label} carries "${token}", a --test-only spelling this file does not interpret`)
+      }
     }
   }
-  for (const flag of bareFlags) {
-    if (!patterns[flag].length) {
-      unresolved.push(`process.execArgv carries a bare "${flag}" with no resolved value, so its pattern is unknown`)
-    }
-  }
+  // Cross-check: NODE_OPTIONS naming a filter flag that neither source resolved a value for
+  // means it reached node in a spelling this file did not understand.
   for (const flag of TEST_FILTER_FLAGS) {
     const resolved = flag === '--test-only' ? onlyMode : patterns[flag].length > 0
     if (nodeOptions.includes(flag) && !resolved) {
-      unresolved.push(`NODE_OPTIONS names "${flag}" but process.execArgv carries no resolved value for it`)
+      unresolved.push(`NODE_OPTIONS names "${flag}" but no source resolved a value for it`)
     }
   }
   return {
@@ -1114,6 +1233,12 @@ test('(mechanism) a refused probe registers a failing case, never a skip', () =>
   // satisfied, in 426ms. The body that reaches node:test must be the caller's
   // own object; the marker-line set in the last test of this file catches the same edit
   // from the other end, on the live registrations.
+  //
+  // Scope, plainly: this pins ONE hop. It says registerHookCase forwards what it was
+  // handed, and nothing about what hookTest hands it — the same wrapper written one frame
+  // earlier passes here. The whole path is pinned by the source-text comparison in the last
+  // test of this file, which reads what node:test received and requires it to be the text
+  // this file spells at each registration.
   const realBody = () => {}
   assert.equal(
     registerHookCase({ reachable: true, error: null, result: 'reachable' },
@@ -1924,6 +2049,59 @@ test('(mechanism) a reachable probe means EVERY hook case body executed', (t) =>
   assert.equal(HOOK_CASES_FROM_SOURCE.cases.length, HOOK_CASES_IN_SOURCE,
     `read ${HOOK_CASES_FROM_SOURCE.cases.length} hook cases from this file's source but ` +
     `${HOOK_CASES_IN_SOURCE} registrations are present`)
+
+  // THE REGISTRATION PATH, pinned end to end rather than one hop of it. Every hook case
+  // reaches node:test through two hops — hookTest, then registerHookCase — and a wrapper
+  // inserted at EITHER one leaves this suite byte-identical to a healthy run: the bodies
+  // still run, still pass, still reach their markers. Measured at the previous tip:
+  // `registerHookCase(liveProbe, name, () => { try { fn() } catch {} })` in hookTest ran
+  // 48 pass / 0 fail / 0 skipped. The identity assertion in the registerHookCase test
+  // covers the second hop only, and said so while a comment nearby claimed it covered the
+  // path.
+  //
+  // The observer here is this file's own TEXT, the principle that made probeTargetProblem
+  // and HOOK_CASES_IN_SOURCE hold: `bodySource` is the exact source slice of each case's
+  // function expression, and Function.prototype.toString returns that same slice for the
+  // function object node:test received. Editing what either hop DOES cannot change what the
+  // text says, so a wrapper — at either hop, in any spelling — arrives here as a function
+  // whose source is the wrapper's, and this assertion names the case it replaced.
+  //
+  // What it does NOT close, tried and stated rather than assumed: a registration path that
+  // built its substitute by evaluating this file's own text for that case would produce a
+  // matching source string, and the thirty-one-stub forgery described below still satisfies
+  // it, since both compare text against text.
+  assert.equal(nodeTestRegistrations.length, HOOK_CASES_FROM_SOURCE.cases.length,
+    `node:test received ${nodeTestRegistrations.length} hook case registrations for the ` +
+    `${HOOK_CASES_FROM_SOURCE.cases.length} this file's source registers — a registration ` +
+    'that did not travel through the recorded path cannot be checked against the source')
+
+  if (!liveProbe.error && liveProbe.result === 'reachable') {
+    const substituted = []
+    HOOK_CASES_FROM_SOURCE.cases.forEach((c, index) => {
+      const [name, body, options] = nodeTestRegistrations[index]
+      if (name !== c.name) {
+        substituted.push(
+          `line ${c.registrationLine}: registration ${index} reached node:test under the name ` +
+          `${JSON.stringify(name)}, but this file's text registers ${JSON.stringify(c.name)} there`)
+      } else if (options !== undefined) {
+        substituted.push(
+          `line ${c.registrationLine}: the case "${c.name}" reached node:test with an options ` +
+          `object ${JSON.stringify(options)} while the probe reported the repository reachable`)
+      } else if (typeof body !== 'function') {
+        substituted.push(
+          `line ${c.registrationLine}: the case "${c.name}" reached node:test as ${typeof body}, not a function`)
+      } else if (body.toString() !== c.bodySource) {
+        substituted.push(
+          `line ${c.registrationLine}: the case "${c.name}" reached node:test as a function ` +
+          `whose source is not the one this file spells at that line — got ${JSON.stringify(body.toString())}`)
+      }
+    })
+    assert.deepEqual(substituted, [],
+      'the body node:test ran for each hook case must be the function this file\'s own text ' +
+      'spells at that registration; a wrapper inserted anywhere on the path from a hookTest ' +
+      'call site to node:test substitutes a different one, and a swallowing wrapper around ' +
+      'bodies that all pass is otherwise indistinguishable from a healthy run')
+  }
 
   // Every hookBodyRan() call must be attributable to a line of this file; one that is not
   // cannot be matched against the marker lines below, so it is reported rather than ignored.
