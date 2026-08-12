@@ -746,6 +746,16 @@ async function readSuppliedPhases(flags, io) {
 //
 // Reported, never refused. Dropping the block is already the safe direction — unmatched evidence
 // changes no verdict — so this exists only so the output stops lying by omission.
+//
+// The keys are printed BARE, and that is safe only because of a constraint stated elsewhere:
+// `validateSuppliedPhases` in `scripts/finish.mjs` refuses any key for which
+// `String(Number(key)) !== key`, so every key that reaches here is the canonical decimal form of
+// an integer and can carry no control byte. Both callers run that validator first —
+// `readSuppliedPhases` returns SUPPLIED_REJECTED on its refusal and both return 2 on it — so a
+// key with bytes in it never gets this far. That refusal is pinned by 'a numeric phase key that
+// is not its own canonical form is refused' in `tests/finish.test.mjs`; if it is ever loosened,
+// these keys need `printable` like every other quoted value here. The `phases` half of the
+// sentence is a list of integers `assignPhases` computed, never read from anything.
 function reportUnmatchedSuppliedPhases(io, supplied, phases) {
   const byPhase = supplied?.phases
   if (!byPhase || typeof byPhase !== 'object') return
@@ -2808,7 +2818,11 @@ export async function runCli(argv, io = { out: console.log }) {
     try {
       verdict = JSON.parse(await readFile(flags.verdict, 'utf8'))
     } catch (err) {
-      io.out(`cannot read verdict at ${flags.verdict}: ${err.message}`)
+      // The verdict file is written by the agent that ran the gate — `skills/phase-gate/SKILL.md`
+      // instructs it to — and Node embeds a slice of the parsed input in a JSON parse error, so
+      // this message carries bytes out of that file. `printable` on both halves, exactly as
+      // `readSuppliedPhases` does for a `--results` file: see its definition in `reviews.mjs`.
+      io.out(`cannot read verdict at ${printable(flags.verdict)}: ${printable(err.message)}`)
       return 1
     }
 
@@ -2822,7 +2836,14 @@ export async function runCli(argv, io = { out: console.log }) {
     // silently selects the wrong task set and reports `unattributable` for findings that
     // are perfectly attributable to the phase that actually failed.
     if (Number.isInteger(verdict?.phase) && verdict.phase !== phase) {
-      io.out(`--phase ${flags.phase} does not match the verdict's phase ${verdict.phase} at ${flags.verdict}\n\n${USAGE}`)
+      // `verdict.phase` is a real integer by the guard above. The other two are not: `flags.phase`
+      // is the STRING that was typed, and `missingArgs` admits it on `Number.isInteger(Number(x))`
+      // — which `Number` reaches through leading and trailing whitespace, so `\r1`, `\n1` and
+      // ` 1` are all accepted and would put that byte on this line. Only whitespace can
+      // arrive that way, never attacker-chosen text, but a line break here is still a line this
+      // CLI did not mean to draw. Both it and the path are wrapped, for the same reason the
+      // parse-error line above wraps what it quotes.
+      io.out(`--phase ${printable(flags.phase)} does not match the verdict's phase ${verdict.phase} at ${printable(flags.verdict)}\n\n${USAGE}`)
       return 2
     }
 

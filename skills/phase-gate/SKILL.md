@@ -75,15 +75,16 @@ those you execute:
   not parse — respawn those lenses instead. A file for a lens this phase did not dispatch is
   reported and ignored, never merged.
 
-  Where a line quotes a value an agent wrote — a lens, a stamp or a reason out of a findings file,
-  and equally a check name, kind or `preview.link` entry out of the gate manifest, whose contents
-  this CLI validates for shape and not for content — the value is printed with its control bytes
-  and line separators replaced by a visible `<0x1B>`-style token. Either file could otherwise carry
-  an escape sequence that erases the line in the terminal and draws one reading like a PASS this
-  CLI computed, or a line break that adds one. That covers the lines a refusal prints, the ones a
-  passing command prints, and the check names inside `finish`'s run summary table. It does not
-  cover the bidi and format controls, which pass through. Read the exit code, not the shape of a
-  line.
+  Where a line quotes a value an agent wrote — a lens, a stamp or a reason out of a findings file;
+  a check name, kind or `preview.link` entry out of the gate manifest, whose contents this CLI
+  validates for shape and not for content; the bytes a JSON parse error quotes back out of a
+  `--results` file or the verdict file `fix` is handed below — the value is printed with its
+  control bytes and line separators replaced by a visible `<0x1B>`-style token. Any of those files
+  could otherwise carry an escape sequence that erases the line in the terminal and draws one
+  reading like a PASS this CLI computed, or a line break that adds one. That covers the lines a
+  refusal prints, the ones a passing command prints, and the check names inside `finish`'s run
+  summary table. It does not cover the bidi and format controls, which pass through. Read the exit
+  code, not the shape of a line.
 
   Both come from the tracked manifest only — the reviewer grades the diff, so
   letting the gitignored layer choose its tier would let the party being judged pick its own

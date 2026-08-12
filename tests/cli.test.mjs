@@ -638,10 +638,70 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 // carrying control bytes, at any site that prints one. One row per site, asserted on BYTES;
 // adding the next site is one row, and a site with no row is visible as an absence.
 //
-// Sites that carry NO row, all of them, and why each is exempt. An earlier version of this
-// header said "three", counted only the first group, and left four more unlisted — which is the
-// same overstated claim this table exists to catch, in the file whose job is to catch it. The
-// rule is: a site is either a row, or it is named here with the reason it cannot be one.
+// Every row here was verified by MUTATION, one wrapper at a time: strip that single wrapper, run
+// this file, and exactly this row must go red. Stripping all of them at once is not the same
+// check — it hides a row that goes red for a neighbour's reason, which is how four dead rows were
+// found (`sha=(\S+)` truncation, a stale reason already sanitised in `reviewStale`, a forged
+// check NAME standing in for an unforged `kind`, and check names already sanitised where the run
+// summary is built). Where a line holds two wrappers, the fixture forges BOTH halves, so either
+// one being removed turns the row red.
+//
+// Sites that carry NO row, and why each is exempt.
+//
+// This header has been wrong three rewrites running, each time in the same direction — a summary
+// sentence that had drifted from the code beside it. It said "three" while counting one group of
+// several. It then said the list was complete while `fix`'s verdict-parse error, which quotes an
+// agent-written file, had neither a row nor an entry. And the sentence naming the remaining sites
+// in prose was itself derived from a `printable(` grep, which silently misses `.map(printable)` —
+// six more sites, invisible to the search that produced the claim.
+//
+// So the list below is DERIVED, not summarised, and the derivation is written down so the next
+// reader can re-run it rather than trust it:
+//
+//     grep -nE "printable(Block)?\b" scripts/cli.mjs scripts/reviews.mjs scripts/digest.mjs \
+//       scripts/finish.mjs
+//
+// minus the definitions in `reviews.mjs`, the four `import` lines, and the comment lines. That
+// yields 43 lines of code holding a wrapper: 31 in `cli.mjs`, 3 in `reviews.mjs`, 6 in
+// `digest.mjs`, 3 in `finish.mjs`. Every one of them is accounted for below — as a row above, as
+// a row in another file's suite, or by name in the numbered groups. A line whose wrappers are
+// only PARTLY driven is listed too: "the row covers this line" is not the same claim as "the row
+// covers every wrapper on it", and the difference is where two dead wrappers were found.
+//
+// The rule, and the scope it is claimed over. Within those four scripts, a print site that puts a
+// value read out of an AGENT-WRITTEN FILE — a plan, the gate manifest, a findings file, a
+// `--results` file, a gate verdict, `status.json` — onto stdout is either driven by a row, or it
+// is named below with the reason it cannot be. Values this CLI was handed on its own argv are a
+// different class and are not enumerated as a class; several are wrapped anyway, where one sits
+// in a sentence beside a value that is in the class, and those wrappers are driven by rows.
+//
+// Of the 43 lines: `reviews.mjs` 115/117/120 are driven by `tests/reviews.test.mjs`;
+// `finish.mjs` 100/101/102 by the three run-summary newline tests below the table; the rest by
+// rows above, except the six fully rowless lines in group 0 and the three partly-driven lines in
+// group 0b.
+//
+// 0. Fully rowless, no wrapper on the line driven by anything (6 lines):
+//    - `cli.mjs:981`, the `syscall` branch of `configFailureMessage`. It prints a Node fs error
+//      for `teammates.gate.json` at a root this CLI computed; nothing an agent wrote is in that
+//      message. Wrapped defensively, so there is nothing for a row to forge.
+//    - `cli.mjs:1363` (3 wrappers) and `cli.mjs:1807` (2), the `init-run` and `rebuild` listings.
+//      Constrained upstream — see group 1.
+//    - `cli.mjs:2339` (2 wrappers), the `GitError` branch of `preview-check`. Its three sibling
+//      branches each have a row; this one is reached only when `git ls-files --error-unmatch`
+//      exits 2 or worse on a path that passed every validator, and no fixture in this suite can
+//      force that. Stated as UNCOVERED, not as safe: if a way to drive it is found, it wants a
+//      row rather than an entry here.
+//    - `cli.mjs:2420`, `review-dispatch`'s duplicate-`test` sentence. `namedTest` is filtered on
+//      `c.name === 'test'`, so the only string that can reach it is the literal `test`.
+//    - `cli.mjs:2587`, `collect-reviews`'s `unexpected` line — unreachable; see group 1.
+// 0b. Driven by a row, with one wrapper on the same line that is NOT (3 lines):
+//    - `cli.mjs:1300`: the row forges the TIER. `printable(task.id)` beside it is constrained to
+//      `T<digits>` (group 6).
+//    - `cli.mjs:2568`: the row forges the LENS. `printable(s.reason)` beside it re-wraps a reason
+//      `reviewStale` already built through `printable` (`reviews.mjs` 115/117/120, which have
+//      their own rows there), so removing it changes no byte and no row could tell.
+//    - `cli.mjs:2584`: the row forges the LENS. `printable(m.reason)` beside it wraps this code's
+//      own constant sentence about a malformed shape, which carries no agent value at all.
 //
 // 1. Unreachable by construction (3): `init-run`'s phase listing, `rebuild`'s task listing, and
 //    `collect-reviews`'s `unexpected` line. The two tests below pin the constraints that make
@@ -661,6 +721,25 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 //    `--enforcement-only`'s refusal (integers `assignPhases` produced), `tierSource`, and the
 //    task states, which are a closed set.
 // 5. The one stderr site, which prints a `GitError` message carrying no agent-written value.
+// 6. Constrained to `T<digits>` before the print by the plan grammar — `TASK_HEADING` matches
+//    the number with `(\d+)` and `plan-parser.mjs` builds the id as `T${n}`: `doctor`'s rendered
+//    liveness board and its `freshness was not measured for ...` line, which name task ids and
+//    nothing else, and every refusal of the form `cannot ...: ${err.message}` where `err` came
+//    from reading or phasing the plan — the only messages `parsePlan` and `assignPhases` throw
+//    with a plan value in them are `duplicate task id` and `unsatisfiable dependencies`, both
+//    built from those same ids. Named as a class rather than as a count on purpose: a count is
+//    what this header got wrong twice. The `assert.match(t.id, /^T\d+$/)` in the first test
+//    below pins the constraint all of them rest on.
+// 7. Constrained to the canonical decimal form of an integer before the print, by
+//    `validateSuppliedPhases` in `scripts/finish.mjs` (1): the `--results` phase keys
+//    `reportUnmatchedSuppliedPhases` names. Both of its callers run that validator first and
+//    return 2 on its refusal, so no other key reaches the sentence, and the refusal is pinned by
+//    'a numeric phase key that is not its own canonical form is refused' in
+//    `tests/finish.test.mjs`.
+//
+// One limit, stated rather than claimed away: `map-notes --near` prints repository paths that
+// `git log --name-only` reported. Those are not read out of an agent-written file, so they fall
+// outside the scope above — this table does not vouch for that site either way.
 //
 // `ESC [ 1 G` rather than CR wherever the value passes through a regex on its way here: JS `.`
 // excludes CR, so a CR-bearing plan line simply fails to parse and never becomes a printed value.
@@ -689,13 +768,48 @@ const SANITISED_SITES = [
     site: 'cli.mjs readSuppliedPhases — a JSON parse error quotes the file it failed on',
     exit: 2,
     // Node embeds a slice of the input in a JSON parse error, so an agent-written results file
-    // puts its own bytes into the message. Found by audit, not reported.
+    // puts its own bytes into the message. Found by audit, not reported. Both halves of that
+    // sentence carry the forgery — the CONTENTS in the ESC form, the PATH in the C1 form because
+    // it has to exist as a real file — so removing either wrapper at that line turns this red.
     async setup({ root, planPath, io }) {
       await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
       await writeManifest(root, { phases: { default: { checks: [AGENT_CHECK] } } })
-      const supplied = path.join(root, 'supplied.json')
+      const supplied = path.join(root, `${CLI_C1_FORGERY}.json`)
       await writeFile(supplied, `${CLI_ESC_FORGERY}{`, 'utf8')
       return ['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--results', supplied]
+    },
+  },
+  {
+    site: 'cli.mjs fix — a JSON parse error quotes the verdict file it failed on',
+    exit: 1,
+    // The verdict file is agent-written — `skills/phase-gate/SKILL.md` tells the agent running
+    // the gate to write it — and Node embeds a slice of the parsed input in its parse error, so
+    // the same hazard the `--results` row above covers arrives one command over. Both halves of
+    // the sentence carry the forgery, so removing EITHER wrapper at that line turns this red:
+    // the path in the C1 form because it has to exist as a real file, the contents in the ESC
+    // form because nothing constrains them at all.
+    async setup({ root, planPath, io }) {
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      const verdictPath = path.join(root, `${CLI_C1_FORGERY}.json`)
+      await writeFile(verdictPath, `${CLI_ESC_FORGERY}{`, 'utf8')
+      return ['fix', '--run', 'r1', '--phase', '1', '--verdict', verdictPath]
+    },
+  },
+  {
+    site: 'cli.mjs fix — the verdict path quoted when the verdict names another phase',
+    exit: 2,
+    // A second, separate site on the same command, reached only when the file DOES parse. Two
+    // halves again, so removing either wrapper turns this red: the path in the C1 form because
+    // it has to exist as a real file, and `--phase` itself, which `missingArgs` admits on
+    // `Number.isInteger(Number(x))` — `Number` skips leading whitespace, so a CR in front of the
+    // digit is a legal `--phase 1` that carries a byte no line of this CLI should contain.
+    // Whitespace is all that fits through that hole, which is why this half is a bare CR rather
+    // than a forged sentence.
+    async setup({ root, planPath, io }) {
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      const verdictPath = path.join(root, `${CLI_C1_FORGERY}.json`)
+      await writeFile(verdictPath, JSON.stringify({ phase: 2, verdict: 'FAIL' }), 'utf8')
+      return ['fix', '--run', 'r1', '--phase', '\r\n1', '--verdict', verdictPath]
     },
   },
   {
@@ -763,13 +877,16 @@ const SANITISED_SITES = [
     },
   },
   {
-    site: 'cli.mjs collect-reviews — an unableToVerify reason',
+    site: 'cli.mjs collect-reviews — an unableToVerify reason, and the lens beside it',
     exit: 4,
+    // Both wrappers on that line, not just the reason: with the lens left as `claims` this row
+    // stayed green with `printable(u.lens)` removed. The lens takes the C1 form because it
+    // becomes a filename; the reason takes the ESC form because nothing constrains it.
     async setup({ root, planPath, io, git: g }) {
       const stampFor = await withStampedPhase(root, planPath, io, g)
-      await writeManifest(root, { lens: ['claims'], phases: { default: { checks: [AGENT_CHECK] } } })
-      await writeReviewFile(root, 'r1', '1-claims.json', {
-        stamp: stampFor('claims'),
+      await writeManifest(root, { lens: [CLI_C1_FORGERY], phases: { default: { checks: [AGENT_CHECK] } } })
+      await writeReviewFile(root, 'r1', `1-${CLI_C1_FORGERY}.json`, {
+        stamp: stampFor(CLI_C1_FORGERY),
         findings: [],
         unableToVerify: CLI_ESC_FORGERY,
       })
@@ -918,10 +1035,16 @@ const SANITISED_SITES = [
     exit: 2,
     // `check.kind` and `check.name` are spliced bare into the refusal. `r.status`/`r.source` next
     // to them go out through `JSON.stringify` and need nothing, which is why only these two moved.
+    //
+    // The KIND carries the forgery too, not just the name: nothing validates a kind anywhere —
+    // `validateGate` says outright it checks the shape of a check and not its content — so an
+    // unsuppliable kind is whatever the manifest says, and with only the name forged this row
+    // stayed green with the kind's own wrapper removed. `validateSuppliedResults` runs before
+    // any check of this phase is executed, so an unknown kind never reaches a runner.
     async setup({ root, planPath, io, git: g }) {
       await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
       await writeManifest(root, {
-        phases: { default: { checks: [{ name: CLI_ESC_FORGERY, kind: 'fileset' }] } },
+        phases: { default: { checks: [{ name: CLI_ESC_FORGERY, kind: `${CLI_ESC_FORGERY}-kind` }] } },
       })
       g(['add', 'teammates.gate.json'])
       g(['commit', '--quiet', '-m', 'manifest'])
@@ -1003,6 +1126,55 @@ const SANITISED_SITES = [
     },
   },
   {
+    site: 'cli.mjs preview-check — a declared link target that exists but is not a directory',
+    exit: 1,
+    // The second of `preview-check`'s four branches. Each pushes its own sentence, so each holds
+    // its own wrapper: with only the ENOENT row above, this one's could be removed and the whole
+    // suite stayed green. The C1 form because the entry has to exist on disk to get past `stat`.
+    async setup({ root }) {
+      await writeFile(path.join(root, CLI_C1_FORGERY), 'not a directory\n', 'utf8')
+      await writeManifest(root, {
+        preview: { link: [CLI_C1_FORGERY] },
+        phases: { default: { checks: [] } },
+      })
+      return ['preview-check']
+    },
+  },
+  {
+    site: 'cli.mjs preview-check — a declared link target the repository tracks',
+    exit: 1,
+    // The third branch: the entry is a real directory AND `git ls-files --error-unmatch` matches
+    // something inside it, which is the shape that would shadow the merged result.
+    async setup({ root, git: g }) {
+      await mkdir(path.join(root, CLI_C1_FORGERY), { recursive: true })
+      await writeFile(path.join(root, CLI_C1_FORGERY, 'tracked.mjs'), 'export const x = 1\n', 'utf8')
+      g(['add', '--', path.join(CLI_C1_FORGERY, 'tracked.mjs')])
+      g(['commit', '--quiet', '-m', 'tracked link target'])
+      await writeManifest(root, {
+        preview: { link: [CLI_C1_FORGERY] },
+        phases: { default: { checks: [] } },
+      })
+      return ['preview-check']
+    },
+  },
+  {
+    site: 'cli.mjs finish — the run id inside the rendered run summary block',
+    exit: 1,
+    // Distinct from the check-names row below, and added because that row could not reach this
+    // wrapper: `renderRunSummary` puts every check name through `printable` where the table is
+    // BUILT, so by the time the block arrives at `printableBlock` the names are already safe and
+    // dropping that wrap left the whole suite green. The run id is the half `renderRunSummary`
+    // does NOT wrap — it is spliced into the table's first line raw — so it is what pins the
+    // block wrapper. The C1 form because the id becomes a directory under `.teammates/`.
+    async setup({ root, planPath, io }) {
+      await runCli(['init-run', planPath, '--run', CLI_C1_FORGERY, '--root', root], io)
+      await writeManifest(root, {
+        phases: { default: { checks: [{ name: 'suite', kind: 'command', run: 'node -e "process.exit(1)"' }] } },
+      })
+      return ['finish', '--run', CLI_C1_FORGERY, '--plan', 'plan.md', '--base', 'main']
+    },
+  },
+  {
     site: 'cli.mjs preview-check — the SUCCESS line, printed on a manifest that passed every validator',
     exit: 0,
     // The C1 form, because this entry has to exist as a real directory and Windows rejects
@@ -1077,6 +1249,39 @@ const SANITISED_SITES = [
       })
       await writeReviewFile(root, 'r1', `1-${CLI_C1_FORGERY}.json`, { findings: [] })
       return ['collect-reviews', '--run', 'r1', '--phase', '1']
+    },
+  },
+  {
+    site: 'digest.mjs renderDigest — the run id and phase numbers in the header line',
+    exit: 0,
+    // The header is a separate line from the task lines the four rows around it drive, with its
+    // own six wrappers — three on this branch and three on the caveman one below — and with only
+    // the task rows in the table all six could be removed with the suite still green. The run id
+    // reaches it from argv (C1 form: it becomes a directory under `.teammates/`), and `phase` and
+    // `totalPhases` reach it out of status.json, which the blockedBy row above already treats as
+    // a file an agent writes.
+    async setup({ root, planPath, io }) {
+      await runCli(['init-run', planPath, '--run', CLI_C1_FORGERY, '--root', root], io)
+      const status = await readStatus(root, CLI_C1_FORGERY)
+      status.phase = CLI_ESC_FORGERY
+      status.totalPhases = `${CLI_ESC_FORGERY}-total`
+      await writeFile(path.join(root, '.teammates', CLI_C1_FORGERY, 'status.json'), JSON.stringify(status), 'utf8')
+      return ['digest', '--run', CLI_C1_FORGERY]
+    },
+  },
+  {
+    site: 'digest.mjs renderDigest — the same header line in caveman mode',
+    exit: 0,
+    // The caveman branch of the header is a second template with its own three wrappers, exactly
+    // as `describe`/`describeTerse` below are two templates with their own.
+    async setup({ root, planPath, io }) {
+      await runCli(['init-run', planPath, '--run', CLI_C1_FORGERY, '--root', root], io)
+      await writeManifest(root, { caveman: 'full', phases: { default: { checks: [] } } })
+      const status = await readStatus(root, CLI_C1_FORGERY)
+      status.phase = CLI_ESC_FORGERY
+      status.totalPhases = `${CLI_ESC_FORGERY}-total`
+      await writeFile(path.join(root, '.teammates', CLI_C1_FORGERY, 'status.json'), JSON.stringify(status), 'utf8')
+      return ['digest', '--run', CLI_C1_FORGERY]
     },
   },
   {
