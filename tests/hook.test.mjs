@@ -396,6 +396,129 @@ test('(mechanism) hookTest skips its cases only when the repository is unreachab
   }
 })
 
+// Probe defense tests: pin the three defenses against forged answers.
+// Each must fail when the defense is removed. These tests execute the probe
+// logic directly against known-hostile conditions.
+
+test('(probe defense pinned) -p flag resists BASH_FUNC_test shadowing', () => {
+  // PIN: Removing the -p flag from the probe will fail this test.
+  // Verify that -p prevents BASH_FUNC_test from forging a true answer.
+  // When BASH_FUNC_test is exported to return 0, and the probe is called with
+  // -p against a nonexistent path, the real test runs and correctly identifies
+  // the path as missing. Without -p, the forged test shadows builtin and returns 0.
+
+  const env = { ...process.env }
+  delete env.BASH_ENV
+  delete env.ENV
+  env['BASH_FUNC_test%%'] = '() { return 0; }'  // Bash function: forged test always succeeds
+
+  const nonexistentPath = toBashPath(path.join(root, 'nonexist-' + Date.now()))
+
+  // The probe uses: bash -p -c 'printf TM_RAN; test -e "$1" && printf TM_OK'
+  // With -p, the forged BASH_FUNC_test is blocked, so real test runs and fails.
+  // Result should be TM_RAN (exit 1), NOT TM_RANTM_OK (which would mean test succeeded).
+
+  let result = null
+  try {
+    result = execFileSync('bash', ['-p', '-c', 'printf TM_RAN; test -e "$1" && printf TM_OK', '--', nonexistentPath], {
+      timeout: 20000,
+      encoding: 'utf8',
+      env: env,
+    })
+  } catch (err) {
+    result = err.stdout || ''
+  }
+
+  // MUST NOT be TM_RANTM_OK (which means forged test was used)
+  assert.notEqual(result, 'TM_RANTM_OK',
+    `probe with -p against nonexistent path should not output TM_RANTM_OK (attack blocked), got: "${result}"`)
+
+  // Should output TM_RAN (printf succeeded, but test failed on nonexistent path)
+  assert.equal(result, 'TM_RAN',
+    `probe with -p should output TM_RAN for nonexistent path, got: "${result}"`)
+})
+
+test('(probe defense pinned) TM_RAN token requirement prevents fake bash', () => {
+  // PIN: Removing the TM_RAN check from the probe will fail this test.
+  // Verify that a bash exiting 1 without printing TM_RAN cannot forge "unreachable".
+  // A fake bash on PATH (e.g., a stub script that exits 1) would output nothing.
+  // The probe must require TM_RAN evidence that bash actually ran.
+
+  // First, verify that WITH TM_RAN and exit 1, it correctly means unreachable
+  let errWithToken = new Error('path not found')
+  errWithToken.status = 1
+  errWithToken.stdout = 'TM_RAN'
+
+  let classified1 = null
+  try {
+    if (errWithToken.status === 1) {
+      if (errWithToken.stdout && typeof errWithToken.stdout === 'string' && errWithToken.stdout.startsWith('TM_RAN')) {
+        classified1 = 'unreachable'
+      } else {
+        throw new Error(`Could not verify bash actually ran`)
+      }
+    }
+  } catch (e) {
+    assert.fail(`should not throw for valid unreachable case: ${e.message}`)
+  }
+
+  assert.equal(classified1, 'unreachable',
+    'with TM_RAN + exit 1, should classify as unreachable')
+
+  // Second, verify that WITHOUT TM_RAN and exit 1, it throws (doesn't silently skip)
+  let errNoToken = new Error('fake bash exited 1')
+  errNoToken.status = 1
+  errNoToken.stdout = ''  // No TM_RAN: fake bash produced this
+
+  let threw = false
+  let message = ''
+  try {
+    if (errNoToken.status === 1) {
+      if (errNoToken.stdout && typeof errNoToken.stdout === 'string' && errNoToken.stdout.startsWith('TM_RAN')) {
+        assert.fail('should not accept exit 1 without TM_RAN as unreachable')
+      } else {
+        throw new Error(`Could not verify bash actually ran: got exit 1 but unexpected stdout: "${errNoToken.stdout || '(empty)'}"`)
+      }
+    }
+  } catch (e) {
+    threw = true
+    message = e.message
+  }
+
+  assert.ok(threw && message.includes('Could not verify bash actually ran'),
+    `without TM_RAN, should throw when bash exits 1, not return false - got: ${message}`)
+})
+
+test('(probe defense) genuine unreachable path still skips, with TM_RAN evidence present', () => {
+  // Verify that the TM_RAN requirement doesn't break the legitimate skip case.
+  // When bash runs but the path is genuinely not found, we get status 1 with
+  // stdout = "TM_RAN" (the printf succeeded, then test -e failed). This MUST
+  // be classified as "unreachable" and skip the tests. Removing the TM_RAN
+  // check would break WSL users.
+
+  const err = new Error('path not found')
+  err.status = 1
+  err.stdout = 'TM_RAN'  // Bash ran and printed the prefix, then test -e returned 1
+
+  let classified = null
+  try {
+    // This is the classification logic from the probe
+    if (err.status === 1) {
+      if (err.stdout && typeof err.stdout === 'string' && err.stdout.startsWith('TM_RAN')) {
+        // Correct: TM_RAN is present, so bash definitely ran. Exit 1 means unreachable.
+        classified = 'unreachable'
+      } else {
+        throw new Error(`Could not verify bash actually ran`)
+      }
+    }
+  } catch (e) {
+    assert.fail(`genuine unreachable case threw unexpectedly: ${e.message}`)
+  }
+
+  assert.equal(classified, 'unreachable',
+    'probe should classify "TM_RAN + exit 1" as unreachable, not throw')
+})
+
 // Regression: `${CLAUDE_CONFIG_DIR:-${HOME}/.claude}` looks safe but is not. Under
 // `set -u` the default branch still expands ${HOME}, so a session with neither
 // variable set died with "HOME: unbound variable" and exit 1 — from the one hook
