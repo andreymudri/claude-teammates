@@ -33,15 +33,42 @@ const updateCheckScript = fileURLToPath(new URL('../hooks/update-check', import.
 // there". The first is refused loudly; only the second is allowed to skip.
 let _probeResult = null  // 'reachable' | 'unreachable' | null (exposed for mechanism test)
 
-// A path only a real process can create. The probe script writes the spawned shell's
-// own PID here, so the existence and contents of this file are physical evidence that
-// a bash process ran — evidence no in-process stub that merely returns a string can
-// manufacture. The write is wrapped in a brace group with stderr discarded and `|| true`
-// so a witness path bash cannot write (a WSL bash handed a Windows temp path) changes
-// neither the probe's stdout nor its exit status.
-const PROBE_WITNESS_DIR = mkdtempSync(path.join(tmpdir(), 'tm-probe-'))
-const PROBE_WITNESS = path.join(PROBE_WITNESS_DIR, 'witness')
-process.on('exit', () => rmSync(PROBE_WITNESS_DIR, { recursive: true, force: true }))
+// The probe script writes the spawned shell's own PID here. That defeats a stub which
+// MERELY RETURNS A STRING, and nothing more: a stub that also calls writeFileSync on the
+// witness path it was handed satisfies this check, and nothing in this file stops it. So
+// the witness is one leg of the live-spawn pin, not the whole of it — the other legs are
+// the identity comparison against the child_process namespace and, for the unreachable
+// answer, the corroborating spawn in the evidence test below.
+//
+// The write is wrapped in a brace group with stderr discarded and `|| true` so a witness
+// path bash cannot write (a WSL bash handed a Windows temp path) changes neither the
+// probe's stdout nor its exit status.
+//
+// Reading the witness back from Node presumes the spawned bash and this process see the
+// SAME tmpdir. That is exactly what "reachable" reports, which is why the witness is
+// only asserted on that answer; see the evidence test for the other branch.
+//
+// mkdtempSync is GUARDED, deliberately. An unavailable temp dir — read-only, full, a
+// TMPDIR pointing somewhere broken — would otherwise throw during module evaluation, and
+// a file that fails to load reports ONE anonymous failure instead of every case failing
+// under its own name. Caught here, the rest of the file still registers and still
+// reports: the many cases that need a temp dir of their own fail individually and say
+// which operation failed, which is the diagnosable outcome.
+let probeWitnessDirError = null
+let PROBE_WITNESS_DIR = null
+try {
+  PROBE_WITNESS_DIR = mkdtempSync(path.join(tmpdir(), 'tm-probe-'))
+} catch (err) {
+  probeWitnessDirError = err
+}
+// Still a string when the directory could not be made, so the argv builder below stays
+// total. Bash's write to it fails, the `|| true` swallows that, and the probe's stdout
+// and exit status are unchanged — the same path an arg-dropping bash already takes.
+const PROBE_WITNESS = path.join(
+  PROBE_WITNESS_DIR || path.join(tmpdir(), 'tm-probe-witness-dir-unavailable'), 'witness')
+process.on('exit', () => {
+  if (PROBE_WITNESS_DIR) rmSync(PROBE_WITNESS_DIR, { recursive: true, force: true })
+})
 
 // The one place the probe's command line is built. runProbe builds its argv here,
 // and the probe defense tests below spawn what this returns, so a change to the
@@ -104,8 +131,9 @@ function buildProbeInvocation(targetPath) {
 //
 // This is a funnel, not a barrier: it cannot stop a future branch from writing
 // `return 'unreachable'` directly and bypassing it. What it does is give every existing
-// arm one place to go and one rule to satisfy, and the tests below mutate each arm in
-// turn to show that none of them currently sidesteps it.
+// arm one place to go and one rule to satisfy. No test demonstrates that the arms route
+// through here — making both of them return 'unreachable' directly leaves this file
+// green, with the concludeUnreachable test still passing over a function nothing calls.
 function concludeUnreachable(stdout) {
   if (typeof stdout === 'string' && stdout.startsWith(PROBE_UNREACHABLE)) {
     return 'unreachable'
@@ -127,7 +155,14 @@ function concludeUnreachable(stdout) {
 // hook tests skip):
 //   - TM_RAN + TM_ARG, no TM_OK, on either exit 0 or exit 1. Bash ran, was handed the
 //     repository path, and reported that the path is not there. That is a real answer,
-//     and it is the WSL-cannot-read-C:\ case the skip exists to serve.
+//     and it is the case the skip exists to serve: a bash that FORWARDS its arguments
+//     but cannot see this filesystem.
+//
+//     Note that WSL's bash is NOT that case, though earlier comments here said it was.
+//     Per the header above, WSL drops positional arguments after `-c <script>`, so it
+//     cannot emit TM_ARG at all: it lands in the loud TM_RAN-alone branch below and
+//     produces failures, not skips. Attributing this silent branch to WSL told a
+//     maintainer to expect a quiet green run where the suite in fact goes red.
 // Loud (throws, and the caller turns that into failures rather than skips):
 //   - the spawn never produced a bash exit status at all — ENOENT because bash is not
 //     on PATH, a timeout, a signal. Nothing ran, so nothing was determined.
@@ -176,7 +211,7 @@ function classifyProbeOutcome({ output, err }) {
       // the child, or a signal. Nothing ran to completion, so there is nothing to
       // classify. Returning 'unreachable' here would be the same silent-skip bug in its
       // third disguise — a machine with no bash would report success having tested
-      // nothing — so this arm refuses, and the test below mutates it to prove it must.
+      // nothing — so this arm refuses, and the test below pins the refusal.
       throw new Error(
         `Could not determine if bash can access the repository (${err.code || err.signal || 'unknown'}): ${err.message}`
       )
@@ -202,14 +237,64 @@ let _lastSpawnUsed = null
 // declares no default of its own, so a no-argument call lands here. That keeps the
 // default that the live probe uses and the default the tests pin as the same one
 // object, rather than two that can drift apart.
-function runProbe(spawn = execFileSync) {
+// Markers that make a directory THIS repository rather than merely some directory that
+// exists. Both are read by the hook tests themselves, so a target missing either could
+// not have produced a meaningful run even if bash could reach it.
+const PROBE_TARGET_MARKERS = ['.claude-plugin/plugin.json', 'hooks/session-start']
+
+// The independent observer, and the reason it is worth more than another pin inside the
+// probe: every other check in this file asks BASH whether the repository is reachable, so
+// each one is edited by the same change that breaks it. Node's own view of the filesystem
+// is not. It cannot be forged by editing the recorder, the counters, the classifier or
+// the script, because none of them is consulted.
+//
+// What it defends, precisely: that the path the probe reports on is the repository. `root`
+// was validated against nothing, so appending a nonexistent segment to it made bash answer
+// 'unreachable' TRUTHFULLY — bash really cannot see that path — and the suite skipped every
+// hook case and exited 0. No hardening inside the probe can catch that, because the probe
+// is not lying.
+//
+// Why it does NOT break the legitimate skip: the case the skip exists to serve is a bash
+// that cannot see a path NODE CAN — a WSL bash handed a Windows path. Node's check passes
+// there and the skip proceeds untouched. The two are distinguishable precisely because the
+// observers are independent.
+//
+// It does NOT subsume the other two pins, and is not claimed to: a lying recorder and a
+// hookTest that registers every case as a skip both leave `root` perfectly valid. Those
+// are pinned by the live-probe evidence test and the canary respectively.
+function probeTargetProblem(target) {
+  if (!existsSync(target)) return 'Node cannot see it at all'
+  const missing = PROBE_TARGET_MARKERS.filter((m) => !existsSync(path.join(target, m)))
+  return missing.length ? `it is missing ${missing.join(' and ')}` : null
+}
+
+// `target` is injectable for the same reason `spawn` is, and defaults to `root` so the
+// live path is unaffected: it lets a test drive a bogus target through this exact call
+// site and observe the refusal, rather than asserting on probeTargetProblem in isolation
+// and hoping runProbe still calls it. Both defaults are evaluated here and nowhere else,
+// so runProbe.length stays 0 and canBashAccessRepository keeps its single parameter.
+function runProbe(spawn = execFileSync, target = root) {
   // Probe the repository root (not the hook file itself). If the repo is
   // unreachable, the probe fails. If a hook file is missing, the repo is
   // still reachable, and tests should run and fail as expected.
   //
   // Require positive evidence: have bash print 'TM_OK' on success. This
   // prevents forging via exit codes (startup files, etc.).
-  const { command, args, options } = buildProbeInvocation(toBashPath(root))
+  //
+  // Checked here, at the one place the target is chosen, so every route to an answer
+  // passes through it. A bogus target is a REFUSAL, not an 'unreachable': the run
+  // determined nothing about this repository, which is the same category as a probe that
+  // never ran, and it must be as loud.
+  const problem = probeTargetProblem(target)
+  if (problem) {
+    throw new Error(
+      `Refusing to probe: the target is not this repository — ${problem}. Resolved ` +
+      `target: "${target}". A target that does not exist makes bash answer 'unreachable' ` +
+      'honestly, which would skip every hook test and exit 0 having verified nothing. ' +
+      `Expected to find ${PROBE_TARGET_MARKERS.join(' and ')} beneath it.`,
+    )
+  }
+  const { command, args, options } = buildProbeInvocation(toBashPath(target))
   _lastSpawnUsed = spawn
   try {
     return { output: spawn(command, args, options) }
@@ -245,7 +330,12 @@ function shouldSkipHookTests() {
 let hookTestsRegistered = 0
 let hookTestsSkipped = 0
 // Cases registered as failures because the probe made no determination. Kept separate
-// from hookTestsSkipped so the mechanism test can assert the two never trade places.
+// from hookTestsSkipped so a mechanism test can assert the two never trade places.
+//
+// On a machine whose probe ANSWERS, this counter stays at zero and the live values of
+// these three counters say nothing about the undetermined path. What exercises that path
+// on every machine is the registerHookCase test below, which drives the same registration
+// function with a synthesized refused probe.
 let hookTestsUndetermined = 0
 
 // Convert backslashes to forward slashes for bash. Bash on Windows (both MINGW and WSL)
@@ -310,24 +400,38 @@ function withConfigDir(fn) {
 // test can verify that the skip decision matches the probe's result.
 function hookTest(name, fn) {
   hookTestsRegistered += 1
-  if (liveProbe.error) {
+  registerHookCase(liveProbe, name, fn)
+}
+
+// The registration decision itself, as a function of a probe rather than of the module's
+// live one. hookTest passes liveProbe; the mechanism test below passes a SYNTHESIZED
+// refused probe and a recording `register`, which is what makes the undetermined branch
+// execute on a machine whose own probe answered. Written inline in hookTest before, that
+// branch was dead on every MINGW host and the comments claiming it was protected were
+// describing code nothing ran.
+//
+// Returns the mode it chose, so a caller can assert on the choice as well as on the
+// registration it produced.
+function registerHookCase(probe, name, fn, register = test) {
+  if (probe.error) {
     // The probe refused to classify. Registering these as FAILURES rather than skips is
     // the whole point of the distinction: an undetermined probe that skipped would be
     // indistinguishable from a green run. shouldSkipHookTests() is deliberately not
     // consulted here — calling it would re-enter the probe and raise the same error
     // again, this time during registration, where it aborts the file.
     hookTestsUndetermined += 1
-    test(name, () => {
-      throw liveProbe.error
+    register(name, () => {
+      throw probe.error
     })
-    return
+    return 'undetermined'
   }
-  if (shouldSkipHookTests()) {
+  if (probe.result !== 'reachable') {
     hookTestsSkipped += 1
-    test(name, { skip: 'bash cannot access the repository path' }, () => {})
-  } else {
-    test(name, fn)
+    register(name, { skip: 'bash cannot access the repository path' }, () => {})
+    return 'skip'
   }
+  register(name, fn)
+  return 'run'
 }
 
 // The live probe, run here at module evaluation with no injected spawn, and the
@@ -371,10 +475,12 @@ test('(probe defense pinned) the live probe ran the real execFileSync, and a rea
   // pinned by nothing behavioural. Substituting a stub for the default at any point on
   // the live path (runProbe's parameter default, or a default re-added to
   // canBashAccessRepository, or a shim shadowing the local execFileSync binding) fails
-  // the first assertion here. It compares function IDENTITY against the module
+  // the identity assertion below. It compares function IDENTITY against the module
   // namespace, which ESM forbids reassigning, so aliasing the import does not help.
-  // Reported first: when the probe refused to classify, its message names the cause,
-  // and every assertion after this one would fail less informatively.
+  //
+  // The refusal is reported FIRST, before identity: when the probe declined to classify,
+  // its own message names the cause, and every assertion after this one would fail less
+  // informatively.
   assert.equal(liveProbe.error, null,
     `the live probe refused to classify: ${liveProbe.error && liveProbe.error.message}`)
 
@@ -382,19 +488,48 @@ test('(probe defense pinned) the live probe ran the real execFileSync, and a rea
     'the live probe must call node:child_process.execFileSync itself, not a stand-in')
 
   // Identity alone would still pass if runProbe recorded execFileSync while calling
-  // something else. The witness closes that: PROBE_WITNESS is written by the probe
-  // SCRIPT, inside the spawned shell, so its contents are a PID no in-process stub
-  // produced. It is asserted only when the live probe answered reachable, because that
-  // answer is precisely the evidence that bash and this Node process share a
-  // filesystem; where the probe answers unreachable (WSL bash handed a Windows path)
-  // the file is legitimately absent and this half of the pin is inert.
+  // something else — `_lastSpawnUsed = execFileSync` beside a call to a stub. Both
+  // branches below add evidence that does not come from the recorder, and BOTH answers
+  // get one: an unreachable answer is the only outcome that skips quietly, so leaving it
+  // on identity alone is exactly the hole worth closing.
   if (liveProbe.reachable) {
+    // Reachable means bash and this Node process share a filesystem, so the witness the
+    // probe SCRIPT wrote inside the spawned shell is readable here, and holds a PID.
     assert.notEqual(liveProbe.witness, null,
-      'the live probe answered reachable, so the bash it spawned must have written the witness')
+      'the live probe answered reachable, so the bash it spawned must have written the ' +
+      `witness${probeWitnessDirError ? ` (the witness dir could not be created: ${probeWitnessDirError.message})` : ''}`)
     assert.match(liveProbe.witness, /^[0-9]+$/,
       `the witness must hold the spawned shell's PID, got: "${liveProbe.witness}"`)
     assert.notEqual(liveProbe.witness, String(process.pid),
       'the witness must come from a child process, not from this one')
+  } else {
+    // Unreachable: the witness is legitimately absent, because a bash that cannot stat
+    // the repo path generally cannot write this process's temp dir either. Asserting it
+    // here would break the users the skip exists to serve: a bash that forwards its
+    // arguments but cannot see this filesystem. (Not WSL — WSL drops the arguments and
+    // is refused loudly instead; see classifyProbeOutcome.)
+    //
+    // So the evidence is corroboration instead: spawn the probe's own argv again, from
+    // this test, through the child_process namespace's execFileSync (not the local
+    // binding, which a shim could shadow), and require a real bash to reach the SAME
+    // verdict for the SAME path. A recorder that returned a canned PROBE_UNREACHABLE
+    // while the real bash reports the repo reachable fails here.
+    //
+    // What this does not close: a stub that returns the answer real bash would have
+    // returned anyway is indistinguishable from the real spawn by this assertion. That
+    // residue is unclosable from inside the process for the unreachable answer, because
+    // the only out-of-process witness — a file — needs the shared filesystem this answer
+    // says is missing.
+    const { command, args, options } = buildProbeInvocation(toBashPath(root))
+    let corroboration
+    try {
+      corroboration = childProcess.execFileSync(command, args, options)
+    } catch (err) {
+      corroboration = typeof err.stdout === 'string' ? err.stdout : '(no stdout)'
+    }
+    assert.equal(corroboration, PROBE_UNREACHABLE,
+      'the live probe answered unreachable, so a real bash spawned here must report the ' +
+      `same shape for the same path, got: "${corroboration}"`)
   }
 
   // And the answer the rest of the suite runs on is the one that spawn produced.
@@ -409,6 +544,23 @@ test('hooks.json declares a SessionStart matcher', async () => {
   const cfg = JSON.parse(await readFile(new URL('../hooks/hooks.json', import.meta.url), 'utf8'))
   assert.ok(Array.isArray(cfg.hooks.SessionStart))
   assert.match(cfg.hooks.SessionStart[0].matcher, /startup/)
+})
+
+// Set by the canary hookTest below, from INSIDE its body. Deliberately not touched by
+// hookTest or registerHookCase: every counter those functions maintain can be dropped by
+// the same edit that breaks them, which is how a skip-everything mutation stayed green
+// through four rounds. This flag lives where only an executing body can reach it, so no
+// edit to the registration logic can set it. The plain test at the end of this file reads
+// it, and a plain test cannot be turned into a skip by anything hookTest does.
+let hookBodyCanaryRan = false
+
+hookTest('(canary) a hook case body runs and the hook really answers', () => {
+  hookBodyCanaryRan = true
+  // Do real work, so the flag cannot be set by a body that was emptied out: this is the
+  // same hook invocation the cases below depend on, and it fails if the hook cannot run.
+  const parsed = JSON.parse(runHook({}))
+  assert.equal(typeof parsed.hookSpecificOutput.additionalContext, 'string',
+    'the canary must exercise a real hook invocation, not merely set its flag')
 })
 
 hookTest('emits valid JSON containing the entrypoint content', () => {
@@ -621,8 +773,13 @@ test('hooks.json wires update-check async and session-start sync', async () => {
 // either hookTest was mutated, or the probe gave a wrong answer.
 test('(mechanism) hookTest skips its cases only when the repository is unreachable', () => {
   // An undetermined probe is accounted for separately: those cases were registered as
-  // failures, and the count of skips must be zero. Asserting it here is what stops a
-  // future change from quietly routing the undetermined case back into the skip branch.
+  // failures, and the count of skips must be zero.
+  //
+  // This branch runs ONLY on a machine whose probe refused, so on an ordinary host it
+  // protects nothing — the counters below are what execute here. The change that routes
+  // the undetermined case back into the skip branch is caught on every machine by the
+  // registerHookCase test that follows, which synthesizes a refused probe instead of
+  // waiting for the host to produce one.
   if (liveProbe.error) {
     assert.equal(hookTestsSkipped, 0,
       'a probe that determined nothing must produce failures, never skips')
@@ -651,6 +808,78 @@ test('(mechanism) hookTest skips its cases only when the repository is unreachab
   }
 })
 
+test('(mechanism) a refused probe registers a failing case, never a skip', () => {
+  // PIN, and the reason this test exists: registerHookCase's undetermined branch and the
+  // undetermined half of the mechanism test above are BOTH dead on any machine whose
+  // probe answers, which on MINGW is every machine. Changing that branch to register a
+  // skip instead of a throwing case left this file at 44 pass / 0 fail / 0 skipped —
+  // green, while the one outcome the distinction exists to make loud went silent.
+  //
+  // Driving registerHookCase with a synthesized probe removes the dependence on the host:
+  // all three registration modes are exercised here whatever the live probe answered.
+  const refusal = new Error('synthetic refusal: the probe determined nothing')
+  const calls = []
+  const record = (...args) => calls.push(args)
+
+  // registerHookCase moves the module's counters, which the mechanism test above reads.
+  // Restore them so this test observes the counters without perturbing that one, in
+  // either registration order.
+  const savedSkipped = hookTestsSkipped
+  const savedUndetermined = hookTestsUndetermined
+  let mode
+  try {
+    mode = registerHookCase({ reachable: null, error: refusal, result: null },
+      'synthetic case', () => { throw new Error('the real body must not be registered') }, record)
+    assert.equal(hookTestsUndetermined, savedUndetermined + 1,
+      'a refused probe must count the case as undetermined')
+    assert.equal(hookTestsSkipped, savedSkipped,
+      'a refused probe must not count the case as a skip')
+  } finally {
+    hookTestsSkipped = savedSkipped
+    hookTestsUndetermined = savedUndetermined
+  }
+
+  assert.equal(mode, 'undetermined')
+  assert.equal(calls.length, 1, 'the case must still be registered, not dropped')
+
+  // node:test skips a case when it is handed a { skip } options object. The registration
+  // must carry no options object at all, so there is no route to a silent skip, and the
+  // body it does carry must rethrow the probe's own refusal.
+  const [name, body, options] = calls[0]
+  assert.equal(name, 'synthetic case')
+  assert.equal(options, undefined,
+    'an undetermined case must be registered with no options object, so node:test cannot skip it')
+  assert.equal(typeof body, 'function')
+  assert.throws(body, /synthetic refusal/,
+    'the registered body must rethrow the probe refusal, so the case FAILS and names its cause')
+
+  // The neighbouring answers must keep their own modes, so the above is a narrowing of
+  // the registration rule rather than "everything becomes a failure".
+  const other = []
+  const otherRecord = (...args) => other.push(args)
+  const savedSkipped2 = hookTestsSkipped
+  try {
+    assert.equal(
+      registerHookCase({ reachable: false, error: null, result: 'unreachable' },
+        'unreachable case', () => {}, otherRecord),
+      'skip',
+      'a probe that answered unreachable must still skip')
+    assert.equal(hookTestsSkipped, savedSkipped2 + 1)
+  } finally {
+    hookTestsSkipped = savedSkipped2
+  }
+  assert.deepEqual(other[0][1], { skip: 'bash cannot access the repository path' },
+    'the skip must travel as node:test options, with a reason')
+
+  assert.equal(
+    registerHookCase({ reachable: true, error: null, result: 'reachable' },
+      'reachable case', () => {}, otherRecord),
+    'run',
+    'a probe that answered reachable must register the real body')
+  assert.equal(typeof other[1][1], 'function', 'a running case registers a body')
+  assert.equal(other[1][2], undefined, 'a running case carries no options object')
+})
+
 // Probe defense tests. Each pins one property that keeps a broken or hostile bash
 // from quietly turning this suite into skips, and each fails when its property is
 // removed from the implementation above:
@@ -665,16 +894,27 @@ test('(mechanism) hookTest skips its cases only when the repository is unreachab
 //     real bash ran before an exit-1 answer is accepted as 'unreachable';
 //   - classification from status and stdout alone on both paths from runProbe into
 //     classifyProbeOutcome — the injected one and canBashAccessRepository's own — so
-//     the ordinary WSL-cannot-read-C:\ skip is not derailed by whatever text bash
+//     the ordinary cannot-see-the-filesystem skip is not derailed by whatever text bash
 //     put on stderr;
 //   - the spawn the LIVE probe used, pinned above by identity against the child_process
-//     namespace and by the witness file a real bash wrote, so the default that decides
-//     the skip is not itself a stub;
+//     namespace, and corroborated for whichever answer it gave — by the witness file a
+//     real bash wrote when it answered reachable, by a fresh real-bash spawn of the same
+//     argv when it answered unreachable — so the default that decides the skip is not
+//     itself a stub;
 //   - the TM_ARG token, which separates "bash never got the path" from "the path is not
 //     there", so a shell that drops positional arguments is refused rather than skipped;
 //   - the arm that fires when no bash exit status exists at all — ENOENT, timeout,
 //     signal — which refuses instead of skipping, so a machine with no bash on PATH
-//     cannot report success having run nothing.
+//     cannot report success having run nothing;
+//   - the probe's TARGET, checked by Node rather than by bash, so a `root` that does not
+//     name this repository is refused instead of drawing an honest 'unreachable' out of
+//     a bash that genuinely cannot see it.
+//
+// Three of these guard the same property from different sides, because each of the three
+// was separately found to leave the suite green: the probe's answer must be honest (the
+// live-probe evidence test), the target it answers about must be this repository (the
+// Node-side check), and the answer must actually cause bodies to run (the canary at the
+// end of this file). No one of them implies the others.
 // Which code each test reaches differs, and the difference matters: the first, second
 // and fourth spawn the argv buildProbeInvocation returns and observe what bash printed;
 // the wiring test inspects that argv without spawning it; the TM_RAN gate test calls
@@ -741,7 +981,8 @@ test('(probe defense pinned) the target path travels as an argv element, not as 
 test('(probe defense pinned) runProbe spawns the argv buildProbeInvocation builds', () => {
   // PIN: an inlined argv inside runProbe that DIFFERS from what buildProbeInvocation
   // returns will fail this test — including one that merely drops -p, which the -p test
-  // below cannot see because it builds its own invocation. Without -p, an attacker
+  // below cannot see because it spawns what the BUILDER returns, never what runProbe
+  // sends, so an argv inlined at this call site is outside its view. Without -p, an attacker
   // forges the *unreachable* answer with an environment variable alone: BASH_ENV
   // pointing at a file that prints TM_RAN and exits 1 yields exactly the
   // status-1-plus-TM_RAN shape the classifier accepts, skipping all the hook tests.
@@ -768,11 +1009,14 @@ test('(probe defense pinned) runProbe spawns the argv buildProbeInvocation build
   //   - timeout is pinned here, and only here, because it is load-bearing: without it a
   //     bash that hangs hangs the whole suite at module evaluation instead of failing it;
   //   - encoding is pinned behaviourally by the positive-path test, which compares the
-  //     spawn's return value to the string 'TM_RANTM_OK' and would see a Buffer without it;
-  //   - env is NOT pinned, deliberately. Dropping it leaves the child inheriting this
-  //     process's environment anyway, which is what spreading process.env produces. The
-  //     -p test overrides it to inject BASH_FUNC_test, so the field must keep existing,
-  //     and that test would fail if it did not.
+  //     spawn's return value to the PROBE_REACHABLE string and would see a Buffer without it;
+  //   - env is NOT pinned, and neither is its existence. Dropping the field leaves the
+  //     child inheriting this process's environment anyway, which is what spreading
+  //     process.env produces. The -p test below rebuilds it as `{ ...options.env }`, and
+  //     spreading an absent field yields `{}` rather than throwing, so that test goes on
+  //     passing too. Deleting `env` from the builder leaves this whole file green —
+  //     measured, not assumed. It is kept because being explicit about the child's
+  //     environment is worth more than the line costs, not because a test demands it.
   assert.equal(seen[0].options.timeout, 20000,
     'the probe must carry a timeout, or a hung bash hangs the suite rather than failing it')
 
@@ -799,7 +1043,10 @@ test('(probe defense pinned) -p flag resists BASH_FUNC_test shadowing', () => {
   env['BASH_FUNC_test%%'] = '() { return 0; }'  // Bash function: forged test always succeeds
 
   // With -p, the forged BASH_FUNC_test is blocked, so real test runs and fails.
-  // Result should be TM_RAN (exit 1), NOT TM_RANTM_OK (which would mean test succeeded).
+  // Result should be PROBE_UNREACHABLE (exit 1), NOT PROBE_REACHABLE (which would mean
+  // the forged test succeeded). Not bare TM_RAN, which an earlier version of this comment
+  // named: that is the argument-dropping shape the classifier now REFUSES, and anyone
+  // following the old text would have relaxed the assertion below to re-accept it.
 
   let result = null
   try {
@@ -864,6 +1111,47 @@ test('(probe defense pinned) a probe that never ran at all is refused, not skipp
   try {
     assert.throws(() => canBashAccessRepository(enoentSpawn), /Could not determine/,
       'canBashAccessRepository must propagate the refusal, not answer false')
+  } finally {
+    _probeResult = memo
+  }
+})
+
+test('(probe defense pinned) a target Node cannot verify is refused, not skipped', () => {
+  // PIN: `root` is the probe's target and was checked by nothing. Appending a nonexistent
+  // segment to it left the suite at 14 pass / 0 fail / 30 skipped — green — because bash
+  // answered 'unreachable' about that path perfectly honestly. This is the one route the
+  // probe cannot police itself, so Node polices it.
+  //
+  // Deleting probeTargetProblem's call in runProbe fails the last assertion here.
+  assert.equal(probeTargetProblem(root), null,
+    `the real repo root must pass Node's own check, got: ${probeTargetProblem(root)}`)
+
+  assert.match(probeTargetProblem(path.join(root, 'nope-xyz')), /cannot see it at all/,
+    'a target that does not exist must be reported as a problem, not probed')
+
+  // Exists, but is not this repository: the marker check, not merely existsSync. A bare
+  // tmpdir is the cheapest example of a directory that is real and wrong.
+  assert.match(probeTargetProblem(tmpdir()), /is missing/,
+    'a directory that exists but lacks the repo markers must be reported as a problem')
+
+  // And end to end through runProbe's own call site, which is what pins that runProbe
+  // still consults the check: a bogus target must refuse BEFORE spawning. The spawn
+  // handed in here would answer 'unreachable' — the exact honest answer that made this
+  // route silent — and it must never be reached.
+  let spawned = 0
+  const wouldSkip = () => { spawned += 1; return PROBE_UNREACHABLE }
+  assert.throws(() => runProbe(wouldSkip, path.join(root, 'nope-xyz')), /Refusing to probe/,
+    'a target Node cannot verify must refuse, never resolve to a skip')
+  assert.equal(spawned, 0, 'the refusal must come before bash is spawned at all')
+
+  // The refusal must reach the caller of canBashAccessRepository too, so hookTest turns
+  // it into failures rather than skips.
+  const memo = _probeResult
+  _probeResult = null
+  try {
+    assert.throws(
+      () => classifyProbeOutcome(runProbe(wouldSkip, tmpdir())), /Refusing to probe/,
+      'a target that exists but is not this repository must refuse as well')
   } finally {
     _probeResult = memo
   }
@@ -938,7 +1226,8 @@ test('(probe defense pinned) TM_RAN token requirement prevents fake bash', () =>
     'output TM_RANTM_ARG should classify as unreachable')
 
   // Case 3: TM_RAN + exit 1 -> unreachable (real bash ran and test failed).
-  // This is the genuine WSL-cannot-read-C:\ path: the TM_RAN gate must let it
+  // This is the genuine cannot-see-the-filesystem path — a bash that DID forward the
+  // argument and could not stat it, which is not WSL — and the TM_RAN gate must let it
   // skip rather than throw, so tightening the gate cannot break those users.
   // execFileSync appends the child's stderr and command line to err.message, so
   // this case also carries stderr text that classification must ignore.
@@ -969,10 +1258,13 @@ test('(probe defense pinned) TM_RAN token requirement prevents fake bash', () =>
   )
 })
 
-// The spawn a genuine WSL-cannot-read-C:\ probe produces: bash ran, printed TM_RAN,
-// could not stat the Windows path, exited 1, and left stderr text in err.message.
-// Shared by the two tests below so both see the identical failure shape.
-function wslLikeFailureSpawn() {
+// The spawn a genuine cannot-see-the-filesystem probe produces: bash ran, forwarded and
+// printed TM_RAN + TM_ARG, could not stat the path, exited 1, and left stderr text in
+// err.message. Shared by the two tests below so both see the identical failure shape.
+//
+// Named for the shape rather than for WSL, which cannot produce it: WSL drops the
+// argument and emits TM_RAN alone, which classifyProbeOutcome refuses.
+function unreachableFilesystemSpawn() {
   const err = new Error(
     "Command failed: bash -p -c 'printf TM_RAN; ... test -e \"$1\" && printf TM_OK'\n" +
     'bash: Could not open the current directory: Permission denied\n'
@@ -989,10 +1281,11 @@ test('(probe defense pinned) a spawn failure is classified from status and stdou
   // inside canBashAccessRepository is caught by the next test, not this one.
   //
   // execFileSync appends the child's stderr AND the command line to err.message.
-  // The ordinary WSL case — bash runs, prints TM_RAN, cannot stat the Windows
-  // path, exits 1 — routinely carries stderr text of its own. That must still
-  // classify as 'unreachable' and skip, whatever the child said on stderr.
-  assert.equal(classifyProbeOutcome(runProbe(wslLikeFailureSpawn)), 'unreachable',
+  // The ordinary unreachable case — bash runs, forwards the argument, prints
+  // TM_RAN + TM_ARG, cannot stat the path, exits 1 — routinely carries stderr text of
+  // its own. That must still classify as 'unreachable' and skip, whatever bash said
+  // on stderr.
+  assert.equal(classifyProbeOutcome(runProbe(unreachableFilesystemSpawn)), 'unreachable',
     'a genuine exit-1-with-TM_RAN failure must skip, not throw, whatever its message says')
 
   // And a spawn failure with no TM_RAN evidence must still be refused, so the
@@ -1023,7 +1316,7 @@ test('(probe defense pinned) canBashAccessRepository classifies from status and 
   const memo = _probeResult
   _probeResult = null
   try {
-    assert.equal(canBashAccessRepository(wslLikeFailureSpawn), false,
+    assert.equal(canBashAccessRepository(unreachableFilesystemSpawn), false,
       'an exit-1-with-TM_RAN probe must report the repository unreachable, not throw')
   } finally {
     _probeResult = memo
@@ -1300,5 +1593,37 @@ hookTest("a broken install still exits 0 with exactly one valid context field", 
     })
   } finally {
     rmSync(pluginRoot, { recursive: true, force: true })
+  }
+})
+
+// Registered LAST on purpose. node:test runs top-level cases in registration order, so by
+// the time this body executes every hookTest above has either run or been skipped, and
+// hookBodyCanaryRan holds the answer.
+test('(mechanism) a reachable probe means hook bodies actually executed', () => {
+  // PIN, and the property this whole file exists to defend: not "which spawn ran" and not
+  // "what the counters say", but THAT A HOOK BODY RAN when the probe said it could.
+  //
+  // MEASURED, and the reason this is a separate test: turning hookTest into an
+  // unconditional skip AND dropping its `hookTestsSkipped += 1` in the same edit left the
+  // suite at 14 pass / 0 fail / 30 skipped — green — because every other mechanism here
+  // reads a counter that the same edit deleted. The live-probe evidence test does not
+  // catch it either: it pins which function was spawned, which stays true while no hook
+  // body runs at all. This assertion reads a flag set only from inside an executing body,
+  // so no edit to the registration logic can satisfy it without actually running one.
+  if (liveProbe.error) {
+    assert.equal(hookBodyCanaryRan, false,
+      'a probe that determined nothing must not have run a hook body')
+    return
+  }
+  if (liveProbe.result === 'reachable') {
+    assert.equal(hookBodyCanaryRan, true,
+      'the probe reported the repository reachable, so at least one hook case body must ' +
+      'have executed — a suite that registered every case as a skip reports green while ' +
+      'testing nothing')
+  } else {
+    // The honest skip, kept honest in the other direction: a probe that answered
+    // unreachable must NOT have run bodies, or the skip decision is not being applied.
+    assert.equal(hookBodyCanaryRan, false,
+      'the probe reported the repository unreachable, so no hook case body should have run')
   }
 })
