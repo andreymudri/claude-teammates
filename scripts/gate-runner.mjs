@@ -233,6 +233,98 @@ export function landedForFiles(filesBySha, sha, declaredFiles) {
   return false
 }
 
+// Credit for task refs sitting exactly at the run tip, where `landedForFiles` cannot help: the
+// run tip is never keyed in `mergedParentFiles` (that index holds only the NON-FIRST parents the
+// chain walk meets), so a sha there carries no attribution at all and the predicate is
+// structurally false. That false is correct for a no-op teammate and wrong for a genuinely
+// landed task whose ref a fix round re-pointed with the brief's own `git checkout -B <task>
+// <run branch>` — and both look identical from the sha.
+//
+// What separates them is not the position but SCARCITY. A merged secondary parent is a
+// contribution that was earned exactly once. If a task's ref points AT such a parent, that task
+// has already spent it, and no ref parked at the run tip may be credited with the same one. So a
+// run-tip ref is credited only by being matched to a merged parent that (a) carried its WHOLE
+// declared set and (b) no other task ref already points at, with at most one run-tip task per
+// parent — a bipartite matching, not a containment test.
+//
+// That distinction is the whole point, and it is what the reverted `f6e2191` lacked. Executed,
+// the shape that closure passed and this one fails: T1 (phase 1) declares and merges `a.mjs`
+// plus `b.mjs`; T2 (phase 2) declares only `a.mjs` and writes nothing, its ref left at the run
+// tip by `checkout -B`. Containment alone credits T2, because T1's merge carried a superset of
+// T2's declared set — and a phase-2 task that only MODIFIES files phase 1 created has that
+// superset by construction, so it is the routine shape, not a corner. Here T1's own ref still
+// points at that parent, so the parent is spent and T2 matches nothing. Two refs both re-pointed
+// to the run tip with one parent between them fail for the same reason: the matching is capped
+// at the number of distinct parents, so one of them is always left unmatched and its phase does
+// not read as integrated.
+//
+// Attributing by the merge SUBJECT was considered and rejected: no such convention is enforced
+// anywhere in this repo, and `tm-integrator` writes that subject while being one of the enforced
+// parties — the `status.json` mistake this whole design exists to avoid.
+//
+// What this does NOT close, pinned as a LIMIT in `tests/gate-runner.test.mjs`: a SPARE parent.
+// Two merges crediting the same task — an initial integration plus a fix round's own merge —
+// put two parents in the index while only one ref points at one of them, so the leftover is
+// unclaimed and can be matched by a run-tip ref whose declared set it happens to contain in
+// full. It is much narrower than plain containment (it needs a spare merge whose own diff covers
+// the whole declared set, not merely any superset anywhere in range), but it is real.
+export function creditRunTipTasks({ tasks, shaByTask, runSha, mergedFiles }) {
+  // A parent is spent when some task ref points directly at it. Refs at the run tip spend
+  // nothing — that is exactly the position with no attribution behind it.
+  const claimed = new Set()
+  for (const sha of shaByTask.values()) {
+    if (sha !== runSha && mergedFiles.has(sha)) claimed.add(sha)
+  }
+  const free = [...mergedFiles.keys()].filter((p) => p !== runSha && !claimed.has(p))
+
+  const runTip = tasks.filter((t) => shaByTask.get(t.id) === runSha)
+  const candidates = new Map()
+  for (const t of runTip) {
+    const declared = (t.files ?? []).map(normalizePath)
+    // A task declaring nothing is never creditable from the run tip: the empty set is contained
+    // in every parent, so without this guard it would match the first free one.
+    if (declared.length === 0) { candidates.set(t.id, []); continue }
+    candidates.set(t.id, free.filter((p) => {
+      const carried = new Set([...mergedFiles.get(p)].map(normalizePath))
+      return declared.every((file) => carried.has(file))
+    }))
+  }
+
+  // Kuhn's augmenting-path matching. Greedy assignment is not enough: an early task can take the
+  // only parent a later one could have used, when a different assignment would have satisfied
+  // both. Order of `tasks` and of the index decides ties, so the result is deterministic.
+  const heldBy = new Map()
+  const assign = (taskId, seen) => {
+    for (const parent of candidates.get(taskId) ?? []) {
+      if (seen.has(parent)) continue
+      seen.add(parent)
+      const holder = heldBy.get(parent)
+      if (holder === undefined || assign(holder, seen)) {
+        heldBy.set(parent, taskId)
+        return true
+      }
+    }
+    return false
+  }
+  for (const t of runTip) assign(t.id, new Set())
+  return new Set(heldBy.values())
+}
+
+// Resolves every task ref in the run to a sha, skipping tasks whose branch cannot be resolved or
+// does not exist. Shared so `deriveContext` and `runFilesetCheck` build the SAME map that
+// `creditRunTipTasks` reads — the scarcity argument only holds when every ref in the run is
+// accounted for, so a caller passing only the current phase's tasks would over-credit.
+export async function resolveTaskShas(git, { tasks, runId }) {
+  const shaByTask = new Map()
+  for (const task of tasks) {
+    const branch = resolveTaskBranch(task, runId)
+    if (!branch) continue
+    if (!(await git.branchExists(branch))) continue
+    shaByTask.set(task.id, await git.resolveRef(`refs/heads/${branch}`))
+  }
+  return shaByTask
+}
+
 // Takes no `status` argument by design. Three earlier versions of this system were defeated
 // by trusting a file the enforced agents can write.
 export async function deriveContext({ git, runId, runBranch, baseBranch, planPath }) {
@@ -259,6 +351,14 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
   // Built once, shared by every task branch of every phase below — see the comment on
   // `mergedParentFiles` above this function for what it answers and why.
   const mergedFiles = await mergedParentFiles(git, { anchorSha, runSha })
+  // Run-wide, never per-phase: a phase-1 ref pointing at its own merged parent is what makes
+  // that parent spent for a phase-2 ref parked at the run tip.
+  const runTipCredited = creditRunTipTasks({
+    tasks,
+    shaByTask: await resolveTaskShas(git, { tasks, runId }),
+    runSha,
+    mergedFiles,
+  })
 
   const integratedPhases = []
   for (const [phase, phaseTasks] of byPhase) {
@@ -345,7 +445,12 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
       //     considered and rejected on the same grounds as `status.json`: `tm-integrator` writes
       //     that subject, and it is one of the enforced parties. Failing closed here costs a
       //     misleading message on a genuinely landed re-pointed ref; passing open costs the check.
-      states.push(landedForFiles(mergedFiles, sha, t.files) && await git.isAncestor(sha, runSha))
+      //     Closed since, by scarcity rather than containment — see `creditRunTipTasks` above for
+      //     what separates the two and which shape each verdict falls on.
+      const landed = sha === runSha
+        ? runTipCredited.has(t.id)
+        : landedForFiles(mergedFiles, sha, t.files)
+      states.push(landed && await git.isAncestor(sha, runSha))
     }
     if (states.length > 0 && states.every(Boolean)) integratedPhases.push(phase)
   }
@@ -445,6 +550,22 @@ export async function runFilesetCheck(check, ctx = {}) {
     return checkResult(check, 'fail', `could not walk this run's merge history: ${err.message}`)
   }
 
+  // Built from EVERY task in the run, not `phaseTasks`: a ref outside this phase pointing at a
+  // merged parent is what spends it, so scoping this to the gated phase would hand a parked ref
+  // a parent its real owner already claimed.
+  let runTipCredited
+  try {
+    runTipCredited = creditRunTipTasks({
+      tasks: ctx.tasks ?? [],
+      shaByTask: await resolveTaskShas(git, { tasks: ctx.tasks ?? [], runId }),
+      runSha,
+      mergedFiles,
+    })
+  } catch (err) {
+    if (!(err instanceof GitError)) throw err
+    return checkResult(check, 'fail', `could not resolve this run's task refs: ${err.message}`)
+  }
+
   const problems = []
   const branchShas = {}
   for (const task of phaseTasks) {
@@ -522,7 +643,15 @@ export async function runFilesetCheck(check, ctx = {}) {
         //     tell the parked ref from the branch that genuinely earned that credit. See the
         //     comment on `landedForFiles` above `deriveContext`, and the LIMIT test in
         //     `tests/adversarial.test.mjs`, for the executed repro.
-        const landed = landedForFiles(mergedFiles, sha, task.files)
+        //   - The run-tip position (`sha === runSha`) is answered by `creditRunTipTasks`, which
+        //     matches such a ref to a merged parent that carried its whole declared set and that
+        //     no other task ref already points at. `landedForFiles` cannot answer it at all: the
+        //     run tip is not a key in the index, so it reads false for a genuinely landed task
+        //     whose ref a fix round re-pointed. See that function for why containment alone is
+        //     not enough, and what its own residual is.
+        const landed = sha === runSha
+          ? runTipCredited.has(task.id)
+          : landedForFiles(mergedFiles, sha, task.files)
         if (!landed) {
           problems.push(`${task.id}: branch ${branch} contributes no file changes past its fork point ${forkPoint} — the work is not on the conventional ref, and merging this task would be a no-op`)
         }

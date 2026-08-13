@@ -1,6 +1,6 @@
 import { resolveTaskBranch } from './enforce.mjs'
 import { GitError } from './git.mjs'
-import { mergedParentFiles, landedForFiles } from './gate-runner.mjs'
+import { mergedParentFiles, landedForFiles, creditRunTipTasks, resolveTaskShas } from './gate-runner.mjs'
 import { printable } from './reviews.mjs'
 
 // Read-only diagnosis of a run, computed entirely from git.
@@ -79,6 +79,26 @@ export async function collectDoctorReport({ git, runId, runBranch, baseBranch, t
     }
   }
 
+  // The run-tip position, answered the same way the gate answers it. `landedForFiles` cannot
+  // speak to it at all — the run tip is not a key in the index — so without this `doctor` would
+  // report NO CHANGES for a task the gate passes, which is the divergence importing the shared
+  // predicate exists to prevent. Built over EVERY task in the run, because a ref pointing at a
+  // merged parent is what spends it for a ref parked at the tip.
+  let runTipCredited = new Set()
+  if (mergedFiles && runSha) {
+    try {
+      runTipCredited = creditRunTipTasks({
+        tasks,
+        shaByTask: await resolveTaskShas(git, { tasks, runId }),
+        runSha,
+        mergedFiles,
+      })
+    } catch (err) {
+      if (!(err instanceof GitError)) throw err
+      problems.push(`could not resolve this run's task refs: ${err.message} — a task whose ref sits at the run tip is reported as not integrated`)
+    }
+  }
+
   const taskReports = []
   for (const task of tasks) {
     const branch = resolveTaskBranch(task, runId)
@@ -140,7 +160,11 @@ export async function collectDoctorReport({ git, runId, runBranch, baseBranch, t
         // `runFilesetCheck` in `scripts/gate-runner.mjs` computes this same test the same way,
         // over the same index, with the same limits — that is the whole point of importing it
         // rather than keeping a second implementation that could silently disagree.
-        entry.landed = anchorSha ? landedForFiles(mergedFiles ?? new Map(), sha, task.files) : false
+        entry.landed = !anchorSha
+          ? false
+          : sha === runSha
+            ? runTipCredited.has(task.id)
+            : landedForFiles(mergedFiles ?? new Map(), sha, task.files)
         if (entry.changed.length === 0 && !entry.landed) {
           problems.push(`${task.id}: branch ${branch} has no file changes past its fork point — the work landed on another ref and this task would merge as a no-op`)
         }

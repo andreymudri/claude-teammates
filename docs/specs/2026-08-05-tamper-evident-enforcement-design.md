@@ -77,6 +77,28 @@ where the corresponding claim is made:
      the identical sha**, and the gate already reports every task branch's sha in `branchShas`.
      Recorded here so a future check does not have to rediscover it; nothing implements it yet.
 
+  3. The RUN-TIP variant, now caught by SCARCITY rather than left open. A ref sitting exactly at
+     the run tip is named by no merge, so the declared-files predicate has nothing to attribute
+     by and used to read false unconditionally — which failed a genuinely landed task whose ref
+     a fix round re-pointed with the brief's own `git checkout -B <task> <run branch>`.
+     `creditRunTipTasks` credits such a ref only by matching it to a merged parent that carried
+     its WHOLE declared set and that **no other task ref already points at**, one task per
+     parent. A merged contribution was earned once and can only be spent once.
+
+     A first attempt (`f6e2191`, reverted by `227abf2`) asked containment alone — "did some
+     merged parent carry this task's whole declared set" — and was a fail-open in the routine
+     case: the gate for phase N runs before any phase-N branch is merged, so an idle phase-N ref
+     sits exactly at the run tip, and a phase-2 task that only MODIFIES a file phase 1 created
+     has its declared set contained in phase 1's merge by construction. Executed: T1 merges
+     `a.mjs` + `b.mjs`, T2 declares only `a.mjs` and writes nothing, verdict PASS. Under
+     scarcity T1's own ref still points at that parent, so it is spent and T2 matches nothing.
+     Attributing by the merge SUBJECT was rejected on the `status.json` grounds — `tm-integrator`
+     writes that subject and is one of the enforced parties.
+
+     What survives, pinned as a LIMIT: a **spare parent**. Two merges crediting the same task —
+     an initial integration plus a fix round's own merge — leave one parent unclaimed, and a
+     run-tip ref whose declared set that spare merge contains in full matches it.
+
   One variant that used to sit in this bullet is now CAUGHT, and is pinned in
   `tests/adversarial.test.mjs` under the defended section: a teammate pointing a task ref at a
   run tip that already carries someone else's real work, and committing nothing itself.

@@ -13,6 +13,7 @@ import {
   runOwnershipCheck,
   mergedParentFiles,
   landedForFiles,
+  creditRunTipTasks,
 } from '../scripts/gate-runner.mjs'
 import { GitError, createGit, defaultGitExec } from '../scripts/git.mjs'
 
@@ -1186,6 +1187,50 @@ function singleTaskPlan() {
     '- Create: `a.mjs`',
     '',
     '**Depends:** none',
+    '',
+  ].join('\n')
+}
+
+// Two phases whose declared sets OVERLAP: T2 modifies a file T1 created. Legal across phases
+// (`scripts/phases.mjs` enforces disjointness only within a phase) and routine in a real plan,
+// which is what makes it the shape a containment-only run-tip test lets through.
+function overlappingTwoPhasePlan() {
+  return [
+    '### Task 1: first task',
+    '',
+    '**Files:**',
+    '- Create: `a.mjs`',
+    '- Create: `b.mjs`',
+    '',
+    '**Depends:** none',
+    '',
+    '### Task 2: second task',
+    '',
+    '**Files:**',
+    '- Modify: `a.mjs`',
+    '',
+    '**Depends:** T1',
+    '',
+  ].join('\n')
+}
+
+// Two phases with disjoint declared sets, both of which a single merge carries — so two run-tip
+// refs are each individually eligible for the same parent and only scarcity separates them.
+function twoPhaseBothFilesPlan() {
+  return [
+    '### Task 1: first task',
+    '',
+    '**Files:**',
+    '- Create: `a.mjs`',
+    '',
+    '**Depends:** none',
+    '',
+    '### Task 2: second task',
+    '',
+    '**Files:**',
+    '- Modify: `b.mjs`',
+    '',
+    '**Depends:** T1',
     '',
   ].join('\n')
 }
@@ -2399,15 +2444,14 @@ test('a solo run builds no preview and consults no links even when ctx.previewLi
   assert.deepEqual(calls.map((c) => c.cwd), ['/project/root'])
 })
 
-// --- LIMIT: ownWorkBase (real repo) ---------------------------------------------------------
+// --- ownWorkBase: the run-tip position, closed by scarcity (real repo) -----------------------
 //
-// Settled, not closed, by the plan's Task 2 Step 5: T1 (run `claims`) isolated this shape and
-// confirmed it against the pre-task baseline. The declared-files predicate does not resolve it
-// — see the `ownWorkBase` entry in the "What remains open" comment above `states.push(...)` in
-// `deriveContext`, in this file, for why. Pinned here as a LIMIT (the gate FAILs a task that is
-// genuinely, fully landed) so a future change that happens to fix it is noticed rather than
-// silently assumed to still be open.
-test('LIMIT (ownWorkBase): a fix round re-pointing an already-integrated branch at the run tip reads as having done no work (real repo)', async () => {
+// Was a LIMIT: the gate FAILed a genuinely, fully landed task because a ref at the run tip is not
+// a key in `mergedParentFiles`'s index. `creditRunTipTasks` matches such a ref to a merged parent
+// that carried its whole declared set and that no other task ref already points at. This is the
+// exact construction the LIMIT used to pin, with the assertions inverted — the shape was not
+// changed to make it pass.
+test('ownWorkBase: a fix round re-pointing an already-integrated branch at the run tip reads as landed (real repo)', async () => {
   await withRepo(async ({ root, sh, git }) => {
     await writeFile(path.join(root, 'plan.md'), singleTaskPlan(), 'utf8')
     await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
@@ -2424,19 +2468,183 @@ test('LIMIT (ownWorkBase): a fix round re-pointing an already-integrated branch 
 
     // The brief's own recommended fix-round step: `git checkout -B teammates/r1/T1 run`. T1's
     // work is already, genuinely, on the run branch — this only moves where the CONVENTIONAL
-    // REF points, at a commit that is already the run tip.
+    // REF points, at a commit that is already the run tip. Nothing else claims T1's merge, so
+    // the parent is free and T1 matches it.
     await sh(['branch', '-f', 'teammates/r1/T1', 'run'])
 
     const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
-    // The limit: a genuinely-landed task reads as not integrated, reopening a phase that has
-    // nothing left to do.
-    assert.deepEqual(ctx.integratedPhases, [])
-    assert.equal(ctx.currentPhase, 1)
+    assert.deepEqual(ctx.integratedPhases, [1])
 
     const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
-    // And the gate FAILs it outright, naming a cause ("contributes no file changes") that is
-    // not the true one — the work is on the run branch; only the ref's own history is empty.
-    assert.equal(res.status, 'fail')
-    assert.match(res.output, /T1: branch teammates\/r1\/T1 contributes no file changes past its fork point/)
+    assert.equal(res.status, 'pass')
   })
+})
+
+// The regression guard, and the reason `creditRunTipTasks` matches instead of testing
+// containment. A closure that asked only "did some merged parent carry this task's whole declared
+// set" (`f6e2191`, reverted by `227abf2`) passed this: T1's merge carried a SUPERSET of T2's
+// declared set, which a phase-2 task that only MODIFIES a file phase 1 created has by
+// construction. T1's own ref still points at that parent, so it is spent and T2 matches nothing.
+// If this test ever goes green on a PASS, the enforcing check has been traded away again.
+test('a run-tip ref is NOT credited with a merge another task ref still points at (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'plan.md'), overlappingTwoPhasePlan(), 'utf8')
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+
+    // T1 declares and lands BOTH files; T2 declares only `a.mjs` and never writes anything.
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    await writeFile(path.join(root, 'b.mjs'), 'export const b = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+
+    await sh(['branch', '-f', 'teammates/r1/T2', 'run'])
+
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+    assert.equal(ctx.currentPhase, 2)
+    const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
+    assert.equal(res.status, 'fail')
+    assert.match(res.output, /T2: branch teammates\/r1\/T2 contributes no file changes past its fork point/)
+  })
+})
+
+// Scarcity is a cap, not a per-ref test: two refs both re-pointed to the run tip cannot both be
+// credited with the one merge between them, so one is always left over and its phase does not
+// read as integrated.
+test('two refs at the run tip cannot both be credited with a single merged parent (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'plan.md'), twoPhaseBothFilesPlan(), 'utf8')
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    await writeFile(path.join(root, 'b.mjs'), 'export const b = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+
+    await sh(['branch', '-f', 'teammates/r1/T1', 'run'])
+    await sh(['branch', '-f', 'teammates/r1/T2', 'run'])
+
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+    const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
+    assert.equal(res.status, 'fail')
+  })
+})
+
+// --- LIMIT: the spare parent (real repo) -----------------------------------------------------
+//
+// What scarcity does not close. Two merges crediting the SAME task — an initial integration plus
+// a fix round's own merge — put two parents in the index while only one ref points at one of
+// them. The leftover is unclaimed, so a run-tip ref whose declared set that spare merge happens
+// to contain in full matches it. Much narrower than plain containment, which needed only a
+// superset anywhere in range, but real. Pinned so a future change that closes it is noticed.
+test('LIMIT (spare parent): a run-tip ref matches a fix round\'s leftover merge (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'plan.md'), overlappingTwoPhasePlan(), 'utf8')
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+
+    // T1 lands `a.mjs`, then a fix round lands a second merge also touching `a.mjs`. Two parents
+    // now carry T1's file; T1's ref can only point at one of them.
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+    await sh(['checkout', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 2\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 fix round'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1 again', 'teammates/r1/T1'])
+
+    // T2 declares `a.mjs`, writes nothing, parks at the run tip, and matches the spare parent.
+    await sh(['branch', '-f', 'teammates/r1/T2', 'run'])
+
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+    const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
+    assert.equal(res.status, 'pass')
+  })
+})
+
+test('creditRunTipTasks matches on containment, spends each parent once, and never credits an empty declared set', () => {
+  const mergedFiles = new Map([
+    ['P1', new Set(['a.mjs', 'b.mjs'])],
+    ['P2', new Set(['c.mjs'])],
+  ])
+  const runSha = 'RUNTIP'
+
+  // A parent no ref points at, containing the whole declared set: credited.
+  assert.deepEqual(
+    [...creditRunTipTasks({
+      tasks: [{ id: 'T1', files: ['a.mjs'] }],
+      shaByTask: new Map([['T1', runSha]]),
+      runSha, mergedFiles,
+    })],
+    ['T1'],
+  )
+
+  // The same parent, but another task's ref points AT it: spent, so nothing is credited.
+  assert.deepEqual(
+    [...creditRunTipTasks({
+      tasks: [{ id: 'T1', files: ['a.mjs', 'b.mjs'] }, { id: 'T2', files: ['a.mjs'] }],
+      shaByTask: new Map([['T1', 'P1'], ['T2', runSha]]),
+      runSha, mergedFiles,
+    })],
+    [],
+  )
+
+  // Two run-tip tasks, one eligible parent: exactly one is credited, never both.
+  assert.equal(
+    creditRunTipTasks({
+      tasks: [{ id: 'T1', files: ['a.mjs'] }, { id: 'T2', files: ['b.mjs'] }],
+      shaByTask: new Map([['T1', runSha], ['T2', runSha]]),
+      runSha, mergedFiles,
+    }).size,
+    1,
+  )
+
+  // Augmenting, not greedy: T1 can only use P1, T2 can use either. T1 must not be starved by T2
+  // taking P1 first.
+  assert.equal(
+    creditRunTipTasks({
+      tasks: [{ id: 'T2', files: [] }, { id: 'T1', files: ['a.mjs'] }],
+      shaByTask: new Map([['T1', runSha], ['T2', runSha]]),
+      runSha, mergedFiles,
+    }).has('T1'),
+    true,
+  )
+
+  // Partial containment is not containment.
+  assert.deepEqual(
+    [...creditRunTipTasks({
+      tasks: [{ id: 'T1', files: ['a.mjs', 'c.mjs'] }],
+      shaByTask: new Map([['T1', runSha]]),
+      runSha, mergedFiles,
+    })],
+    [],
+  )
+
+  // An empty declared set is contained in every parent and must still be credited by none.
+  assert.deepEqual(
+    [...creditRunTipTasks({
+      tasks: [{ id: 'T1', files: [] }],
+      shaByTask: new Map([['T1', runSha]]),
+      runSha, mergedFiles,
+    })],
+    [],
+  )
 })
