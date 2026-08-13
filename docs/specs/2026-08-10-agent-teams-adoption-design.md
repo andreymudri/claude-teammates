@@ -171,7 +171,7 @@ handler must not be written against the current ones.
 **The handler must not read the printed text to tell the two apart.** The rejection path prints a
 line beginning `gate does not pass for phase <name>: <checks>`, and matching on it would work.
 Taking a programmatic decision from the shape of a line is precisely what this project refuses
-everywhere else; `skills/phase-gate/SKILL.md:87` states the rule in as many words — "Read the exit
+everywhere else; `skills/phase-gate/SKILL.md:86-87` states the rule in as many words — "Read the exit
 code, not the shape of a line" — and states it about output this same CLI prints. A *teammate*
 reading its own command's output and acting on what it says is a different matter and is fine. A
 hook deciding whether to block is not.
@@ -216,20 +216,26 @@ the phase gate remains the thing that decides.
 
 ### Two limits, stated in the handler
 
-- **Any teammate can rewrite any record in the run.** The location records are keyed by task id in
-  one directory shared across the run, not scoped per writer, and every teammate has Bash. So this
-  is not merely "writable by its subject". The simple case is a teammate deleting or rewriting its
-  own record: its worktree then matches nothing, and its stop is allowed unchecked. The
-  cross-teammate case is stranger and worth stating exactly, because it runs opposite to intuition.
-  If A runs `locate --task T2` naming A's own worktree, it overwrites B's record. B's worktree now
-  matches nothing, so B stops with no check at all — B is not harmed, it is merely unenforced. A,
-  meanwhile, has pointed the hook at itself under T2: A's stop resolves to the forged record and is
-  judged against T2's branch, which is not A's work, so A is the one that gets blocked for failures
-  it did not cause. Tampering here removes enforcement from the victim and misdirects it onto the
-  tamperer; it does not let a teammate push a cost onto a rival. What it never does is produce a
-  false PASS: the gate recomputes every verdict from git, takes its plan path from the operator,
-  and reads nothing under `.teammates/`. Losing the early catch is the whole of what any of this
-  buys. Tamper-evident, not tamper-proof, on the same footing as everything else in that directory.
+- **Any teammate can create or overwrite any record in the run.** The records live in one directory
+  keyed by task id, shared across the run and not access-controlled, and every teammate has a
+  shell — so the `locate` command is one way to write one, not the only way. Both fields are
+  attacker-chosen: a record may name a worktree that is not the writer's, and may be filed under a
+  task id the writer was not given, including one no task uses.
+
+  Consequences reachable from that include, and are not limited to: a teammate leaving itself
+  unenforced, so its stop is allowed with no check; a *different* teammate left unenforced, its
+  worktree no longer matching any record; and a teammate judged against a task that is not its own,
+  because the record its worktree now resolves through describes someone else's work. Which of
+  these a given forgery produces depends on the file it writes and on the resolution order, and
+  this list is not offered as exhaustive — three earlier versions of this paragraph each named a
+  single direction of harm and each was falsified by an attack shape it had not considered.
+
+  The bound that does hold, and the only one worth resting on, is that **none of it produces a
+  false gate PASS.** The gate recomputes every verdict from git, takes its plan path from the
+  operator, and reads nothing under `.teammates/`. Forgery costs somebody the early catch, or aims
+  it at the wrong task; it cannot make a failing task pass. Tamper-evident, not tamper-proof, on
+  the same footing as everything else in that directory — which is why no check reads any of it.
+  `scripts/state.mjs` states the same shape at the reader itself; the two must not drift apart.
 - **It fails open.** A handler that cannot run — no `node`, a timeout, a malformed run directory —
   exits non-zero-but-not-2, which the harness treats as a non-blocking error. The teammate stops
   and the gate catches what the hook did not. The harness reinforces this from its own side: for
