@@ -1,6 +1,6 @@
 # Agent teams adoption
 
-Status: approved, not yet planned
+Status: approved; retargeted 2026-08-13 to SubagentStop — see docs/specs/2026-08-13-agent-teams-probe-findings.md
 Date: 2026-08-10
 
 ## Problem
@@ -10,22 +10,27 @@ development process "onto the Teammates feature (background agents, FleetView, `
 Task tooling)". Agent teams has since shipped as a distinct, environment-gated session mode, and
 this plugin does not use it. A sweep for `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `TeamCreate`,
 `teammateMode`, `~/.claude/teams`, `~/.claude/tasks`, and the `TeammateIdle` / `TaskCreated` /
-`TaskCompleted` hooks returns nothing outside prose in that original spec.
+`TaskCompleted` hooks returns nothing anywhere in the repository outside this file. It does not
+match in `docs/specs/2026-08-05-claude-teammates-design.md` either: that spec frames the purpose in
+the prose quoted above and contains none of those terms.
 
 What the plugin uses instead is the `Agent` tool with `isolation: 'worktree'`, a generated
 `Workflow` script for phases of three or more tasks, and its own coordination in
 `.teammates/<runId>/` behind `cli.mjs claim` / `unclaim`. That is a working design, not a broken
 one — but three capabilities the harness now provides are being reimplemented or forgone:
 
-- **Enforcement at the point a teammate finishes.** `TeammateIdle` can refuse to let a teammate go
-  idle. Today nothing does; a teammate that committed nothing returns `done`, and the mistake is
-  caught later at the gate, after the phase's wall-clock is already spent.
-- **Addressability.** `skills/fleet-lifecycle/SKILL.md:66` records that `SendMessage` reaches only
+- **Enforcement at the point a teammate finishes.** A stop-path hook can refuse to let a teammate
+  finish. Today nothing does; a teammate that committed nothing returns `done`, and the mistake is
+  caught later at the gate, after the phase's wall-clock is already spent. This is the one item
+  that survived measurement, and it is what the rest of this document specifies — against
+  `SubagentStop`, not `TeammateIdle`; see **What was measured**.
+- **Addressability.** `skills/fleet-lifecycle/SKILL.md:67` records that `SendMessage` reaches only
   directly-dispatched teammates, never agents inside a running `Workflow` — which is exactly the
   wide phases where a wrong teammate costs most. The project memory records six agents stalled in
-  one run with recovery by `SendMessage` as the containment.
+  one run with recovery by `SendMessage` as the containment. *Teams mode does not fix this: see
+  **Why fan-out is not part of this**.*
 - **Visibility.** Teammates appear in the agent panel and can be read and messaged by the user
-  without going through the lead.
+  without going through the lead. *Not pursued; nothing below depends on it.*
 
 ## Non-goals
 
@@ -51,159 +56,161 @@ design.
 
 A run must produce the same verdict with the flag on or off. Everything that decides whether work
 is correct — the phase gate, the file-set enforcement, `tm-integrator` as the sole writer to the
-run branch, `.teammates/` as the only coordination store — is byte-identical in both modes. What
-the flag changes is how a phase fans out and what happens when a teammate tries to finish.
+run branch, `.teammates/` as the only coordination store — is byte-identical in both modes. Since
+the retarget to `SubagentStop` nothing in the plugin branches on the flag at all, so that property
+holds trivially rather than by construction: what this design changes is what happens when a
+teammate tries to finish, in both modes alike.
 
-That is also why the `TeammateIdle` hook runs `complete` rather than anything new: it is the
-verification the teammate was already told to run before returning, moved to a point the teammate
-cannot skip.
+The hook runs `complete` rather than anything new because that is the verification a teammate
+should have run before returning. Stated as such in the 2026-08-10 draft, that was false: nothing
+in the repository invoked `complete` on any path, so there was no existing instruction to relocate.
+This design adds that instruction — to the `tm-implementer` contract and to the dispatched brief —
+and the hook is the backstop for a teammate that skips it. The backstop is not the same run: the
+hook runs the cheap enforcement subset (`fileset`, `ownership`, `merge`), never the full gate,
+because the gate's `command` checks are the project's test suite and running that inside a stop
+hook makes a timeout the usual outcome.
 
-## Blocking verification
+## What was measured
 
-Three questions have no documented answer. The implementation plan opens with them, and the first
-one gates the rest of this design.
+The three questions this design opened with were closed by measurement against Claude Code 2.1.231
+on 2026-08-13. Evidence, including method and its limits, is in
+`docs/specs/2026-08-13-agent-teams-probe-findings.md`.
 
-1. **Does `isolation: 'worktree'` still apply to a teammate spawned under teams mode?** Agent teams
-   is a coordination layer — shared task list, mailbox, panel — and worktree isolation is a
-   parameter on the `Agent` tool. Nothing in the agent-teams documentation mentions worktrees, and
-   its "next steps" points at git worktrees as a *manual* alternative for parallel sessions. If
-   isolation does not survive, teammates share the main worktree, "no teammate ever touches the
-   main worktree" is false in teams mode, and adoption stops at the hook: **Detection**, **The
-   `TeammateIdle` hook** and the `fleet-supervision` half of **Skill changes** ship; **Fan-out**
-   does not, and the `Workflow` threshold stays as it is in both modes.
-2. **What `TeammateIdle` actually delivers.** The published field list for these three events is
-   explicitly partial, and whether the event fires at all for a worktree-isolated teammate is
-   unconfirmed. The design depends only on `cwd`, which is a common field — but "the hook fires"
-   is itself the assumption.
-3. **Whether `tm-implementer` ever dispatches a background subagent.** In-process teammates cannot;
-   the attempt returns an error. Answered by inspection — `agents/tm-implementer.md` dispatches
-   nothing and declares neither `skills` nor `mcpServers` frontmatter, so the "frontmatter is
-   ignored for teammates" caveat does not bite either — and re-confirmed by the plan rather than
-   assumed.
+- **`isolation: 'worktree'` survives.** A spawned agent lands in a linked worktree — `--git-dir` is
+  `.git/worktrees/agent-<hash>`, `--git-common-dir` is `.git` — locked and clean.
+- **`TeammateIdle` exists in 2.1.231 but is unreachable.** It has an entry in the hook event table,
+  an executor and a "prevented continuation" path, and it is gated on team context (`B_()`), which
+  the environment variable does not create and an `Agent`-spawned subagent never has. With
+  `TeamCreate` removed from the harness there is no way to reach it at all. Its payload carries
+  `teammate_name` and `team_name`, and leaves `agent_id` / `agent_type` undefined — not the shape
+  the 2026-08-10 draft resolved a task from.
+- **`tm-implementer` dispatches no subagent** and declares neither `skills:` nor `mcpServers:`
+  frontmatter, confirmed by inspection, so the "frontmatter is ignored for teammates" caveat does
+  not bite.
 
-## Detection
+## The `SubagentStop` hook
 
-The variable lives in the lead's environment and every `node scripts/cli.mjs …` the lead spawns
-inherits it, so the plugin reads `process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` directly. No
-settings file is parsed: `settings.json` is one of several places the value can come from, and
-reading the process environment is the one answer that is true however it got there.
+A new handler, `scripts/subagent-stop.mjs`, declared under a `SubagentStop` key with no matcher —
+the event takes none. It is a Node script rather than a `hooks/` shell script because it parses
+JSON on stdin and reuses `scripts/state.mjs`.
 
-Two surfaces, because two readers need it:
-
-- `doctor` gains an `agent teams: on|off` line, so the operator asking why a run fanned out one way
-  gets it from the command that already answers "what does the repository say".
-- `cli.mjs teams-mode` exits 0 when on and 1 when off, printing nothing. Skills branch on the exit
-  code, the same idiom `claim` already uses.
-
-`on` means only that the variable is set to `1`. It is not a claim that a team formed, that the
-harness supports it, or that the running version behaves as this spec describes — and the doctor
-line says so, because a line reading `agent teams: on` next to a run that spawned no team would
-otherwise be read as the plugin's assurance.
-
-## The `TeammateIdle` hook
-
-A new handler, `hooks/teammate-idle`, declared under a `TeammateIdle` key with no matcher — the
-event ignores matchers.
+Described below is the handler this design builds; none of it exists on `master` today.
 
 ### It no-ops far more often than it acts
 
-The hook fires for every idle agent in every session with this plugin installed: a reviewer in an
-unrelated project, this plugin's own read-only `tm-reviewer`, any subagent in a repository with no
-run at all. It exits 0 immediately unless all of:
+The hook fires for every subagent stop in every session with this plugin installed: a reviewer in
+an unrelated project, this plugin's own read-only `tm-reviewer`, any subagent in a repository with
+no run at all. It returns success — allowing the stop — immediately unless all of:
 
-- `cwd` resolves inside a git worktree, and
-- the branch checked out there matches `teammates/<runId>/<taskId>`, and
-- `.teammates/<runId>/` exists.
+- `stop_hook_active` is false, and
+- `cwd` is a string that resolves inside a git repository, and
+- a location record under `.teammates/<runId>/worktrees/` names that worktree, and
+- the run's recorded plan path is present.
 
 Anything else is not this plugin's business, and the handler must be cheap enough to say so — the
 common case is a single `git rev-parse` in a directory that has nothing to do with a run.
 
-### The task comes from git
+### The task comes from a record the teammate writes
 
-The documented payload carries `agent_id` and `agent_type`, and no task identifier. Resolving
-`cwd` → branch → `runId` / `taskId` takes it from the ref the teammate is actually committing to,
-which is the same ref the gate enforces by convention. A teammate that renamed its branch resolves
-to nothing here and is allowed to go idle — and then fails the gate, which is the correct order:
-this hook is an early catch, never the thing that decides.
+The payload carries `agent_id` and `agent_type`, and no task identifier. It cannot be resolved
+through the checked-out branch either: the harness names the worktree branch `worktree-agent-<hash>`
+itself, and `teammates/<runId>/<taskId>` exists only once the implementer creates it — so branch
+resolution would miss precisely the teammate that did nothing, which is the case the hook exists
+for. Instead each implementer writes `.teammates/<runId>/worktrees/<taskId>.json` as its first act
+after checkout, and the handler maps `cwd` back to a task through it. A `cwd` that matches no
+record is allowed to stop — and then fails the gate, which is the correct order: this hook is an
+early catch, never the thing that decides.
 
 ### What it runs
 
-`cli.mjs complete --run <runId> --task <taskId> --plan <planPath> --root <repo root>`. Exit 0
-allows the idle. Non-zero exits 2 with the failure text on stderr, which the harness feeds back to
-the teammate as the reason to keep working. `complete` is per-task and computable while siblings
-are still working, so nothing deadlocks — blocking on the *phase gate* would, because the gate
-cannot run until the phase is idle.
+`cli.mjs complete --run <runId> --task <taskId> --plan <planPath> --root <repo root>
+--enforcement-only`. Exit 0 allows the stop. Exit 2 is a verdict — the checks ran and rejected this
+task — and the handler exits 2 in turn with the failure text on stderr, which the harness feeds back
+to the teammate as the reason to keep working. Exit 4 is "cannot verify": no gate manifest, an
+underivable context, an unknown task id. That is a fact about the run's configuration rather than
+about this teammate's work, so it allows the stop, as does any other exit code, which can only mean
+a broken handler.
 
-### Two arguments the hook is not given
+`complete` is per-task and computable while siblings are still working, so nothing deadlocks —
+blocking on the *phase gate* would, because the gate cannot run until the phase is finished.
 
-`complete` requires `--plan`, and `deriveContext` reads that plan out of git at the run anchor
-(`scripts/cli.mjs:861`), so it is a repo-relative path — not something derivable from `cwd`.
-Nothing under `.teammates/<runId>/` records it today. `init-run` starts recording the repo-relative
-plan path it was invoked with, and the hook reads it from there.
+### Three arguments the hook is not given
 
-That record is written into the directory the teammate can edit, and the consequence has to be
-stated rather than glossed: a teammate that rewrites the recorded path makes the hook verify
-against the wrong plan. What that buys is a teammate that goes idle unchecked — it does **not**
-produce a passing gate, because the gate takes its plan path from the operator and reads it from
-git at the anchor, and never consults this file. The failure mode is losing the early catch, not
-gaining a false PASS, and the hook is designed as an early catch for exactly that reason.
+`complete` requires `--plan`, and `deriveContext` (`scripts/gate-runner.mjs:369`) reads that plan
+out of git at the run anchor (`scripts/gate-runner.mjs:378`), so it is a repo-relative path — not
+something derivable from `cwd`. Nothing under `.teammates/<runId>/` records it today. `init-run`
+starts recording the repo-relative plan path it was invoked with, and the hook reads it from there.
+
+`--task` is not derivable either, and not for the same reason. The branch at the teammate's `cwd`
+is `worktree-agent-<hash>`, chosen by the harness; `teammates/<runId>/<taskId>` exists only because
+the implementer creates it. Resolving the task from the checked-out branch would therefore fail
+exactly for a teammate that created no branch — the do-nothing case this hook exists to catch. The
+task id comes instead from the location record the teammate writes at start.
 
 `--root` must be the **main** repository root, not the teammate's worktree: run from inside the
 worktree, the CLI would resolve the run branch to the task branch checked out there. The hook
 derives it from `git rev-parse --path-format=absolute --git-common-dir` and takes that directory's
 parent, which is the main worktree for a linked worktree and the repository itself otherwise.
 
-### Bounded at two blocks
+### The harness bounds this, not us
 
-Each block is appended to `.teammates/<runId>/idle-blocks.json` with its reason and the task id. On
-the third idle for the same task the hook allows it through and records the task `orphaned` with
-the unresolved failure attached. The phase gate still fails: a released teammate is not a passed
-task, and nothing reports it done.
+The 2026-08-10 draft specified a block counter in `.teammates/<runId>/idle-blocks.json`. It is not
+built. The harness already caps consecutive blocks — read out of 2.1.231, the cap is read from
+`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` with a default of 8 — and that count lives in the harness
+process, so unlike anything under `.teammates/` the teammate it counts cannot reset it.
+
+The handler additionally returns success whenever `stop_hook_active` is true, which is the
+harness's own documented guidance for `Stop` and `SubagentStop` handlers. That makes one stop cost
+one forced retry: the teammate is blocked once, gets the failure text, takes another turn, and is
+not blocked again for the same stop.
+
+A block hands the teammate a reason; it cannot compel a fix. Measured on 2026-08-13, a probe agent
+read the injected stderr, acknowledged it, and returned `status: "done"` anyway. That is why the
+phase gate remains the thing that decides.
 
 ### Two limits, stated in the handler
 
-- **The counter is writable by its subject.** The teammate has Bash and can zero
-  `idle-blocks.json`. Tamper-evident, not tamper-proof — the same footing as everything else under
-  `.teammates/`, which is why no check reads any of it.
+- **The location record is writable by its subject.** Like everything under `.teammates/`, the
+  teammate has Bash and can rewrite or delete the record that names its worktree. Doing so makes
+  the hook fail to resolve a task and allow the stop. What that buys is stopping unchecked — it
+  does **not** produce a passing gate, because the gate derives every verdict from git, takes its
+  plan path from the operator, and reads nothing under `.teammates/`. The teammate loses itself the
+  early catch and gains nothing. Tamper-evident, not tamper-proof.
 - **It fails open.** A handler that cannot run — no `node`, a timeout, a malformed run directory —
-  exits non-zero-but-not-2, which the harness treats as a non-blocking error. The teammate goes
-  idle and the gate catches what the hook did not. A broken hook must not wedge every agent on the
-  machine, and the failure is loud in the transcript rather than silent.
+  exits non-zero-but-not-2, which the harness treats as a non-blocking error. The teammate stops
+  and the gate catches what the hook did not. The harness reinforces this from its own side: for
+  `SubagentStop` an exit 2 with empty stdout whose stderr matches `no such file|can't open` is
+  reported as a missing hook script and downgraded to success, so a hook pointing at nothing cannot
+  wedge every agent on the machine. The failure is loud in the transcript rather than silent.
 
-## Fan-out
+## Why fan-out is not part of this
 
-`skills/parallel-execution/SKILL.md` currently sends phases of three or more tasks through a
-generated `Workflow` and everything smaller through direct `Agent` calls. In teams mode that
-forfeits the point: `Workflow` agents are not teammates, cannot receive `SendMessage`, and do not
-raise `TeammateIdle`.
-
-With the flag on, every task of a phase is dispatched as a named background `Agent`, whatever the
-count — still capped by `maxParallel`, still `isolation: 'worktree'`, still
-`agentType: claude-teammates:tm-implementer`. With the flag off, the current rule is untouched.
-
-Names are `tm-<runId>-<taskId>`, which satisfies the harness name pattern. Predictable names are
-required, not cosmetic: `SendMessage` addresses by name, and the documentation is explicit that
-stable names exist only because the lead was told what to call each teammate.
-
-**What is given up with the flag on:** `Workflow`'s deterministic control flow and its
-`resumeFromRunId` cache. `.teammates/` plus `rebuild-state` covers part of that and not all of it —
-`rebuild-state` reconstructs task state from branches and deliberately reconstructs no gate
-history. Stated here rather than discovered during a resumed run.
+The 2026-08-10 draft proposed dispatching every task of a phase as a named background `Agent` with
+the flag on, and leaving the three-or-more-tasks `Workflow` threshold alone with it off. That
+rationale does not survive the measurement. It rested on `Workflow` agents not being teammates —
+but `Agent`-spawned agents are not teammates with the flag on either, and a direct spawn already
+returns an id usable with `SendMessage`. Teams mode therefore buys no addressability the current
+dispatch lacks, so the section is dropped rather than made conditional. The `Workflow` threshold in
+`skills/parallel-execution/SKILL.md` is unchanged, in both modes.
 
 ## Skill changes
 
-- **`fleet-lifecycle`** — the `SendMessage` caveat at `SKILL.md:66` becomes conditional. In teams
-  mode every task's teammate is addressable because no `Workflow` is involved; with the flag off
-  the caveat stands unchanged and stays true.
+- **`fleet-lifecycle`** — the `SendMessage` caveat at `SKILL.md:67` stands exactly as written: an
+  agent inside a running `Workflow` cannot receive `SendMessage` in either mode. That is why fix
+  rounds address directly dispatched teammates only, and why a phase dispatched through `Workflow`
+  has no live teammate to address and respawns instead.
 - **`fleet-supervision`** — the agent panel shows teammates, and the digest stays authoritative.
   The panel renders harness state; `doctor` and `liveness` read git. A panel row reading "working"
   is the same class of self-report this plugin refuses everywhere else, and the skill says so.
-- **`using-teammates`** — the fleet-versus-inline preview names the active mode, so the cost being
-  accepted is the one shown.
+- **`using-teammates`** — unchanged. The 2026-08-10 draft had the fleet-versus-inline preview name
+  the active mode; with nothing in the plugin behaving differently with the flag on, naming it
+  would imply a difference that does not exist.
 
 `liveness` does not become redundant, and the skill must not imply it. The two cover disjoint
-failures: `TeammateIdle` fires when a teammate *tries to finish*, and a stalled teammate never
-tries, so the hook never runs. The stall case remains `liveness`'s alone.
+failures: `SubagentStop` fires when a teammate *ends a turn*, and a stalled teammate never does, so
+no stop-path hook runs for it. `TeammateIdle` would not have helped here either — it is dispatched
+from inside the Stop executor, at the same moment, so "idle" there means the same thing. The stall
+case remains `liveness`'s alone.
 
 ## Standing risk
 
@@ -217,3 +224,9 @@ compatibility note nobody reads next to the code.
 The plugin's own version check already reports its installed version each time it changes; it does
 not and should not attempt to gate on a Claude Code version, because there is no interface here for
 asking one and a wrong guess would disable a working feature.
+
+That applies with full force to the retarget. The `SubagentStop` payload shape, the consecutive
+block cap and the `B_()` team-context gate were read out of a minified binary rather than a
+documented interface; they are true of 2.1.231 and of nothing else. The handler must therefore
+degrade to allowing the stop whenever what it expects is absent — an unparseable payload, a missing
+`cwd`, a `complete` exit it does not recognise — rather than assuming any of them will be there.
