@@ -46,9 +46,10 @@ const checkoutSteps = (task, baseBranch) => (baseBranch ? [
 
 // Files that have historically changed alongside this task's declared set. They are OUTSIDE the
 // set, so the teammate may not edit them — the point is the opposite: they are what its change
-// is most likely to break without touching. Rendered only when the caller supplied any, so a
-// repository with no history, or a task whose files are new, shows no section rather than an
-// empty one.
+// is most likely to break without touching. Rendered only when the caller supplied a NON-EMPTY
+// list, so a repository with no history, or a task whose files are new, shows no section rather
+// than a header with nothing under it — the `.length` test is what distinguishes an empty array
+// from an absent key, and both cases are pinned in tests/brief.test.mjs.
 const blastRadius = (task) => (task.neighbours && task.neighbours.length ? [
   'BLAST RADIUS. These files are not yours and you may not edit them. They have changed together',
   'with your files in the past, so they are where your change is most likely to break something:',
@@ -77,12 +78,19 @@ const locateStep = (task, runId) => (runId ? [
 // either missing the command could not run, so the section is dropped rather than rendered
 // with an empty flag value.
 //
-// `complete` has three outcomes, not two (scripts/cli.mjs), and the brief states all three.
-// Exit 4 is "cannot verify" — no gate manifest, an underivable context, an unknown task id —
-// which is a fact about the run's configuration, not about the teammate's work. A repository
-// with no tracked teammates.gate.json is a supported state, so telling the teammate to fix
-// whatever a non-zero exit names would send every implementer looping on a message that names
-// nothing to fix, or reporting blocked with the work finished.
+// The exit codes below are read out of `complete` in scripts/cli.mjs, not inferred:
+//   0  the task passes and is marked done in status.json
+//   1  the gate passed but status.json is missing or does not list the task — bookkeeping
+//   2  teammates.gate.json is present and MALFORMED — configuration only
+//   4  FOUR different situations: no gate manifest, an underivable context, a task the plan
+//      does not contain, and — the case that matters most — the recomputed gate REJECTING
+//      this task, which prints a first line beginning `gate does not pass for phase`.
+// So the code alone cannot separate "your work is wrong" from "this run cannot be verified":
+// only that printed first line can. The brief therefore keys the teammate off what it can
+// actually observe. A teammate told that 4 means "proceed" would return done on a failing
+// fileset check. Reading a printed line is fine for an agent, which reads text anyway; what
+// must never be built on text is a programmatic decision, which is why the hook gets a
+// distinct exit code in a later phase and why that is not solved here.
 const verifyStep = (task, runId, planPath) => (runId && planPath ? [
   'BEFORE YOU RETURN "done". Run the task gate on your own work, in the FOREGROUND:',
   '',
@@ -92,16 +100,21 @@ const verifyStep = (task, runId, planPath) => (runId && planPath ? [
   '',
   'ROOT must be the MAIN worktree, which is what that command computes — run from inside your',
   'own worktree the CLI would resolve the run branch to your task branch and answer the wrong',
-  'question. Read the exit code. It has three meanings, and they are not interchangeable:',
+  'question. Read BOTH the exit code and the first line it printed — exit 4 covers four',
+  'different situations and only the printed line tells them apart:',
   '  exit 0 — your task passes. Return "done".',
-  '  exit 2 — the gate ran and rejected your task. That is your work: fix exactly what it names',
-  '           and run the command again.',
-  '  exit 4 — it could not verify: no gate manifest, an underivable context, or a task id the',
-  '           plan does not contain. That is a fact about the run configuration, not about your',
-  '           work. Quote what it printed in your summary and proceed. Do not loop on it, and',
-  '           do not report "blocked" for it when the work itself is finished.',
-  'Returning "done" on an exit 2 wastes the phase, because the gate recomputes exactly this and',
-  'will reject it.',
+  '  exit 4, output beginning "gate does not pass for phase" — the gate recomputed your task',
+  '           and REJECTED it. That is your work. Fix exactly the checks it names and run the',
+  '           command again. Returning "done" on this wastes the phase: the phase gate',
+  '           recomputes the same thing and will reject it.',
+  '  exit 4, output "no gate manifest", "cannot verify completion" or "no task ' + task.id + ' in the',
+  '           plan" — the run cannot be verified from here. That is the run configuration, not',
+  '           your work. Quote what it printed in your summary and proceed; do not loop on it,',
+  '           and do not report "blocked" for it when the work itself is finished.',
+  '  exit 2 — teammates.gate.json is malformed. Configuration, not your work. Quote it and',
+  '           report it; do not loop.',
+  '  exit 1 — the gate passed, but the run\'s status file is missing or does not list your task.',
+  '           Your work is verified; quote the message and report it.',
   '',
 ] : [])
 

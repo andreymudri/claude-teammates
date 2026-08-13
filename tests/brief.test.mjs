@@ -72,23 +72,39 @@ test('the complete command carries run, task and plan and sits after the constra
     'self-verification must precede the final commit instruction')
 })
 
-// `complete` exits 0, 2 or 4 and the three are not interchangeable: 4 is "cannot verify", a
-// fact about the run configuration. A brief that collapses them tells a teammate on a repo
-// with no tracked gate manifest to loop on a message that names nothing to fix.
-test('the verify step distinguishes all three complete exit codes', () => {
+// Read out of `complete` in scripts/cli.mjs: the recomputed gate REJECTING the task exits 4,
+// the same code as no-manifest / underivable-context / unknown-task. Only the printed first
+// line `gate does not pass for phase` separates them. A brief that maps 4 to "proceed", or
+// puts the rejection on 2, tells a teammate with a failing fileset check to return done.
+test('the verify step maps rejection to exit 4 with its printed discriminator', () => {
   for (const brief of [composeBrief(FULL), composeBrief({ ...FULL, caveman: 'full' })]) {
     assert.ok(/exit 0[^\n]*passes/.test(brief), 'exit 0 is not described as passing')
-    assert.ok(brief.includes('exit 2'), 'exit 2 is not named')
-    assert.ok(/exit 2[^]{0,200}fix/.test(brief), 'exit 2 is not the teammate\'s work to fix')
-    assert.ok(brief.includes('exit 4'), 'exit 4 is not named')
-    assert.ok(/exit 4[^]{0,400}could not verify/.test(brief),
-      'exit 4 is not described as a failure to verify')
-    assert.ok(/exit 4[^]{0,600}Do not loop on it/.test(brief),
-      'exit 4 does not tell the teammate to proceed rather than loop')
+    assert.ok(brief.includes('gate does not pass for phase'),
+      'the brief does not name the line that identifies a rejection')
+    // The rejection clause must be attached to exit 4 and must be the one that says "fix".
+    const rejection = brief.slice(at(brief, 'gate does not pass for phase'))
+    assert.ok(/^[^]{0,400}\bREJECTED\b/.test(rejection) || /^[^]{0,400}\bfix\b/i.test(rejection),
+      'the rejection line does not tell the teammate to fix its own work')
+    assert.ok(/exit 4, output beginning "gate does not pass for phase"/.test(brief),
+      'the rejection is not keyed to exit 4 and its printed first line')
+    // ...and the cannot-verify clause must be a DIFFERENT exit-4 clause, the one that proceeds.
+    assert.ok(/exit 4, output "no gate manifest"/.test(brief),
+      'the cannot-verify situations are not keyed to exit 4')
+    assert.ok(/no gate manifest[^]{0,400}do not loop on it/i.test(brief),
+      'the cannot-verify clause does not tell the teammate to proceed rather than loop')
+    assert.ok(at(brief, 'gate does not pass for phase') < at(brief, 'no gate manifest'),
+      'the rejection clause must be read before the cannot-verify clause')
+    assert.ok(/exit 2[^]{0,120}malformed/.test(brief),
+      'exit 2 is not described as a malformed manifest')
+    assert.ok(/exit 1[^]{0,200}status file is missing/.test(brief),
+      'exit 1 is not described as missing status bookkeeping')
+    // The inverted mapping round 2 shipped must not come back.
+    assert.ok(!/exit 2 — the gate ran and rejected/.test(brief),
+      'exit 2 is still described as the gate rejecting the task')
+    assert.ok(!/exit 4 — it could not verify/.test(brief),
+      'exit 4 is still described as only a failure to verify')
     assert.ok(!/Anything else: fix what it names/.test(brief),
       'the brief still treats every non-zero exit as the teammate\'s defect')
-    assert.ok(at(brief, 'exit 0') < at(brief, 'exit 2') && at(brief, 'exit 2') < at(brief, 'exit 4'),
-      'the exit codes are not listed in order')
   }
 })
 
@@ -136,6 +152,18 @@ test('a task with no neighbours renders no blast radius and no undefined', () =>
   const brief = composeBrief(FULL)
   assert.ok(!brief.includes('BLAST RADIUS.'))
   assert.ok(!brief.includes('undefined'))
+})
+
+// An absent key and an empty array are different inputs and the guard must reject both: with
+// only the absent-key case pinned, weakening the guard to a truthiness test on the array
+// leaves the suite green while an empty list renders a header with nothing under it.
+test('an empty neighbours array renders no blast radius header', () => {
+  const brief = composeBrief({ ...FULL, task: { ...TASK, neighbours: [] } })
+  assert.ok(!brief.includes('BLAST RADIUS.'),
+    'an empty neighbours array rendered a header with no files under it')
+  assert.ok(!brief.includes('They have changed together'))
+  assert.ok(brief.includes('Touching any other file fails the phase gate.'),
+    'the section around the blast radius is still rendered')
 })
 
 test('the caveman variant keeps every load-bearing instruction', () => {
@@ -254,8 +282,12 @@ function executableSource(src) {
 test('scripts/brief.mjs executable source imports nothing and touches no host state', async () => {
   const src = await readFile(new URL('../scripts/brief.mjs', import.meta.url), 'utf8')
   const code = executableSource(src)
-  assert.ok(!/(^|[\s;}])import\s+[\w{*'"]/.test(code), 'scripts/brief.mjs must import nothing')
-  assert.ok(!/\bimport\s*\(/.test(code), 'scripts/brief.mjs must not use a dynamic import')
+  // This module imports nothing at all, so the total check is the honest one: any occurrence
+  // of the token `import` in executable source is a failure. A narrower pattern missed
+  // `import "node:fs"` (the stripper removes the quotes, leaving a bare `import `),
+  // `import{x}from'y'` with no space, and `export * from '...'`.
+  assert.ok(!/\bimport\b/.test(code), 'scripts/brief.mjs must not import anything, in any form')
+  assert.ok(!/\bexport\b[^;\n]*\bfrom\b/.test(code), 'scripts/brief.mjs must not re-export from a module')
   assert.ok(!/\brequire\s*\(/.test(code), 'scripts/brief.mjs must not require anything')
   assert.ok(!/\bprocess\b/.test(code), 'scripts/brief.mjs must not touch process')
   assert.ok(!/\bglobalThis\b/.test(code), 'scripts/brief.mjs must not reach through globalThis')
@@ -264,6 +296,10 @@ test('scripts/brief.mjs executable source imports nothing and touches no host st
   // The stripper is the load-bearing half of this check, so pin it against both directions of
   // the mistake it exists to prevent.
   assert.equal(/\bprocess\b/.test(executableSource("const a = 'process.env is prose here'")), false)
-  assert.equal(/\bimport\s*\(/.test(executableSource("await import('node:' + 'fs')")), true)
+  assert.equal(/\bimport\b/.test(executableSource("const a = 'do not import a neighbour file'")), false)
+  assert.equal(/\bimport\b/.test(executableSource('await import(\'node:\' + \'fs\')')), true)
+  assert.equal(/\bimport\b/.test(executableSource('import "node:fs"')), true)
+  assert.equal(/\bimport\b/.test(executableSource("import{readFileSync}from'node:fs'")), true)
+  assert.equal(/\bexport\b[^;\n]*\bfrom\b/.test(executableSource("export * from 'node:fs'")), true)
   assert.equal(/\bprocess\b/.test(executableSource('const a = `x${process.env.Y}z`')), true)
 })
