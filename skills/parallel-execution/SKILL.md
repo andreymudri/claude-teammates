@@ -63,6 +63,24 @@ Run `phase-gate`. Only on PASS, dispatch `tm-integrator` to merge the teammate b
 dependency order with `--no-ff`. The integrator is the sole writer to the run branch and runs
 alone. No bookkeeping call follows the merge: the next phase is derived from what is merged.
 
+### Import coupling across tasks
+
+A task whose file set imports a symbol another task introduces cannot build on its own branch.
+Merging it first produces a commit whose tree cannot load. In run `followups2`, T2's
+`scripts/doctor.mjs` imported `printable` from T3's `scripts/reviews.mjs`; on T2's own tip the CLI
+died at import before printing its help, and merging T2 ahead of T3 would have carried that
+unloadable tree onto the run branch. A revert of the providing task breaks every consumer, not only
+the feature that motivated it.
+
+The softer form leaves the tree loading and only a comment wrong. In run `followups3`, T3's change
+to the CLI entrypoint carries a comment citing `reviewFileName` as precedent for wrapping before
+quoting: true once T2's `scripts/reviews.mjs` is merged, false on T3 alone. Nothing fails to load —
+the commit's comment is simply wrong about its own tree, and the merge order was given to the
+integrator for that reason.
+
+Both forms share one rule: the integrator merges in dependency order, and a reviewer judging a
+cross-task claim judges it on the merge, not on one branch.
+
 ## Choosing a model per dispatch
 
 Every task in `plan.json` carries a `tier`, either declared in the plan or inferred by
@@ -154,6 +172,18 @@ so a dispatch asking it to rebuild asks for something its contract does not cove
 
 Amend only when a task's declared file set is genuinely wrong. Correcting a stale *interface* — a
 signature an earlier phase's fix rounds changed — belongs in the dispatch brief, not the plan.
+
+**Branch a run's base from the default branch, not from another run's branch.** Step 1 commits the
+amendment on the base, so if the base is another run's deliverable branch the amendment lands
+there, where it belongs to no task of that run and to no ancestor of that run's own base — which is
+what `ownership` then reports, correctly, whenever that branch is gated. Run `followups2` based on
+`run/claims` did exactly this, and `ownership` gated on `run/claims` named five unowned commits:
+nothing was rewritten to hide them, and no ownership exception is added to accept them, because an
+exception broad enough to accept a parent run's branch accepts exactly what the check exists to
+catch. That report does not last. Once `run/claims` landed to the default branch it became an
+ancestor of it, the derived anchor moved onto the run tip, the commit range emptied, and `ownership`
+now passes on `run/claims` — so do not count on the check to preserve the finding. Prevent it
+instead: if work genuinely stacks, land the first run before starting the second.
 
 ## Invariants
 
