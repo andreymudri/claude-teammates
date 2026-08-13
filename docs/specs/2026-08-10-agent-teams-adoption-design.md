@@ -98,8 +98,10 @@ JSON on stdin and reuses `scripts/state.mjs`.
 
 Everything in this section and its subsections is **specification**, not description: it states what
 the implementation plan builds. None of it — the handler, the `locate` command, the location
-records, `complete --enforcement-only`, the recorded plan path — existed in the tree this design was
-written against. Read every sentence below as "will", never as "does".
+records, `complete --enforcement-only`, its rejection-specific exit code, the recorded plan path —
+existed in the tree this design was written against. Read every sentence below as "will", never as
+"does". Where a subsection quotes `scripts/cli.mjs` line numbers, that part *is* description of the
+shipped code, and it says so.
 
 ### It no-ops far more often than it acts
 
@@ -130,15 +132,39 @@ early catch, never the thing that decides.
 ### What it runs
 
 `cli.mjs complete --run <runId> --task <taskId> --plan <planPath> --root <repo root>
---enforcement-only`. Exit 0 allows the stop. Exit 2 is a verdict — the checks ran and rejected this
-task — and the handler exits 2 in turn with the failure text on stderr, which the harness feeds back
-to the teammate as the reason to keep working. Exit 4 is "cannot verify": no gate manifest, an
-underivable context, an unknown task id. That is a fact about the run's configuration rather than
-about this teammate's work, so it allows the stop, as does any other exit code, which can only mean
-a broken handler.
+--enforcement-only`. `complete` is per-task and computable while siblings are still working, so
+nothing deadlocks — blocking on the *phase gate* would, because the gate cannot run until the phase
+is finished.
 
-`complete` is per-task and computable while siblings are still working, so nothing deadlocks —
-blocking on the *phase gate* would, because the gate cannot run until the phase is finished.
+**The exit codes it returns today cannot carry this decision.** As `scripts/cli.mjs` stands:
+
+- **0** — the task passes; the run's status file is updated (`cli.mjs:2820-2822`).
+- **1** — the checks passed but `status.json` is missing or does not list the task
+  (`cli.mjs:2815-2817`).
+- **2** — `teammates.gate.json` is present and malformed (`cli.mjs:2759`). A configuration failure
+  and nothing else.
+- **4** — no gate manifest (`cli.mjs:2760`), an underivable context, a task absent from the plan,
+  **or the recomputed gate rejected this task** (`cli.mjs:2811`, pinned by `tests/cli.test.mjs`,
+  "complete exits 4 when the recomputed gate fails").
+
+So exit 4 conflates "the gate rejected this task" with "the gate could not run", and exit 2 means
+only that the manifest is broken. A handler built on these codes would block on a malformed
+manifest and allow every rejected task through — the enforcement inert, and silently so, since the
+inert case looks exactly like a clean pass.
+
+**This design therefore requires a new exit code**, added to `complete` alongside the rest of the
+CLI work: a code returned for a gate rejection and for nothing else, distinct from every
+"cannot verify" path. The handler blocks on that code and allows every other non-zero result. Like
+the rest of this section, that is specification — `complete` has no such code today, and the
+handler must not be written against the current ones.
+
+**The handler must not read the printed text to tell the two apart.** The rejection path prints a
+line beginning `gate does not pass for phase <name>: <checks>`, and matching on it would work.
+Taking a programmatic decision from the shape of a line is precisely what this project refuses
+everywhere else; `skills/phase-gate/SKILL.md:87` states the rule in as many words — "Read the exit
+code, not the shape of a line" — and states it about output this same CLI prints. A *teammate*
+reading its own command's output and acting on what it says is a different matter and is fine. A
+hook deciding whether to block is not.
 
 ### Three arguments the hook is not given
 
