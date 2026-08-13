@@ -2067,17 +2067,20 @@ export async function runCli(argv, io = { out: console.log }) {
       phaseResults.push({ phase, supplied: forPhase.length > 0, verdict: aggregateVerdict(results) })
     }
 
-    // `renderRunSummary` builds a multi-line table and splices each failed, pending and skipped
-    // CHECK NAME into it, so the manifest's strings arrive already inside the rendered block.
-    // The block form is what fits a table: it neutralises the escape sequences with which a
-    // name could erase a row, and keeps the newlines that are the table itself.
+    // No wrapper at this print site, because every value the table carries is wrapped where the
+    // table is BUILT, in `renderRunSummary` (`scripts/finish.mjs`). Enumerated: the run id and
+    // each failed/pending/skipped check name go through `printable` there; `entry.phase` and the
+    // phase lists in the "not finished" lines are integers `assignPhases` produced; the verdict
+    // is `aggregateVerdict`'s own `PASS`/`FAIL`; the rest of every line is a string literal.
     //
-    // Stated exactly: `printableBlock` keeps every newline it is given, including a value's own,
-    // so on its own it stops a name from redrawing the table but not from adding a row that reads
-    // like a row this CLI wrote. That second half is closed where the table is BUILT —
-    // `renderRunSummary` in `scripts/finish.mjs` puts each name through `printable`, so no name
-    // still carries a newline by the time it reaches this wrap.
-    io.out(printableBlock(renderRunSummary(runId, phaseResults)))
+    // Wrapping at the build site is also the only place the table's real hazard can be closed.
+    // `printableBlock` keeps every newline it is given, including a value's own, so a wrap here
+    // stops a name from redrawing the table but not from ADDING a row shaped like one this CLI
+    // wrote — and by then the name is already inside the block. A `printableBlock` here was
+    // therefore a second pass over bytes already neutralised: removed by mutation, it changed no
+    // byte of any output this suite produces and left every sanitising row green. It is gone
+    // rather than kept as a layer no test can drive.
+    io.out(renderRunSummary(runId, phaseResults))
     const summary = summarizeRun(phaseResults)
     if (summary.complete) return 0
     // 1 for a phase that was verified and failed; 4 for one that was never verified at all.
