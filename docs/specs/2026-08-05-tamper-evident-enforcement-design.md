@@ -97,10 +97,25 @@ where the corresponding claim is made:
 - **A run whose base branch is another run's branch.** Not a hole in `ownership` — the opposite:
   the check reports what is there, and what is there is unowned. Run `followups2` used
   `run/claims`, another run's deliverable branch, as its base. The amendment procedure commits an
-  amendment on the BASE branch, so three plan amendments landed on `run/claims`. Evaluated for run
-  `claims`, `ownership` reports those commits as reachable from no task branch of that run and from
-  no ancestor of ITS base, which is exactly what they are. The consequence is permanent:
-  `run/claims` can never pass its own gate again. Nothing was rewritten to hide it, and the content
+  amendment on the BASE branch, so four plan amendments landed on `run/claims` — `3a5d074`,
+  `39cbd61`, `5f46838`, `c9a122c` — on top of `8897e38`, which created the same plan file. Counted
+  from `git log --oneline run/claims`, that is FIVE commits above `09f5ad9 merge: teammates/claims/T3`,
+  each touching only `docs/plans/2026-08-11-run-claims-followups.md`. "Unowned commits" is the
+  accurate noun rather than "amendments": one of the five creates the plan rather than amending it,
+  and `ownership` does not distinguish the two — it asks only which task branch explains a commit.
+  Evaluated for run `claims`, `ownership` reported those commits as reachable from no task branch of
+  that run and from no ancestor of ITS base, which is exactly what they are.
+
+  That report is not permanent, and its answer depends on the base it is run against. Measured today
+  with base `master`: `git merge-base master run/claims` is `c9a122c`, the tip of `run/claims`
+  itself, so the derived anchor equals the run sha, the commit range `anchor..run` is EMPTY, and
+  `ownership` has nothing to report and passes. `run/claims` landed to `master` inside
+  `run/claims-followups`, which made it an ancestor of `master` and moved the anchor onto the run
+  tip. Only against a base predating that landing — `fff2307^1`, that is `7bd2e0c` — does the anchor
+  fall back far enough for the range to hold 23 commits and for `ownership` to name the five. So the
+  check has no memory of the violation; the record of it lives in this spec and in the reflog. (The
+  gate for run `claims` does still fail today, but on `fileset`, for an unrelated reason — do not
+  read that failure as this one.) Nothing was rewritten to hide the commits, and the content
   still landed, because `run/claims` was an ancestor of `run/claims-followups`. The remedy is
   procedural and is stated in `skills/parallel-execution/SKILL.md`: branch a run's base from the
   default branch, not from another run's branch, and land a first run before stacking a second on

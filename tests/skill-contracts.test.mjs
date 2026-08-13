@@ -933,8 +933,21 @@ test('parallel-execution states a run bases off the default branch, not another 
   })
   assertStatement(
     section,
-    /Run followups2 based on run\/claims did exactly this, and run\/claims can never pass its own gate again/i,
-    'parallel-execution must name the run that paid for this and the permanence of the result',
+    /Run followups2 based on run\/claims did exactly this, and ownership gated on run\/claims named five unowned commits/i,
+    'parallel-execution must name the run that paid for this and the number of commits it left',
+  )
+  // Measured against base `master`: the anchor equals the run tip, the range is empty, and
+  // `ownership` passes. A skill promising the report survives would send a reader to a green check
+  // as evidence of a violation it no longer reports.
+  assertStatement(
+    section,
+    /the derived anchor moved onto the run tip, the commit range emptied, and ownership now passes on run\/claims/i,
+    'parallel-execution must state that the ownership report does not survive the run landing',
+  )
+  assertNoStatement(
+    section,
+    /can never pass its own gate again/i,
+    'the report is not permanent, so the skill must not claim it is',
   )
   assertStatement(
     section,
@@ -993,10 +1006,30 @@ test('fleet-supervision states liveness detects an absence of progress and names
     /the harness moved it to the background at the harness timeout of 120 seconds/i,
     'the second cause is the harness backgrounding a foreground command at its own timeout',
   )
+  // Neither cause has been counted, so neither may be ranked. The recorded occurrences in this
+  // repository (runs `codemap` and `followups2`) are all of a teammate backgrounding the command
+  // itself; the harness-timeout cause rests on in-session reports only. Ranking the second above
+  // the first also countermands `agents/tm-implementer.md`, which tells a teammate not to
+  // background its suite.
   assertStatement(
     section,
-    /following the instruction to run in the foreground is what triggers it, so do not brief a stalled teammate as if it had disobeyed/i,
-    'fleet-supervision must not blame the teammate for a harness timeout',
+    /Neither cause is ranked above the other, because neither has been counted/i,
+    'fleet-supervision must not rank two causes it has no measurement for',
+  )
+  assertStatement(
+    section,
+    /every occurrence recorded in this repository is of the first, and the second has been reported by teammates in session but never recorded/i,
+    'fleet-supervision must say which cause the repository actually records',
+  )
+  assertStatement(
+    section,
+    /do not assume disobedience without checking which cause applies/i,
+    'the caution must be conditional, so it does not countermand the implementer contract',
+  )
+  assertNoStatement(
+    section,
+    /is the common one/i,
+    'an unmeasured frequency claim must not return to this section',
   )
   assertStatement(
     section,

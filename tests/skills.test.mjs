@@ -123,7 +123,19 @@ test('the tamper-evident spec lists a run based on another run branch as out of 
   const outOfScope = spec.slice(spec.indexOf('### Not defended against'))
   assert.ok(outOfScope.length > 0, 'the spec must keep its out-of-scope section')
   assert.match(outOfScope, /A run whose base branch is another run's branch/)
-  assert.match(outOfScope, /can never pass its own gate again/)
+  // Counted from `git log --oneline run/claims`: four amendment commits plus the plan-creation
+  // commit, all above the last task merge and all touching only the plan file.
+  assert.match(outOfScope, /FIVE commits above `09f5ad9/)
+  // `ownership` keeps no memory of the violation. Once `run/claims` became an ancestor of the
+  // default branch the anchor moved onto the run tip and the commit range emptied, so the spec must
+  // not promise a check that fails forever — the record lives in the spec, not in the check.
+  assert.match(outOfScope, /That report is not permanent/)
+  assert.match(outOfScope, /the commit range `anchor\.\.run` is EMPTY/)
+  assert.doesNotMatch(
+    outOfScope,
+    /can never pass its own gate again/,
+    'the spec must not claim a permanence `ownership` does not have',
+  )
   // An exception accepting anything on a parent run's branch would accept exactly the unowned
   // commit `ownership` exists to catch, so the spec has to record that none was added.
   assert.match(outOfScope, /No ownership exception is added for this/)
@@ -133,11 +145,17 @@ test('fleet-supervision quotes the liveness stall hint exactly as renderLiveness
   // Read the hint from the source rather than restating it here: a test carrying its own copy of
   // the string goes green while the skill quotes a hint the CLI no longer prints.
   const source = await readFile(new URL('../scripts/liveness.mjs', import.meta.url), 'utf8')
-  const literal = /const STALL_HINT = '([^']*)'/.exec(source)
+  // Anchored to the start of a line. Unanchored, the first match anywhere in the file wins,
+  // including one inside a comment: a commented-out legacy copy above the real declaration plus a
+  // changed real literal goes green here while `renderLiveness` emits a hint the skill does not
+  // contain — the exact staleness this pin exists to prevent.
+  const literal = /^const STALL_HINT = '([^']*)'/m.exec(source)
   assert.ok(literal, 'scripts/liveness.mjs must define STALL_HINT as a single-quoted literal')
   const { body } = await skill('fleet-supervision')
+  // The hint text only. The skill quotes it inside an indented block, so the rendered line carries
+  // more leading whitespace than the literal and the exact indent of that line is not pinned here.
   assert.ok(
     body.includes(literal[1]),
-    'fleet-supervision must quote the stall hint verbatim, including its leading indent',
+    'fleet-supervision must quote the stall hint text verbatim as scripts/liveness.mjs emits it',
   )
 })

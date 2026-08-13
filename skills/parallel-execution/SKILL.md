@@ -177,10 +177,13 @@ signature an earlier phase's fix rounds changed — belongs in the dispatch brie
 amendment on the base, so if the base is another run's deliverable branch the amendment lands
 there, where it belongs to no task of that run and to no ancestor of that run's own base — which is
 what `ownership` then reports, correctly, whenever that branch is gated. Run `followups2` based on
-`run/claims` did exactly this, and `run/claims` can never pass its own gate again: nothing may be
-rewritten to hide the commits, and no ownership exception is added to accept them, because an
+`run/claims` did exactly this, and `ownership` gated on `run/claims` named five unowned commits:
+nothing was rewritten to hide them, and no ownership exception is added to accept them, because an
 exception broad enough to accept a parent run's branch accepts exactly what the check exists to
-catch. If work genuinely stacks, land the first run before starting the second.
+catch. That report does not last. Once `run/claims` landed to the default branch it became an
+ancestor of it, the derived anchor moved onto the run tip, the commit range emptied, and `ownership`
+now passes on `run/claims` — so do not count on the check to preserve the finding. Prevent it
+instead: if work genuinely stacks, land the first run before starting the second.
 
 ## Invariants
 
