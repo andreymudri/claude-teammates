@@ -262,16 +262,15 @@ export function landedForFiles(filesBySha, sha, declaredFiles) {
 // anywhere in this repo, and `tm-integrator` writes that subject while being one of the enforced
 // parties — the `status.json` mistake this whole design exists to avoid.
 //
-// What this does NOT close, pinned as a LIMIT in `tests/gate-runner.test.mjs`: a SPARE parent.
-// Two merges crediting the same task — an initial integration plus a fix round's own merge —
-// put two parents in the index while only one ref points at one of them, so the leftover is
-// unclaimed and can be matched by a run-tip ref whose declared set it happens to contain in
-// full. It is much narrower than plain containment (it needs a spare merge whose own diff covers
-// the whole declared set, not merely any superset anywhere in range), but it is real.
-export function creditRunTipTasks({ tasks, shaByTask, runSha, mergedFiles }) {
+// `spent` is supplied by the caller (see `spentParents`) and carries the SPARE-parent closure: a
+// task integrated more than once — an initial merge plus a fix round's own merge — leaves parents
+// in the index that no ref points AT, and an unclaimed leftover was matchable by a run-tip ref.
+// Without a `spent` set this falls back to direct ref positions only, which is what the unit tests
+// exercise; the callers that gate a real repository always pass one.
+export function creditRunTipTasks({ tasks, shaByTask, runSha, mergedFiles, spent }) {
   // A parent is spent when some task ref points directly at it. Refs at the run tip spend
   // nothing — that is exactly the position with no attribution behind it.
-  const claimed = new Set()
+  const claimed = new Set(spent ?? [])
   for (const sha of shaByTask.values()) {
     if (sha !== runSha && mergedFiles.has(sha)) claimed.add(sha)
   }
@@ -308,6 +307,46 @@ export function creditRunTipTasks({ tasks, shaByTask, runSha, mergedFiles }) {
   }
   for (const t of runTip) assign(t.id, new Set())
   return new Set(heldBy.values())
+}
+
+// Which merged parents are already accounted for by a task that is NOT sitting at the run tip.
+// This is what closes the spare-parent residual `creditRunTipTasks` was first shipped with.
+//
+// Pointing AT a parent is not the only way to have earned it. A task integrated twice — merged,
+// then merged again after a fix round — leaves the first merge's parent behind as an ancestor of
+// its current tip, claimed by nobody, and a run-tip ref whose declared set that leftover happens
+// to contain in full could match it. So a parent counts as spent when it is an ancestor of some
+// task ref AND the files it carried intersect that task's own declared set.
+//
+// Both halves are load-bearing, and dropping either was measured, not reasoned about:
+//
+//   - Without the ANCESTOR half, only direct positions are spent and the spare parent stays
+//     matchable — the residual this closes.
+//   - Without the DECLARED-SET half, ancestry alone spends far too much and reintroduces the
+//     original false FAIL. A phase-2 task legitimately forks from the run tip after phase 1 was
+//     merged, so phase 1's merged parent is an ancestor of that phase-2 ref. If phase 1's own ref
+//     is then re-pointed at the run tip by a fix round, its parent would already read as spent by
+//     an unrelated later task and the genuinely landed phase-1 task would fail again. Requiring
+//     the carried files to intersect that task's OWN declared set keeps a later task from
+//     spending a parent it did not earn.
+//
+// Run-tip refs spend nothing, here as everywhere: that position carries no attribution, which is
+// the whole reason `creditRunTipTasks` exists.
+export async function spentParents(git, { tasks, shaByTask, runSha, mergedFiles }) {
+  const spent = new Set()
+  const byId = new Map((tasks ?? []).map((t) => [t.id, t]))
+  for (const [taskId, sha] of shaByTask) {
+    if (sha === runSha) continue
+    const declared = new Set(((byId.get(taskId)?.files) ?? []).map(normalizePath))
+    if (declared.size === 0) continue
+    for (const [parent, carried] of mergedFiles) {
+      if (spent.has(parent) || parent === runSha) continue
+      const intersects = [...carried].some((file) => declared.has(normalizePath(file)))
+      if (!intersects) continue
+      if (parent === sha || await git.isAncestor(parent, sha)) spent.add(parent)
+    }
+  }
+  return spent
 }
 
 // Resolves every task ref in the run to a sha, skipping tasks whose branch cannot be resolved or
@@ -353,11 +392,13 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
   const mergedFiles = await mergedParentFiles(git, { anchorSha, runSha })
   // Run-wide, never per-phase: a phase-1 ref pointing at its own merged parent is what makes
   // that parent spent for a phase-2 ref parked at the run tip.
+  const shaByTask = await resolveTaskShas(git, { tasks, runId })
   const runTipCredited = creditRunTipTasks({
     tasks,
-    shaByTask: await resolveTaskShas(git, { tasks, runId }),
+    shaByTask,
     runSha,
     mergedFiles,
+    spent: await spentParents(git, { tasks, shaByTask, runSha, mergedFiles }),
   })
 
   const integratedPhases = []
@@ -555,11 +596,14 @@ export async function runFilesetCheck(check, ctx = {}) {
   // a parent its real owner already claimed.
   let runTipCredited
   try {
+    const allTasks = ctx.tasks ?? []
+    const shaByTask = await resolveTaskShas(git, { tasks: allTasks, runId })
     runTipCredited = creditRunTipTasks({
-      tasks: ctx.tasks ?? [],
-      shaByTask: await resolveTaskShas(git, { tasks: ctx.tasks ?? [], runId }),
+      tasks: allTasks,
+      shaByTask,
       runSha,
       mergedFiles,
+      spent: await spentParents(git, { tasks: allTasks, shaByTask, runSha, mergedFiles }),
     })
   } catch (err) {
     if (!(err instanceof GitError)) throw err

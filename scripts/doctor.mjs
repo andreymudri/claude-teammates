@@ -1,6 +1,6 @@
 import { resolveTaskBranch } from './enforce.mjs'
 import { GitError } from './git.mjs'
-import { mergedParentFiles, landedForFiles, creditRunTipTasks, resolveTaskShas } from './gate-runner.mjs'
+import { mergedParentFiles, landedForFiles, creditRunTipTasks, resolveTaskShas, spentParents } from './gate-runner.mjs'
 import { printable } from './reviews.mjs'
 
 // Read-only diagnosis of a run, computed entirely from git.
@@ -87,11 +87,13 @@ export async function collectDoctorReport({ git, runId, runBranch, baseBranch, t
   let runTipCredited = new Set()
   if (mergedFiles && runSha) {
     try {
+      const shaByTask = await resolveTaskShas(git, { tasks, runId })
       runTipCredited = creditRunTipTasks({
         tasks,
-        shaByTask: await resolveTaskShas(git, { tasks, runId }),
+        shaByTask,
         runSha,
         mergedFiles,
+        spent: await spentParents(git, { tasks, shaByTask, runSha, mergedFiles }),
       })
     } catch (err) {
       if (!(err instanceof GitError)) throw err

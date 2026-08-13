@@ -2541,14 +2541,15 @@ test('two refs at the run tip cannot both be credited with a single merged paren
   })
 })
 
-// --- LIMIT: the spare parent (real repo) -----------------------------------------------------
+// --- the spare parent, closed (real repo) ----------------------------------------------------
 //
-// What scarcity does not close. Two merges crediting the SAME task — an initial integration plus
-// a fix round's own merge — put two parents in the index while only one ref points at one of
-// them. The leftover is unclaimed, so a run-tip ref whose declared set that spare merge happens
-// to contain in full matches it. Much narrower than plain containment, which needed only a
-// superset anywhere in range, but real. Pinned so a future change that closes it is noticed.
-test('LIMIT (spare parent): a run-tip ref matches a fix round\'s leftover merge (real repo)', async () => {
+// Was a LIMIT. Two merges crediting the SAME task — an initial integration plus a fix round's own
+// merge — put two parents in the index while only one ref points AT one of them, and the leftover
+// was matchable by a run-tip ref whose declared set it contained in full. `spentParents` closes it
+// by spending a parent that is an ANCESTOR of a task ref whose declared set the parent's carried
+// files intersect, not only one a ref points directly at. Same construction the LIMIT pinned, with
+// the assertion inverted.
+test('the spare parent of a task merged twice is spent, not matchable by a run-tip ref (real repo)', async () => {
   await withRepo(async ({ root, sh, git }) => {
     await writeFile(path.join(root, 'plan.md'), overlappingTwoPhasePlan(), 'utf8')
     await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
@@ -2571,8 +2572,49 @@ test('LIMIT (spare parent): a run-tip ref matches a fix round\'s leftover merge 
     await sh(['checkout', 'run'])
     await sh(['merge', '--no-ff', '-m', 'Merge T1 again', 'teammates/r1/T1'])
 
-    // T2 declares `a.mjs`, writes nothing, parks at the run tip, and matches the spare parent.
+    // T2 declares `a.mjs`, writes nothing, parks at the run tip. Both parents carry `a.mjs` and
+    // both are ancestors of T1's ref, so neither is free.
     await sh(['branch', '-f', 'teammates/r1/T2', 'run'])
+
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+    const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
+    assert.equal(res.status, 'fail')
+    assert.match(res.output, /T2: branch teammates\/r1\/T2 contributes no file changes past its fork point/)
+  })
+})
+
+// The direction spending must NOT break, and the reason `spentParents` requires the carried files
+// to intersect the ref's OWN declared set rather than spending on ancestry alone. A phase-2 task
+// legitimately forks from the run tip after phase 1 was merged, so phase 1's merged parent is an
+// ancestor of the phase-2 ref. On ancestry alone that parent reads as spent by a task that never
+// earned it, and a fix round re-pointing phase 1's own ref at the run tip fails a genuinely landed
+// task — the exact false FAIL this whole mechanism exists to remove. Measured, not reasoned about:
+// deleting the intersection guard turns this test red.
+test('a later sibling does not spend the merged parent of an earlier task it never earned (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'plan.md'), twoPhaseBothFilesPlan(), 'utf8')
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+
+    // T2 forks AFTER T1's merge, so T1's merged parent is an ancestor of T2's tip.
+    await sh(['checkout', '-b', 'teammates/r1/T2', 'run'])
+    await writeFile(path.join(root, 'b.mjs'), 'export const b = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T2 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T2', 'teammates/r1/T2'])
+
+    // T1's fix round finds nothing to change and leaves its ref at the run tip.
+    await sh(['branch', '-f', 'teammates/r1/T1', 'run'])
 
     const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
     const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
