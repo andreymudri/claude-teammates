@@ -92,10 +92,12 @@ export function summarizeRun(phaseResults = []) {
 // comment on `printable` in `scripts/reviews.mjs` for why that line is drawn where it is.
 export function renderRunSummary(runId, phaseResults = []) {
   const summary = summarizeRun(phaseResults)
-  // `runId` is operator-supplied (the `--run` flag a human passes to the CLI), not
-  // teammate-controlled like the failed/pending/skipped names below — wrapping it here is not
-  // closing a hazard, it is keeping this line consistent with its neighbours so every value in
-  // the header goes through the same `printable` wrapper.
+  // `runId` reaches this line by a different route from the names below — it is whatever string
+  // the `--run` flag carried, not a value read out of an agent-written file — but it is wrapped
+  // for the same reason and it is the only thing wrapping it. `cli.mjs` prints this block
+  // unwrapped, so with this `printable` removed a control byte in `--run` reaches stdout inside
+  // a line an operator reads as this CLI's own verdict. Two tests hold it: the run id row in the
+  // sanitising table in `tests/cli.test.mjs` and the `renderRunSummary` unit test beside it.
   const lines = [`run ${printable(runId)} — every verdict below was recomputed from git just now, not read from a record`]
 
   for (const entry of phaseResults) {
