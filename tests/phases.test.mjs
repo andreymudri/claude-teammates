@@ -120,9 +120,12 @@ test('multiple spellings converge: four redundant spellings of the same file all
   // it can only pin what normalizeDeclarePath itself does: four different declared
   // spellings of one file all collapse to the same canonical form, so all four tasks
   // conflict with each other. It says nothing about whether normalizeDeclarePath's
-  // notion of "same file" matches normalizePath's — that relationship is pinned by
-  // 'a case-only mismatch is a violation' in tests/enforce.test.mjs, which fails if the
-  // two normalizers disagree.
+  // notion of "same file" matches normalizePath's — divergence between the two
+  // normalizers is covered, but by tests split across both files, one per direction:
+  // a change on the normalizePath side is caught by 'a case-only mismatch is a
+  // violation' in tests/enforce.test.mjs, and a change on the normalizeDeclarePath
+  // side is caught by 'case-sensitive differences: tasks declaring A.mjs and a.mjs
+  // land in the same phase' in this file.
   const out = assignPhases([
     task('T1', ['a/b.mjs']),
     task('T2', ['a/./b.mjs']),      // Interior ./
