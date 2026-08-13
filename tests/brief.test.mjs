@@ -81,10 +81,18 @@ test('the verify step maps rejection to exit 4 with its printed discriminator', 
     assert.ok(/exit 0[^\n]*passes/.test(brief), 'exit 0 is not described as passing')
     assert.ok(brief.includes('gate does not pass for phase'),
       'the brief does not name the line that identifies a rejection')
-    // The rejection clause must be attached to exit 4 and must be the one that says "fix".
-    const rejection = brief.slice(at(brief, 'gate does not pass for phase'))
-    assert.ok(/^[^]{0,400}\bREJECTED\b/.test(rejection) || /^[^]{0,400}\bfix\b/i.test(rejection),
-      'the rejection line does not tell the teammate to fix its own work')
+    // Assert the GUIDANCE inside the rejection clause, not the presence of a word the clause
+    // itself supplies: `/REJECTED/ || /fix/i` short-circuited on its own text and stayed green
+    // when the guidance was swapped for "quote it and proceed", which is the inversion again.
+    const rejection = brief.slice(at(brief, 'gate does not pass for phase'), at(brief, 'no gate manifest'))
+    assert.ok(/Fix exactly the checks it names/.test(rejection),
+      'the rejection clause does not tell the teammate to fix the checks it names')
+    assert.ok(/run the command again/.test(rejection),
+      'the rejection clause does not tell the teammate to re-run')
+    for (const wrong of ['proceed', 'do not loop', 'Quote']) {
+      assert.ok(!rejection.includes(wrong),
+        `the rejection clause tells the teammate to "${wrong}" — that is the cannot-verify guidance`)
+    }
     assert.ok(/exit 4, output beginning "gate does not pass for phase"/.test(brief),
       'the rejection is not keyed to exit 4 and its printed first line')
     // ...and the cannot-verify clause must be a DIFFERENT exit-4 clause, the one that proceeds.
@@ -142,12 +150,28 @@ test('with no plan path the verify section is dropped rather than emitting an em
     'the locate section does not depend on the plan path')
 })
 
+// A runnable command in this brief is an indented line beginning with the executable. The
+// prose that quotes a checkout starts with a double quote, so it is not one. Pinning the
+// absence of any runnable checkout catches the operand-less `git checkout -B <branch>` the
+// module's own comment warns about, in `switch -c` spelling too — the old assertion keyed on
+// one exact string with a trailing space and caught neither.
+const runnableCheckout = /^[ \t]*git[ \t]+(checkout|switch)\b/m
+
 test('with no base branch the brief refuses to name a starting commit', () => {
   const brief = composeBrief({ ...FULL, baseBranch: '' })
   assert.ok(brief.includes('No base branch was supplied'))
-  assert.ok(!brief.includes('git checkout -B teammates/substop/T4 '),
-    'the no-base variant must not emit a checkout with a start point')
+  assert.ok(!runnableCheckout.test(brief),
+    'the no-base variant emits a runnable checkout command; it must refuse to name a start point')
   assert.ok(brief.includes('report status "blocked"'))
+  // The same regex must match the variant that DOES emit one, or it proves nothing above.
+  assert.ok(runnableCheckout.test(composeBrief(FULL)),
+    'the runnable-checkout pattern fails to match a real checkout command')
+})
+
+test('the no-base caveman variant also emits no runnable checkout', () => {
+  const brief = composeBrief({ ...FULL, baseBranch: '', caveman: 'full' })
+  assert.ok(!runnableCheckout.test(brief))
+  assert.ok(brief.includes('No base branch was supplied'))
 })
 
 test('with no constraints the GLOBAL CONSTRAINTS header is not rendered', () => {
@@ -193,6 +217,54 @@ test('the caveman variant keeps every load-bearing instruction', () => {
   assert.ok(brief.includes('IN THE FOREGROUND'))
   assert.ok(brief.includes(FULL.planPath))
   for (const f of TASK.files) assert.ok(brief.includes(f), `missing declared file ${f}`)
+  // The constraints were the one clause the module's own "survives compression unchanged"
+  // comment named and nothing checked: emptying them in `terse` alone left the suite green.
+  assert.ok(brief.includes('GLOBAL CONSTRAINTS:'),
+    'the compressed variant dropped the GLOBAL CONSTRAINTS header')
+  for (const c of FULL.constraints) {
+    assert.ok(brief.includes('- ' + c), `the compressed variant dropped the constraint: ${c}`)
+  }
+})
+
+// The comment above `terse` claims parity with `full` on the load-bearing clauses. Assert it
+// clause by clause rather than trusting the prose, so compression cannot silently lose one.
+test('the compressed variant carries the same specification clauses as the full one', () => {
+  const full = composeBrief(FULL)
+  const terse = composeBrief({ ...FULL, caveman: 'full' })
+  const clauses = [
+    'MANDATORY FIRST STEP.',
+    'git checkout -B teammates/substop/T4 master',
+    'RECORD YOUR WORKTREE.',
+    'locate --run substop --task T4',
+    'BEFORE YOU RETURN "done".',
+    '--run substop --task T4 --plan ' + FULL.planPath,
+    'ROOT=$(dirname',
+    'gate does not pass for phase',
+    'IN THE FOREGROUND',
+    'You may create or modify ONLY these files:',
+    'GLOBAL CONSTRAINTS:',
+    ...FULL.constraints.map((c) => '- ' + c),
+  ]
+  for (const clause of clauses) {
+    assert.ok(full.includes(clause), `the full variant is missing: ${clause}`)
+    assert.ok(terse.includes(clause), `compression dropped a specification clause: ${clause}`)
+  }
+})
+
+// Which variant a caller gets by default is a behavioural choice nothing pinned: flipping the
+// signature default to a caveman level sent every ordinary dispatch the compressed spec plus a
+// STYLE directive no caller asked for, undetected.
+test('an omitted caveman key renders the full variant, not the compressed one', () => {
+  const brief = composeBrief(FULL)
+  assert.ok(brief.includes('BASELINE. Then bootstrap the worktree, before writing anything'),
+    'the default render is not the full variant')
+  assert.ok(!brief.includes('STYLE.'), 'the default render carries the caveman STYLE directive')
+  assert.ok(!brief.includes('caveman-terse'), 'the default render asks for caveman-terse output')
+  assert.ok(!brief.includes('use it at level'), 'the default render names a caveman level')
+  // ...and the compressed variant really is different, so the assertions above can fail.
+  const terse = composeBrief({ ...FULL, caveman: 'full' })
+  assert.ok(terse.includes('STYLE.') && !terse.includes('BASELINE. Then bootstrap'),
+    'the two variants are indistinguishable, so the default cannot be pinned')
 })
 
 // Rendered at two distinct levels, because asserting `level full` against `caveman: 'full'`
@@ -238,6 +310,19 @@ test('composeBrief throws when task.branch is empty', () => {
     () => composeBrief({ task: { id: 'T1', files: [], branch: '' } }),
     /T1 has no branch/,
   )
+})
+
+// The realistic shape for a task read out of a plan is an ABSENT branch key, not an empty
+// string. With only the empty-string case pinned, narrowing the guard to `=== ''` renders
+// `git checkout -B undefined <base>` and the teammate commits to a branch named `undefined`,
+// which no gate check can find.
+test('composeBrief throws when task.branch is absent or not a string', () => {
+  for (const branch of [undefined, null, 42, {}]) {
+    const task = { id: 'T1', files: [] }
+    if (branch !== undefined) task.branch = branch
+    assert.throws(() => composeBrief({ task }), /T1 has no branch/,
+      `a branch of ${JSON.stringify(branch) ?? 'undefined'} was accepted`)
+  }
 })
 
 test('no rendered line is empty of content yet claims a value it does not have', () => {
