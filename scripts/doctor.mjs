@@ -1,6 +1,6 @@
 import { resolveTaskBranch } from './enforce.mjs'
 import { GitError } from './git.mjs'
-import { mergedParentFiles, landedForFiles, landedForWholeSet } from './gate-runner.mjs'
+import { mergedParentFiles, landedForFiles } from './gate-runner.mjs'
 import { printable } from './reviews.mjs'
 
 // Read-only diagnosis of a run, computed entirely from git.
@@ -137,25 +137,10 @@ export async function collectDoctorReport({ git, runId, runBranch, baseBranch, t
         //     credit — sibling-tip self-integration with an overlapping declared set is still
         //     open, in the gate and here alike.
         //
-        //   - The run tip itself (`sha === runSha`) is not a key in the index at all, so
-        //     `landedForFiles` is structurally false there and would report a genuinely landed
-        //     task — one whose ref a fix round re-pointed with `git checkout -B` — as having
-        //     done nothing. That one position is answered by `landedForWholeSet` instead, which
-        //     asks whether a SINGLE merged secondary parent carried the task's WHOLE declared
-        //     set, since the run tip retains nothing to attribute by. Its own residual (a
-        //     run-tip ref declaring a SUBSET of a merged sibling's files) is open here and in
-        //     the gate alike.
-        //
         // `runFilesetCheck` in `scripts/gate-runner.mjs` computes this same test the same way,
         // over the same index, with the same limits — that is the whole point of importing it
-        // rather than keeping a second implementation that could silently disagree. That
-        // includes the run-tip branch below: were only one of the two files to take it, `doctor`
-        // would tell an operator a task landed that the gate fails, or the reverse.
-        entry.landed = !anchorSha
-          ? false
-          : sha === runSha
-            ? landedForWholeSet(mergedFiles ?? new Map(), task.files, { exclude: runSha })
-            : landedForFiles(mergedFiles ?? new Map(), sha, task.files)
+        // rather than keeping a second implementation that could silently disagree.
+        entry.landed = anchorSha ? landedForFiles(mergedFiles ?? new Map(), sha, task.files) : false
         if (entry.changed.length === 0 && !entry.landed) {
           problems.push(`${task.id}: branch ${branch} has no file changes past its fork point — the work landed on another ref and this task would merge as a no-op`)
         }

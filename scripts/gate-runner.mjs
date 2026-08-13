@@ -233,50 +233,6 @@ export function landedForFiles(filesBySha, sha, declaredFiles) {
   return false
 }
 
-// The `sha === runSha` case, and ONLY that case. `landedForFiles` above answers "did the merge
-// naming THIS sha carry this task's files", which needs the sha to be a key in the index. A ref
-// sitting exactly at the run tip never is: `mergedParentFiles` keys only the NON-FIRST parents
-// it meets walking the chain, and the tip it starts from is not one of them. So for that one
-// position the sha carries no attribution at all, and `landedForFiles` is structurally false —
-// which failed a genuinely, fully landed task whose ref a fix round re-pointed with the brief's
-// own recommended `git checkout -B teammates/<runId>/<taskId> <run branch>` step.
-//
-// With no sha to attribute by, this predicate substitutes a stricter question for the missing
-// attribution: is there a SINGLE merged secondary parent whose own carried set contains EVERY
-// file this task declared? Not "any intersection with any merge" — that would credit a task the
-// moment an unrelated sibling happened to touch one file it also declares, which across phases
-// is routine, since declared sets are disjoint only WITHIN a phase (`scripts/phases.mjs`).
-// Requiring one branch to have carried the whole declared set is what stands in for knowing
-// which branch it was.
-//
-// Deliberately fails closed in two directions, both of which cost a real, honest failure rather
-// than a false pass:
-//   - A task whose plan declares a file it never actually touched has no single merged parent
-//     carrying its whole declared set, so a re-pointed ref for it still reads as no work. The
-//     operator sees the ordinary "contributes no file changes" message; the fix is a commit on
-//     the conventional ref, which is what the check has always asked for.
-//   - An empty declared set returns false unconditionally. A task declaring nothing must never
-//     be creditable from the run tip; `new Set()` is a subset of everything, so this is guarded
-//     explicitly rather than left to the loop.
-//
-// What it does NOT close, and is pinned as a LIMIT in `tests/gate-runner.test.mjs`: a ref parked
-// at the run tip whose declared set is a SUBSET of what one already-merged sibling carried is
-// credited with that sibling's work. This is the same irreducible class as sibling-tip
-// self-integration (see the comment on `landedForFiles` above) — an unattributed position plus a
-// real, overlapping file set — narrowed here from "any intersection" to "full containment", but
-// not eliminated. The run tip is the one position where git state retains nothing that says
-// which branch earned it.
-export function landedForWholeSet(filesBySha, declaredFiles, { exclude } = {}) {
-  const declared = (declaredFiles ?? []).map(normalizePath)
-  if (declared.length === 0) return false
-  for (const [sha, carried] of filesBySha) {
-    if (exclude && sha === exclude) continue
-    const carriedNorm = new Set([...carried].map(normalizePath))
-    if (declared.every((file) => carriedNorm.has(file))) return true
-  }
-  return false
-}
-
 // Takes no `status` argument by design. Three earlier versions of this system were defeated
 // by trusting a file the enforced agents can write.
 export async function deriveContext({ git, runId, runBranch, baseBranch, planPath }) {
@@ -371,15 +327,8 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
       //     for a task that is genuinely, fully landed. The declared-files predicate does not
       //     resolve this — it was built to tell a parked ref from a merged one by what a merge
       //     carried, and a ref sitting exactly at the run tip is not named by any merge at all.
-      //     Closed for the whole-declared-set case by `landedForWholeSet`, which covers this one
-      //     position: with no sha to attribute by, it asks whether a SINGLE merged secondary
-      //     parent carried the task's WHOLE declared set. Its own residual — a run-tip ref whose
-      //     declared set is a SUBSET of a merged sibling's — is pinned as a LIMIT in
-      //     `tests/gate-runner.test.mjs`; see the comment on `landedForWholeSet` itself.
-      const landed = sha === runSha
-        ? landedForWholeSet(mergedFiles, t.files, { exclude: runSha })
-        : landedForFiles(mergedFiles, sha, t.files)
-      states.push(landed && await git.isAncestor(sha, runSha))
+      //     Not closed by this change; still open.
+      states.push(landedForFiles(mergedFiles, sha, t.files) && await git.isAncestor(sha, runSha))
     }
     if (states.length > 0 && states.every(Boolean)) integratedPhases.push(phase)
   }
@@ -556,15 +505,7 @@ export async function runFilesetCheck(check, ctx = {}) {
         //     tell the parked ref from the branch that genuinely earned that credit. See the
         //     comment on `landedForFiles` above `deriveContext`, and the LIMIT test in
         //     `tests/adversarial.test.mjs`, for the executed repro.
-        //   - The run-tip position specifically (`sha === runSha`) is answered by
-        //     `landedForWholeSet` instead, because no merge names the run tip as a secondary
-        //     parent and `landedForFiles` is therefore structurally false there — it failed a
-        //     genuinely landed task whose ref a fix round re-pointed. That predicate demands one
-        //     merged parent to have carried the task's WHOLE declared set; its residual (a
-        //     run-tip ref declaring a SUBSET of a merged sibling's files) is pinned as a LIMIT.
-        const landed = sha === runSha
-          ? landedForWholeSet(mergedFiles, task.files, { exclude: runSha })
-          : landedForFiles(mergedFiles, sha, task.files)
+        const landed = landedForFiles(mergedFiles, sha, task.files)
         if (!landed) {
           problems.push(`${task.id}: branch ${branch} contributes no file changes past its fork point ${forkPoint} — the work is not on the conventional ref, and merging this task would be a no-op`)
         }
