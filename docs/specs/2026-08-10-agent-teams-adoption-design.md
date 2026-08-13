@@ -218,9 +218,21 @@ the phase gate remains the thing that decides.
 
 - **Any teammate can create or overwrite any record in the run.** The records live in one directory
   keyed by task id, shared across the run and not access-controlled, and every teammate has a
-  shell — so the `locate` command is one way to write one, not the only way. Both fields are
-  attacker-chosen: a record may name a worktree that is not the writer's, and may be filed under a
-  task id the writer was not given, including one no task uses.
+  shell — so the `locate` command is one way to write one, not the only way. All three fields are
+  attacker-chosen: a record may name a worktree that is not the writer's, may be filed under a task
+  id the writer was not given (including one no task uses), and may name any `branch` at all.
+
+  The `branch` field deserves separate statement, because it is the one that needs no mismatch to
+  do damage. A record with an honest task id and an honest worktree still hands an attacker-chosen
+  ref to whatever consumes it. Through the handler specified here that alone is enough: a `branch`
+  naming any ref that exists makes the branch precheck succeed, so a teammate that created no
+  branch is waved straight past — the do-nothing case this entire design exists to catch. Worse, a
+  `branch` naming a rival's ref gets the victim blocked and then told, by the handler's own
+  remediation text, to `git checkout -B <that ref>` and commit, so a compliant teammate is walked
+  into force-moving another task's ref. The requirement that follows: the handler must not treat a
+  record's branch as an identity. It must check that the ref is one that record could legitimately
+  name before believing it, and fall back to the conventional name rather than trusting a supplied
+  one.
 
   Consequences reachable from that include, and are not limited to: a teammate leaving itself
   unenforced, so its stop is allowed with no check; a *different* teammate left unenforced, its
@@ -231,11 +243,19 @@ the phase gate remains the thing that decides.
   single direction of harm and each was falsified by an attack shape it had not considered.
 
   The bound that does hold, and the only one worth resting on, is that **none of it produces a
-  false gate PASS.** The gate recomputes every verdict from git, takes its plan path from the
-  operator, and reads nothing under `.teammates/`. Forgery costs somebody the early catch, or aims
-  it at the wrong task; it cannot make a failing task pass. Tamper-evident, not tamper-proof, on
-  the same footing as everything else in that directory — which is why no check reads any of it.
-  `scripts/state.mjs` states the same shape at the reader itself; the two must not drift apart.
+  false gate PASS**, because the verdict is recomputed from git: `deriveContext` resolves base, run,
+  anchor and plan from refs and takes no status argument, the checks receive only that context, and
+  `complete` marks a task done only after recomputing.
+
+  Files under `.teammates/` *are* read — for bookkeeping, not for verdicts. `gate` reads
+  `status.json` at `cli.mjs:2722` and `complete` at `cli.mjs:2814`; earlier drafts of this
+  paragraph said the gate "reads nothing under `.teammates/`", which was never true. What holds is
+  that a corrupt one fails the run **closed**, not open: non-JSON in `status.json` makes `readState`
+  rethrow, and `gate` reports `FAIL` with `run-state` among the failed checks and exits 1 even
+  though every check passed (`cli.mjs:2727-2735`). So the damage from forgery is a wrong or missing
+  early catch, or a run that stops — never a failing task recorded as passing. Tamper-evident, not
+  tamper-proof, on the same footing as everything else in that directory. `scripts/state.mjs`
+  states the same shape at the reader itself; the two must not drift apart.
 - **It fails open.** A handler that cannot run — no `node`, a timeout, a malformed run directory —
   exits non-zero-but-not-2, which the harness treats as a non-blocking error. The teammate stops
   and the gate catches what the hook did not. The harness reinforces this from its own side: for
