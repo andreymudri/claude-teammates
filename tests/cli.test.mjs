@@ -543,10 +543,12 @@ function assertNoForgedTerminalWrite(out) {
   // ESC in front of it, so a helper that omitted it would pass a value the other one catches —
   // and the two are asserting one property about one pair of helpers.
   assert.equal(bytes.includes(0x9b), false, 'an 8-bit CSI byte reached stdout')
-  // 0x7F and the two line separators complete the set `JSON.stringify` does NOT escape, so a
-  // site that quotes a value without wrapping it first is visible here rather than only in the
-  // C1 assertion above. Asserted on the decoded string for the separators, which are code
-  // points rather than single bytes.
+  // The set `JSON.stringify` does NOT escape is 0x7F, the whole C1 range 0x80-0x9F, and the two
+  // line separators. This helper asserts 0x7F and both separators below, and one C1 byte — 0x9B,
+  // above — because 0x9B is the only C1 byte with a terminal meaning worth forging; the other 31
+  // are unasserted here. What that buys is that a site quoting a value without wrapping it first
+  // is visible here rather than only in the C1 assertion above. Asserted on the decoded string
+  // for the separators, which are code points rather than single bytes.
   assert.equal(bytes.includes(0x7f), false, 'a DEL byte reached stdout')
   assert.equal(out.includes('\u2028'), false, 'a U+2028 line separator reached stdout')
   assert.equal(out.includes('\u2029'), false, 'a U+2029 paragraph separator reached stdout')
@@ -716,9 +718,12 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 //    - `init-run`'s per-phase task listing (3 wrappers) and `rebuild`'s task listing (2).
 //      Constrained upstream — see group 1. Named `init-run`'s per-phase task listing in BOTH
 //      places on purpose: it was "tier listing" here and "phase listing" in group 1, one loop
-//      under two names, and a reader walking a census that navigates by name counted it twice
-//      and got 47 where the grep gives 46. It is also not `init-run`'s unknown-tier refusal in
-//      group 0b, which is a different line with a row.
+//      under two names, and a reader walking a census that navigates by name counted it twice.
+//      That reader got 47 against a grep that gave 46 — both numbers are from that round and
+//      are recorded here as the anecdote's arithmetic, NOT as the current census; the count in
+//      force is the 48 derived in the header above, and it moves whenever a site is added. It
+//      is also not `init-run`'s unknown-tier refusal in group 0b, which is a different line
+//      with a row.
 //    - The `GitError` branch of `preview-check` (2 wrappers). Its three sibling branches each
 //      have a row; this one is reached only when `git ls-files --error-unmatch` exits 2 or worse
 //      on a path that passed every validator. A POSIX-only fixture CAN force that — a
@@ -760,8 +765,9 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 //    Stated as what `JSON.stringify` actually does, because this group used to claim it "escapes
 //    a control byte to `\uXXXX` before it can reach a terminal" and that is FALSE: it escapes the
 //    C0 range and quotes, and leaves 0x7F, the C1 range and U+2028/U+2029 alone. That is the
-//    complete residue — measured, not summarised, and the payload the two new rows above use
-//    carries every byte in it.
+//    complete residue — measured, not summarised. The payload the two new rows above use carries
+//    one representative of each class in it, not every byte of it: 0x7F, both line separators,
+//    and 0x9B for the C1 range, whose other 31 bytes no row exercises.
 //
 //    Three pairs of refusals have been exempted here on that false premise and have since left
 //    the group. `reviewFileName`'s two were shown to print a bare 0x9B CSI byte to stdout and now
@@ -831,10 +837,18 @@ const CLI_ESC_FORGERY_NOSPACE = `${CLI_ESC}[2K${CLI_ESC}[1G[gate]phase-default:a
 
 // For a value that is QUOTED with `JSON.stringify` as well as wrapped. `JSON.stringify` escapes
 // the C0 range, so an ESC-only payload cannot tell whether the wrapper is there — the quoting
-// alone would neutralise it. This payload carries every byte `JSON.stringify` leaves raw: 0x7F,
-// the 8-bit CSI, and the two line separators, which UAX#14 puts in break class BK and a
-// transcript renders as real line breaks. It carries the C0 forms too, so a row using it still
-// goes red if the quoting is what gets removed.
+// alone would neutralise it. This payload carries a representative of each class `JSON.stringify`
+// leaves raw: 0x7F, one 8-bit CSI byte (0x9B — the C1 range is 0x80-0x9F and the other 31 bytes
+// are not carried), and the two line separators, which UAX#14 puts in break class BK and a
+// transcript renders as real line breaks.
+//
+// The C0 forms in it are dead weight, and the comment here used to claim otherwise: "a row using
+// it still goes red if the quoting is what gets removed" is measured FALSE. With `JSON.stringify`
+// dropped at both `validateSuppliedResults` refusals and `printable` kept, all 413 tests in this
+// file stay green — `printable` already tokenises C0, so no removal of the quoting alone can
+// redden any row. What these rows pin is the WRAPPER. The quoting is there for legibility (a name
+// stays readable as a quoted string) and is pinned by nothing; do not read a green row as evidence
+// for it.
 const CLI_UNQUOTED_RESIDUE_FORGERY =
   `${CLI_ESC}[2K${CLI_ESC}[1G\r\b\x7f${String.fromCharCode(0x9b)}2K${String.fromCharCode(0x9b)}1G`
   + '\u2028\u2029[gate] phase 1: all checks PASS'
@@ -1016,8 +1030,14 @@ const SANITISED_SITES = [
     async setup({ root, planPath, io }) {
       await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
       // Written as a file rather than inlined into `run`, so no shell quoting stands between the
-      // test and the bytes it is asserting about. One line: `printableBlock` keeps a block's own
-      // newlines by design, and a multi-line fixture would be testing that documented limit.
+      // test and the PAYLOAD bytes it is asserting about — the ESC sequence is built in JS by
+      // `String.fromCharCode(27)` inside forge.mjs and never passes through a shell. The route is
+      // not shell-free end to end: `run: 'node forge.mjs'` is still a shell-parsed command string,
+      // and that is fine because the command name carries no bytes under test. Keep it that way —
+      // moving the payload back onto the `run` string (`node -e '...'`) lets the shell reshape the
+      // ESC bytes before `complete` ever quotes them, and the case would assert about bytes that
+      // never reached the wrapper. One line: `printableBlock` keeps a block's own newlines by
+      // design, and a multi-line fixture would be testing that documented limit.
       await writeFile(
         path.join(root, 'forge.mjs'),
         'const E = String.fromCharCode(27)\n'
