@@ -303,12 +303,21 @@ test('findTaskByWorktree matches a worktree reached through a symlinked parent',
       taskId: 'T1',
       branch: 'teammates/r1/T1',
     })
-    // And the other way round: recorded through the link, queried by the real path.
-    await writeLocation(root, 'r1', 'T2', {
+    // And the other way round: recorded through the link, queried by the real path. Under a
+    // second run id, with the first record's mtime forced into the past, so the answer does not
+    // depend on two writes microseconds apart landing on distinct mtimes — they tie on any
+    // filesystem with coarse mtime granularity, and this assertion would then flip on CI.
+    const stale = new Date(Date.now() - 86_400_000)
+    await utimes(path.join(root, '.teammates', 'r1', 'worktrees', 'T1.json'), stale, stale)
+    await writeLocation(root, 'r2', 'T2', {
       worktree: path.join(link, 'agent-1'),
-      branch: 'teammates/r1/T2',
+      branch: 'teammates/r2/T2',
     })
-    assert.equal((await findTaskByWorktree(root, real)).taskId, 'T2')
+    assert.deepEqual(await findTaskByWorktree(root, real), {
+      runId: 'r2',
+      taskId: 'T2',
+      branch: 'teammates/r2/T2',
+    })
   })
 })
 
@@ -341,7 +350,7 @@ test('findTaskByWorktree resolves duplicate records by write time, not readdir o
   })
 })
 
-test('findTaskByWorktree breaks an exact mtime tie deterministically rather than by directory order', async () => {
+test('findTaskByWorktree breaks an exact mtime tie across runs deterministically rather than by directory order', async () => {
   await withTempRoot(async (root) => {
     const worktree = path.join(root, 'wt', 'agent-1')
     const a = await writeLocation(root, 'aaa', 'T1', { worktree, branch: 'a' })
@@ -356,6 +365,76 @@ test('findTaskByWorktree breaks an exact mtime tie deterministically rather than
         branch: 'z',
       })
     }
+  })
+})
+
+// The run id cannot settle a tie between two records of the SAME run, and that is the reachable
+// case: a respawned teammate reuses an agent-<hash> path within one run, on a filesystem whose
+// mtime granularity collapses both writes onto one timestamp.
+test('findTaskByWorktree breaks an exact mtime tie inside one run rather than by directory order', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    const first = await writeLocation(root, 'r1', 'T1', { worktree, branch: 'teammates/r1/T1' })
+    const second = await writeLocation(root, 'r1', 'T2', { worktree, branch: 'teammates/r1/T2' })
+    const same = new Date(1_700_000_000_000)
+    await utimes(first, same, same)
+    await utimes(second, same, same)
+    for (let i = 0; i < 3; i += 1) {
+      assert.deepEqual(await findTaskByWorktree(root, worktree), {
+        runId: 'r1',
+        taskId: 'T2',
+        branch: 'teammates/r1/T2',
+      })
+    }
+  })
+})
+
+// writeLocation's guard constrains the record's FILENAME. A teammate with a shell can write the
+// file itself and put anything in its CONTENT, and the taskId read back out is handed to a caller
+// that spends it as `complete --task`. So the read side validates too.
+test('findTaskByWorktree skips a hand-written record whose taskId is a traversal', async () => {
+  await withTempRoot(async (root) => {
+    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
+    await mkdir(dir, { recursive: true })
+    const worktree = path.join(root, 'wt', 'agent-1')
+    for (const taskId of [
+      '../../../escaped',
+      '..\\..\\escaped',
+      'nested/T1',
+      '..',
+      '.',
+      '',
+      path.join(root, 'absolute'),
+      42,
+      null,
+      { id: 'T1' },
+    ]) {
+      await writeFile(path.join(dir, 'T1.json'), JSON.stringify({ taskId, worktree, branch: 'b' }), 'utf8')
+      assert.equal(
+        await findTaskByWorktree(root, worktree),
+        null,
+        `a record carrying taskId ${JSON.stringify(taskId)} was returned rather than skipped`,
+      )
+    }
+  })
+})
+
+test('findTaskByWorktree skips a record whose taskId does not name its own file', async () => {
+  await withTempRoot(async (root) => {
+    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
+    await mkdir(dir, { recursive: true })
+    const worktree = path.join(root, 'wt', 'agent-1')
+    // A plain segment, so the traversal check alone would pass it — but T1.json claiming to be
+    // T9 means one of the two is a lie, and the file name is the half the writer's guard bounds.
+    await writeFile(path.join(dir, 'T1.json'), JSON.stringify({ taskId: 'T9', worktree }), 'utf8')
+    assert.equal(await findTaskByWorktree(root, worktree), null)
+    // The honest record next to it is still found, so this skips a record rather than the run.
+    await writeLocation(root, 'r1', 'T2', { worktree, branch: 'teammates/r1/T2' })
+    assert.deepEqual(await findTaskByWorktree(root, worktree), {
+      runId: 'r1',
+      taskId: 'T2',
+      branch: 'teammates/r1/T2',
+    })
   })
 })
 

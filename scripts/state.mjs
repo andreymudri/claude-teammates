@@ -68,16 +68,27 @@ export function normaliseWorktree(p) {
   return process.platform === 'win32' ? trimmed.replace(/\\/g, '/').toLowerCase() : trimmed
 }
 
-// Same guard shape and message as `assertContained` in scripts/cli.mjs, applied here rather than
-// at each call site so every caller inherits it. A taskId is a single path segment and nothing
-// else: `--task ../claims/T5` would otherwise plant a claim file that makes T5 unclaimable for
-// the rest of the run — the phase then finishes with T5 silently unimplemented — and
-// `--task ../status` would overwrite status.json, while more `..` escapes the repository.
+// True when `segment` names a child of `baseDir` directly: not empty, not `.` or `..`, not
+// absolute, not climbing out, and not descending either. This is deliberately STRICTER than
+// `assertContained` in scripts/cli.mjs, which tests containment only: `a/b` is a contained
+// path and that function accepts it, while this one rejects it, because a location record
+// lives directly in `worktrees/` and a nested id would only fail later as an ENOENT. The
+// error message below was copied from that function to keep the two readable side by side,
+// but nothing cross-checks the wording — if cli.mjs is reworded, this text simply stays as
+// it is. Treat the match as a convention, not a guarantee.
+function isSegment(baseDir, segment) {
+  if (typeof segment !== 'string' || segment === '') return false
+  const rel = path.relative(path.resolve(baseDir), path.resolve(path.join(baseDir, segment)))
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel) && !rel.includes(path.sep)
+}
+
+// Applied inside the writer rather than at each call site so every caller inherits it.
+// A taskId is a single path segment and nothing else: `--task ../claims/T5` would otherwise
+// plant a claim file that makes T5 unclaimable for the rest of the run — the phase then
+// finishes with T5 silently unimplemented — and `--task ../status` would overwrite
+// status.json, while more `..` escapes the repository.
 function assertSegment(baseDir, segment, flagName) {
-  const resolvedBase = path.resolve(baseDir)
-  const resolvedTarget = path.resolve(path.join(baseDir, String(segment)))
-  const rel = path.relative(resolvedBase, resolvedTarget)
-  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel) || rel.includes(path.sep)) {
+  if (!isSegment(baseDir, segment)) {
     throw new Error(`${flagName} ${segment} escapes the run directory`)
   }
 }
@@ -98,6 +109,18 @@ export async function writeLocation(root, runId, taskId, { worktree, branch }) {
   return target
 }
 
+// A total order over matching records: newest write first, then the later run id, then the
+// later file name. Every key is needed for totality — mtime alone ties on a coarse filesystem
+// clock (FAT 2s, ext3 and HFS+ 1s, some overlay mounts), and run id alone still ties for two
+// records written inside ONE run, which is exactly the respawn-into-a-reused-worktree case
+// this lookup exists for. With the file name as the last key no pair compares equal, so the
+// answer never falls through to readdir order.
+function laterThan(a, b) {
+  if (a.mtimeMs !== b.mtimeMs) return a.mtimeMs > b.mtimeMs
+  if (a.runId !== b.runId) return a.runId > b.runId
+  return a.file > b.file
+}
+
 // Returns { runId, taskId, branch } for the location record whose worktree is `worktree`,
 // or null. Reads only; a malformed or unreadable record is skipped rather than thrown,
 // because the sole caller is a hook whose failure mode must be "allow the stop", never
@@ -107,8 +130,7 @@ export async function writeLocation(root, runId, taskId, { worktree, branch }) {
 // directory can match records from several runs at once. Returning the first match would
 // resolve that in readdir order — alphabetically — and enforce a finished run's task against
 // the teammate living there now. The newest record wins instead: it is the one a `locate` at
-// checkout just wrote. Equal mtimes (a coarse filesystem clock) break to the later run id, so
-// the answer never depends on directory order.
+// checkout just wrote. See `laterThan` for how equal mtimes are settled.
 export async function findTaskByWorktree(root, worktree) {
   const want = normaliseWorktree(worktree)
   if (want === '') return null
@@ -130,20 +152,26 @@ export async function findTaskByWorktree(root, worktree) {
         const full = path.join(dir, file)
         const record = JSON.parse(await readFile(full, 'utf8'))
         if (normaliseWorktree(record.worktree) !== want) continue
+        // taskId comes from file CONTENT, which the writer's guard never saw: any teammate
+        // with a shell can write this file directly, and the value is handed to a caller that
+        // passes it to `complete --task`. Require it to be a plain segment AND to name the
+        // file it was read from, and skip the record otherwise — the same treatment malformed
+        // JSON gets, because a hook must degrade to "no match" rather than propagate a path.
+        if (!isSegment(dir, record.taskId)) continue
+        if (record.taskId !== file.slice(0, -'.json'.length)) continue
         const { mtimeMs } = await stat(full)
-        const newer = best === null
-          || mtimeMs > best.mtimeMs
-          || (mtimeMs === best.mtimeMs && run.name > best.match.runId)
-        if (newer) {
-          best = {
-            mtimeMs,
-            match: { runId: run.name, taskId: record.taskId, branch: record.branch ?? null },
-          }
+        const candidate = {
+          mtimeMs,
+          file,
+          runId: run.name,
+          taskId: record.taskId,
+          branch: record.branch ?? null,
         }
+        if (best === null || laterThan(candidate, best)) best = candidate
       } catch { continue }
     }
   }
-  return best === null ? null : best.match
+  return best === null ? null : { runId: best.runId, taskId: best.taskId, branch: best.branch }
 }
 
 // Returns the task to the pool. Idempotent: releasing an unclaimed or already-released
