@@ -1,6 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile, readdir } from 'node:fs/promises'
+import { assertClaim, assertStatement, parseDoc } from './md-contract.mjs'
+import { STALL_HINT, renderLiveness } from '../scripts/liveness.mjs'
 
 const dir = new URL('../skills/', import.meta.url)
 const REQUIRED = ['fleet-lifecycle', 'fleet-supervision', 'parallel-execution', 'phase-gate', 'using-teammates']
@@ -120,42 +122,74 @@ test('the tamper-evident spec lists a run based on another run branch as out of 
     new URL('../docs/specs/2026-08-05-tamper-evident-enforcement-design.md', import.meta.url),
     'utf8',
   )
-  const outOfScope = spec.slice(spec.indexOf('### Not defended against'))
-  assert.ok(outOfScope.length > 0, 'the spec must keep its out-of-scope section')
-  assert.match(outOfScope, /A run whose base branch is another run's branch/)
+  // Sectioned rather than sliced. `spec.slice(spec.indexOf(...))` returns the file's last
+  // character when the heading is gone, so a guard on the slice's length can never fire; the
+  // section lookup asserts exactly one heading matches and names the file when none does.
+  const outOfScope = parseDoc(spec, 'tamper-evident spec').section(/Not defended against/)
+  assertStatement(
+    outOfScope,
+    /A run whose base branch is another run's branch/i,
+    'the spec must list a run based on another run branch as out of scope',
+  )
   // Counted from `git log --oneline run/claims`: four amendment commits plus the plan-creation
   // commit, all above the last task merge and all touching only the plan file.
-  assert.match(outOfScope, /FIVE commits above `09f5ad9/)
+  assertStatement(outOfScope, /FIVE commits above 09f5ad9/i, 'the spec must state the unowned-commit count')
   // `ownership` keeps no memory of the violation. Once `run/claims` became an ancestor of the
   // default branch the anchor moved onto the run tip and the commit range emptied, so the spec must
   // not promise a check that fails forever — the record lives in the spec, not in the check.
-  assert.match(outOfScope, /That report is not permanent/)
-  assert.match(outOfScope, /the commit range `anchor\.\.run` is EMPTY/)
-  assert.doesNotMatch(
+  //
+  // `subject:` rather than a `doesNotMatch` on the retracted phrase: a phrase pin binds one
+  // spelling, and a paraphrase ("the gate will refuse it forever") reinstates the claim with this
+  // file green. The inventory lock fails on ANY unlisted sentence in the section that speaks about
+  // the report's permanence, whatever it says, so re-adding the claim costs a deliberate `allow`.
+  assertClaim(outOfScope, {
+    label: 'ownership report permanence',
+    claim: /That report is not permanent, and its answer depends on the base it is run against/i,
+    subject: /(permanent|permanently|forever|never (again )?(pass|go green)|no memory|memory of the violation|passes on run\/claims|its own gate)/i,
+    allow: [
+      /the commit range anchor\.\.run is EMPTY, and ownership has nothing to report and passes/i,
+      /the check has no memory of the violation; the record of it lives in this spec and in the permanent history of the default branch/i,
+      /an ownership PASS computed in that state inspected zero commits/i,
+      /A green ownership on a run already merged into its base is therefore not evidence that anything was checked/i,
+    ],
+  })
+  assertStatement(
     outOfScope,
-    /can never pass its own gate again/,
-    'the spec must not claim a permanence `ownership` does not have',
+    /the commit range anchor\.\.run is EMPTY/i,
+    'the spec must state why the report evaporates: the range is empty',
+  )
+  // The record has to point at the durable copy. A reflog is local to one clone and expires, so a
+  // reader on a fresh clone follows the pointer and finds nothing.
+  assertStatement(
+    outOfScope,
+    /Do not send a reader to git reflog for them/i,
+    'the spec must point at branch history, not at the reflog, for the evidence',
   )
   // An exception accepting anything on a parent run's branch would accept exactly the unowned
   // commit `ownership` exists to catch, so the spec has to record that none was added.
-  assert.match(outOfScope, /No ownership exception is added for this/)
+  assertStatement(
+    outOfScope,
+    /No ownership exception is added for this/i,
+    'the spec must record that no ownership exception was added',
+  )
 })
 
 test('fleet-supervision quotes the liveness stall hint exactly as renderLiveness emits it', async () => {
-  // Read the hint from the source rather than restating it here: a test carrying its own copy of
-  // the string goes green while the skill quotes a hint the CLI no longer prints.
-  const source = await readFile(new URL('../scripts/liveness.mjs', import.meta.url), 'utf8')
-  // Anchored to the start of a line. Unanchored, the first match anywhere in the file wins,
-  // including one inside a comment: a commented-out legacy copy above the real declaration plus a
-  // changed real literal goes green here while `renderLiveness` emits a hint the skill does not
-  // contain — the exact staleness this pin exists to prevent.
-  const literal = /^const STALL_HINT = '([^']*)'/m.exec(source)
-  assert.ok(literal, 'scripts/liveness.mjs must define STALL_HINT as a single-quoted literal')
+  // Import the hint rather than restating it here, and rather than regexing the source for it. A
+  // test carrying its own copy goes green while the skill quotes a hint the CLI no longer prints;
+  // a regex over the source reads the file as TEXT, so a line-start occurrence inside a comment or
+  // a template literal wins the match just as happily as the declaration and produces the same
+  // false green. The import is what `renderLiveness` itself pushes, so there is no second copy.
   const { body } = await skill('fleet-supervision')
   // The hint text only. The skill quotes it inside an indented block, so the rendered line carries
-  // more leading whitespace than the literal and the exact indent of that line is not pinned here.
+  // more leading whitespace than the constant and the exact indent of that line is not pinned here.
   assert.ok(
-    body.includes(literal[1]),
+    body.includes(STALL_HINT),
     'fleet-supervision must quote the stall hint text verbatim as scripts/liveness.mjs emits it',
+  )
+  assert.match(
+    renderLiveness([{ taskId: 'T1', tipAgeMs: null, touchAgeMs: null, floored: false, state: 'stalled' }]),
+    /likely cause: backgrounded command/,
+    'renderLiveness must still emit the hint the skill quotes',
   )
 })

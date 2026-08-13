@@ -113,7 +113,17 @@ where the corresponding claim is made:
   `run/claims-followups`, which made it an ancestor of `master` and moved the anchor onto the run
   tip. Only against a base predating that landing — `fff2307^1`, that is `7bd2e0c` — does the anchor
   fall back far enough for the range to hold 23 commits and for `ownership` to name the five. So the
-  check has no memory of the violation; the record of it lives in this spec and in the reflog. (The
+  check has no memory of the violation; the record of it lives in this spec and in the permanent
+  history of the default branch — `run/claims` reached `master` through `fff2307`, so
+  `git log --oneline run/claims` still lists those five commits above `09f5ad9` in a fresh clone
+  that has no reflog at all. Do not send a reader to `git reflog` for them: reflog entries are
+  local to one clone and expire (90 days by default), so it is the least durable copy of the
+  evidence rather than the record. Read the emptied range forward as well as backward: when the
+  derived anchor equals the run sha the range `anchor..run` holds nothing, so an `ownership` PASS
+  computed in that state inspected zero commits, and the gate prints it identically to a PASS over
+  a non-empty range. A green `ownership` on a run already merged into its base is therefore not
+  evidence that anything was checked — a consequence of anchor derivation, not a second hole in
+  the check. (The
   gate for run `claims` does still fail today, but on `fileset`, for an unrelated reason — do not
   read that failure as this one.) Nothing was rewritten to hide the commits, and the content
   still landed, because `run/claims` was an ancestor of `run/claims-followups`. The remedy is

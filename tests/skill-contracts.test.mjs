@@ -926,10 +926,19 @@ test('parallel-execution states a run bases off the default branch, not another 
   // is another run's deliverable branch, those commits land on it, and `ownership` evaluated for
   // THAT run reports them as reachable from no task branch of it and from no ancestor of its base
   // — which is what they are. The limit is procedural and belongs beside the step that causes it.
+  // `subject:` rather than a `doesNotMatch` on the retracted phrase. A phrase pin binds exactly one
+  // spelling: "run/claims can never again pass its own gate", inserted anywhere in this section,
+  // reinstates the retracted claim with the whole suite green. The inventory lock fails on any
+  // unlisted sentence about the report's permanence, whatever its wording.
   assertClaim(section, {
     label: 'stacked-run base',
     claim: /Branch a run's base from the default branch, not from another run's branch/i,
     then: /Step 1 commits the amendment on the base, so if the base is another run's deliverable branch the amendment lands there/i,
+    subject: /(permanent|permanently|forever|never (again )?(pass|go green)|does not last|not last|preserve the finding|its own gate|passes on run\/claims)/i,
+    allow: [
+      /That report does not last/i,
+      /ownership now passes on run\/claims — so do not count on the check to preserve the finding/i,
+    ],
   })
   assertStatement(
     section,
@@ -943,11 +952,6 @@ test('parallel-execution states a run bases off the default branch, not another 
     section,
     /the derived anchor moved onto the run tip, the commit range emptied, and ownership now passes on run\/claims/i,
     'parallel-execution must state that the ownership report does not survive the run landing',
-  )
-  assertNoStatement(
-    section,
-    /can never pass its own gate again/i,
-    'the report is not permanent, so the skill must not claim it is',
   )
   assertStatement(
     section,
@@ -1006,30 +1010,40 @@ test('fleet-supervision states liveness detects an absence of progress and names
     /the harness moved it to the background at the harness timeout of 120 seconds/i,
     'the second cause is the harness backgrounding a foreground command at its own timeout',
   )
-  // Neither cause has been counted, so neither may be ranked. The recorded occurrences in this
-  // repository (runs `codemap` and `followups2`) are all of a teammate backgrounding the command
-  // itself; the harness-timeout cause rests on in-session reports only. Ranking the second above
-  // the first also countermands `agents/tm-implementer.md`, which tells a teammate not to
-  // background its suite.
+  // No relative frequency exists, so neither cause may be ranked. Of the two stalls this repository
+  // records, only one attributes a cause: docs/plans/2026-08-08-tooling-gaps.md names run `codemap`
+  // as teammates backgrounding the suite themselves, while
+  // docs/specs/2026-08-10-claims-liveness-distinct-refs-design.md records run `claims` as three
+  // stalls with no cause attributed. The harness-timeout cause rests on in-session reports only.
+  // Ranking it above the first also countermands `agents/tm-implementer.md`, which tells a teammate
+  // not to background its suite.
+  //
+  // `subject:` rather than a `doesNotMatch` on "is the common one": that phrase pin binds one
+  // spelling, and "the second is the usual one for a long test suite" restores the unmeasured
+  // ranking with the suite green. The inventory lock fails on any unlisted sentence in this section
+  // that speaks about frequency or ranking.
+  assertClaim(section, {
+    label: 'stall cause ranking',
+    claim: /Neither cause is ranked above the other, because no relative frequency has been measured/i,
+    subject: /\b(rank|ranks|ranked|ranking|frequency|count|counts|counted|common|usual|usually|typical|typically|often|majority|mostly|rare|rarer)\b/i,
+    allow: [
+      /do not assume disobedience without checking which cause applies/i,
+    ],
+  })
   assertStatement(
     section,
-    /Neither cause is ranked above the other, because neither has been counted/i,
-    'fleet-supervision must not rank two causes it has no measurement for',
+    /of the two stalls this repository records, one attributes the first cause \(run codemap\) and one names no cause at all \(run claims\)/i,
+    'fleet-supervision must say what the repository actually records, not attribute both stalls to one cause',
   )
   assertStatement(
     section,
-    /every occurrence recorded in this repository is of the first, and the second has been reported by teammates in session but never recorded/i,
-    'fleet-supervision must say which cause the repository actually records',
+    /the second cause has been reported by teammates in session and never written down/i,
+    'fleet-supervision must say the second cause has no written record',
   )
   assertStatement(
     section,
     /do not assume disobedience without checking which cause applies/i,
     'the caution must be conditional, so it does not countermand the implementer contract',
-  )
-  assertNoStatement(
-    section,
-    /is the common one/i,
-    'an unmeasured frequency claim must not return to this section',
   )
   assertStatement(
     section,

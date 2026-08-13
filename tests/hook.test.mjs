@@ -12,6 +12,20 @@ import { execFileSync } from 'node:child_process'
 import * as childProcess from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
+// LOADING THIS MODULE SPAWNS BASH. The accessibility probe below runs at module
+// evaluation, before any test body, so importing this file at all — a full `node --test`
+// sweep, an editor test-explorer discovery pass, any tool that loads modules to enumerate
+// them — executes `bash -p -c <fixed script> -- <repo path> <witness path>` once. Nothing
+// about the invocation is agent-supplied or caller-supplied: the script is the constant
+// PROBE_SCRIPT, both arguments are derived here, and privileged mode is on.
+//
+// This is deliberate and is the cost of the design, not an oversight. Whether the thirty
+// hook cases RUN or SKIP is decided at registration time, and node:test fixes a case's
+// options — including `skip` — when the test is registered. Deferring the probe into the
+// bodies would mean registering every case unconditionally and skipping from inside, which
+// trades a measured registration for a runtime one and rewrites the mechanism tests that
+// pin the three registration outcomes (run / skip / undetermined-as-failure). The residual
+// stands recorded: discovery and execution are not separable for this file.
 const root = fileURLToPath(new URL('..', import.meta.url))
 const hookScript = fileURLToPath(new URL('../hooks/session-start', import.meta.url))
 const updateCheckScript = fileURLToPath(new URL('../hooks/update-check', import.meta.url))
@@ -715,6 +729,13 @@ const hookBodyForeignCalls = []
 //   eval + //# sourceURL     at b2 (C:/x/tests/hook.test.mjs:42:24)
 //   new Function             at b3 (eval at <anonymous> (…), <anonymous>:44:30)
 //   new Function + sourceURL at b4 (C:/x/tests/hook.test.mjs:44:30)
+//   vm.runInThisContext      at b5 (C:/x/tests/hook.test.mjs:44:21)
+//
+// The table is the enumeration it looks like, and the last row is why the cost sentence below
+// is worded as it is: `vm.runInThisContext(src, {filename, lineOffset})` names any file at any
+// line with no `eval at ` segment and nothing appended to the source — re-measured on node
+// v24.14.0 with `filename: 'C:/x/tests/hook.test.mjs', lineOffset: 43`, which produced exactly
+// the frame above. That shape pays nothing at all.
 //
 // So the check below catches an eval-compiled substitute that does NOT set `sourceURL`, and
 // does not catch one that does. End-to-end at the tip that added this check, registering
@@ -727,8 +748,10 @@ const hookBodyForeignCalls = []
 // free variables bind in the eval scope, so a local `assert` neuters every assertion in every
 // body.
 //
-// The check is kept because it rejects the naive shape and costs nothing. It raises the cost
-// of one spelling by one line and closes nothing.
+// The check is kept because it rejects the naive shape and costs nothing. What it raises the
+// cost of is TWO spellings — plain `eval` and plain `new Function` — by one line each, the
+// appended `//# sourceURL=`. Against `vm.runInThisContext` with a `filename` it raises nothing:
+// that shape never carries an `eval at ` segment to reject. It closes nothing.
 //
 // Nor does adding a leg help, which is why no third mechanism was written when this was
 // measured: the source-text leg passes because the forgery reuses the case's own bodySource
