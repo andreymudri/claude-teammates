@@ -620,11 +620,13 @@ test('hooks.json declares a SessionStart matcher', async () => {
 // thirty-one arrive from the ONE line inside the registration path instead of from the
 // thirty-one marker lines this file's text carries.
 //
-// What that buys, exactly, and what it does not buy. Two independent legs stand between a
-// forgery in the registration path and a green file: these marker lines, derived from the
-// stack frames the marker calls arrive on, and the source-text comparison in the mechanism
-// test at the end, which compares each body node:test received against this file's own text.
-// A forgery has to satisfy BOTH.
+// What that buys, exactly, and what it does not buy. Two legs stand between a forgery in the
+// registration path and a green file: these marker lines, derived from the stack frames the
+// marker calls arrive on, and the source-text comparison in the mechanism test at the end,
+// which compares each body node:test received against this file's own text. A forgery has to
+// satisfy BOTH. They are not independent, and adding a leg is not the lever it looks like:
+// each one reads a property of this file's own text, so a single edit to this file can aim at
+// both at once — and one measured below does.
 //
 // What that is worth is the CASUAL edit, and that is the realistic regression here. A
 // wrapper added while refactoring the registration path keeps every marker line but arrives
@@ -668,14 +670,17 @@ test('hooks.json declares a SessionStart matcher', async () => {
 // in every body becomes a no-op. Measured: with `NOT fully working` changed to `NOT fully
 // operational` in hooks/session-start, the honest file reports 49 tests with 5 failures, and
 // the same broken product with that substitution in place reported 49 pass / 0 fail /
-// 0 skipped. markerFrameLine now rejects the frames such a substitute produces, so its
-// marker calls land in hookBodyForeignCalls instead of satisfying this leg.
+// 0 skipped. markerFrameLine now rejects the frames THAT spelling of the substitute produces,
+// so its marker calls land in hookBodyForeignCalls instead of satisfying this leg. A one-line
+// variant of the same substitute is not rejected; see the measurement at markerFrameLine.
 //
-// Five consecutive rounds of this comment, across two runs, have each named a price for
-// forging these markers — thirty-one edits, then one edit, then two lines, then a claim
-// that only a substitute with genuinely matching real source remained — and every one was
-// falsified by the next reader, twice within a single round. No count of lines or edits
-// bounds this, and none is stated here.
+// Six consecutive rounds of this comment, across two runs, have each named a price for
+// forging these markers — thirty-one edits, then one edit, then two lines, then a claim that
+// only a substitute with genuinely matching real source remained, then a claim that V8 always
+// writes an `eval at ` segment the compiled code cannot drop — and every one was falsified by
+// the next reader, twice within a single round. No count of lines or edits bounds this, and
+// none is stated here. The rule that survived all six: a sentence here may report what was
+// measured, and may not promise what a future edit cannot do.
 //
 // The runtime gap is an observation, NOT a defense: a forged run finishes in a fraction of
 // the healthy time precisely because no real body executes. Nothing in this file asserts on
@@ -697,15 +702,46 @@ const hookBodyForeignCalls = []
 // call site that compiled it, not the location of the code that ran. Both halves of the old
 // check read as honest on such a frame — it contains `hook.test.mjs`, and the trailing
 // `<anonymous>:12:3` is a number the padding of the compiled string can aim at any line —
-// so a substitute compiled from a string could report whatever marker line it chose. The
-// `eval at ` segment is the one part of that shape V8 always writes and the compiled code
-// cannot drop; a body written literally in this file never produces it. Rejecting the frame
-// on that segment sends such a call to hookBodyForeignCalls, where the mechanism test
-// reports it, instead of crediting it as a marker line.
+// so a substitute compiled from a string could report whatever marker line it chose.
+// Rejecting the frame on the `eval at ` segment sends such a call to hookBodyForeignCalls,
+// where the mechanism test reports it, instead of crediting it as a marker line.
 //
-// This rejects THIS frame shape. It is not a claim about forgery in general, and the
-// paragraphs above still hold: the attacker and this file are the same thing, and nothing
-// written here bounds what an edit to this file may do.
+// The compiled code CAN drop that segment, in one documented line. `//# sourceURL=` appended
+// to the compiled string makes V8 name that URL as the frame's file and omit the `eval at `
+// segment entirely, while keeping the position the padding aimed at. Measured on node
+// v24.14.0, one frame per compilation shape:
+//
+//   eval                     at b1 (eval at <anonymous> (…frames.mjs:5:21), <anonymous>:42:24)
+//   eval + //# sourceURL     at b2 (C:/x/tests/hook.test.mjs:42:24)
+//   new Function             at b3 (eval at <anonymous> (…), <anonymous>:44:30)
+//   new Function + sourceURL at b4 (C:/x/tests/hook.test.mjs:44:30)
+//
+// So the check below catches an eval-compiled substitute that does NOT set `sourceURL`, and
+// does not catch one that does. End-to-end at the tip that added this check, registering
+// `eval(NL.repeat(c.registrationLine - 1) + '(' + c.bodySource + ')' + NL +
+// '//# sourceURL=file:///forged/tests/hook.test.mjs')` from a scope holding a no-op `assert`:
+// 50 pass / 0 fail, hookBodyForeignCalls empty, marker lines matching every case, both
+// mechanism pins green. With the product broken (`NOT fully working` -> `NOT fully
+// operational` at hooks/session-start:144) the honest file reports 45 pass / 5 fail and the
+// forged one 50 pass / 0 fail — because, as with the unadorned eval shape above, the copy's
+// free variables bind in the eval scope, so a local `assert` neuters every assertion in every
+// body.
+//
+// The check is kept because it rejects the naive shape and costs nothing. It raises the cost
+// of one spelling by one line and closes nothing.
+//
+// Nor does adding a leg help, which is why no third mechanism was written when this was
+// measured: the source-text leg passes because the forgery reuses the case's own bodySource
+// verbatim, and the marker leg passes because `sourceURL` lets the frame name this file at
+// the padded line. One construction satisfies both, and every property either leg reads is a
+// property of THIS FILE'S OWN TEXT, which the same edit controls. The paragraphs above hold
+// and are the whole of it: the attacker and this file are the same thing, and nothing written
+// here — this check, either leg, or the two together — bounds what an edit to this file may
+// do.
+//
+// What these mechanisms are for is the accidental and the casual: a wrapper added while
+// refactoring, a body replaced by a stub, a case skipped by mistake. Those they catch, and
+// they go red naming the case. A deliberate edit to this file they do not resist and cannot.
 function markerFrameLine(frame) {
   if (frame.includes('eval at ')) return null
   const at = /(\d+):\d+\)?$/.exec(frame)
