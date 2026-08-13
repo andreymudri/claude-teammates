@@ -652,6 +652,25 @@ test('hooks.json declares a SessionStart matcher', async () => {
 // capture. The attacker and the file are the same thing, so no mechanism written here can
 // bound what an edit to this file may do.
 //
+// One shape satisfied both legs at once without touching `Function.prototype` at all, and
+// it is what the frame check in markerFrameLine below was written against. Registering
+// `eval('\n'.repeat(c.registrationLine - 1) + '(' + c.bodySource + ')')` in place of each
+// real body produces a substitute whose `Function.prototype.toString.call(...)` is
+// byte-identical to the case's own source slice, so the source-text leg sees no mismatch;
+// and the newline padding puts the compiled script's lines onto this file's lines, so the
+// marker calls inside it reported the exact marker lines. Measured on the merged tree
+// against a 1517 pass / 0 fail baseline: both legs green, the mechanism test and the
+// mechanism pin green with it.
+//
+// Text identity is not behavioural identity in JavaScript, which is why that shape mattered
+// rather than being a curiosity: the compiled copy's free variables bind in the scope the
+// eval ran in, so an `assert` local to that scope replaces the real one and every assertion
+// in every body becomes a no-op. Measured: with `NOT fully working` changed to `NOT fully
+// operational` in hooks/session-start, the honest file reports 49 tests with 5 failures, and
+// the same broken product with that substitution in place reported 49 pass / 0 fail /
+// 0 skipped. markerFrameLine now rejects the frames such a substitute produces, so its
+// marker calls land in hookBodyForeignCalls instead of satisfying this leg.
+//
 // Five consecutive rounds of this comment, across two runs, have each named a price for
 // forging these markers — thirty-one edits, then one edit, then two lines, then a claim
 // that only a substitute with genuinely matching real source remained — and every one was
@@ -668,13 +687,38 @@ const hookBodyMarkerLines = new Set()
 // Calls whose origin could not be attributed to a line of this file. Any entry here is a
 // failure: it means a hookBodyRan() call came from somewhere this file cannot account for.
 const hookBodyForeignCalls = []
+// The line of this file a marker call arrived from, or null when the frame is not one of
+// this file's own lines. Split out from hookBodyRan so it can be driven with real captured
+// frames by the pin at the end of this file without moving the module counters.
+//
+// V8 writes a frame for code compiled by eval or `new Function` as
+// `at NAME (eval at SITE (…hook.test.mjs:413:3), <anonymous>:12:3)`: the trailing position
+// belongs to the compiled script, and the file path inside the `eval at ` segment is the
+// call site that compiled it, not the location of the code that ran. Both halves of the old
+// check read as honest on such a frame — it contains `hook.test.mjs`, and the trailing
+// `<anonymous>:12:3` is a number the padding of the compiled string can aim at any line —
+// so a substitute compiled from a string could report whatever marker line it chose. The
+// `eval at ` segment is the one part of that shape V8 always writes and the compiled code
+// cannot drop; a body written literally in this file never produces it. Rejecting the frame
+// on that segment sends such a call to hookBodyForeignCalls, where the mechanism test
+// reports it, instead of crediting it as a marker line.
+//
+// This rejects THIS frame shape. It is not a claim about forgery in general, and the
+// paragraphs above still hold: the attacker and this file are the same thing, and nothing
+// written here bounds what an edit to this file may do.
+function markerFrameLine(frame) {
+  if (frame.includes('eval at ')) return null
+  const at = /(\d+):\d+\)?$/.exec(frame)
+  if (!at || !frame.includes('hook.test.mjs')) return null
+  return Number(at[1])
+}
 function hookBodyRan() {
   hookBodyRuns += 1
   // Frame 0 is the "Error" header, frame 1 is this function, frame 2 is the caller.
   const frame = ((new Error().stack || '').split('\n')[2] || '').trim()
-  const at = /(\d+):\d+\)?$/.exec(frame)
-  if (at && frame.includes('hook.test.mjs')) hookBodyMarkerLines.add(Number(at[1]))
-  else hookBodyForeignCalls.push(frame || '(no stack frame)')
+  const line = markerFrameLine(frame)
+  if (line === null) hookBodyForeignCalls.push(frame || '(no stack frame)')
+  else hookBodyMarkerLines.add(line)
 }
 
 // How many registrations this file's own source contains, read from the text rather than
@@ -2279,4 +2323,54 @@ test('(mechanism pinned) the source-text leg reads the real function source, not
   // so the fix does not turn honest registrations red.
   assert.ok(!bodySourceMismatch(realBody, realSource),
     'the source-text leg must accept an unwrapped body unchanged')
+})
+
+test('(mechanism pinned) a frame from eval-compiled code is not credited as a marker line', () => {
+  // PIN for markerFrameLine, the exact function hookBodyRan calls to attribute a marker call
+  // to a line of this file — not a re-statement of it, so a mutation to that one
+  // implementation is caught here. It drives markerFrameLine with REAL captured frames and
+  // never calls hookBodyRan, so it moves none of the module counters the mechanism test
+  // above reads.
+  const captureCallerFrame = () => ((new Error().stack || '').split('\n')[2] || '').trim()
+
+  // A genuinely eval-compiled function, padded the way the substitution documented beside
+  // hookBodyRan pads its copies: 41 leading newlines put its body on line 42 of the compiled
+  // script, so the position V8 writes at the end of its frame is 42 — a line this code does
+  // not occupy and did not have to occupy. Direct eval, so `captureCallerFrame` binds in
+  // this scope; that same free-variable binding is what lets such a substitute supply its
+  // own `assert` to every body it compiles.
+  const compiled = eval('\n'.repeat(41) + '(function compiledBody() { return captureCallerFrame() })')
+  const evalFrame = compiled()
+
+  // The premise: this frame passes both halves of the check markerFrameLine replaced. It
+  // names this file, and it ends in a position that parses as a line number.
+  assert.ok(evalFrame.includes('hook.test.mjs'),
+    `an eval frame names this file through its "eval at" call site, so a frame check keyed ` +
+    `on the file name alone reads it as honest — got ${JSON.stringify(evalFrame)}`)
+  const trailing = /(\d+):\d+\)?$/.exec(evalFrame)
+  assert.ok(trailing, `the eval frame must end in a position, got ${JSON.stringify(evalFrame)}`)
+  assert.equal(Number(trailing[1]), 42,
+    'the padding must aim the frame position at line 42, or this test is not exercising the ' +
+    'shape it claims to')
+
+  // The distinguishing segment, and the actual code path. With the `eval at ` rejection
+  // removed from markerFrameLine, this returns 42 and the call is credited as the marker
+  // line of whichever case the padding was computed from.
+  assert.match(evalFrame, /eval at /,
+    'V8 writes an "eval at" segment for code compiled from a string; without it this test ' +
+    'pins nothing')
+  assert.equal(markerFrameLine(evalFrame), null,
+    'a frame from eval-compiled code must not be attributed to a line of this file, so the ' +
+    'call is reported as foreign rather than credited as a hook case marker')
+
+  // And a body written literally in this file must still be attributed, so the rejection
+  // does not turn honest marker calls into foreign ones.
+  const honestFrame = (function honestBody() { return captureCallerFrame() })()
+  const honestLine = markerFrameLine(honestFrame)
+  assert.equal(typeof honestLine, 'number',
+    `a frame from a function written in this file must be attributed to a line, got ` +
+    `${JSON.stringify(honestFrame)}`)
+  assert.match(SELF_SOURCE.split('\n')[honestLine - 1], /honestBody/,
+    `line ${honestLine} of this file must be the line that made the call, but it does not ` +
+    'contain the calling function')
 })
