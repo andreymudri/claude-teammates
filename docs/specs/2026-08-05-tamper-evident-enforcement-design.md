@@ -77,6 +77,20 @@ where the corresponding claim is made:
      the identical sha**, and the gate already reports every task branch's sha in `branchShas`.
      Recorded here so a future check does not have to rediscover it; nothing implements it yet.
 
+     It is a signal and **not a decision procedure**, which is the part worth writing down.
+     Refusing both tasks on a shared sha was implemented and reverted: two teammates dispatched
+     together and not yet committed share the run tip as their ordinary, benign state, and once
+     anything else lands — a plan amendment, this repo's own documented procedure — that shared
+     sha is no longer the run tip. The check then accuses two idle, honest teammates of parking.
+     That is the same false positive two earlier discriminators produced (`not the run tip`, and
+     `git.mergedBranchTips` membership), and `gate does not treat two idle siblings as parked when
+     an unrelated commit moves the run tip past them` pins it. Sharing a sha says at most one task
+     did that commit's work; it does not say either of them was *supposed* to have done it yet,
+     and the honest reading of the common case is "neither has committed", which the ordinary
+     empty-diff message already reports correctly. Any future use of this signal has to add
+     something that separates "shares a sha" from "shares a sha *and* should not", or it will
+     rediscover this regression.
+
   3. The RUN-TIP variant, now caught by SCARCITY rather than left open. A ref sitting exactly at
      the run tip is named by no merge, so the declared-files predicate has nothing to attribute
      by and used to read false unconditionally — which failed a genuinely landed task whose ref
