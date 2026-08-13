@@ -502,10 +502,21 @@ test('findTaskByWorktree skips a record whose taskId does not name its own file'
     const dir = path.join(root, '.teammates', 'r1', 'worktrees')
     await mkdir(dir, { recursive: true })
     const worktree = path.join(root, 'wt', 'agent-1')
-    // A plain segment, so the traversal check alone would pass it — but T1.json claiming to be
-    // T9 means one of the two is a lie, and the file name is the half the writer's guard bounds.
-    await writeFile(path.join(dir, 'T1.json'), JSON.stringify({ taskId: 'T9', worktree }), 'utf8')
-    assert.equal(await findTaskByWorktree(root, worktree), null)
+    // Each is a plain segment, so the traversal check alone would pass all of them — but
+    // T1.json claiming to be something else means one of the two is a lie, and the file name is
+    // the half the writer's guard bounds. The check has to be exact equality, not a substring
+    // relation: `T` is a strict PREFIX of the stem, so a `file.startsWith(taskId)` weakening
+    // would hand `complete --task T` to the caller, and `T1.json` is contained in the file name,
+    // so a `file.includes(taskId)` weakening would pass it too. `T9` alone catches neither.
+    for (const taskId of ['T9', 'T', 'T1.json', 'T1x', 'json']) {
+      await writeFile(path.join(dir, 'T1.json'), JSON.stringify({ taskId, worktree }), 'utf8')
+      assert.equal(
+        await findTaskByWorktree(root, worktree),
+        null,
+        `T1.json carrying taskId ${JSON.stringify(taskId)} was returned rather than skipped`,
+      )
+    }
+    await rm(path.join(dir, 'T1.json'))
     // The honest record next to it is still found, so this skips a record rather than the run.
     await writeLocation(root, 'r1', 'T2', { worktree, branch: 'teammates/r1/T2' })
     assert.deepEqual(await findTaskByWorktree(root, worktree), {
