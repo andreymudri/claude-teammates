@@ -452,9 +452,11 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
       //     at T1's own merged tip; verdict PASS, `b.mjs` never exists. Recorded in the spec's
       //     "Not defended against" list as sibling-tip self-integration; pinned as a LIMIT in
       //     `tests/adversarial.test.mjs`.
+      //
+      // CLOSED, kept as history because two attempts at it failed in instructive ways:
       //   - `ownWorkBase`: a fix round that re-points an ALREADY-INTEGRATED task's branch onto
       //     the run branch's own current tip — exactly what the brief's own recommended
-      //     `git checkout -B teammates/<runId>/<taskId> <run branch>` step does — reads as
+      //     `git checkout -B teammates/<runId>/<taskId> <run branch>` step does — USED TO read as
       //     having done no work, even though the task's files are genuinely already on the run
       //     branch. `sha` then equals `runSha`, `forkPoint` above also equals `sha` (the
       //     "already on the run branch" branch is taken), and `landedForFiles` looks the sha up
@@ -468,7 +470,8 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
       //     for a task that is genuinely, fully landed. The declared-files predicate does not
       //     resolve this — it was built to tell a parked ref from a merged one by what a merge
       //     carried, and a ref sitting exactly at the run tip is not named by any merge at all.
-      //     Not closed by this change; still open.
+      //     That was the state until `creditRunTipTasks` and `spentParents` below; the paragraph
+      //     above describes the defect, not current behaviour.
       //
       //     One closure was tried and REVERTED (`f6e2191`, reverted by `227abf2`) — recorded so
       //     it is not re-attempted. It asked, for `sha === runSha` only, whether a SINGLE merged
@@ -687,12 +690,15 @@ export async function runFilesetCheck(check, ctx = {}) {
         //     tell the parked ref from the branch that genuinely earned that credit. See the
         //     comment on `landedForFiles` above `deriveContext`, and the LIMIT test in
         //     `tests/adversarial.test.mjs`, for the executed repro.
-        //   - The run-tip position (`sha === runSha`) is answered by `creditRunTipTasks`, which
-        //     matches such a ref to a merged parent that carried its whole declared set and that
-        //     no other task ref already points at. `landedForFiles` cannot answer it at all: the
-        //     run tip is not a key in the index, so it reads false for a genuinely landed task
-        //     whose ref a fix round re-pointed. See that function for why containment alone is
-        //     not enough, and what its own residual is.
+        //
+        // NOT open, and listed here only because it is the other branch of the test below: the
+        // run-tip position (`sha === runSha`) is answered by `creditRunTipTasks`, which matches
+        // such a ref to a merged parent that carried its whole declared set and that is not
+        // already spent — spent meaning pointed at by another task ref, or (see `spentParents`)
+        // an ancestor of one whose declared set the parent's files intersect. `landedForFiles`
+        // cannot answer it at all: the run tip is not a key in the index, so it reads false for a
+        // genuinely landed task whose ref a fix round re-pointed. See those two functions for why
+        // containment alone was not enough.
         const landed = sha === runSha
           ? runTipCredited.has(task.id)
           : landedForFiles(mergedFiles, sha, task.files)

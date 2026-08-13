@@ -158,6 +158,12 @@ export async function collectDoctorReport({ git, runId, runBranch, baseBranch, t
         //     predicate cannot tell the parked ref from the branch that genuinely earned that
         //     credit — sibling-tip self-integration with an overlapping declared set is still
         //     open, in the gate and here alike.
+        //   - It says nothing at all about a ref sitting exactly at the run tip, which is not a
+        //     key in the index and so reads false however much the task landed. That position is
+        //     answered by `creditRunTipTasks` + `spentParents` instead, on the branch below —
+        //     listed here because this list claims to be the gate's limits, and a list that
+        //     omitted the one branch this function takes for that case would be exactly the
+        //     drift it promises not to have.
         //
         // `runFilesetCheck` in `scripts/gate-runner.mjs` computes this same test the same way,
         // over the same index, with the same limits — that is the whole point of importing it
