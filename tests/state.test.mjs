@@ -183,9 +183,21 @@ test('findTaskByWorktree returns null for an unknown worktree and for an empty q
       worktree: path.join(root, 'wt', 'agent-1'),
       branch: 'teammates/r1/T1',
     })
+    // A record with no `worktree` field at all — a shape a hand-written record produces, and the
+    // one that makes the empty-query guard load-bearing: it normalises to '' just as an empty or
+    // missing cwd does, so without the early return a hook called with no cwd would match it and
+    // enforce T2 against whatever agent stopped.
+    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
+    await writeFile(path.join(dir, 'T2.json'), JSON.stringify({ taskId: 'T2', branch: 'b' }), 'utf8')
     assert.equal(await findTaskByWorktree(root, path.join(root, 'wt', 'nobody')), null)
     assert.equal(await findTaskByWorktree(root, ''), null)
     assert.equal(await findTaskByWorktree(root, undefined), null)
+    // The honest record beside it still resolves, so the guard skips a record, not the run.
+    assert.deepEqual(await findTaskByWorktree(root, path.join(root, 'wt', 'agent-1')), {
+      runId: 'r1',
+      taskId: 'T1',
+      branch: 'teammates/r1/T1',
+    })
   })
 })
 
@@ -255,6 +267,10 @@ test('writeLocation refuses a taskId that climbs out of the worktrees directory'
       '../../../../escaped',
       'nested/T1',
       '..',
+      // `.` writes `..json`, whose stem is `.` and therefore equals its own taskId — so this
+      // one segment defeats the writer's guard and the reader's equality check together, and
+      // only isSegment's `rel !== ''` clause stops it at either end.
+      '.',
       path.join(root, 'absolute'),
     ]) {
       await assert.rejects(
@@ -463,7 +479,9 @@ test('findTaskByWorktree skips a record whose file stem is itself a traversal', 
     const dir = path.join(root, '.teammates', 'r1', 'worktrees')
     await mkdir(dir, { recursive: true })
     const worktree = path.join(root, 'wt', 'agent-1')
-    for (const [file, taskId] of [['...json', '..'], ['.json', ''], ['....json', '...']]) {
+    // `..json` has stem `.`, which is what pins isSegment's `rel !== ''` clause: `.` resolves to
+    // the directory itself, so relative() returns '' and only that clause rejects it.
+    for (const [file, taskId] of [['...json', '..'], ['.json', ''], ['....json', '...'], ['..json', '.']]) {
       // Precondition: the equality conjunct accepts this pairing, so a failure here is
       // isSegment's alone.
       assert.equal(file.slice(0, -'.json'.length), taskId)
