@@ -67,11 +67,18 @@ export function livenessRows({ tasks = [], tips = {}, touches = {}, now, staleMi
 
 // A guess at the cause of a stalled row, not a diagnosis: `stalled` means no fresh commit and no
 // fresh worktree write, and that absence has more than one possible cause. The one named here is
-// the most common one seen in practice — a teammate backgrounded its test command and is now
-// waiting on a notification that a backgrounded command never sends. The fix is to resume that
-// same agent with an instruction to run in the foreground, not to respawn it: a respawn discards
-// the task's whole context, and the returned teammate's worktree keeps its branch checked out.
-const STALL_HINT = '  -> likely cause: backgrounded command waiting on a notification that never arrives; resume this agent (do not respawn) and tell it to run in the foreground'
+// the only one this repository has a written record of — a teammate backgrounded its test command
+// and is now waiting on a notification that a backgrounded command never sends. That is a record,
+// not a frequency: no relative count of the causes exists, and `skills/fleet-supervision/SKILL.md`
+// names the other one. The fix is to resume that same agent with an instruction to run in the
+// foreground, not to respawn it: a respawn discards the task's whole context, and the returned
+// teammate's worktree keeps its branch checked out.
+//
+// Exported so the skill-text pin can import the string instead of regexing this file for it: a
+// pin that reads source as text matches a line-start occurrence inside a comment or a template
+// literal just as happily as the declaration, and goes green while `renderLiveness` emits a hint
+// the skill no longer contains.
+export const STALL_HINT = '  -> likely cause: backgrounded command waiting on a notification that never arrives; resume this agent (do not respawn) and tell it to run in the foreground'
 
 export function renderLiveness(rows = [], { staleMinutes = DEFAULT_STALE_MINUTES } = {}) {
   const age = (ms) => (ms == null ? '-' : `${Math.floor(ms / 60000)}m`)

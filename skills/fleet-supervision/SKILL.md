@@ -72,9 +72,10 @@ the hint names only one of them. A teammate may have backgrounded a long command
 it ran that command in the foreground and the harness moved it to the background at the harness
 timeout of 120 seconds, against a suite that takes 200-340 seconds in this repository, leaving the
 agent waiting for a completion notification that a detached command never sends. Neither cause is
-ranked above the other, because neither has been counted: every occurrence recorded in this
-repository is of the first, and the second has been reported by teammates in session but never
-recorded. So do not assume disobedience without checking which cause applies — and do not assume the
+ranked above the other, because no relative frequency has been measured: of the two stalls this
+repository records, one attributes the first cause (run `codemap`) and one names no cause at all
+(run `claims`), while the second cause has been reported by teammates in session and never written
+down. So do not assume disobedience without checking which cause applies — and do not assume the
 harness either. Treat the hint as the guess it is until the teammate's own account settles it.
 
 At dispatch time, prevent it: tell the teammate to pass an explicit longer timeout on the
