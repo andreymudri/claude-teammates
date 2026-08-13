@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, symlink, utimes, writeFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
@@ -236,6 +237,147 @@ test('findTaskByWorktree reports a null branch for a record that carries none', 
       branch: null,
     })
   })
+})
+
+// A taskId reaches writeLocation from `locate --task`, i.e. from the teammate. It is a single
+// path segment and nothing else: the traversals below are the ones that do real damage.
+
+test('writeLocation refuses a taskId that climbs out of the worktrees directory', async () => {
+  await withTempRoot(async (root) => {
+    const args = { worktree: path.join(root, 'wt', 'agent-1'), branch: 'b' }
+    for (const taskId of [
+      '../claims/T5',
+      '..\\claims\\T5',
+      '../status',
+      '../../../../escaped',
+      'nested/T1',
+      '..',
+      path.join(root, 'absolute'),
+    ]) {
+      await assert.rejects(
+        writeLocation(root, 'r1', taskId, args),
+        /escapes the run directory/,
+        `taskId ${taskId} was not refused`,
+      )
+    }
+    // Nothing was created anywhere: not the claim that would make T5 unclaimable forever,
+    // not an overwritten status.json, not a file outside the run directory.
+    assert.equal(await readState(root, 'r1', 'status'), null)
+    assert.equal(await claimTask(root, 'r1', 'T5', 'impl-a'), true)
+  })
+})
+
+test('writeLocation refuses a runId that climbs out of .teammates', async () => {
+  await withTempRoot(async (root) => {
+    const args = { worktree: path.join(root, 'wt', 'agent-1'), branch: 'b' }
+    for (const runId of ['../..', '../escaped', 'nested/r1', '..']) {
+      await assert.rejects(writeLocation(root, runId, 'T1', args), /escapes the run directory/)
+    }
+  })
+})
+
+test('writeLocation still accepts an ordinary task and run id after the guard', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    const written = await writeLocation(root, 'run-1_x', 'T10', { worktree, branch: 'b' })
+    assert.equal(written, path.join(root, '.teammates', 'run-1_x', 'worktrees', 'T10.json'))
+  })
+})
+
+test('findTaskByWorktree matches a worktree reached through a symlinked parent', async (t) => {
+  await withTempRoot(async (root) => {
+    const real = path.join(root, 'real', 'agent-1')
+    await mkdir(real, { recursive: true })
+    const link = path.join(root, 'linked')
+    try {
+      await symlink(path.join(root, 'real'), link, 'junction')
+    } catch (err) {
+      t.skip(`symlinks unavailable here: ${err.code}`)
+      return
+    }
+    // Recorded as git prints it (the real path); queried as the harness reports it (through
+    // the link). Lexical normalisation alone cannot see these are one directory.
+    await writeLocation(root, 'r1', 'T1', { worktree: real, branch: 'teammates/r1/T1' })
+    assert.deepEqual(await findTaskByWorktree(root, path.join(link, 'agent-1')), {
+      runId: 'r1',
+      taskId: 'T1',
+      branch: 'teammates/r1/T1',
+    })
+    // And the other way round: recorded through the link, queried by the real path.
+    await writeLocation(root, 'r1', 'T2', {
+      worktree: path.join(link, 'agent-1'),
+      branch: 'teammates/r1/T2',
+    })
+    assert.equal((await findTaskByWorktree(root, real)).taskId, 'T2')
+  })
+})
+
+// Records are never deleted and worktree paths are reused, so several runs can hold a record
+// for one directory. Whichever one `locate` wrote most recently is the live teammate's.
+test('findTaskByWorktree resolves duplicate records by write time, not readdir order', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    const stale = await writeLocation(root, 'aaa-old', 'T9', { worktree, branch: 'teammates/aaa-old/T9' })
+    const live = await writeLocation(root, 'zzz-current', 'T2', { worktree, branch: 'teammates/zzz-current/T2' })
+    const old = new Date(Date.now() - 86_400_000)
+    await utimes(stale, old, old)
+    assert.deepEqual(await findTaskByWorktree(root, worktree), {
+      runId: 'zzz-current',
+      taskId: 'T2',
+      branch: 'teammates/zzz-current/T2',
+    })
+    // The mirror case, which readdir order and reverse-alphabetical order both get wrong:
+    // the newest record now sorts FIRST by name.
+    const newer = await writeLocation(root, 'bbb-newest', 'T3', { worktree, branch: 'teammates/bbb-newest/T3' })
+    const past = new Date(Date.now() - 3_600_000)
+    await utimes(live, past, past)
+    const soon = new Date(Date.now() + 60_000)
+    await utimes(newer, soon, soon)
+    assert.deepEqual(await findTaskByWorktree(root, worktree), {
+      runId: 'bbb-newest',
+      taskId: 'T3',
+      branch: 'teammates/bbb-newest/T3',
+    })
+  })
+})
+
+test('findTaskByWorktree breaks an exact mtime tie deterministically rather than by directory order', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    const a = await writeLocation(root, 'aaa', 'T1', { worktree, branch: 'a' })
+    const b = await writeLocation(root, 'zzz', 'T2', { worktree, branch: 'z' })
+    const same = new Date(1_700_000_000_000)
+    await utimes(a, same, same)
+    await utimes(b, same, same)
+    for (let i = 0; i < 3; i += 1) {
+      assert.deepEqual(await findTaskByWorktree(root, worktree), {
+        runId: 'zzz',
+        taskId: 'T2',
+        branch: 'z',
+      })
+    }
+  })
+})
+
+// A cross-file source assertion, not a behavioural one. Observing a torn read requires winning
+// a race against a write that finishes in microseconds, which is exactly the flaky test this
+// suite avoids; the property is structural — the bytes never appear at the target path under a
+// non-final name — so the structure is what gets pinned. Replacing the tmp+rename pair with a
+// direct writeFile(target, ...) fails here.
+test('writeLocation writes through a unique temp file and renames, never straight to the target', async () => {
+  const source = await readFile(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'state.mjs'),
+    'utf8',
+  )
+  const start = source.indexOf('export async function writeLocation')
+  assert.notEqual(start, -1, 'writeLocation is no longer declared under that name')
+  const body = source.slice(start, source.indexOf('\n}', start))
+  assert.match(body, /const tmp = `\$\{target\}\.\$\{process\.pid\}\./,
+    'the temp name must be unique per writer, or two writers share one scratch file')
+  assert.match(body, /await writeFile\(tmp,/, 'the payload must be written to the temp file')
+  assert.match(body, /await rename\(tmp, target\)/, 'the temp file must be renamed onto the target')
+  assert.doesNotMatch(body, /writeFile\(\s*target/,
+    'writing straight to the target lets a concurrent reader see a half-written record')
 })
 
 // The location record is deliberately separate from the claim: adding it must not have relaxed

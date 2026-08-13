@@ -1,4 +1,5 @@
-import { mkdir, readdir, readFile, writeFile, rename, unlink } from 'node:fs/promises'
+import { mkdir, readdir, readFile, stat, writeFile, rename, unlink } from 'node:fs/promises'
+import { realpathSync } from 'node:fs'
 import path from 'node:path'
 
 const NAMES = new Set(['plan', 'status', 'findings'])
@@ -44,20 +45,50 @@ export async function claimTask(root, runId, taskId, teammate) {
   }
 }
 
-// Compared, never displayed. Windows paths differ in case and separator between what git
-// prints, what the harness sends in a hook payload, and what a shell reports — three
-// spellings of one directory. Normalising at both ends is what makes the lookup total.
+// Compared, never displayed. One directory has several spellings: what git prints, what the
+// harness sends in a hook payload, and what a shell reports differ in separator, in drive-letter
+// and path case on Windows, in trailing separators, and — because a worktree can be reached
+// through a symlinked parent (/var vs /private/var) or an 8.3 short name — in the identity of
+// the directory components themselves. Trailing separator, case and separator style are folded
+// lexically; the rest needs the filesystem, so an existing path is resolved through realpath at
+// both ends. What remains uncovered: a path that no longer exists at compare time falls back to
+// lexical resolution and so still fails to match a differently-spelled record, and two genuinely
+// distinct paths that a bind mount points at one target compare equal. Both directions cost only
+// the early catch — a missed match lets the hook allow the stop, which is its fail-open default.
 export function normaliseWorktree(p) {
   if (typeof p !== 'string' || p === '') return ''
   const resolved = path.resolve(p).replace(/[\\/]+$/, '')
-  return process.platform === 'win32' ? resolved.replace(/\\/g, '/').toLowerCase() : resolved
+  let real = resolved
+  try {
+    // .native canonicalises case and expands 8.3 short names on Windows; both platforms
+    // resolve symlinks. It throws for a path that does not exist — compare that lexically.
+    real = realpathSync.native(resolved)
+  } catch { /* fall back to the lexical form */ }
+  const trimmed = real.replace(/[\\/]+$/, '')
+  return process.platform === 'win32' ? trimmed.replace(/\\/g, '/').toLowerCase() : trimmed
+}
+
+// Same guard shape and message as `assertContained` in scripts/cli.mjs, applied here rather than
+// at each call site so every caller inherits it. A taskId is a single path segment and nothing
+// else: `--task ../claims/T5` would otherwise plant a claim file that makes T5 unclaimable for
+// the rest of the run — the phase then finishes with T5 silently unimplemented — and
+// `--task ../status` would overwrite status.json, while more `..` escapes the repository.
+function assertSegment(baseDir, segment, flagName) {
+  const resolvedBase = path.resolve(baseDir)
+  const resolvedTarget = path.resolve(path.join(baseDir, String(segment)))
+  const rel = path.relative(resolvedBase, resolvedTarget)
+  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel) || rel.includes(path.sep)) {
+    throw new Error(`${flagName} ${segment} escapes the run directory`)
+  }
 }
 
 // Written by the teammate at start, read by the stop-time hook. Overwritable on purpose:
 // a respawned teammate re-enters the same task from a different worktree, and a record
 // that could not be updated would point the hook at a directory that no longer exists.
 export async function writeLocation(root, runId, taskId, { worktree, branch }) {
+  assertSegment(path.join(root, '.teammates'), runId, '--run')
   const dir = path.join(runDir(root, runId), 'worktrees')
+  assertSegment(dir, taskId, '--task')
   await mkdir(dir, { recursive: true })
   const target = path.join(dir, `${taskId}.json`)
   // Unique temp name, then rename: a concurrent reader never sees a half-written record.
@@ -71,6 +102,13 @@ export async function writeLocation(root, runId, taskId, { worktree, branch }) {
 // or null. Reads only; a malformed or unreadable record is skipped rather than thrown,
 // because the sole caller is a hook whose failure mode must be "allow the stop", never
 // "crash every agent on this machine".
+//
+// Records are never deleted, and the harness reuses `agent-<hash>` worktree paths, so one
+// directory can match records from several runs at once. Returning the first match would
+// resolve that in readdir order — alphabetically — and enforce a finished run's task against
+// the teammate living there now. The newest record wins instead: it is the one a `locate` at
+// checkout just wrote. Equal mtimes (a coarse filesystem clock) break to the later run id, so
+// the answer never depends on directory order.
 export async function findTaskByWorktree(root, worktree) {
   const want = normaliseWorktree(worktree)
   if (want === '') return null
@@ -78,6 +116,7 @@ export async function findTaskByWorktree(root, worktree) {
   try {
     runs = await readdir(path.join(root, '.teammates'), { withFileTypes: true })
   } catch { return null }
+  let best = null
   for (const run of runs) {
     if (!run.isDirectory()) continue
     const dir = path.join(root, '.teammates', run.name, 'worktrees')
@@ -88,14 +127,23 @@ export async function findTaskByWorktree(root, worktree) {
     for (const file of files) {
       if (!file.endsWith('.json')) continue
       try {
-        const record = JSON.parse(await readFile(path.join(dir, file), 'utf8'))
-        if (normaliseWorktree(record.worktree) === want) {
-          return { runId: run.name, taskId: record.taskId, branch: record.branch ?? null }
+        const full = path.join(dir, file)
+        const record = JSON.parse(await readFile(full, 'utf8'))
+        if (normaliseWorktree(record.worktree) !== want) continue
+        const { mtimeMs } = await stat(full)
+        const newer = best === null
+          || mtimeMs > best.mtimeMs
+          || (mtimeMs === best.mtimeMs && run.name > best.match.runId)
+        if (newer) {
+          best = {
+            mtimeMs,
+            match: { runId: run.name, taskId: record.taskId, branch: record.branch ?? null },
+          }
         }
       } catch { continue }
     }
   }
-  return null
+  return best === null ? null : best.match
 }
 
 // Returns the task to the pool. Idempotent: releasing an unclaimed or already-released
