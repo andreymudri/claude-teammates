@@ -1,10 +1,21 @@
-// The brief IS the task specification. Every consumer composes it here so that the
-// plan pointer, the mandatory checkout, the baseline run, the declared file set and the
-// global constraints cannot be present on one dispatch path and missing on another.
+// The brief IS the task specification. This module exists to become the single composer, so
+// that the plan pointer, the mandatory checkout, the location record, the baseline run, the
+// declared file set, the global constraints and the self-verification stop being present on
+// one dispatch path and missing on another.
 //
-// Pure: no I/O, no filesystem, no process access. Generated workflow scripts run without
-// module access, so the generator substitutes the finished text rather than importing this
-// at workflow runtime.
+// That unification has NOT landed yet. Nothing outside tests/brief.test.mjs imports this
+// module: `templates/phase-workflow.js` still carries its own copy, and the two already
+// differ — this one emits the locate and complete steps, the template's copy emits neither,
+// so a workflow-dispatched implementer is currently never told to run `cli.mjs locate`.
+// Task 6 rewires the generator and the template onto `composeBrief` and adds the cross-file
+// check that pins them byte-identical; until it lands, the template's copy is still live and
+// is what a `Workflow` dispatch actually renders.
+//
+// Pure: no I/O, no filesystem, no process access — pinned by a source-level test in
+// tests/brief.test.mjs, since an unused import changes no rendered output and no behavioural
+// assertion could catch it. Purity is what lets the generator substitute finished text into
+// generated workflow scripts, which run without filesystem or module access and so could
+// never import this at workflow runtime.
 
 // With a base branch, the brief opens with a checkout that has an explicit start point and a
 // log line the teammate can check against a named ref. With no base there is nothing to branch

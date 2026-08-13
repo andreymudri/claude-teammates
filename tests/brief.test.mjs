@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import { composeBrief } from '../scripts/brief.mjs'
 
 const TASK = {
@@ -58,6 +59,13 @@ test('the complete command carries run, task and plan and sits after the constra
   assert.ok(brief.includes('cli.mjs" complete'), 'complete command missing')
   assert.ok(brief.includes('--run substop --task T4 --plan ' + FULL.planPath),
     'complete command does not substitute run id, task id and plan path')
+  assert.ok(brief.includes('--root "$ROOT"'), 'complete command does not pass --root')
+  // Without the assignment, --root "$ROOT" expands to the empty string and the CLI resolves the
+  // run branch to the task branch — the wrong question, asked silently.
+  assert.ok(brief.includes('ROOT=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")'),
+    'the ROOT assignment that gives --root its value is missing')
+  assert.ok(at(brief, 'ROOT=$(dirname') < at(brief, '--root "$ROOT"'),
+    'ROOT must be assigned before it is passed to --root')
   assert.ok(at(brief, 'GLOBAL CONSTRAINTS:') < at(brief, 'cli.mjs" complete'),
     'self-verification must follow the constraints section')
   assert.ok(at(brief, 'cli.mjs" complete') < at(brief, 'Commit your work on'),
@@ -156,8 +164,29 @@ test('composeBrief throws when task.branch is empty', () => {
 })
 
 test('no rendered line is empty of content yet claims a value it does not have', () => {
-  const brief = composeBrief(FULL)
-  assert.ok(!/--run(\s*)$/m.test(brief), 'a --run flag ends a line with no value')
-  assert.ok(!/--task(\s*)$/m.test(brief), 'a --task flag ends a line with no value')
-  assert.ok(!/--plan(\s*)$/m.test(brief), 'a --plan flag ends a line with no value')
+  for (const brief of [composeBrief(FULL), composeBrief({ ...FULL, caveman: 'full' })]) {
+    for (const flag of ['run', 'task', 'plan', 'root']) {
+      assert.ok(!new RegExp('--' + flag + '\\s*$', 'm').test(brief),
+        `a --${flag} flag ends a line with no value`)
+      assert.ok(!brief.includes('--' + flag + '  '),
+        `a --${flag} flag is followed by an empty value`)
+      assert.ok(!brief.includes('--' + flag + ' ""'),
+        `a --${flag} flag is given an empty literal`)
+    }
+  }
+})
+
+// Cross-file, source-level check. The module's purity is a claim about what it does NOT do, and
+// an unused `node:fs` import or a `process.env` read changes no rendered output — so no
+// behavioural assertion over composeBrief's return value can fail on it. This repository already
+// uses cross-file source checks for exactly this shape of claim.
+test('scripts/brief.mjs performs no I/O and touches no host state', async () => {
+  const src = await readFile(new URL('../scripts/brief.mjs', import.meta.url), 'utf8')
+  const code = src.split('\n').filter((l) => !l.trimStart().startsWith('//')).join('\n')
+  for (const forbidden of ['node:fs', 'node:child_process', 'node:os', 'node:path', 'node:process',
+    'require(', 'readFile', 'writeFile', 'execSync', 'spawn', 'process.', 'globalThis', 'fetch(']) {
+    assert.ok(!code.includes(forbidden),
+      `scripts/brief.mjs must stay pure: it references ${forbidden}`)
+  }
+  assert.ok(!/^\s*import\s/m.test(code), 'scripts/brief.mjs must import nothing')
 })
