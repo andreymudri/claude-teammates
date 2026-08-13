@@ -1,6 +1,10 @@
 import { mkdir, readdir, readFile, stat, writeFile, rename, unlink } from 'node:fs/promises'
 import { realpathSync } from 'node:fs'
 import path from 'node:path'
+// The single definition of `teammates/<runId>/<taskId>`. Imported rather than restated so the
+// branch a record is allowed to name cannot drift from the branch the run actually uses.
+// enforce.mjs imports nothing, so this costs the stop-time hook no extra module graph.
+import { taskBranchName } from './enforce.mjs'
 
 const NAMES = new Set(['plan', 'status', 'findings'])
 
@@ -50,22 +54,45 @@ export async function claimTask(root, runId, taskId, teammate) {
 // and path case on Windows, in trailing separators, and — because a worktree can be reached
 // through a symlinked parent (/var vs /private/var) or an 8.3 short name — in the identity of
 // the directory components themselves. Trailing separator, case and separator style are folded
-// lexically; the rest needs the filesystem, so an existing path is resolved through realpath at
-// both ends. What remains uncovered: a path that no longer exists at compare time falls back to
-// lexical resolution and so still fails to match a differently-spelled record, and two genuinely
-// distinct paths that a bind mount points at one target compare equal. Both directions cost only
-// the early catch — a missed match lets the hook allow the stop, which is its fail-open default.
-export function normaliseWorktree(p) {
+// lexically; the rest needs the filesystem, so `resolveLinks` resolves the path through realpath.
+//
+// That branch is a filesystem call, and its cost is bounded by the filesystem, not by this code:
+// realpath on a path that does not exist returns quickly, but on win32 an unreachable UNC share
+// blocks the calling thread for as long as the network stack takes to give up — 26.8 s measured
+// once on this host, synchronously, with the event loop stopped. It is therefore NOT a cheap
+// fallback, and callers holding untrusted paths pass `resolveLinks: false` and decide for
+// themselves (see `isLocalAbsolute`).
+//
+// What remains uncovered even with links resolved: a path that no longer exists at compare time
+// falls back to its lexical form and so still fails to match a differently-spelled record, and
+// two genuinely distinct paths that a bind mount points at one target compare equal. Both cost
+// only the early catch — a missed match lets the hook allow the stop, its fail-open default.
+export function normaliseWorktree(p, { resolveLinks = true } = {}) {
   if (typeof p !== 'string' || p === '') return ''
   const resolved = path.resolve(p).replace(/[\\/]+$/, '')
   let real = resolved
-  try {
-    // .native canonicalises case and expands 8.3 short names on Windows; both platforms
-    // resolve symlinks. It throws for a path that does not exist — compare that lexically.
-    real = realpathSync.native(resolved)
-  } catch { /* fall back to the lexical form */ }
+  if (resolveLinks) {
+    try {
+      // .native canonicalises case and expands 8.3 short names on Windows; both platforms
+      // resolve symlinks. It throws for a path that does not exist — compare that lexically.
+      real = realpathSync.native(resolved)
+    } catch { /* fall back to the lexical form */ }
+  }
   const trimmed = real.replace(/[\\/]+$/, '')
   return process.platform === 'win32' ? trimmed.replace(/\\/g, '/').toLowerCase() : trimmed
+}
+
+// Whether a path is safe to hand to realpath. A record's worktree is attacker-supplied — anyone
+// with a shell can write a file under `.teammates/` — and a UNC path to an unreachable host is
+// the measured stall above. Ten such records would keep every stop inside this lookup for
+// minutes, past the hook's own timeout, which switches enforcement off for the whole run at no
+// cost to whoever wrote them. A plain local absolute path cannot do that. Residual, stated
+// rather than fixed: a drive letter mapped to an unreachable share is a local-looking spelling
+// and still pays the stall, and nothing cheap tells the two apart.
+function isLocalAbsolute(p) {
+  if (typeof p !== 'string' || p === '') return false
+  if (process.platform === 'win32') return /^[A-Za-z]:[\\/]/.test(p)
+  return p.startsWith('/') && !p.startsWith('//')
 }
 
 // True when `segment` names a child of `baseDir` directly: not empty, not `.` or `..`, not
@@ -132,8 +159,13 @@ function laterThan(a, b) {
 // the teammate living there now. The newest record wins instead: it is the one a `locate` at
 // checkout just wrote. See `laterThan` for how equal mtimes are settled.
 export async function findTaskByWorktree(root, worktree) {
-  const want = normaliseWorktree(worktree)
-  if (want === '') return null
+  // The query comes from the caller (a hook payload's cwd), not from a record, so it is the one
+  // path worth resolving through the filesystem — once, here, rather than per record. Records
+  // are then compared against both its spellings, which is what lets the common case decide
+  // lexically and never touch the filesystem with a value a record supplied.
+  const wantReal = normaliseWorktree(worktree)
+  if (wantReal === '') return null
+  const wantLexical = normaliseWorktree(worktree, { resolveLinks: false })
   let runs
   try {
     runs = await readdir(path.join(root, '.teammates'), { withFileTypes: true })
@@ -151,7 +183,11 @@ export async function findTaskByWorktree(root, worktree) {
       try {
         const full = path.join(dir, file)
         const record = JSON.parse(await readFile(full, 'utf8'))
-        if (normaliseWorktree(record.worktree) !== want) continue
+        // ORDER MATTERS. Everything below that can reject a record on string comparison alone
+        // runs before any filesystem call on a value the record supplies. A record that fails
+        // these costs one read and one parse; put the worktree resolution first instead and a
+        // record needs no valid taskId at all to make this lookup stall (see `isLocalAbsolute`).
+        //
         // taskId comes from file CONTENT, which the writer's guard never saw: any teammate
         // with a shell can write this file directly, and the value is handed to a caller that
         // passes it to `complete --task`. Require it to be a plain segment AND to name the
@@ -159,13 +195,31 @@ export async function findTaskByWorktree(root, worktree) {
         // JSON gets, because a hook must degrade to "no match" rather than propagate a path.
         if (!isSegment(dir, record.taskId)) continue
         if (record.taskId !== file.slice(0, -'.json'.length)) continue
+        const lexical = normaliseWorktree(record.worktree, { resolveLinks: false })
+        if (lexical === '') continue
+        let matched = lexical === wantReal || lexical === wantLexical
+        if (!matched && isLocalAbsolute(record.worktree)) {
+          const real = normaliseWorktree(record.worktree)
+          matched = real === wantReal || real === wantLexical
+        }
+        if (!matched) continue
         const { mtimeMs } = await stat(full)
         const candidate = {
           mtimeMs,
           file,
           runId: run.name,
           taskId: record.taskId,
-          branch: record.branch ?? null,
+          // `branch` is the field that survives an HONEST taskId and an HONEST worktree, so no
+          // amount of cross-checking those two constrains it. Unvalidated it is a lever on the
+          // caller's git: any existing ref waves past a teammate that created no branch at all,
+          // and a rival's ref turns the hook's own remediation text into an instruction to
+          // force-move another task's branch. A record may name exactly one branch — the one
+          // this run gives this task — and anything else is dropped to null rather than
+          // discarding the record, because the record that legitimately carries a non-canonical
+          // branch is the teammate that never checked its task branch out, i.e. precisely the
+          // do-nothing case the hook exists to catch. Null is what the caller already falls
+          // back on, and it recomputes the same name from runId and taskId.
+          branch: record.branch === taskBranchName(run.name, record.taskId) ? record.branch : null,
         }
         if (best === null || laterThan(candidate, best)) best = candidate
       } catch { continue }
@@ -188,8 +242,16 @@ export async function releaseClaim(root, runId, taskId) {
 
 // Round counts are bookkeeping, not enforcement. status.json is written by the agents the
 // gate enforces, so a teammate can reset its own count and buy more retries. That costs
-// tokens; it cannot produce a false PASS, because the verdict is recomputed from git every
-// round and reads nothing from .teammates/. The worktree location record above is weaker still,
+// tokens; it cannot produce a false PASS, because every verdict is recomputed from git.
+//
+// State the bound precisely, because the obvious phrasing is wrong: the gate does NOT read
+// nothing under .teammates/ — `gate` and `complete` both read status.json (scripts/cli.mjs:2722
+// and :2814). What holds is the half that matters: no forgery here manufactures a PASS. The
+// files under .teammates/ are read for bookkeeping, and a corrupt one fails the run CLOSED —
+// non-JSON in status.json makes readState rethrow, and gate then reports FAIL with `run-state`
+// among the failures and exits 1 even with every check passing. Denial, not escalation.
+//
+// The worktree location record above is weaker still,
 // and not in the way "a teammate can only hurt itself" would suggest: nothing binds a record to
 // a writer. Any teammate in the run can write any record, including one naming a DIFFERENT
 // teammate's worktree, and newest-wins then resolves that directory to the forged record — so

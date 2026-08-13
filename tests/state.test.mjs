@@ -404,8 +404,8 @@ test('findTaskByWorktree resolves duplicate records by write time, not readdir o
 test('findTaskByWorktree breaks an exact mtime tie across runs deterministically rather than by directory order', async () => {
   await withTempRoot(async (root) => {
     const worktree = path.join(root, 'wt', 'agent-1')
-    const a = await writeLocation(root, 'aaa', 'T1', { worktree, branch: 'a' })
-    const b = await writeLocation(root, 'zzz', 'T1', { worktree, branch: 'z' })
+    const a = await writeLocation(root, 'aaa', 'T1', { worktree, branch: 'teammates/aaa/T1' })
+    const b = await writeLocation(root, 'zzz', 'T1', { worktree, branch: 'teammates/zzz/T1' })
     const same = new Date(1_700_000_000_000)
     await utimes(a, same, same)
     await utimes(b, same, same)
@@ -413,7 +413,7 @@ test('findTaskByWorktree breaks an exact mtime tie across runs deterministically
       assert.deepEqual(await findTaskByWorktree(root, worktree), {
         runId: 'zzz',
         taskId: 'T1',
-        branch: 'z',
+        branch: 'teammates/zzz/T1',
       })
     }
   })
@@ -525,6 +525,98 @@ test('findTaskByWorktree skips a record whose taskId does not name its own file'
       branch: 'teammates/r1/T2',
     })
   })
+})
+
+// `branch` is the field a forged record can carry while its taskId and worktree are entirely
+// honest, so neither read-side guard constrains it. A record may name exactly one branch.
+test('findTaskByWorktree drops a branch the record could not legitimately name', async () => {
+  await withTempRoot(async (root) => {
+    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
+    await mkdir(dir, { recursive: true })
+    const worktree = path.join(root, 'wt', 'agent-2')
+    for (const branch of [
+      'teammates/r1/T5', // a rival task's ref: the hook would tell T2 to force-move it
+      'master', // any existing ref: waves past a teammate that created no branch at all
+      'refs/heads/teammates/r1/T2', // fully-qualified: not the name the run uses
+      'teammates/r2/T2', // right task, wrong run
+      'teammates/r1/T2 --force', // a plain segment prefix with an argument stapled on
+      42,
+      null,
+    ]) {
+      // taskId honest, filename honest, worktree honest — only `branch` is forged.
+      await writeFile(path.join(dir, 'T2.json'), JSON.stringify({ taskId: 'T2', worktree, branch }), 'utf8')
+      assert.deepEqual(
+        await findTaskByWorktree(root, worktree),
+        { runId: 'r1', taskId: 'T2', branch: null },
+        `branch ${JSON.stringify(branch)} reached the caller`,
+      )
+    }
+    // The one branch it may name survives untouched, so this narrows the field rather than
+    // blanking it: a caller can still tell a recorded task branch from an absent one.
+    await writeFile(
+      path.join(dir, 'T2.json'),
+      JSON.stringify({ taskId: 'T2', worktree, branch: 'teammates/r1/T2' }),
+      'utf8',
+    )
+    assert.deepEqual(await findTaskByWorktree(root, worktree), {
+      runId: 'r1',
+      taskId: 'T2',
+      branch: 'teammates/r1/T2',
+    })
+  })
+})
+
+// A UNC path is the spelling that must never reach realpath: an unreachable host blocks the
+// event loop for tens of seconds per record. It still has to compare, just lexically.
+test('findTaskByWorktree still matches a UNC worktree by its literal spelling', async () => {
+  await withTempRoot(async (root) => {
+    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
+    await mkdir(dir, { recursive: true })
+    const unc = '\\\\nonexistent-host-for-tests\\share\\wt\\agent-1'
+    await writeFile(
+      path.join(dir, 'T1.json'),
+      JSON.stringify({ taskId: 'T1', worktree: unc, branch: 'teammates/r1/T1' }),
+      'utf8',
+    )
+    const found = await findTaskByWorktree(root, unc)
+    if (process.platform === 'win32') {
+      assert.deepEqual(found, { runId: 'r1', taskId: 'T1', branch: 'teammates/r1/T1' })
+    } else {
+      // On POSIX that string is a relative path, not a UNC one, and resolves under cwd.
+      assert.equal(found === null || found.taskId === 'T1', true)
+    }
+  })
+})
+
+// Ordering, asserted against the source. The property is "no filesystem call on a value the
+// record supplies happens before the checks that can reject it on string comparison alone",
+// and the cost of getting it wrong is a stall measured in tens of seconds — which a test can
+// only reproduce by depending on an unreachable network host, i.e. by being unrunnable offline
+// and flaky everywhere else. So the order itself is pinned, the same way the tmp+rename is.
+test('findTaskByWorktree validates the taskId before resolving any record-supplied path', async () => {
+  const source = await readFile(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'state.mjs'),
+    'utf8',
+  )
+  const start = source.indexOf('export async function findTaskByWorktree')
+  assert.notEqual(start, -1, 'findTaskByWorktree is no longer declared under that name')
+  const body = source.slice(start, source.indexOf('\n}', start))
+  const isSegmentAt = body.indexOf('isSegment(dir, record.taskId)')
+  const stemAt = body.indexOf("file.slice(0, -'.json'.length)")
+  const resolveAt = body.indexOf('normaliseWorktree(record.worktree')
+  assert.notEqual(isSegmentAt, -1, 'the taskId segment check is gone')
+  assert.notEqual(stemAt, -1, 'the filename equality check is gone')
+  assert.notEqual(resolveAt, -1, 'the record worktree is no longer normalised')
+  assert.equal(isSegmentAt < resolveAt, true, 'the segment check must precede path resolution')
+  assert.equal(stemAt < resolveAt, true, 'the filename check must precede path resolution')
+  // And the first resolution of a record's worktree must be the link-free one; the realpath
+  // form is reached only behind the isLocalAbsolute guard.
+  assert.match(
+    body.slice(resolveAt, resolveAt + 120),
+    /normaliseWorktree\(record\.worktree, \{ resolveLinks: false \}\)/,
+    'the first pass over a record-supplied path must not touch the filesystem',
+  )
+  assert.match(body, /isLocalAbsolute\(record\.worktree\)/, 'realpath must stay behind the guard')
 })
 
 // A cross-file source assertion, not a behavioural one. Observing a torn read requires winning
