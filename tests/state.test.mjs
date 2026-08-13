@@ -2,6 +2,9 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, readFile, rm, symlink, utimes, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
+// Spawned inside a test body, never at module load, and never bash: `fsutil` is the only way to
+// create a deterministic 8.3 short name on a volume where auto-generation is disabled.
+import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
@@ -321,6 +324,36 @@ test('findTaskByWorktree matches a worktree reached through a symlinked parent',
   })
 })
 
+// The 8.3 spelling is the case plain realpathSync does NOT resolve: it returns `SHORTN~1`
+// unchanged, while realpathSync.native expands it to the long name. Auto-generation of short
+// names is off on many volumes, so the test sets one explicitly and skips when it cannot.
+test('normaliseWorktree maps a Windows 8.3 short name onto its long spelling', {
+  skip: process.platform !== 'win32' ? 'win32 only' : false,
+}, async (t) => {
+  await withTempRoot(async (root) => {
+    const long = path.join(root, 'a very long worktree directory name')
+    await mkdir(long, { recursive: true })
+    const short = path.join(root, 'SHORTN~1')
+    try {
+      execFileSync('fsutil', ['file', 'setshortname', long, 'SHORTN~1'], { stdio: 'ignore' })
+    } catch (err) {
+      t.skip(`8.3 short names unavailable on this volume: ${err.code ?? err.message}`)
+      return
+    }
+    // Precondition: the two spellings really are one directory, and they really do differ —
+    // otherwise this test would pass without proving anything.
+    assert.notEqual(short.toLowerCase(), long.toLowerCase())
+    assert.equal(normaliseWorktree(short), normaliseWorktree(long))
+    // And through the lookup: recorded long, queried short.
+    await writeLocation(root, 'r1', 'T1', { worktree: long, branch: 'teammates/r1/T1' })
+    assert.deepEqual(await findTaskByWorktree(root, short), {
+      runId: 'r1',
+      taskId: 'T1',
+      branch: 'teammates/r1/T1',
+    })
+  })
+})
+
 // Records are never deleted and worktree paths are reused, so several runs can hold a record
 // for one directory. Whichever one `locate` wrote most recently is the live teammate's.
 test('findTaskByWorktree resolves duplicate records by write time, not readdir order', async () => {
@@ -350,18 +383,20 @@ test('findTaskByWorktree resolves duplicate records by write time, not readdir o
   })
 })
 
+// Both records are named T1.json, so the file-name key cannot separate them and only the run-id
+// key can: with equal mtimes and equal file names, deleting that key leaves readdir order.
 test('findTaskByWorktree breaks an exact mtime tie across runs deterministically rather than by directory order', async () => {
   await withTempRoot(async (root) => {
     const worktree = path.join(root, 'wt', 'agent-1')
     const a = await writeLocation(root, 'aaa', 'T1', { worktree, branch: 'a' })
-    const b = await writeLocation(root, 'zzz', 'T2', { worktree, branch: 'z' })
+    const b = await writeLocation(root, 'zzz', 'T1', { worktree, branch: 'z' })
     const same = new Date(1_700_000_000_000)
     await utimes(a, same, same)
     await utimes(b, same, same)
     for (let i = 0; i < 3; i += 1) {
       assert.deepEqual(await findTaskByWorktree(root, worktree), {
         runId: 'zzz',
-        taskId: 'T2',
+        taskId: 'T1',
         branch: 'z',
       })
     }
@@ -415,6 +450,31 @@ test('findTaskByWorktree skips a hand-written record whose taskId is a traversal
         null,
         `a record carrying taskId ${JSON.stringify(taskId)} was returned rather than skipped`,
       )
+    }
+  })
+})
+
+// The two conjuncts of the read-side guard have to be pinned separately, and a hostile payload
+// in T1.json only ever reaches the equality check. These file names are the ones whose STEM is
+// itself a traversal — `...json` has stem `..` and `.json` has stem `''` — so equality passes
+// and isSegment is the only thing left standing between the record and its caller.
+test('findTaskByWorktree skips a record whose file stem is itself a traversal', async () => {
+  await withTempRoot(async (root) => {
+    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
+    await mkdir(dir, { recursive: true })
+    const worktree = path.join(root, 'wt', 'agent-1')
+    for (const [file, taskId] of [['...json', '..'], ['.json', ''], ['....json', '...']]) {
+      // Precondition: the equality conjunct accepts this pairing, so a failure here is
+      // isSegment's alone.
+      assert.equal(file.slice(0, -'.json'.length), taskId)
+      const full = path.join(dir, file)
+      await writeFile(full, JSON.stringify({ taskId, worktree, branch: 'b' }), 'utf8')
+      assert.equal(
+        await findTaskByWorktree(root, worktree),
+        null,
+        `a record in ${file} carrying taskId ${JSON.stringify(taskId)} was returned`,
+      )
+      await rm(full)
     }
   })
 })

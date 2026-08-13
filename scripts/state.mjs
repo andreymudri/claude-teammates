@@ -189,10 +189,14 @@ export async function releaseClaim(root, runId, taskId) {
 // Round counts are bookkeeping, not enforcement. status.json is written by the agents the
 // gate enforces, so a teammate can reset its own count and buy more retries. That costs
 // tokens; it cannot produce a false PASS, because the verdict is recomputed from git every
-// round and reads nothing from .teammates/. The worktree location record above sits on the same
-// footing: it is written by the teammate it describes, so a teammate can rewrite or delete it,
-// and the hook that reads it is only an early catch — the worst that costs is the catch itself,
-// because the gate recomputes every verdict from git and reads nothing here either.
+// round and reads nothing from .teammates/. The worktree location record above is weaker still,
+// and not in the way "a teammate can only hurt itself" would suggest: nothing binds a record to
+// a writer. Any teammate in the run can write any record, including one naming a DIFFERENT
+// teammate's worktree, and newest-wins then resolves that directory to the forged record — so
+// the victim is blocked, or judged against a branch that is not its work, while the author of
+// the record pays nothing. What that still cannot do is manufacture a PASS: the gate recomputes
+// every verdict from git and reads nothing under .teammates/, so the reachable damage is a
+// wrong or missing early catch, never a task that ships unverified.
 export function readFixRounds(status, phase) {
   return status?.fixRounds?.[String(phase)] ?? {}
 }
