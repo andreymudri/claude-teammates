@@ -26,7 +26,7 @@ one — but three capabilities the harness now provides are being reimplemented 
   caught later at the gate, after the phase's wall-clock is already spent. This is the one item
   that survived measurement, and it is what the rest of this document specifies — against
   `SubagentStop`, not `TeammateIdle`; see **What was measured**.
-- **Addressability.** `skills/fleet-lifecycle/SKILL.md:66` records that `SendMessage` reaches only
+- **Addressability.** `skills/fleet-lifecycle/SKILL.md:66-67` records that `SendMessage` reaches only
   directly-dispatched teammates, never agents inside a running `Workflow` — which is exactly the
   wide phases where a wrong teammate costs most. The project memory records six agents stalled in
   one run with recovery by `SendMessage` as the containment. *Teams mode does not fix this: see
@@ -211,7 +211,7 @@ dispatch lacks, so the section is dropped rather than made conditional. The `Wor
 
 ## Skill changes
 
-- **`fleet-lifecycle`** — the `SendMessage` caveat at `SKILL.md:66` stands exactly as written: an
+- **`fleet-lifecycle`** — the `SendMessage` caveat at `SKILL.md:66-67` stands exactly as written: an
   agent inside a running `Workflow` cannot receive `SendMessage` in either mode. That is why fix
   rounds address directly dispatched teammates only, and why a phase dispatched through `Workflow`
   has no live teammate to address and respawns instead.
