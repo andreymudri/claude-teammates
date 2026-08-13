@@ -684,11 +684,13 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 // A named site survives the shift, and the grep above re-derives the line numbers in one command.
 //
 // The count is a checkpoint, not a fact this file maintains: re-run the grep. Last derived on a
-// scratch merge of this branch with the sibling branch that was editing `reviews.mjs` alongside
-// it, rather than on either branch alone — a count taken on one branch describes a tree that will
-// never be merged. It came to 46 lines: 30 in `cli.mjs`, 6 in `reviews.mjs`, 6 in `digest.mjs`,
-// 4 in `finish.mjs`. If the number you get differs, the census gained or lost a site; find it by
-// name rather than assuming this sentence is still current.
+// scratch merge of every branch in this round, rather than on any one of them — a count taken on
+// one branch describes a tree that will never be merged, and the sibling editing `reviews.mjs`
+// moves three of these lines on its own. It came to 48 lines: 32 in `cli.mjs`, 6 in `reviews.mjs`,
+// 6 in `digest.mjs`, 4 in `finish.mjs`. Two more than the previous derivation, both in `cli.mjs`
+// and both named in group 2: the `validateSuppliedResults` refusals that quote the supplied check
+// name now wrap it first. If the number you get differs, the census gained or lost a site; find it
+// by name rather than assuming this sentence is still current.
 //
 // The rule, and the scope it is claimed over. Within those four scripts, a print site that puts a
 // value read out of an AGENT-WRITTEN FILE — a plan, the gate manifest, a findings file, a
