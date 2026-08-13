@@ -10,9 +10,11 @@ development process "onto the Teammates feature (background agents, FleetView, `
 Task tooling)". Agent teams has since shipped as a distinct, environment-gated session mode, and
 this plugin does not use it. A sweep for `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `TeamCreate`,
 `teammateMode`, `~/.claude/teams`, `~/.claude/tasks`, and the `TeammateIdle` / `TaskCreated` /
-`TaskCompleted` hooks returns nothing anywhere in the repository outside this file. It does not
-match in `docs/specs/2026-08-05-claude-teammates-design.md` either: that spec frames the purpose in
-the prose quoted above and contains none of those terms.
+`TaskCompleted` hooks matches no code: `scripts/`, `skills/`, `agents/`, `hooks/`, `templates/` and
+`tests/` are clean of all of them. The occurrences that remain are prose — this design, its
+implementation plan, and the probe findings it cites. In particular the original spec quoted above,
+`docs/specs/2026-08-05-claude-teammates-design.md`, contains none of those terms; it frames the
+purpose in that sentence and nowhere names the machinery.
 
 What the plugin uses instead is the `Agent` tool with `isolation: 'worktree'`, a generated
 `Workflow` script for phases of three or more tasks, and its own coordination in
@@ -24,7 +26,7 @@ one — but three capabilities the harness now provides are being reimplemented 
   caught later at the gate, after the phase's wall-clock is already spent. This is the one item
   that survived measurement, and it is what the rest of this document specifies — against
   `SubagentStop`, not `TeammateIdle`; see **What was measured**.
-- **Addressability.** `skills/fleet-lifecycle/SKILL.md:67` records that `SendMessage` reaches only
+- **Addressability.** `skills/fleet-lifecycle/SKILL.md:66` records that `SendMessage` reaches only
   directly-dispatched teammates, never agents inside a running `Workflow` — which is exactly the
   wide phases where a wrong teammate costs most. The project memory records six agents stalled in
   one run with recovery by `SendMessage` as the containment. *Teams mode does not fix this: see
@@ -94,7 +96,10 @@ A new handler, `scripts/subagent-stop.mjs`, declared under a `SubagentStop` key 
 the event takes none. It is a Node script rather than a `hooks/` shell script because it parses
 JSON on stdin and reuses `scripts/state.mjs`.
 
-Described below is the handler this design builds; none of it exists on `master` today.
+Everything in this section and its subsections is **specification**, not description: it states what
+the implementation plan builds. None of it — the handler, the `locate` command, the location
+records, `complete --enforcement-only`, the recorded plan path — existed in the tree this design was
+written against. Read every sentence below as "will", never as "does".
 
 ### It no-ops far more often than it acts
 
@@ -116,8 +121,9 @@ The payload carries `agent_id` and `agent_type`, and no task identifier. It cann
 through the checked-out branch either: the harness names the worktree branch `worktree-agent-<hash>`
 itself, and `teammates/<runId>/<taskId>` exists only once the implementer creates it — so branch
 resolution would miss precisely the teammate that did nothing, which is the case the hook exists
-for. Instead each implementer writes `.teammates/<runId>/worktrees/<taskId>.json` as its first act
-after checkout, and the handler maps `cwd` back to a task through it. A `cwd` that matches no
+for. So this design adds a location record: the implementer contract and the dispatched brief gain
+a step writing `.teammates/<runId>/worktrees/<taskId>.json` as the first act after checkout, and the
+handler maps `cwd` back to a task through it. A `cwd` that matches no
 record is allowed to stop — and then fails the gate, which is the correct order: this hook is an
 early catch, never the thing that decides.
 
@@ -155,33 +161,43 @@ parent, which is the main worktree for a linked worktree and the repository itse
 ### The harness bounds this, not us
 
 The 2026-08-10 draft specified a block counter in `.teammates/<runId>/idle-blocks.json`. It is not
-built. The harness already caps consecutive blocks — read out of 2.1.231, the cap is read from
-`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` with a default of 8 — and that count lives in the harness
-process, so unlike anything under `.teammates/` the teammate it counts cannot reset it.
+built, and no part of this design replaces it, because the harness already caps consecutive blocks
+itself. That cap is read from `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` and defaults to 8 — established by
+direct inspection of the installed 2.1.231 binary, not by the probe findings, which do not record
+it. The count lives in the harness process, so unlike anything under `.teammates/` the teammate it
+counts cannot reset it.
 
-The handler additionally returns success whenever `stop_hook_active` is true, which is the
-harness's own documented guidance for `Stop` and `SubagentStop` handlers. That makes one stop cost
-one forced retry: the teammate is blocked once, gets the failure text, takes another turn, and is
-not blocked again for the same stop.
+The handler this design builds additionally returns success whenever `stop_hook_active` is true,
+which is the harness's own documented guidance for `Stop` and `SubagentStop` handlers. That makes
+one stop cost one forced retry: the teammate is blocked once, gets the failure text, takes another
+turn, and is not blocked again for the same stop. The probe findings measure exactly this sequence
+— exit 2 blocked a subagent stop, forced a second turn, and the harness set `stop_hook_active` on
+the re-stop.
 
-A block hands the teammate a reason; it cannot compel a fix. Measured on 2026-08-13, a probe agent
-read the injected stderr, acknowledged it, and returned `status: "done"` anyway. That is why the
-phase gate remains the thing that decides.
+A block hands the teammate a reason; it cannot compel a fix. In that same measurement the probe
+agent read the injected stderr, acknowledged it, and returned `status: "done"` anyway. That is why
+the phase gate remains the thing that decides.
 
 ### Two limits, stated in the handler
 
-- **The location record is writable by its subject.** Like everything under `.teammates/`, the
-  teammate has Bash and can rewrite or delete the record that names its worktree. Doing so makes
-  the hook fail to resolve a task and allow the stop. What that buys is stopping unchecked — it
-  does **not** produce a passing gate, because the gate derives every verdict from git, takes its
-  plan path from the operator, and reads nothing under `.teammates/`. The teammate loses itself the
-  early catch and gains nothing. Tamper-evident, not tamper-proof.
+- **Any teammate can rewrite any record in the run.** The location records are keyed by task id in
+  one directory shared across the run, not scoped per writer, and every teammate has Bash. So this
+  is not merely "writable by its subject": teammate A can run `locate --task T2` naming its own
+  worktree and overwrite B's record. The cost then lands on B, not on A — B's worktree matches
+  nothing, so B's stop is allowed with no check at all, while A's stop resolves to T2 and is judged
+  against a branch that is not its work. Both outcomes are noise, and neither is a false PASS: the
+  gate recomputes every verdict from git, takes its plan path from the operator, and reads nothing
+  under `.teammates/`. What tampering buys is losing the early catch — for whoever it lands on —
+  and nothing more. Tamper-evident, not tamper-proof, on the same footing as everything else in
+  that directory.
 - **It fails open.** A handler that cannot run — no `node`, a timeout, a malformed run directory —
   exits non-zero-but-not-2, which the harness treats as a non-blocking error. The teammate stops
   and the gate catches what the hook did not. The harness reinforces this from its own side: for
   `SubagentStop` an exit 2 with empty stdout whose stderr matches `no such file|can't open` is
   reported as a missing hook script and downgraded to success, so a hook pointing at nothing cannot
-  wedge every agent on the machine. The failure is loud in the transcript rather than silent.
+  wedge every agent on the machine. That downgrade, like the block cap above, comes from direct
+  inspection of the 2.1.231 binary rather than from the probe findings. The failure is loud in the
+  transcript rather than silent.
 
 ## Why fan-out is not part of this
 
@@ -195,7 +211,7 @@ dispatch lacks, so the section is dropped rather than made conditional. The `Wor
 
 ## Skill changes
 
-- **`fleet-lifecycle`** — the `SendMessage` caveat at `SKILL.md:67` stands exactly as written: an
+- **`fleet-lifecycle`** — the `SendMessage` caveat at `SKILL.md:66` stands exactly as written: an
   agent inside a running `Workflow` cannot receive `SendMessage` in either mode. That is why fix
   rounds address directly dispatched teammates only, and why a phase dispatched through `Workflow`
   has no live teammate to address and respawns instead.
