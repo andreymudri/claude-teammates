@@ -8,6 +8,7 @@ import { collectReviewResults } from '../scripts/reviews.mjs'
 import {
   assertClaim,
   assertCode,
+  assertNoStatement,
   assertStatement,
   parseDoc,
   splitFrontmatter,
@@ -916,4 +917,100 @@ test('phase-gate documents finish taking per-phase results', async () => {
     /A phase that passed on supplied results is marked \(review supplied\) in its output/,
     'a reader must be able to tell a recomputed pass from a reported one',
   )
+})
+
+test('parallel-execution states a run bases off the default branch, not another run branch', async () => {
+  const { doc } = await skill('parallel-execution')
+  const section = doc.section('Amending a plan mid-run')
+  // Step 1 of the procedure in this section commits the amendment on the BASE branch. If the base
+  // is another run's deliverable branch, those commits land on it, and `ownership` evaluated for
+  // THAT run reports them as reachable from no task branch of it and from no ancestor of its base
+  // — which is what they are. The limit is procedural and belongs beside the step that causes it.
+  assertClaim(section, {
+    label: 'stacked-run base',
+    claim: /Branch a run's base from the default branch, not from another run's branch/i,
+    then: /Step 1 commits the amendment on the base, so if the base is another run's deliverable branch the amendment lands there/i,
+  })
+  assertStatement(
+    section,
+    /Run followups2 based on run\/claims did exactly this, and run\/claims can never pass its own gate again/i,
+    'parallel-execution must name the run that paid for this and the permanence of the result',
+  )
+  assertStatement(
+    section,
+    /If work genuinely stacks, land the first run before starting the second/i,
+    'parallel-execution must give the alternative for genuinely stacked work',
+  )
+})
+
+test('parallel-execution states the integrator merges in dependency order because a consumer cannot build alone', async () => {
+  const { doc } = await skill('parallel-execution')
+  const section = doc.section('Import coupling across tasks')
+  assertClaim(section, {
+    label: 'import coupling',
+    claim: /A task whose file set imports a symbol another task introduces cannot build on its own branch/i,
+    then: /merging it first produces a commit whose tree cannot load/i,
+  })
+  assertStatement(
+    section,
+    /A revert of the providing task breaks every consumer, not only the feature that motivated it/i,
+    'parallel-execution must state that a revert propagates to consumers',
+  )
+  // The softer form leaves the tree loading and only the prose wrong, so no build catches it. It
+  // still has to be judged on the merge, which is the same rule the load failure produces.
+  assertStatement(
+    section,
+    /The softer form leaves the tree loading and only a comment wrong/i,
+    'parallel-execution must record the softer form, not only the load failure',
+  )
+  assertStatement(
+    section,
+    /the integrator merges in dependency order, and a reviewer judging a cross-task claim judges it on the merge, not on one branch/i,
+    'parallel-execution must state the rule both forms share',
+  )
+})
+
+test('fleet-supervision states liveness detects an absence of progress and names both stall causes', async () => {
+  const { doc } = await skill('fleet-supervision')
+  const section = doc.section('When a teammate stalls')
+  assertStatement(
+    section,
+    /what it detects is an absence of progress/i,
+    'fleet-supervision must say what liveness measures, not what its hint guesses',
+  )
+  assertNoStatement(
+    section,
+    /liveness detects (a )?backgrounded command/i,
+    'the hint names a likely cause; the skill must not promote it to a diagnosis',
+  )
+  assertClaim(section, {
+    label: 'two stall causes',
+    claim: /That names a likely cause; it is a guess, not a diagnosis/i,
+    then: /Two causes produce the same board, and the hint names only one of them/i,
+  })
+  assertStatement(
+    section,
+    /the harness moved it to the background at the harness timeout of 120 seconds/i,
+    'the second cause is the harness backgrounding a foreground command at its own timeout',
+  )
+  assertStatement(
+    section,
+    /following the instruction to run in the foreground is what triggers it, so do not brief a stalled teammate as if it had disobeyed/i,
+    'fleet-supervision must not blame the teammate for a harness timeout',
+  )
+  assertStatement(
+    section,
+    /pass an explicit longer timeout on the long-running command rather than relying on the default/i,
+    'fleet-supervision must give the dispatch-time fix, not only the recovery',
+  )
+})
+
+test('fleet-supervision states the stall recovery resumes that agent rather than respawning it', async () => {
+  const { doc } = await skill('fleet-supervision')
+  const section = doc.section('When a teammate stalls')
+  assertClaim(section, {
+    label: 'stall recovery',
+    claim: /The recovery is to resume THAT agent with an instruction to re-run in the foreground with an explicit longer timeout/,
+    then: /Do not respawn it: a respawn discards the task's whole context, and a returned teammate's worktree keeps its branch checked out, so a fresh dispatch fails with "already used by worktree" until that worktree is pruned/i,
+  })
 })

@@ -114,3 +114,30 @@ test('README states the phase gate guarantee and its limit', async () => {
   assert.match(readme, /tamper-evident/i)
   assert.match(readme, /not tamper-proof/i)
 })
+
+test('the tamper-evident spec lists a run based on another run branch as out of scope, with no ownership exception', async () => {
+  const spec = await readFile(
+    new URL('../docs/specs/2026-08-05-tamper-evident-enforcement-design.md', import.meta.url),
+    'utf8',
+  )
+  const outOfScope = spec.slice(spec.indexOf('### Not defended against'))
+  assert.ok(outOfScope.length > 0, 'the spec must keep its out-of-scope section')
+  assert.match(outOfScope, /A run whose base branch is another run's branch/)
+  assert.match(outOfScope, /can never pass its own gate again/)
+  // An exception accepting anything on a parent run's branch would accept exactly the unowned
+  // commit `ownership` exists to catch, so the spec has to record that none was added.
+  assert.match(outOfScope, /No ownership exception is added for this/)
+})
+
+test('fleet-supervision quotes the liveness stall hint exactly as renderLiveness emits it', async () => {
+  // Read the hint from the source rather than restating it here: a test carrying its own copy of
+  // the string goes green while the skill quotes a hint the CLI no longer prints.
+  const source = await readFile(new URL('../scripts/liveness.mjs', import.meta.url), 'utf8')
+  const literal = /const STALL_HINT = '([^']*)'/.exec(source)
+  assert.ok(literal, 'scripts/liveness.mjs must define STALL_HINT as a single-quoted literal')
+  const { body } = await skill('fleet-supervision')
+  assert.ok(
+    body.includes(literal[1]),
+    'fleet-supervision must quote the stall hint verbatim, including its leading indent',
+  )
+})

@@ -94,6 +94,19 @@ where the corresponding claim is made:
   stayed in the declared set".
 - **A teammate that edits the enforcement code.** Out of reach in a normal install, where the
   CLI lives at `CLAUDE_PLUGIN_ROOT`; reachable in this repo, which is its own plugin.
+- **A run whose base branch is another run's branch.** Not a hole in `ownership` — the opposite:
+  the check reports what is there, and what is there is unowned. Run `followups2` used
+  `run/claims`, another run's deliverable branch, as its base. The amendment procedure commits an
+  amendment on the BASE branch, so three plan amendments landed on `run/claims`. Evaluated for run
+  `claims`, `ownership` reports those commits as reachable from no task branch of that run and from
+  no ancestor of ITS base, which is exactly what they are. The consequence is permanent:
+  `run/claims` can never pass its own gate again. Nothing was rewritten to hide it, and the content
+  still landed, because `run/claims` was an ancestor of `run/claims-followups`. The remedy is
+  procedural and is stated in `skills/parallel-execution/SKILL.md`: branch a run's base from the
+  default branch, not from another run's branch, and land a first run before stacking a second on
+  it. **No ownership exception is added for this.** Every exception is a way to launder an unowned
+  commit, and one accepting anything reachable from a parent run's branch would accept precisely
+  the commit the check exists to catch.
 - **A compromised orchestrator.**
 
 ## Documentation rule
