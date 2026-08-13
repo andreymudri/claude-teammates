@@ -734,7 +734,12 @@ async function readSuppliedPhases(flags, io) {
   }
   const invalid = validateSuppliedPhases(parsed)
   if (invalid) {
-    io.out(invalid)
+    // The refusal embeds a phase key from the agent-written `--results` file. `JSON.stringify`
+    // escapes the C0 range but leaves 0x7F, the C1 range and U+2028/U+2029 raw — 0x9B is CSI in
+    // an 8-bit terminal, and U+2028 is a line break where the transcript is rendered — so the
+    // refusal itself would print a forged `[gate] ... PASS` line. Wrapped for the same reason the
+    // JSON-parse message three lines above it already is.
+    io.out(printable(invalid))
     return SUPPLIED_REJECTED
   }
   return parsed
@@ -1736,7 +1741,9 @@ export async function runCli(argv, io = { out: console.log }) {
     // never what the operator is told. A board carrying both a stall and an unmeasured row reports
     // both.
     for (const [reason, explanation] of UNMEASURED_REASONS) {
-      const names = rows.filter((row) => row.unknownReason === reason).map((row) => row.taskId)
+      // Same plan-authored ids `renderLiveness` wraps, reaching a terminal by a second route —
+      // wrapping only the renderer would leave this line as the way to erase what it printed.
+      const names = rows.filter((row) => row.unknownReason === reason).map((row) => printable(row.taskId))
       if (names.length > 0) io.out(`freshness was not measured for ${names.join(', ')}: ${explanation}`)
     }
 
@@ -2314,7 +2321,11 @@ export async function runCli(argv, io = { out: console.log }) {
     // The same validator the merge check runs, so a manifest that passes here cannot fail there
     // for a reason this command could have named first.
     const invalid = validateLinkPaths(links)
-    if (invalid) { io.out(invalid); return 1 }
+    // Wrapped, like every other print site in this block: the refusal quotes the rejected manifest
+    // entry, and the comment immediately below already says `validateLinkPaths` does not screen
+    // control bytes. An entry embedding a raw U+2028 ahead of a forged success sentence otherwise renders
+    // a second line reading exactly like this command's own success line.
+    if (invalid) { io.out(printable(invalid)); return 1 }
 
     // `validateLinkPaths` above rejects a non-string, an empty string, an absolute path, a `..`
     // and a duplicate, and quotes what it rejected through `JSON.stringify` — but it does not
@@ -2458,7 +2469,11 @@ export async function runCli(argv, io = { out: console.log }) {
         branchShas,
       })
     } catch (err) {
-      io.out(err.message)
+      // `generateReviewDispatch` throws `validateLinkPaths`'s message among others, which quotes
+      // a manifest-supplied path through `JSON.stringify` — escaping the C0 range but not U+2028,
+      // 0x7F or the C1 range. Wrapped here so the refusal cannot print a line of the attacker's
+      // choosing on its way out.
+      io.out(printable(err.message))
       return 4
     }
     // Emitted exactly as generated. Nothing is appended here: the claims prompt ends with a DATA

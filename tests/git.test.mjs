@@ -1150,6 +1150,21 @@ test('commitTime rejects a non-numeric committer date instead of returning NaN',
   )
 })
 
+// The non-numeric guard above does NOT cover the empty string: `Number('')` is `0`, which is
+// finite, so an empty `%ct` slipped through and returned epoch 0. `livenessRows` subtracts that
+// from the clock and reports a tip roughly fifty-six years stale — a `stalled` row and exit 1 for
+// a teammate that is fine. Whitespace-only output is the same shape after `.trim()`.
+test('commitTime rejects an empty committer date instead of dating the commit to the epoch', async () => {
+  for (const stdout of ['\n', '   \n']) {
+    const { exec } = recorder({ code: 0, stdout, stderr: '' })
+    await assert.rejects(
+      () => createGit({ exec }).commitTime('abc1234'),
+      (err) => err instanceof GitError && /non-numeric committer date/.test(err.message),
+      `empty %ct output ${JSON.stringify(stdout)} must not resolve`,
+    )
+  }
+})
+
 test('commitTime on a too-old git raises a GitError naming the 2.24 floor', async () => {
   const { exec } = recorder({ code: 128, stdout: '', stderr: OLD_GIT_LOG_SHOW_STDERR })
   await assert.rejects(

@@ -610,10 +610,26 @@ test('ordinary commands and link paths are emitted unchanged', () => {
 // pre-diff code. The gate builds a merge preview for exactly this reason.
 test('the method states the basis of the scratch worktree and what to do when it conflicts', () => {
   const prompt = generateReviewDispatch(CLAIMS).reviewers[0].prompt
-  assert.match(prompt, /from run\/r1/)
+  // The basis is now stated by the command itself rather than by the word "from" — the run
+  // branch must still be the start point the worktree is built from.
+  assert.match(prompt, new RegExp(`git worktree add --detach \\S+ ${'run/r1'.replace(/\//g, '\\/')}`))
   assert.match(prompt, /merge teammates\/r1\/T1, teammates\/r1\/T2 into it/)
   assert.match(prompt, /If that merge conflicts/)
   assert.match(prompt, /"unableToVerify"/)
+})
+
+// The run branch is `git.currentBranch()` at dispatch time, so it is checked out in the main
+// worktree by construction and `git worktree add <dir> <runBranch>` refuses with "already checked
+// out at" — every time, for every claims reviewer. Without `--detach` in the step itself the
+// reviewer's first action is a hard failure it has to improvise around, which is how the
+// integrator ended up inventing `update-ref`. The reason is asserted too, not just the flag: a
+// bare flag with no rationale is the first thing a later edit drops as noise.
+test('the claims method gives worktree add --detach, and says why it is required', () => {
+  const prompt = generateReviewDispatch(CLAIMS).reviewers[0].prompt
+  assert.match(prompt, /git worktree add --detach/)
+  assert.match(prompt, /already checked out/)
+  // And never the bare form, which is the failure this closes.
+  assert.doesNotMatch(prompt, /git worktree add (?!--detach)/)
 })
 
 // Without a revert, the first genuinely pinned claim turns the suite red and every claim probed

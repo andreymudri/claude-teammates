@@ -296,7 +296,12 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
       }
       const out = (await run(['log', '-n', '1', '--format=%ct', '--end-of-options', sha, '--'])).trim()
       const seconds = Number(out)
-      if (!Number.isFinite(seconds)) {
+      // The empty string is checked separately because `Number('')` is `0`, which IS finite — so
+      // a `%ct` that came back empty passed this guard and returned epoch 0, and `livenessRows`
+      // then reported the tip as roughly fifty-six years old: a `stalled` row and a non-zero exit
+      // for a teammate that is working normally. An absent date must fail loudly, not date the
+      // commit to 1970.
+      if (out === '' || !Number.isFinite(seconds)) {
         throw new GitError(`commitTime read a non-numeric committer date for ${sha}: ${JSON.stringify(out)}`)
       }
       return seconds * 1000

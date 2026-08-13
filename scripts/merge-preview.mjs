@@ -103,10 +103,15 @@ export async function withMergePreview({ git, base, branches = [], link = [], re
       // one `tm-preview-*` directory left behind per run of `tests/gate-runner.test.mjs`, which
       // drives exactly that shape.
       //
-      // The throw still propagates — a teardown failure must reach the caller and fail the
-      // `merge` check, which is what the gate-runner test pins. Only the cleanup is made
-      // unconditional. `rm` keeps its own `.catch` because a directory that cannot be removed
-      // (a handle still open, a permission) must not replace the teardown error with its own.
+      // Which failures actually propagate, stated as what the code does rather than as what
+      // would be reassuring: only a SYNCHRONOUS throw from `removeWorktree` does. The `.catch`
+      // below swallows its rejection, and the real accessor's `removeWorktree` is `async`, so
+      // with real git a teardown failure never reaches the caller and never fails the `merge`
+      // check — the gate-runner test that pins propagation drives a synchronous-throwing double,
+      // and says so itself. An earlier version of this comment claimed the throw propagates
+      // generally; it does not. Only the cleanup is unconditional. `rm` keeps its own `.catch`
+      // because a directory that cannot be removed (a handle still open, a permission) must not
+      // replace the teardown error with its own.
       try {
         await git.removeWorktree(dir).catch(() => {})
       } finally {

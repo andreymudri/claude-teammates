@@ -202,6 +202,47 @@ test('renderLiveness attaches the stall hint to the stalled row only, exactly on
   assert.match(lines[stalledLineIndex + 1] ?? '', /likely cause/, 'the hint line directly follows the stalled row')
 })
 
+// A terminal ACTS on control bytes, and `taskId` comes from the plan a planning agent wrote. An
+// id carrying `ESC [ 2 K` `ESC [ 1 A` erases the row reporting it and the line above it while the
+// command still exits 1 — the operator reads a clean board and acts on nothing. This renderer is
+// where that matters most: `liveness` exists to say a teammate has gone quiet.
+//
+// Asserted on BYTES, not by regex over the rendered string: a regex matches happily while the
+// payload is still sitting in the output.
+test('renderLiveness neutralises control bytes in a plan-authored task id', () => {
+  const ESC = String.fromCharCode(0x1b)
+  // 0x9B is CSI in an 8-bit terminal — built from its code point rather than pasted, so the
+  // byte never sits raw in this file the way it would in a plan.
+  const CSI = String.fromCharCode(0x9b)
+  const rows = [{
+    taskId: `T1${ESC}[2K${ESC}[1A`,
+    branch: 'b1',
+    tipAgeMs: 60000,
+    touchAgeMs: 60000,
+    floored: false,
+    state: 'stalled',
+    unknownReason: null,
+  }]
+  const out = renderLiveness(rows, { staleMinutes: 20 })
+  assert.ok(!out.includes(ESC), 'no raw ESC reaches the rendered board')
+  assert.ok(!out.includes(CSI), 'no raw CSI reaches the rendered board')
+  // The id is still reported — neutralised, not dropped, or the row it names would go missing.
+  assert.match(out, /T1/)
+  // And the stall it was hiding is still on the board.
+  assert.match(out, /likely cause/)
+})
+
+// The same ids reach a terminal by a second route, so wrapping only the renderer would leave this
+// line as the way to erase what the renderer printed.
+test('renderLiveness state is neutralised too, not only the id', () => {
+  const ESC = String.fromCharCode(0x1b)
+  const out = renderLiveness([{
+    taskId: 'T1', branch: 'b1', tipAgeMs: 1, touchAgeMs: 1, floored: false,
+    state: `working${ESC}[2K`, unknownReason: null,
+  }], { staleMinutes: 20 })
+  assert.ok(!out.includes(ESC))
+})
+
 test('hasStall is true only when some row is stalled', () => {
   assert.equal(hasStall([{ state: 'working' }, { state: 'not started' }]), false)
   assert.equal(hasStall([{ state: 'working' }, { state: 'stalled' }]), true)

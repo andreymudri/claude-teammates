@@ -11,6 +11,11 @@
 // Pure so it is testable without a repository: the caller gathers `tips` and `touches` and the
 // clock, and this decides.
 
+// The only import this module has, and it stays that way: `reviews.mjs` has no imports of its
+// own, so pulling in `printable` costs nothing and cannot cycle. Purity here means "no repository
+// access", not "no code reuse" — a second copy of the escaping is how two renderers drift.
+import { printable } from './reviews.mjs'
+
 export const DEFAULT_STALE_MINUTES = 20
 
 // A task with no branch and no worktree has not started. Reporting that as a stall would make
@@ -85,7 +90,12 @@ export function renderLiveness(rows = [], { staleMinutes = DEFAULT_STALE_MINUTES
   const lines = [`liveness (stale after ${staleMinutes}m)`, 'task  tip     touched  state']
   for (const row of rows) {
     const note = row.floored ? ' (floor)' : ''
-    lines.push(`${row.taskId}  ${age(row.tipAgeMs)}  ${age(row.touchAgeMs)}${note}  ${row.state}`)
+    // `taskId` comes from the plan, which a planning agent wrote, and a terminal ACTS on control
+    // bytes: an id carrying `ESC [ 2 K` `ESC [ 1 A` erases the row reporting it and the line
+    // above, while the command still exits 1. That matters most in this renderer of all of them —
+    // `liveness` exists to say a teammate has gone quiet, so an id that deletes its own `stalled`
+    // row defeats the check exactly where it is used.
+    lines.push(`${printable(row.taskId)}  ${age(row.tipAgeMs)}  ${age(row.touchAgeMs)}${note}  ${printable(row.state)}`)
     if (row.state === 'stalled') lines.push(STALL_HINT)
   }
   return lines.join('\n')
