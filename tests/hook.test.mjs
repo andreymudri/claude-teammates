@@ -599,12 +599,17 @@ test('hooks.json declares a SessionStart matcher', async () => {
 // assertion really passed then swallowing changed nothing observable. The other leg, the
 // source-text comparison in the mechanism test at the end of this file, catches the ordinary
 // spellings of that wrapper, because a wrapper's own source text is not what this file
-// spells at that registration. It does not catch one that also carries its own `toString`:
-// a one-line `Object.assign(function (...a) { try { … } catch {} },
-// { toString: () => fn.toString() })` ran 48 pass / 0 fail / 0 skipped. An earlier version
-// of this sentence credited the registerHookCase identity assertion with catching the
-// wrapper. It does not reach: it pins one hop of a two-hop path, so the identical wrapper
-// written into hookTest instead left this file at 48 pass / 0 fail / 0 skipped.
+// spells at that registration. It also catches one that carries its own `toString`: a
+// one-line `Object.assign(function (...a) { try { … } catch {} },
+// { toString: () => fn.toString() })` ran 48 pass / 0 fail / 0 skipped when the leg compared
+// `body.toString()`, which reads that own property; comparing
+// `Function.prototype.toString.call(body)` instead reads the wrapper's real source
+// regardless of what its own `toString` claims, and the same wrapper then names every
+// substituted case. An earlier version of this sentence credited the registerHookCase
+// identity assertion with catching the wrapper. It does not reach: it pins one hop of a
+// two-hop path, so the identical wrapper written into hookTest instead left this file at
+// 48 pass / 0 fail / 0 skipped — closed by the same leg fix, since that leg runs on
+// whatever body reached node:test regardless of which hop substituted it.
 //
 // Why the call site and not just a count: the body is supplied by the registration path, so
 // that path can substitute a body that calls the marker and does nothing else.
@@ -627,15 +632,19 @@ test('hooks.json declares a SessionStart matcher', async () => {
 // loses its marker line. Either way at least one leg fails and this file goes red naming the
 // case. Neither leg has to be defeated on purpose for those to be caught.
 //
-// A DELIBERATE forgery satisfies both, and does it in a single expression. Measured at this
-// tip: replacing the one registerHookCase call inside hookTest with a stub that pads a
-// `new Function` body so its forged frames land on each case's marker line AND carries an
-// own `toString` returning that case's source slice left this file at
-// 48 pass / 0 fail / 0 skipped in 398ms, against roughly fifteen seconds for a healthy run,
-// with all thirty-one real bodies discarded. Ten consecutive rounds of this comment have
-// each named a price for forging these markers — thirty-one edits, then one edit, then two
-// lines — and every one of them was falsified by the next reader, twice within a single
-// round. No count of lines or edits bounds this, and none is stated here.
+// A DELIBERATE forgery has to satisfy both legs at once, and one shape of it used to do so
+// in a single expression: a stub padding a `new Function` body so its forged frames land on
+// each case's marker line, carrying an own `toString` returning that case's source slice.
+// That shape is closed now that the source-text leg reads
+// `Function.prototype.toString.call(body)` instead of `body.toString()` — an own `toString`
+// no longer substitutes for the real source, so the padded stub's REAL text is what gets
+// compared, and it is not the case's source slice. The residue that remains: a stub whose
+// REAL source text genuinely matches the case's own slice, which is not a forgery of
+// behaviour at all, since the code the marker leg's stack frames were forged to attribute
+// is, at that point, the same code the case's own text spells. Four consecutive rounds of
+// this comment have each named a price for forging these markers — thirty-one edits, then
+// one edit, then two lines — and every one of them was falsified by the next reader, twice
+// within a single round. No count of lines or edits bounds this, and none is stated here.
 //
 // The runtime gap is an observation, NOT a defense: a forged run finishes in a fraction of
 // the healthy time precisely because no real body executes. Nothing in this file asserts on
@@ -2029,6 +2038,16 @@ hookTest("a broken install still exits 0 with exactly one valid context field", 
 // hook body run before the module finishes loading.
 const hookBodyRunsAfterRegistration = hookBodyRuns
 
+// The source-text leg's own comparison, factored out so the pinned test below exercises the
+// SAME code the mechanism test calls rather than a duplicate of it — a mutation to this
+// function is a mutation to both. `Function.prototype.toString.call(body)` reads the
+// function's real source regardless of an own `toString` property; `body.toString()` would
+// read that own property first when one is present, which is exactly what a swallow wrapper
+// carrying `{ toString: () => fn.toString() }` exploits.
+function bodySourceMismatch(body, expectedSource) {
+  return Function.prototype.toString.call(body) !== expectedSource
+}
+
 // Registered LAST on purpose. node:test runs top-level cases in registration order, so by
 // the time this body executes every hookTest above has either run or been skipped, and
 // hookBodyRuns holds the count.
@@ -2087,20 +2106,25 @@ test('(mechanism) a reachable probe means EVERY hook case body executed', (t) =>
   //
   // The observer here is this file's own TEXT, the principle that made probeTargetProblem
   // and HOOK_CASES_IN_SOURCE hold: `bodySource` is the exact source slice of each case's
-  // function expression, and Function.prototype.toString returns that same slice for the
-  // function object node:test received. Editing what either hop DOES cannot change what the
-  // text says, so an ordinary wrapper — at either hop — arrives here as a function whose
-  // source is the wrapper's, and this assertion names the case it replaced.
+  // function expression, and `bodySourceMismatch` reads the function object node:test
+  // received with `Function.prototype.toString.call`, which returns that same slice
+  // regardless of any own `toString` property the object carries. Editing what either hop
+  // DOES cannot change what the text says, so an ordinary wrapper — at either hop — arrives
+  // here as a function whose REAL source is the wrapper's, and this assertion names the
+  // case it replaced.
   //
   // What it does NOT close, tried and stated rather than assumed: this leg compares text
   // against text, so anything that produces the right text passes it. A registration path
   // that built its substitute by evaluating this file's own text for that case produces a
-  // matching source string. So does a stub carrying an own `toString` that returns the case's
-  // source slice — which is how the single-expression forgery described at the hookBodyRan
-  // definition satisfies this leg while forging its stack frames to satisfy the marker leg,
-  // and how a one-line swallow wrapper with `toString: () => fn.toString()` passes it too.
-  // So do not read this assertion as covering a wrapper "in any spelling"; an earlier
-  // version of this comment said exactly that, and it was false.
+  // matching source string, because that IS the case's source — running it is not
+  // distinguishable from running the real body. A stub carrying an own `toString` that lies
+  // about its source does NOT pass it: `Function.prototype.toString.call` does not consult
+  // that property, so the single-expression forgery described at the hookBodyRan definition
+  // and the one-line swallow wrapper with `toString: () => fn.toString()` are both named
+  // here now, pinned by the mechanism-pinned test below. So do not read this assertion as
+  // covering a wrapper "in any spelling that reaches node:test with a function object"; the
+  // residue is narrower than that — only a substitute whose REAL source text genuinely
+  // matches the case's own slice passes, which is not a forgery of behaviour.
   assert.equal(nodeTestRegistrations.length, HOOK_CASES_FROM_SOURCE.cases.length,
     `node:test received ${nodeTestRegistrations.length} hook case registrations for the ` +
     `${HOOK_CASES_FROM_SOURCE.cases.length} this file's source registers — a registration ` +
@@ -2121,10 +2145,11 @@ test('(mechanism) a reachable probe means EVERY hook case body executed', (t) =>
       } else if (typeof body !== 'function') {
         substituted.push(
           `line ${c.registrationLine}: the case "${c.name}" reached node:test as ${typeof body}, not a function`)
-      } else if (body.toString() !== c.bodySource) {
+      } else if (bodySourceMismatch(body, c.bodySource)) {
         substituted.push(
           `line ${c.registrationLine}: the case "${c.name}" reached node:test as a function ` +
-          `whose source is not the one this file spells at that line — got ${JSON.stringify(body.toString())}`)
+          `whose source is not the one this file spells at that line — got ` +
+          `${JSON.stringify(Function.prototype.toString.call(body))}`)
       }
     })
     assert.deepEqual(substituted, [],
@@ -2191,4 +2216,51 @@ test('(mechanism) a reachable probe means EVERY hook case body executed', (t) =>
     assert.deepEqual(sortLines(hookBodyMarkerLines), [],
       'the probe reported the repository unreachable, so no marker line should have been reached')
   }
+})
+
+test('(mechanism pinned) the source-text leg reads the real function source, not an own toString', () => {
+  // PIN for bodySourceMismatch, the exact function the mechanism test's source-text leg
+  // calls above — not a re-statement of it, so a mutation to that one implementation is
+  // caught here too. `body.toString()` reads an own `toString` property when a wrapper
+  // carries one; `Function.prototype.toString.call(body)` does not, and returns the
+  // function's real source instead. Measured at this file's previous tip: registering a
+  // wrapper carrying `{ toString: () => fn.toString() }` at the registerHookCase call site
+  // left the whole suite at 48 pass / 0 fail / 0 skipped in 13.5s against an 11-13s healthy
+  // baseline — no failing case, no timing tell.
+  //
+  // This test drives registerHookCase directly with a synthesized reachable probe and a
+  // private `record`, exactly as the refused-probe test above does, so it perturbs none of
+  // the module counters or registrations the real mechanism test reads.
+  const realBody = function realBody() { hookBodyRan() }
+  const realSource = realBody.toString()
+  const forged = Object.assign(
+    function (...a) { try { return realBody(...a) } catch { /* swallowed */ } },
+    { toString: () => realSource })
+
+  const calls = []
+  const record = (...args) => calls.push(args)
+  registerHookCase({ reachable: true, error: null, result: 'reachable' },
+    'forged case', forged, record)
+  assert.equal(calls.length, 1, 'the forged case must still be registered, not dropped')
+  const [, registeredBody] = calls[0]
+  assert.equal(registeredBody, forged,
+    'registerHookCase must forward the exact body it was handed')
+
+  // The attack's own premise: the forged wrapper's OWN toString lies convincingly.
+  assert.equal(registeredBody.toString(), realSource,
+    'the forged wrapper\'s own toString must return the real body\'s source, or this attack ' +
+    'proves nothing about the leg it is meant to defeat')
+
+  // The actual code path: bodySourceMismatch must call it a mismatch, because the wrapper's
+  // REAL source is not realSource even though its own toString claims otherwise. With
+  // bodySourceMismatch reverted to compare `body.toString() !== expectedSource`, this
+  // assertion fails, because the reverted comparison reads the forged toString and finds it
+  // equal to realSource.
+  assert.ok(bodySourceMismatch(registeredBody, realSource),
+    'the source-text leg must reject a wrapper whose own toString lies about its source')
+
+  // And a body that carries no own toString — the ordinary case — must still compare equal,
+  // so the fix does not turn honest registrations red.
+  assert.ok(!bodySourceMismatch(realBody, realSource),
+    'the source-text leg must accept an unwrapped body unchanged')
 })
