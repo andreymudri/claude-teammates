@@ -44,6 +44,14 @@ test('a lens that tries to escape the reviews directory is refused', () => {
   assert.throws(() => reviewFileName(1, ''), /lens/i)
 })
 
+// `phase` reaches the same join with no upstream validation for `review-dispatch` or
+// `collect-reviews` — see the comment on `reviewFileName` — so it is checked here too.
+test('a phase that tries to escape the reviews directory is refused', () => {
+  assert.throws(() => reviewFileName('../../etc/passwd', 'correctness'), /phase/i)
+  assert.throws(() => reviewFileName('a/b', 'correctness'), /phase/i)
+  assert.throws(() => reviewFileName('', 'correctness'), /phase/i)
+})
+
 const findings = (severity) => [{ severity, file: 'a.mjs', line: 1, summary: 's', failureScenario: 'f' }]
 
 test('every lens present with no findings collects to a single passing result', () => {
@@ -412,6 +420,39 @@ test('unprobed claims reach the emitted output with their count and lens', () =>
   assert.match(out.results[0].output, /3/)
   assert.match(out.results[0].output, /claims/)
   assert.match(out.results[0].output, /not reached/i)
+})
+
+// The total must be the SUM across lenses, not the first lens's count and not the lens count —
+// both of those pass against the single-lens fixture above, so this fixture carries two bounded
+// lenses with DIFFERENT counts and asserts the rendered total is their sum. Confirmed by mutation:
+// replacing the `reduce` with `bounded[0].count` reports 1 here where 4 is required, and replacing
+// it with `bounded.length` reports 2.
+test('the bounded total sums unprobed counts across more than one lens', () => {
+  const out = collectReviewResults({
+    checkName: 'review',
+    lenses: ['claims', 'correctness'],
+    files: [
+      { lens: 'claims', findings: [], unprobed: ['a.mjs:1'] },
+      { lens: 'correctness', findings: [], unprobed: ['b.mjs:1', 'c.mjs:2', 'd.mjs:3'] },
+    ],
+    blockOn: ['high'],
+  })
+  assert.match(out.results[0].output, /\b4\b enumerated claim/)
+  assert.match(out.results[0].output, /claims: 1/)
+  assert.match(out.results[0].output, /correctness: 3/)
+})
+
+// The lens name is spliced into the same sentence `reviewStale` prints a lens into, so it goes
+// through the same wrapper. Asserted on BYTES, per the module comment: a rendered-string
+// assertion is defeated by the very escape it checks for.
+test('a lens name in the bounded note cannot carry an escape byte into the output', () => {
+  const out = collectReviewResults({
+    checkName: 'review',
+    lenses: [FORGERY],
+    files: [{ lens: FORGERY, findings: [], unprobed: ['a.mjs:1'] }],
+    blockOn: ['high'],
+  })
+  assertNoEscapeBytes(out.results[0].output)
 })
 
 // The same sentence has to survive a failing verdict, or the one review most worth bounding —

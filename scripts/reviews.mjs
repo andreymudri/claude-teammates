@@ -70,10 +70,19 @@ export function printableBlock(value) {
 }
 
 // A lens name reaches the filesystem, so it is validated as a filename component and nothing
-// else — no separators, no traversal, no absolute path, non-empty.
+// else — no separators, no traversal, no absolute path, non-empty. `phase` reaches the same
+// filesystem path and gets the identical check: it is a manifest phase key or a plan phase
+// number, but both `review-dispatch` and `collect-reviews` take it straight from `flags.phase`
+// with no upstream validation (`--phase` is only checked as an integer for the commands in
+// `NUMERIC_PHASE_COMMANDS`, which neither of these is), so nothing above this function stops a
+// traversing or absolute phase from reaching the join.
 export function reviewFileName(phase, lens) {
   if (typeof lens !== 'string' || lens === '' || /[\\/]/.test(lens) || lens === '.' || lens === '..') {
     throw new Error(`a lens must be a non-empty name with no path separators, got ${JSON.stringify(lens)}`)
+  }
+  const phaseName = String(phase)
+  if (phaseName === '' || /[\\/]/.test(phaseName) || phaseName === '.' || phaseName === '..') {
+    throw new Error(`a phase must be a non-empty name with no path separators, got ${JSON.stringify(phase)}`)
   }
   return `${phase}-${lens}.json`
 }
@@ -232,10 +241,14 @@ export function collectReviewResults({ checkName = 'review', lenses = [], files 
   const bounded = lenses
     .map((lens) => ({ lens, count: byLens.get(lens).unprobed.length }))
     .filter((u) => u.count > 0)
+  // `u.lens` comes off the manifest's own lens list, not off a reviewer-written file — but it is
+  // spliced into a one-line sentence at the same trust level as the lens `reviewStale` prints, so
+  // it goes through the same wrapper for the same reason: nothing in this string can end the
+  // sentence early and open a line of its own.
   const boundedNote = bounded.length === 0
     ? ''
     : `; ${bounded.reduce((n, u) => n + u.count, 0)} enumerated claim(s) NOT reached`
-      + ` (${bounded.map((u) => `${u.lens}: ${u.count}`).join(', ')}) — this review is bounded, not exhaustive`
+      + ` (${bounded.map((u) => `${printable(u.lens)}: ${u.count}`).join(', ')}) — this review is bounded, not exhaustive`
 
   return {
     results: [{
