@@ -648,15 +648,17 @@ function validateSuppliedResults(supplied, checks) {
     // would let an `agent` result land on the `command` check. Whether the file was accepted
     // would then depend on declaration order rather than on what gets written. Reject the
     // collision instead of resolving it.
-    // `r?.name` goes out through `JSON.stringify`, which escapes a control byte to `\uXXXX`
-    // and is sufficient on its own; `check.kind` and `check.name` below are spliced bare into
-    // the sentence, so those take `printable`. Both halves are agent-written — the difference
-    // is only in how each reaches the line.
+    // Every value below is agent-written — the name out of the `--results` file, the kind and
+    // name out of the manifest — and each is spliced into a sentence a terminal draws, so each
+    // takes `printable`. The two refusals naming `r?.name` are quoted as well as wrapped:
+    // `JSON.stringify` escapes quotes and the C0 range, which keeps the name legible as a
+    // quoted string, and leaves 0x7F, the C1 range and U+2028/U+2029 untouched — so it runs AFTER
+    // `printable`, the order `reviewFileName` uses in `scripts/reviews.mjs`, never instead of it.
     if (duplicated.has(r?.name)) {
-      return `--results names a check declared more than once in this phase's manifest: ${JSON.stringify(r?.name)}`
+      return `--results names a check declared more than once in this phase's manifest: ${JSON.stringify(printable(r?.name))}`
     }
     const check = byName.get(r?.name)
-    if (!check) return `--results names a check not in this phase's manifest: ${JSON.stringify(r?.name)}`
+    if (!check) return `--results names a check not in this phase's manifest: ${JSON.stringify(printable(r?.name))}`
     if (!SUPPLIABLE_KINDS.has(check.kind)) return `--results may not supply a ${printable(check.kind)} check: ${printable(check.name)}`
     if (!SUPPLIED_STATUSES.has(r.status)) return `--results carries an unrecognized status for ${printable(check.name)}: ${JSON.stringify(r.status)}`
     if (r.source !== undefined && !SUPPLIED_SOURCES.has(r.source)) {
@@ -2067,17 +2069,20 @@ export async function runCli(argv, io = { out: console.log }) {
       phaseResults.push({ phase, supplied: forPhase.length > 0, verdict: aggregateVerdict(results) })
     }
 
-    // `renderRunSummary` builds a multi-line table and splices each failed, pending and skipped
-    // CHECK NAME into it, so the manifest's strings arrive already inside the rendered block.
-    // The block form is what fits a table: it neutralises the escape sequences with which a
-    // name could erase a row, and keeps the newlines that are the table itself.
+    // No wrapper at this print site, because every value the table carries is wrapped where the
+    // table is BUILT, in `renderRunSummary` (`scripts/finish.mjs`). Enumerated: the run id and
+    // each failed/pending/skipped check name go through `printable` there; `entry.phase` and the
+    // phase lists in the "not finished" lines are integers `assignPhases` produced; the verdict
+    // is `aggregateVerdict`'s own `PASS`/`FAIL`; the rest of every line is a string literal.
     //
-    // Stated exactly: `printableBlock` keeps every newline it is given, including a value's own,
-    // so on its own it stops a name from redrawing the table but not from adding a row that reads
-    // like a row this CLI wrote. That second half is closed where the table is BUILT —
-    // `renderRunSummary` in `scripts/finish.mjs` puts each name through `printable`, so no name
-    // still carries a newline by the time it reaches this wrap.
-    io.out(printableBlock(renderRunSummary(runId, phaseResults)))
+    // Wrapping at the build site is also the only place the table's real hazard can be closed.
+    // `printableBlock` keeps every newline it is given, including a value's own, so a wrap here
+    // stops a name from redrawing the table but not from ADDING a row shaped like one this CLI
+    // wrote — and by then the name is already inside the block. A `printableBlock` here was
+    // therefore a second pass over bytes already neutralised: removed by mutation, it changed no
+    // byte of any output this suite produces and left every sanitising row green. It is gone
+    // rather than kept as a layer no test can drive.
+    io.out(renderRunSummary(runId, phaseResults))
     const summary = summarizeRun(phaseResults)
     if (summary.complete) return 0
     // 1 for a phase that was verified and failed; 4 for one that was never verified at all.
@@ -2838,10 +2843,12 @@ export async function runCli(argv, io = { out: console.log }) {
     if (Number.isInteger(verdict?.phase) && verdict.phase !== phase) {
       // `verdict.phase` is a real integer by the guard above. The other two are not: `flags.phase`
       // is the STRING that was typed, and `missingArgs` admits it on `Number.isInteger(Number(x))`
-      // — which `Number` reaches through leading and trailing whitespace, so `\r1`, `\n1` and
-      // ` 1` are all accepted and would put that byte on this line. Only whitespace can
-      // arrive that way, never attacker-chosen text, but a line break here is still a line this
-      // CLI did not mean to draw. Both it and the path are wrapped, for the same reason the
+      // — which `Number` also accepts for `0x1`, `1.0`, `1e0`, `+1`, and any string that is only
+      // leading/trailing whitespace-class characters (including `\r1`, `\n1`, ` 1`). The bound
+      // this guard actually gives: whatever reaches this printed line is a non-integer spelling
+      // of an integer, and every consumer downstream in this command is `Number(flags.phase)` —
+      // not a claim that the text itself is constrained. A line break here is still a line this
+      // CLI did not mean to draw, so both it and the path are wrapped, for the same reason the
       // parse-error line above wraps what it quotes.
       io.out(`--phase ${printable(flags.phase)} does not match the verdict's phase ${verdict.phase} at ${printable(flags.verdict)}\n\n${USAGE}`)
       return 2

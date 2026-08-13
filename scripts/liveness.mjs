@@ -65,12 +65,21 @@ export function livenessRows({ tasks = [], tips = {}, touches = {}, now, staleMi
   })
 }
 
+// A guess at the cause of a stalled row, not a diagnosis: `stalled` means no fresh commit and no
+// fresh worktree write, and that absence has more than one possible cause. The one named here is
+// the most common one seen in practice — a teammate backgrounded its test command and is now
+// waiting on a notification that a backgrounded command never sends. The fix is to resume that
+// same agent with an instruction to run in the foreground, not to respawn it: a respawn discards
+// the task's whole context, and the returned teammate's worktree keeps its branch checked out.
+const STALL_HINT = '  -> likely cause: backgrounded command waiting on a notification that never arrives; resume this agent (do not respawn) and tell it to run in the foreground'
+
 export function renderLiveness(rows = [], { staleMinutes = DEFAULT_STALE_MINUTES } = {}) {
   const age = (ms) => (ms == null ? '-' : `${Math.floor(ms / 60000)}m`)
   const lines = [`liveness (stale after ${staleMinutes}m)`, 'task  tip     touched  state']
   for (const row of rows) {
     const note = row.floored ? ' (floor)' : ''
     lines.push(`${row.taskId}  ${age(row.tipAgeMs)}  ${age(row.touchAgeMs)}${note}  ${row.state}`)
+    if (row.state === 'stalled') lines.push(STALL_HINT)
   }
   return lines.join('\n')
 }

@@ -182,6 +182,26 @@ test('renderLiveness names the threshold, every task and its state', () => {
   assert.match(out, /T3\s+-\s+99m \(floor\)\s+unknown/)
 })
 
+test('renderLiveness attaches the stall hint to the stalled row only, exactly once', () => {
+  const rows = livenessRows({
+    tasks: [{ id: 'T1' }, { id: 'T2' }],
+    tips: { T1: { branch: 'b1', at: NOW - 3 * MIN }, T2: { branch: 'b2', at: NOW - 60 * MIN } },
+    touches: { T2: { branch: 'b2', at: NOW - 60 * MIN, floored: false } },
+    now: NOW,
+    staleMinutes: 20,
+  })
+  assert.equal(rows[0].state, 'working')
+  assert.equal(rows[1].state, 'stalled')
+  const out = renderLiveness(rows, { staleMinutes: 20 })
+  const hintOccurrences = out.split('\n').filter((line) => /likely cause/.test(line))
+  assert.equal(hintOccurrences.length, 1)
+  const lines = out.split('\n')
+  const workingLineIndex = lines.findIndex((line) => /^T1\s/.test(line))
+  const stalledLineIndex = lines.findIndex((line) => /^T2\s/.test(line))
+  assert.match(lines[workingLineIndex + 1] ?? '', /^T2\s/, 'no hint line directly follows the working row')
+  assert.match(lines[stalledLineIndex + 1] ?? '', /likely cause/, 'the hint line directly follows the stalled row')
+})
+
 test('hasStall is true only when some row is stalled', () => {
   assert.equal(hasStall([{ state: 'working' }, { state: 'not started' }]), false)
   assert.equal(hasStall([{ state: 'working' }, { state: 'stalled' }]), true)

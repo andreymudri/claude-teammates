@@ -599,12 +599,17 @@ test('hooks.json declares a SessionStart matcher', async () => {
 // assertion really passed then swallowing changed nothing observable. The other leg, the
 // source-text comparison in the mechanism test at the end of this file, catches the ordinary
 // spellings of that wrapper, because a wrapper's own source text is not what this file
-// spells at that registration. It does not catch one that also carries its own `toString`:
-// a one-line `Object.assign(function (...a) { try { … } catch {} },
-// { toString: () => fn.toString() })` ran 48 pass / 0 fail / 0 skipped. An earlier version
-// of this sentence credited the registerHookCase identity assertion with catching the
-// wrapper. It does not reach: it pins one hop of a two-hop path, so the identical wrapper
-// written into hookTest instead left this file at 48 pass / 0 fail / 0 skipped.
+// spells at that registration. It also catches one that carries its own `toString`: a
+// one-line `Object.assign(function (...a) { try { … } catch {} },
+// { toString: () => fn.toString() })` ran 48 pass / 0 fail / 0 skipped when the leg compared
+// `body.toString()`, which reads that own property; comparing
+// `Function.prototype.toString.call(body)` instead reads the wrapper's real source
+// regardless of what its own `toString` claims, and the same wrapper then names every
+// substituted case. An earlier version of this sentence credited the registerHookCase
+// identity assertion with catching the wrapper. It does not reach: it pins one hop of a
+// two-hop path, so the identical wrapper written into hookTest instead left this file at
+// 48 pass / 0 fail / 0 skipped — closed by the same leg fix, since that leg runs on
+// whatever body reached node:test regardless of which hop substituted it.
 //
 // Why the call site and not just a count: the body is supplied by the registration path, so
 // that path can substitute a body that calls the marker and does nothing else.
@@ -615,11 +620,13 @@ test('hooks.json declares a SessionStart matcher', async () => {
 // thirty-one arrive from the ONE line inside the registration path instead of from the
 // thirty-one marker lines this file's text carries.
 //
-// What that buys, exactly, and what it does not buy. Two independent legs stand between a
-// forgery in the registration path and a green file: these marker lines, derived from the
-// stack frames the marker calls arrive on, and the source-text comparison in the mechanism
-// test at the end, which compares each body node:test received against this file's own text.
-// A forgery has to satisfy BOTH.
+// What that buys, exactly, and what it does not buy. Two legs stand between a forgery in the
+// registration path and a green file: these marker lines, derived from the stack frames the
+// marker calls arrive on, and the source-text comparison in the mechanism test at the end,
+// which compares each body node:test received against this file's own text. A forgery has to
+// satisfy BOTH. They are not independent, and adding a leg is not the lever it looks like:
+// each one reads a property of this file's own text, so a single edit to this file can aim at
+// both at once — and one measured below does.
 //
 // What that is worth is the CASUAL edit, and that is the realistic regression here. A
 // wrapper added while refactoring the registration path keeps every marker line but arrives
@@ -627,15 +634,53 @@ test('hooks.json declares a SessionStart matcher', async () => {
 // loses its marker line. Either way at least one leg fails and this file goes red naming the
 // case. Neither leg has to be defeated on purpose for those to be caught.
 //
-// A DELIBERATE forgery satisfies both, and does it in a single expression. Measured at this
-// tip: replacing the one registerHookCase call inside hookTest with a stub that pads a
-// `new Function` body so its forged frames land on each case's marker line AND carries an
-// own `toString` returning that case's source slice left this file at
-// 48 pass / 0 fail / 0 skipped in 398ms, against roughly fifteen seconds for a healthy run,
-// with all thirty-one real bodies discarded. Ten consecutive rounds of this comment have
-// each named a price for forging these markers — thirty-one edits, then one edit, then two
-// lines — and every one of them was falsified by the next reader, twice within a single
-// round. No count of lines or edits bounds this, and none is stated here.
+// A DELIBERATE forgery has to satisfy both legs at once, and one shape of it used to do so
+// in a single expression: a stub padding a `new Function` body so its forged frames land on
+// each case's marker line, carrying an own `toString` returning that case's source slice.
+// That particular shape no longer works, because the source-text leg reads
+// `Function.prototype.toString.call(body)` instead of `body.toString()` — an own `toString`
+// no longer substitutes for the real source, so the padded stub's REAL text is what gets
+// compared, and it is not the case's source slice.
+//
+// That leg reads the real source only for as long as `Function.prototype.toString` IS the
+// real method. It is resolved off the mutable `Function.prototype` at call time, so an edit
+// to this file that replaces that method replaces what the leg reads. Measured in a
+// worktree at the tip that introduced this leg: an eight-line edit capturing the real
+// method, installing a WeakMap-backed liar in its place, and registering marker-only
+// `new Function` stubs padded so their frames land on each case's marker line ran the whole
+// file at 49 pass / 0 fail / 0 skipped in 441ms against a 13s healthy baseline, with all
+// thirty-one real hook bodies discarded. Capturing the method into a module-level const at
+// load time would not change this: an edit that installs a liar can equally edit the
+// capture. The attacker and the file are the same thing, so no mechanism written here can
+// bound what an edit to this file may do.
+//
+// One shape satisfied both legs at once without touching `Function.prototype` at all, and
+// it is what the frame check in markerFrameLine below was written against. Registering
+// `eval('\n'.repeat(c.registrationLine - 1) + '(' + c.bodySource + ')')` in place of each
+// real body produces a substitute whose `Function.prototype.toString.call(...)` is
+// byte-identical to the case's own source slice, so the source-text leg sees no mismatch;
+// and the newline padding puts the compiled script's lines onto this file's lines, so the
+// marker calls inside it reported the exact marker lines. Measured on the merged tree
+// against a 1517 pass / 0 fail baseline: both legs green, the mechanism test and the
+// mechanism pin green with it.
+//
+// Text identity is not behavioural identity in JavaScript, which is why that shape mattered
+// rather than being a curiosity: the compiled copy's free variables bind in the scope the
+// eval ran in, so an `assert` local to that scope replaces the real one and every assertion
+// in every body becomes a no-op. Measured: with `NOT fully working` changed to `NOT fully
+// operational` in hooks/session-start, the honest file reports 49 tests with 5 failures, and
+// the same broken product with that substitution in place reported 49 pass / 0 fail /
+// 0 skipped. markerFrameLine now rejects the frames THAT spelling of the substitute produces,
+// so its marker calls land in hookBodyForeignCalls instead of satisfying this leg. A one-line
+// variant of the same substitute is not rejected; see the measurement at markerFrameLine.
+//
+// Six consecutive rounds of this comment, across two runs, have each named a price for
+// forging these markers — thirty-one edits, then one edit, then two lines, then a claim that
+// only a substitute with genuinely matching real source remained, then a claim that V8 always
+// writes an `eval at ` segment the compiled code cannot drop — and every one was falsified by
+// the next reader, twice within a single round. No count of lines or edits bounds this, and
+// none is stated here. The rule that survived all six: a sentence here may report what was
+// measured, and may not promise what a future edit cannot do.
 //
 // The runtime gap is an observation, NOT a defense: a forged run finishes in a fraction of
 // the healthy time precisely because no real body executes. Nothing in this file asserts on
@@ -647,13 +692,69 @@ const hookBodyMarkerLines = new Set()
 // Calls whose origin could not be attributed to a line of this file. Any entry here is a
 // failure: it means a hookBodyRan() call came from somewhere this file cannot account for.
 const hookBodyForeignCalls = []
+// The line of this file a marker call arrived from, or null when the frame is not one of
+// this file's own lines. Split out from hookBodyRan so it can be driven with real captured
+// frames by the pin at the end of this file without moving the module counters.
+//
+// V8 writes a frame for code compiled by eval or `new Function` as
+// `at NAME (eval at SITE (…hook.test.mjs:413:3), <anonymous>:12:3)`: the trailing position
+// belongs to the compiled script, and the file path inside the `eval at ` segment is the
+// call site that compiled it, not the location of the code that ran. Both halves of the old
+// check read as honest on such a frame — it contains `hook.test.mjs`, and the trailing
+// `<anonymous>:12:3` is a number the padding of the compiled string can aim at any line —
+// so a substitute compiled from a string could report whatever marker line it chose.
+// Rejecting the frame on the `eval at ` segment sends such a call to hookBodyForeignCalls,
+// where the mechanism test reports it, instead of crediting it as a marker line.
+//
+// The compiled code CAN drop that segment, in one documented line. `//# sourceURL=` appended
+// to the compiled string makes V8 name that URL as the frame's file and omit the `eval at `
+// segment entirely, while keeping the position the padding aimed at. Measured on node
+// v24.14.0, one frame per compilation shape:
+//
+//   eval                     at b1 (eval at <anonymous> (…frames.mjs:5:21), <anonymous>:42:24)
+//   eval + //# sourceURL     at b2 (C:/x/tests/hook.test.mjs:42:24)
+//   new Function             at b3 (eval at <anonymous> (…), <anonymous>:44:30)
+//   new Function + sourceURL at b4 (C:/x/tests/hook.test.mjs:44:30)
+//
+// So the check below catches an eval-compiled substitute that does NOT set `sourceURL`, and
+// does not catch one that does. End-to-end at the tip that added this check, registering
+// `eval(NL.repeat(c.registrationLine - 1) + '(' + c.bodySource + ')' + NL +
+// '//# sourceURL=file:///forged/tests/hook.test.mjs')` from a scope holding a no-op `assert`:
+// 50 pass / 0 fail, hookBodyForeignCalls empty, marker lines matching every case, both
+// mechanism pins green. With the product broken (`NOT fully working` -> `NOT fully
+// operational` at hooks/session-start:144) the honest file reports 45 pass / 5 fail and the
+// forged one 50 pass / 0 fail — because, as with the unadorned eval shape above, the copy's
+// free variables bind in the eval scope, so a local `assert` neuters every assertion in every
+// body.
+//
+// The check is kept because it rejects the naive shape and costs nothing. It raises the cost
+// of one spelling by one line and closes nothing.
+//
+// Nor does adding a leg help, which is why no third mechanism was written when this was
+// measured: the source-text leg passes because the forgery reuses the case's own bodySource
+// verbatim, and the marker leg passes because `sourceURL` lets the frame name this file at
+// the padded line. One construction satisfies both, and every property either leg reads is a
+// property of THIS FILE'S OWN TEXT, which the same edit controls. The paragraphs above hold
+// and are the whole of it: the attacker and this file are the same thing, and nothing written
+// here — this check, either leg, or the two together — bounds what an edit to this file may
+// do.
+//
+// What these mechanisms are for is the accidental and the casual: a wrapper added while
+// refactoring, a body replaced by a stub, a case skipped by mistake. Those they catch, and
+// they go red naming the case. A deliberate edit to this file they do not resist and cannot.
+function markerFrameLine(frame) {
+  if (frame.includes('eval at ')) return null
+  const at = /(\d+):\d+\)?$/.exec(frame)
+  if (!at || !frame.includes('hook.test.mjs')) return null
+  return Number(at[1])
+}
 function hookBodyRan() {
   hookBodyRuns += 1
   // Frame 0 is the "Error" header, frame 1 is this function, frame 2 is the caller.
   const frame = ((new Error().stack || '').split('\n')[2] || '').trim()
-  const at = /(\d+):\d+\)?$/.exec(frame)
-  if (at && frame.includes('hook.test.mjs')) hookBodyMarkerLines.add(Number(at[1]))
-  else hookBodyForeignCalls.push(frame || '(no stack frame)')
+  const line = markerFrameLine(frame)
+  if (line === null) hookBodyForeignCalls.push(frame || '(no stack frame)')
+  else hookBodyMarkerLines.add(line)
 }
 
 // How many registrations this file's own source contains, read from the text rather than
@@ -2029,6 +2130,16 @@ hookTest("a broken install still exits 0 with exactly one valid context field", 
 // hook body run before the module finishes loading.
 const hookBodyRunsAfterRegistration = hookBodyRuns
 
+// The source-text leg's own comparison, factored out so the pinned test below exercises the
+// SAME code the mechanism test calls rather than a duplicate of it — a mutation to this
+// function is a mutation to both. `Function.prototype.toString.call(body)` reads the
+// function's real source regardless of an own `toString` property; `body.toString()` would
+// read that own property first when one is present, which is exactly what a swallow wrapper
+// carrying `{ toString: () => fn.toString() }` exploits.
+function bodySourceMismatch(body, expectedSource) {
+  return Function.prototype.toString.call(body) !== expectedSource
+}
+
 // Registered LAST on purpose. node:test runs top-level cases in registration order, so by
 // the time this body executes every hookTest above has either run or been skipped, and
 // hookBodyRuns holds the count.
@@ -2087,20 +2198,29 @@ test('(mechanism) a reachable probe means EVERY hook case body executed', (t) =>
   //
   // The observer here is this file's own TEXT, the principle that made probeTargetProblem
   // and HOOK_CASES_IN_SOURCE hold: `bodySource` is the exact source slice of each case's
-  // function expression, and Function.prototype.toString returns that same slice for the
-  // function object node:test received. Editing what either hop DOES cannot change what the
-  // text says, so an ordinary wrapper — at either hop — arrives here as a function whose
-  // source is the wrapper's, and this assertion names the case it replaced.
+  // function expression, and `bodySourceMismatch` reads the function object node:test
+  // received with `Function.prototype.toString.call`, which returns that same slice
+  // regardless of any own `toString` property the object carries. Editing what either hop
+  // DOES cannot change what the text says, so an ordinary wrapper — at either hop — arrives
+  // here as a function whose REAL source is the wrapper's, and this assertion names the
+  // case it replaced.
   //
   // What it does NOT close, tried and stated rather than assumed: this leg compares text
   // against text, so anything that produces the right text passes it. A registration path
   // that built its substitute by evaluating this file's own text for that case produces a
-  // matching source string. So does a stub carrying an own `toString` that returns the case's
-  // source slice — which is how the single-expression forgery described at the hookBodyRan
-  // definition satisfies this leg while forging its stack frames to satisfy the marker leg,
-  // and how a one-line swallow wrapper with `toString: () => fn.toString()` passes it too.
-  // So do not read this assertion as covering a wrapper "in any spelling"; an earlier
-  // version of this comment said exactly that, and it was false.
+  // matching source string, because that IS the case's source — running it is not
+  // distinguishable from running the real body. A stub carrying an own `toString` that lies
+  // about its source does NOT pass it: `Function.prototype.toString.call` does not consult
+  // that property, so the single-expression forgery described at the hookBodyRan definition
+  // and the one-line swallow wrapper with `toString: () => fn.toString()` are both named
+  // here now, pinned by the mechanism-pinned test below. It also reads the real source only
+  // while `Function.prototype.toString` is the real method: the call resolves it off the
+  // mutable prototype at call time, so an edit to this file that replaces that method
+  // replaces what this leg reads — measured at 49 pass / 0 fail / 0 skipped in 441ms with
+  // every real body discarded, described at the hookBodyRan definition above. So do not
+  // read this assertion as covering a wrapper "in any spelling that reaches node:test with
+  // a function object", and do not read any statement of what a forgery must cost into it;
+  // this file cannot bound edits to itself.
   assert.equal(nodeTestRegistrations.length, HOOK_CASES_FROM_SOURCE.cases.length,
     `node:test received ${nodeTestRegistrations.length} hook case registrations for the ` +
     `${HOOK_CASES_FROM_SOURCE.cases.length} this file's source registers — a registration ` +
@@ -2121,10 +2241,11 @@ test('(mechanism) a reachable probe means EVERY hook case body executed', (t) =>
       } else if (typeof body !== 'function') {
         substituted.push(
           `line ${c.registrationLine}: the case "${c.name}" reached node:test as ${typeof body}, not a function`)
-      } else if (body.toString() !== c.bodySource) {
+      } else if (bodySourceMismatch(body, c.bodySource)) {
         substituted.push(
           `line ${c.registrationLine}: the case "${c.name}" reached node:test as a function ` +
-          `whose source is not the one this file spells at that line — got ${JSON.stringify(body.toString())}`)
+          `whose source is not the one this file spells at that line — got ` +
+          `${JSON.stringify(Function.prototype.toString.call(body))}`)
       }
     })
     assert.deepEqual(substituted, [],
@@ -2191,4 +2312,101 @@ test('(mechanism) a reachable probe means EVERY hook case body executed', (t) =>
     assert.deepEqual(sortLines(hookBodyMarkerLines), [],
       'the probe reported the repository unreachable, so no marker line should have been reached')
   }
+})
+
+test('(mechanism pinned) the source-text leg reads the real function source, not an own toString', () => {
+  // PIN for bodySourceMismatch, the exact function the mechanism test's source-text leg
+  // calls above — not a re-statement of it, so a mutation to that one implementation is
+  // caught here too. `body.toString()` reads an own `toString` property when a wrapper
+  // carries one; `Function.prototype.toString.call(body)` does not, and returns the
+  // function's real source instead. Measured at this file's previous tip: registering a
+  // wrapper carrying `{ toString: () => fn.toString() }` at the registerHookCase call site
+  // left the whole suite at 48 pass / 0 fail / 0 skipped in 13.5s against an 11-13s healthy
+  // baseline — no failing case, no timing tell.
+  //
+  // This test drives registerHookCase directly with a synthesized reachable probe and a
+  // private `record`, exactly as the refused-probe test above does, so it perturbs none of
+  // the module counters or registrations the real mechanism test reads.
+  const realBody = function realBody() { hookBodyRan() }
+  const realSource = realBody.toString()
+  const forged = Object.assign(
+    function (...a) { try { return realBody(...a) } catch { /* swallowed */ } },
+    { toString: () => realSource })
+
+  const calls = []
+  const record = (...args) => calls.push(args)
+  registerHookCase({ reachable: true, error: null, result: 'reachable' },
+    'forged case', forged, record)
+  assert.equal(calls.length, 1, 'the forged case must still be registered, not dropped')
+  const [, registeredBody] = calls[0]
+  assert.equal(registeredBody, forged,
+    'registerHookCase must forward the exact body it was handed')
+
+  // The attack's own premise: the forged wrapper's OWN toString lies convincingly.
+  assert.equal(registeredBody.toString(), realSource,
+    'the forged wrapper\'s own toString must return the real body\'s source, or this attack ' +
+    'proves nothing about the leg it is meant to defeat')
+
+  // The actual code path: bodySourceMismatch must call it a mismatch, because the wrapper's
+  // REAL source is not realSource even though its own toString claims otherwise. With
+  // bodySourceMismatch reverted to compare `body.toString() !== expectedSource`, this
+  // assertion fails, because the reverted comparison reads the forged toString and finds it
+  // equal to realSource.
+  assert.ok(bodySourceMismatch(registeredBody, realSource),
+    'the source-text leg must reject a wrapper whose own toString lies about its source')
+
+  // And a body that carries no own toString — the ordinary case — must still compare equal,
+  // so the fix does not turn honest registrations red.
+  assert.ok(!bodySourceMismatch(realBody, realSource),
+    'the source-text leg must accept an unwrapped body unchanged')
+})
+
+test('(mechanism pinned) a frame from eval-compiled code is not credited as a marker line', () => {
+  // PIN for markerFrameLine, the exact function hookBodyRan calls to attribute a marker call
+  // to a line of this file — not a re-statement of it, so a mutation to that one
+  // implementation is caught here. It drives markerFrameLine with REAL captured frames and
+  // never calls hookBodyRan, so it moves none of the module counters the mechanism test
+  // above reads.
+  const captureCallerFrame = () => ((new Error().stack || '').split('\n')[2] || '').trim()
+
+  // A genuinely eval-compiled function, padded the way the substitution documented beside
+  // hookBodyRan pads its copies: 41 leading newlines put its body on line 42 of the compiled
+  // script, so the position V8 writes at the end of its frame is 42 — a line this code does
+  // not occupy and did not have to occupy. Direct eval, so `captureCallerFrame` binds in
+  // this scope; that same free-variable binding is what lets such a substitute supply its
+  // own `assert` to every body it compiles.
+  const compiled = eval('\n'.repeat(41) + '(function compiledBody() { return captureCallerFrame() })')
+  const evalFrame = compiled()
+
+  // The premise: this frame passes both halves of the check markerFrameLine replaced. It
+  // names this file, and it ends in a position that parses as a line number.
+  assert.ok(evalFrame.includes('hook.test.mjs'),
+    `an eval frame names this file through its "eval at" call site, so a frame check keyed ` +
+    `on the file name alone reads it as honest — got ${JSON.stringify(evalFrame)}`)
+  const trailing = /(\d+):\d+\)?$/.exec(evalFrame)
+  assert.ok(trailing, `the eval frame must end in a position, got ${JSON.stringify(evalFrame)}`)
+  assert.equal(Number(trailing[1]), 42,
+    'the padding must aim the frame position at line 42, or this test is not exercising the ' +
+    'shape it claims to')
+
+  // The distinguishing segment, and the actual code path. With the `eval at ` rejection
+  // removed from markerFrameLine, this returns 42 and the call is credited as the marker
+  // line of whichever case the padding was computed from.
+  assert.match(evalFrame, /eval at /,
+    'V8 writes an "eval at" segment for code compiled from a string; without it this test ' +
+    'pins nothing')
+  assert.equal(markerFrameLine(evalFrame), null,
+    'a frame from eval-compiled code must not be attributed to a line of this file, so the ' +
+    'call is reported as foreign rather than credited as a hook case marker')
+
+  // And a body written literally in this file must still be attributed, so the rejection
+  // does not turn honest marker calls into foreign ones.
+  const honestFrame = (function honestBody() { return captureCallerFrame() })()
+  const honestLine = markerFrameLine(honestFrame)
+  assert.equal(typeof honestLine, 'number',
+    `a frame from a function written in this file must be attributed to a line, got ` +
+    `${JSON.stringify(honestFrame)}`)
+  assert.match(SELF_SOURCE.split('\n')[honestLine - 1], /honestBody/,
+    `line ${honestLine} of this file must be the line that made the call, but it does not ` +
+    'contain the calling function')
 })
