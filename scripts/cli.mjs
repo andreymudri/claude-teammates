@@ -2838,10 +2838,12 @@ export async function runCli(argv, io = { out: console.log }) {
     if (Number.isInteger(verdict?.phase) && verdict.phase !== phase) {
       // `verdict.phase` is a real integer by the guard above. The other two are not: `flags.phase`
       // is the STRING that was typed, and `missingArgs` admits it on `Number.isInteger(Number(x))`
-      // — which `Number` reaches through leading and trailing whitespace, so `\r1`, `\n1` and
-      // ` 1` are all accepted and would put that byte on this line. Only whitespace can
-      // arrive that way, never attacker-chosen text, but a line break here is still a line this
-      // CLI did not mean to draw. Both it and the path are wrapped, for the same reason the
+      // — which `Number` also accepts for `0x1`, `1.0`, `1e0`, `+1`, and any string that is only
+      // leading/trailing whitespace-class characters (including `\r1`, `\n1`, ` 1`). The bound
+      // this guard actually gives: whatever reaches this printed line is a non-integer spelling
+      // of an integer, and every consumer downstream in this command is `Number(flags.phase)` —
+      // not a claim that the text itself is constrained. A line break here is still a line this
+      // CLI did not mean to draw, so both it and the path are wrapped, for the same reason the
       // parse-error line above wraps what it quotes.
       io.out(`--phase ${printable(flags.phase)} does not match the verdict's phase ${verdict.phase} at ${printable(flags.verdict)}\n\n${USAGE}`)
       return 2

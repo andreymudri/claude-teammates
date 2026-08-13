@@ -18,6 +18,7 @@ import {
   UNIVERSAL_FLAGS,
 } from '../scripts/cli.mjs'
 import { previewOwnerMarkerPath } from '../scripts/merge-preview.mjs'
+import { renderRunSummary } from '../scripts/finish.mjs'
 
 const PLAN = `### Task 1: A
 
@@ -661,9 +662,9 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 //     grep -nE "printable(Block)?\b" scripts/cli.mjs scripts/reviews.mjs scripts/digest.mjs \
 //       scripts/finish.mjs
 //
-// minus the definitions in `reviews.mjs`, the four `import` lines, and the comment lines. That
-// yields 43 lines of code holding a wrapper: 31 in `cli.mjs`, 3 in `reviews.mjs`, 6 in
-// `digest.mjs`, 3 in `finish.mjs`. Every one of them is accounted for below — as a row above, as
+// minus the definitions in `reviews.mjs`, the three `import` lines, and the comment lines. That
+// yields 44 lines of code holding a wrapper: 31 in `cli.mjs`, 3 in `reviews.mjs`, 6 in
+// `digest.mjs`, 4 in `finish.mjs`. Every one of them is accounted for below — as a row above, as
 // a row in another file's suite, or by name in the numbered groups. A line whose wrappers are
 // only PARTLY driven is listed too: "the row covers this line" is not the same claim as "the row
 // covers every wrapper on it", and the difference is where two dead wrappers were found.
@@ -675,10 +676,10 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 // different class and are not enumerated as a class; several are wrapped anyway, where one sits
 // in a sentence beside a value that is in the class, and those wrappers are driven by rows.
 //
-// Of the 43 lines: `reviews.mjs` 115/117/120 are driven by `tests/reviews.test.mjs`;
-// `finish.mjs` 100/101/102 by the three run-summary newline tests below the table; the rest by
-// rows above, except the six fully rowless lines in group 0 and the three partly-driven lines in
-// group 0b.
+// Of the 44 lines: `reviews.mjs` 115/117/120 are driven by `tests/reviews.test.mjs`;
+// `finish.mjs` 104/105/106 by the three run-summary newline tests below the table; `finish.mjs`
+// 99 (the run id) by the run id row above; the rest by rows above, except the six fully rowless
+// lines in group 0 and the three partly-driven lines in group 0b.
 //
 // 0. Fully rowless, no wrapper on the line driven by anything (6 lines):
 //    - `cli.mjs:981`, the `syscall` branch of `configFailureMessage`. It prints a Node fs error
@@ -688,9 +689,12 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 //      Constrained upstream — see group 1.
 //    - `cli.mjs:2339` (2 wrappers), the `GitError` branch of `preview-check`. Its three sibling
 //      branches each have a row; this one is reached only when `git ls-files --error-unmatch`
-//      exits 2 or worse on a path that passed every validator, and no fixture in this suite can
-//      force that. Stated as UNCOVERED, not as safe: if a way to drive it is found, it wants a
-//      row rather than an entry here.
+//      exits 2 or worse on a path that passed every validator. A POSIX-only fixture CAN force
+//      that — a `preview.link` entry of `:(bogus)docs` passes every `validateLinkPaths` rule, and
+//      `git ls-files --error-unmatch -z -- ':(bogus)docs'` exits 128 with `fatal: Invalid
+//      pathspec magic 'bogus'` — but the name is illegal on Windows, so no fixture that runs on
+//      every platform this suite targets exists. Stated as UNCOVERED, not as safe: if a
+//      cross-platform way to drive it is found, it wants a row rather than an entry here.
 //    - `cli.mjs:2420`, `review-dispatch`'s duplicate-`test` sentence. `namedTest` is filtered on
 //      `c.name === 'test'`, so the only string that can reach it is the literal `test`.
 //    - `cli.mjs:2587`, `collect-reviews`'s `unexpected` line — unreachable; see group 1.
@@ -738,8 +742,10 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 //    `tests/finish.test.mjs`.
 //
 // One limit, stated rather than claimed away: `map-notes --near` prints repository paths that
-// `git log --name-only` reported. Those are not read out of an agent-written file, so they fall
-// outside the scope above — this table does not vouch for that site either way.
+// `git log --name-only` reported. Those paths are agent-AUTHORED — a teammate chooses one by
+// committing a file with that name — so they fall outside the scope above, which covers only
+// values read out of an agent-written FILE's contents; this table does not vouch for that site
+// either way.
 //
 // `ESC [ 1 G` rather than CR wherever the value passes through a regex on its way here: JS `.`
 // excludes CR, so a CR-bearing plan line simply fails to parse and never becomes a printed value.
@@ -1160,12 +1166,13 @@ const SANITISED_SITES = [
   {
     site: 'cli.mjs finish — the run id inside the rendered run summary block',
     exit: 1,
-    // Distinct from the check-names row below, and added because that row could not reach this
-    // wrapper: `renderRunSummary` puts every check name through `printable` where the table is
-    // BUILT, so by the time the block arrives at `printableBlock` the names are already safe and
-    // dropping that wrap left the whole suite green. The run id is the half `renderRunSummary`
-    // does NOT wrap — it is spliced into the table's first line raw — so it is what pins the
-    // block wrapper. The C1 form because the id becomes a directory under `.teammates/`.
+    // `renderRunSummary` now puts the run id through `printable` where the table is BUILT, the
+    // same as every check name, so this row no longer isolates the `printableBlock` wrap at the
+    // print site the way it once did — measured by mutation: dropping that outer wrap alone still
+    // leaves this row green, because the run id already arrives sanitised. It stays as a
+    // regression test on the property itself (a C1-bearing run id cannot force a forged write),
+    // not as the site that pins the outer wrap. The C1 form because the id becomes a directory
+    // under `.teammates/`.
     async setup({ root, planPath, io }) {
       await runCli(['init-run', planPath, '--run', CLI_C1_FORGERY, '--root', root], io)
       await writeManifest(root, {
@@ -1324,6 +1331,17 @@ for (const { site, exit, setup } of SANITISED_SITES) {
     })
   })
 }
+
+// `renderRunSummary` wraps the run id with `printable` where the table is BUILT, matching every
+// check name on the same header line (`scripts/finish.mjs`). The CLI-level row above cannot pin
+// this on its own: `printableBlock` at the print site in `cli.mjs` also neutralises the same
+// bytes, so calling through the CLI stays green even with this wrap reverted. Asserted directly
+// on `renderRunSummary`'s own return value, with no outer wrap in the way.
+test('renderRunSummary wraps a control byte in the run id, not just in check names', () => {
+  const out = renderRunSummary('r1\x1b[2K', [])
+  assert.equal(Buffer.from(out, 'utf8').includes(0x1b), false, `raw ESC survived: ${JSON.stringify(out)}`)
+  assert.match(out, /<0x1B>/)
+})
 
 // The row above pins that a check name cannot ERASE a row of the run summary. This pins the other
 // half, which that row cannot reach: the name is spliced into the table by `renderRunSummary`, and

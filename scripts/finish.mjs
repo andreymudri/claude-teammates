@@ -92,7 +92,11 @@ export function summarizeRun(phaseResults = []) {
 // comment on `printable` in `scripts/reviews.mjs` for why that line is drawn where it is.
 export function renderRunSummary(runId, phaseResults = []) {
   const summary = summarizeRun(phaseResults)
-  const lines = [`run ${runId} — every verdict below was recomputed from git just now, not read from a record`]
+  // `runId` is operator-supplied (the `--run` flag a human passes to the CLI), not
+  // teammate-controlled like the failed/pending/skipped names below — wrapping it here is not
+  // closing a hazard, it is keeping this line consistent with its neighbours so every value in
+  // the header goes through the same `printable` wrapper.
+  const lines = [`run ${printable(runId)} — every verdict below was recomputed from git just now, not read from a record`]
 
   for (const entry of phaseResults) {
     const verdict = entry.verdict ?? {}
