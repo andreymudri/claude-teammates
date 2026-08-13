@@ -364,6 +364,47 @@ test('the marker is written before the worktree is added, not after', async () =
   assert.equal(existsSync(markerPath), false, 'the marker outlived the preview')
 })
 
+// A teardown that throws SYNCHRONOUSLY is not the same as one that rejects, and the difference
+// used to decide whether the preview directory survived: `git.removeWorktree(dir).catch(...)`
+// attaches to a returned promise, so a synchronous throw escaped the line before `.catch` existed
+// and carried the `rm` below it away with it. Found by counting: every run of
+// tests/gate-runner.test.mjs — which drives exactly this shape at
+// 'a throw raised after the checks already ran does not run them a second time' — left one more
+// empty `tm-preview-*` directory in the temp dir than it started with.
+//
+// Both halves are pinned here. The error must still reach the caller, because a teardown failure
+// has to fail the `merge` check rather than pass quietly; and the directory must be gone anyway.
+test('a synchronous teardown throw still removes the preview directory, and still propagates', async () => {
+  let previewPath = null
+  const git = {
+    async addWorktreeDetached(dir) { return dir },
+    async mergeInto() { return null },
+    // Synchronous, not a rejected promise: the shape a `git` accessor takes when the spawn itself
+    // fails before any promise is created.
+    removeWorktree() { throw new Error('worktree teardown boom') },
+  }
+  await assert.rejects(
+    withMergePreview({
+      git,
+      base: 'main',
+      branches: ['T1'],
+      run: async ({ path: dir }) => { previewPath = dir },
+    }),
+    /worktree teardown boom/,
+    'a teardown failure must reach the caller, so the merge check fails instead of passing quietly',
+  )
+  assert.ok(previewPath, 'the callback must have received a preview path to assert about')
+  assert.equal(
+    existsSync(previewPath), false,
+    'the preview directory outlived a synchronous teardown throw — the cleanup must not depend ' +
+    'on the teardown returning a promise',
+  )
+  assert.equal(
+    existsSync(previewOwnerMarkerPath(previewPath)), false,
+    'the owner marker outlived the preview, so the reaper would read a stale claim',
+  )
+})
+
 test('the marker names the owning pid and lives beside the preview, not inside it', async () => {
   const git = fakeGit()
   let contents = null
