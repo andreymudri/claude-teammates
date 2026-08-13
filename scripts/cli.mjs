@@ -648,15 +648,17 @@ function validateSuppliedResults(supplied, checks) {
     // would let an `agent` result land on the `command` check. Whether the file was accepted
     // would then depend on declaration order rather than on what gets written. Reject the
     // collision instead of resolving it.
-    // `r?.name` goes out through `JSON.stringify`, which escapes a control byte to `\uXXXX`
-    // and is sufficient on its own; `check.kind` and `check.name` below are spliced bare into
-    // the sentence, so those take `printable`. Both halves are agent-written — the difference
-    // is only in how each reaches the line.
+    // Every value below is agent-written — the name out of the `--results` file, the kind and
+    // name out of the manifest — and each is spliced into a sentence a terminal draws, so each
+    // takes `printable`. The two refusals naming `r?.name` are quoted as well as wrapped:
+    // `JSON.stringify` escapes quotes and the C0 range, which keeps the name legible as a
+    // quoted string, and leaves 0x7F, the C1 range and U+2028/U+2029 untouched — so it runs AFTER
+    // `printable`, the order `reviewFileName` uses in `scripts/reviews.mjs`, never instead of it.
     if (duplicated.has(r?.name)) {
-      return `--results names a check declared more than once in this phase's manifest: ${JSON.stringify(r?.name)}`
+      return `--results names a check declared more than once in this phase's manifest: ${JSON.stringify(printable(r?.name))}`
     }
     const check = byName.get(r?.name)
-    if (!check) return `--results names a check not in this phase's manifest: ${JSON.stringify(r?.name)}`
+    if (!check) return `--results names a check not in this phase's manifest: ${JSON.stringify(printable(r?.name))}`
     if (!SUPPLIABLE_KINDS.has(check.kind)) return `--results may not supply a ${printable(check.kind)} check: ${printable(check.name)}`
     if (!SUPPLIED_STATUSES.has(r.status)) return `--results carries an unrecognized status for ${printable(check.name)}: ${JSON.stringify(r.status)}`
     if (r.source !== undefined && !SUPPLIED_SOURCES.has(r.source)) {
