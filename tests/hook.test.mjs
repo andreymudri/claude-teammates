@@ -19,13 +19,28 @@ import { fileURLToPath } from 'node:url'
 // about the invocation is agent-supplied or caller-supplied: the script is the constant
 // PROBE_SCRIPT, both arguments are derived here, and privileged mode is on.
 //
-// This is deliberate and is the cost of the design, not an oversight. Whether the thirty
-// hook cases RUN or SKIP is decided at registration time, and node:test fixes a case's
-// options — including `skip` — when the test is registered. Deferring the probe into the
-// bodies would mean registering every case unconditionally and skipping from inside, which
-// trades a measured registration for a runtime one and rewrites the mechanism tests that
-// pin the three registration outcomes (run / skip / undetermined-as-failure). The residual
-// stands recorded: discovery and execution are not separable for this file.
+// This is deliberate and is the cost of the design. Whether the thirty-one hook cases RUN or
+// SKIP is decided at registration time, and node:test fixes a case's options — including
+// `skip` — when the test is registered. Both ways of deferring the probe were built and
+// MEASURED on node v24.14.0, and each buys the removal of this spawn by giving up a property
+// worth more:
+//
+//   - Cases as subtests of one parent, registered inside the parent's body once the probe has
+//     answered. Keeps `{skip}` options and body identity, and breaks per-case selection:
+//     `--test-name-pattern "<case name>"` selects NOTHING, because the parent's name does not
+//     match and node never enters it. Adding the parent's name back — two patterns, or the
+//     parent alone — runs ALL of its children. Debugging one case by name becomes impossible,
+//     and this file's own filter machinery (readTestFilters/selectHookCases) computes an
+//     expectation that no longer describes what node does.
+//   - Real bodies registered top-level, with the skip decided in a `beforeEach` hook. Keeps
+//     identity and per-case selection, and does not skip: `t.skip()` inside a hook marks the
+//     case skipped and THEN RUNS ITS BODY anyway (measured: body ran, case reported skipped).
+//     On the unreachable machines the skip exists to serve, every body would execute against a
+//     bash that cannot see the repository.
+//
+// So the residual stands, recorded rather than traded away: discovery and execution are not
+// separable for this file. What loading it runs is fixed text with two derived arguments, and
+// `tests/hook-mechanism.test.mjs` is the outside observer that keeps this file honest.
 const root = fileURLToPath(new URL('..', import.meta.url))
 const hookScript = fileURLToPath(new URL('../hooks/session-start', import.meta.url))
 const updateCheckScript = fileURLToPath(new URL('../hooks/update-check', import.meta.url))
@@ -765,6 +780,14 @@ const hookBodyForeignCalls = []
 // What these mechanisms are for is the accidental and the casual: a wrapper added while
 // refactoring, a body replaced by a stub, a case skipped by mistake. Those they catch, and
 // they go red naming the case. A deliberate edit to this file they do not resist and cannot.
+//
+// What DOES resist one is in another file. `tests/hook-mechanism.test.mjs` copies the tree,
+// breaks `hooks/session-start`, runs THIS file inside the copy, and requires the run to go red
+// with a failing case this file's own source names. It asks the one question a forged copy
+// cannot answer about itself. Measured both directions: with `import assert` in this file
+// replaced by a no-op proxy — real bodies, real source text, every marker line reached, so
+// every mechanism here green at 50 pass / 0 fail — the cross-file check is RED and names the
+// state. It is one mutant, not mutation coverage; see that file for what it does not close.
 function markerFrameLine(frame) {
   if (frame.includes('eval at ')) return null
   const at = /(\d+):\d+\)?$/.exec(frame)
@@ -2243,7 +2266,9 @@ test('(mechanism) a reachable probe means EVERY hook case body executed', (t) =>
   // every real body discarded, described at the hookBodyRan definition above. So do not
   // read this assertion as covering a wrapper "in any spelling that reaches node:test with
   // a function object", and do not read any statement of what a forgery must cost into it;
-  // this file cannot bound edits to itself.
+  // this file cannot bound edits to itself. Bounding those is not this leg's job and never
+  // was — `tests/hook-mechanism.test.mjs` runs this file against a deliberately broken product
+  // from outside, which is the only check here that a rewrite of this file cannot rewrite.
   assert.equal(nodeTestRegistrations.length, HOOK_CASES_FROM_SOURCE.cases.length,
     `node:test received ${nodeTestRegistrations.length} hook case registrations for the ` +
     `${HOOK_CASES_FROM_SOURCE.cases.length} this file's source registers — a registration ` +
