@@ -77,6 +77,20 @@ where the corresponding claim is made:
      the identical sha**, and the gate already reports every task branch's sha in `branchShas`.
      Recorded here so a future check does not have to rediscover it; nothing implements it yet.
 
+  3. The RUN-TIP variant of shape 2, narrowed but not closed. A ref sitting exactly at the run
+     tip is not named as a secondary parent by any merge, so the declared-files predicate has no
+     sha to attribute by and used to read false unconditionally — which failed a task that was
+     genuinely, fully landed and whose ref a fix round re-pointed with the brief's own
+     `git checkout -B <task> <run branch>` step. `landedForWholeSet` answers that one position
+     instead, asking whether a SINGLE merged secondary parent carried the task's WHOLE declared
+     set, which is the strongest substitute available when the position itself carries no
+     attribution. What survives: a run-tip ref whose declared set is a strict SUBSET of what one
+     already-merged sibling carried is credited with that sibling's work. Declared sets are
+     disjoint only WITHIN a phase (`scripts/phases.mjs`), so the containment must come from
+     another phase's merge. Pinned as a LIMIT in `tests/gate-runner.test.mjs`; the neighbouring
+     tests pin both directions that DO hold — a re-pointed landed ref passes, and a run-tip ref
+     whose declared set no single merge carried in full still fails.
+
   One variant that used to sit in this bullet is now CAUGHT, and is pinned in
   `tests/adversarial.test.mjs` under the defended section: a teammate pointing a task ref at a
   run tip that already carries someone else's real work, and committing nothing itself.

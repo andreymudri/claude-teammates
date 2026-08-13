@@ -435,6 +435,60 @@ test('doctor agrees with the gate on a task ref parked at a merged sibling tip (
   }
 })
 
+// The run-tip (`ownWorkBase`) counterpart of the fixture above, and the same reason for existing:
+// `landedForFiles` is structurally false for a ref sitting exactly at the run tip, so answering
+// that one position with `landedForWholeSet` in `scripts/gate-runner.mjs` alone would leave
+// `doctor` reporting NO CHANGES for a task the gate now passes. `tests/gate-runner.test.mjs` pins
+// the gate's side of both verdicts; this pins that `doctor` reaches the same two.
+test('doctor agrees with the gate on a task ref re-pointed at the run tip (real repo)', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-doctor-runtip-'))
+  try {
+    git(root, ['init', '--quiet', '--initial-branch=main'])
+    git(root, ['config', 'user.email', 'test@example.com'])
+    git(root, ['config', 'user.name', 'Test'])
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    git(root, ['add', '.'])
+    git(root, ['commit', '--quiet', '-m', 'base'])
+    git(root, ['checkout', '--quiet', '-b', 'run-branch'])
+
+    // T1 does real work and is merged --no-ff, carrying exactly its declared `a.mjs`.
+    git(root, ['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'x\n', 'utf8')
+    git(root, ['add', '.'])
+    git(root, ['commit', '--quiet', '-m', 'T1 work'])
+    git(root, ['checkout', '--quiet', 'run-branch'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+
+    // The fix-round step the brief itself recommends, for a task that is already fully landed.
+    git(root, ['branch', '-f', 'teammates/r1/T1', 'run-branch'])
+    // T2 declares `b.mjs`, writes nothing, and parks at the same run tip. No merge carried its
+    // whole declared set, so the run-tip position must not credit it.
+    git(root, ['branch', 'teammates/r1/T2', 'run-branch'])
+
+    const anchorSha = git(root, ['rev-parse', 'HEAD~1']).trim()
+    const runSha = git(root, ['rev-parse', 'run-branch']).trim()
+
+    const report = await collectDoctorReport({
+      git: createGit({ cwd: root }),
+      runId: 'r1', runBranch: 'run-branch', baseBranch: 'main',
+      tasks: [
+        { id: 'T1', phase: 1, files: ['a.mjs'] },
+        { id: 'T2', phase: 2, files: ['b.mjs'] },
+      ],
+      anchorSha, runSha,
+    })
+
+    const t1 = report.tasks.find((t) => t.id === 'T1')
+    const t2 = report.tasks.find((t) => t.id === 'T2')
+    assert.equal(t1.landed, true)
+    assert.equal(t2.landed, false)
+    assert.doesNotMatch(report.problems.join('\n'), /T1: branch teammates\/r1\/T1 has no file changes/)
+    assert.match(report.problems.join('\n'), /T2: branch teammates\/r1\/T2 has no file changes/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 // A teammate writes its own commit subjects and creates its own branches and worktrees, and every
 // one of those reaches `renderDoctor`. A terminal ACTS on control bytes: a subject carrying
 // `ESC [ 2 K` `ESC [ 1 A` erases the line reporting it and the line above, and a bare newline lets

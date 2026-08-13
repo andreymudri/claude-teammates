@@ -13,6 +13,7 @@ import {
   runOwnershipCheck,
   mergedParentFiles,
   landedForFiles,
+  landedForWholeSet,
 } from '../scripts/gate-runner.mjs'
 import { GitError, createGit, defaultGitExec } from '../scripts/git.mjs'
 
@@ -1186,6 +1187,28 @@ function singleTaskPlan() {
     '- Create: `a.mjs`',
     '',
     '**Depends:** none',
+    '',
+  ].join('\n')
+}
+
+// Two tasks over two phases: T1 alone in phase 1, T2 depending on it. The minimum shape in
+// which the run tip is already past the anchor, which is what the run-tip (`ownWorkBase`)
+// position needs — in phase 1 the run tip IS the anchor and no merge exists to be credited by.
+function twoPhasePlan() {
+  return [
+    '### Task 1: first task',
+    '',
+    '**Files:**',
+    '- Create: `a.mjs`',
+    '',
+    '**Depends:** none',
+    '',
+    '### Task 2: second task',
+    '',
+    '**Files:**',
+    '- Create: `b.mjs`',
+    '',
+    '**Depends:** T1',
     '',
   ].join('\n')
 }
@@ -2399,15 +2422,14 @@ test('a solo run builds no preview and consults no links even when ctx.previewLi
   assert.deepEqual(calls.map((c) => c.cwd), ['/project/root'])
 })
 
-// --- LIMIT: ownWorkBase (real repo) ---------------------------------------------------------
+// --- ownWorkBase: closed for the whole-declared-set case (real repo) ------------------------
 //
-// Settled, not closed, by the plan's Task 2 Step 5: T1 (run `claims`) isolated this shape and
-// confirmed it against the pre-task baseline. The declared-files predicate does not resolve it
-// — see the `ownWorkBase` entry in the "What remains open" comment above `states.push(...)` in
-// `deriveContext`, in this file, for why. Pinned here as a LIMIT (the gate FAILs a task that is
-// genuinely, fully landed) so a future change that happens to fix it is noticed rather than
-// silently assumed to still be open.
-test('LIMIT (ownWorkBase): a fix round re-pointing an already-integrated branch at the run tip reads as having done no work (real repo)', async () => {
+// Was a LIMIT: the gate FAILed a task that was genuinely, fully landed, because a ref sitting at
+// the run tip is not a key in `mergedParentFiles`'s index and `landedForFiles` is structurally
+// false there. `landedForWholeSet` covers that one position. This test is the exact construction
+// the LIMIT used to pin, with the assertions inverted — the shape was not changed to make it
+// pass.
+test('ownWorkBase: a fix round re-pointing an already-integrated branch at the run tip reads as landed (real repo)', async () => {
   await withRepo(async ({ root, sh, git }) => {
     await writeFile(path.join(root, 'plan.md'), singleTaskPlan(), 'utf8')
     await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
@@ -2428,15 +2450,97 @@ test('LIMIT (ownWorkBase): a fix round re-pointing an already-integrated branch 
     await sh(['branch', '-f', 'teammates/r1/T1', 'run'])
 
     const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
-    // The limit: a genuinely-landed task reads as not integrated, reopening a phase that has
-    // nothing left to do.
-    assert.deepEqual(ctx.integratedPhases, [])
-    assert.equal(ctx.currentPhase, 1)
+    // The merge that landed T1 carried `a.mjs`, which is T1's whole declared set, so the run-tip
+    // ref reads as landed and the phase does not reopen with nothing left to do.
+    assert.deepEqual(ctx.integratedPhases, [1])
 
     const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
-    // And the gate FAILs it outright, naming a cause ("contributes no file changes") that is
-    // not the true one — the work is on the run branch; only the ref's own history is empty.
-    assert.equal(res.status, 'fail')
-    assert.match(res.output, /T1: branch teammates\/r1\/T1 contributes no file changes past its fork point/)
+    assert.equal(res.status, 'pass')
   })
+})
+
+// The direction that must NOT move: a ref parked at the run tip having done nothing, whose
+// declared set no single merge carried in full. This is the shape the emptiness test exists for,
+// and `landedForWholeSet` must still fail it — otherwise the run-tip position becomes a blanket
+// pass rather than a narrower question.
+test('a ref parked at the run tip still fails when no merge carried its whole declared set (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'plan.md'), twoPhasePlan(), 'utf8')
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+
+    // T2 declares `b.mjs`, writes nothing, and parks its ref exactly at the run tip. The only
+    // merge in range carried `a.mjs` — not a superset of {b.mjs}.
+    await sh(['branch', '-f', 'teammates/r1/T2', 'run'])
+
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+    assert.equal(ctx.currentPhase, 2)
+    const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
+    assert.equal(res.status, 'fail')
+    assert.match(res.output, /T2: branch teammates\/r1\/T2 contributes no file changes past its fork point/)
+  })
+})
+
+// --- LIMIT: ownWorkBase residual (real repo) ------------------------------------------------
+//
+// What `landedForWholeSet` narrowed but did not eliminate. A run-tip ref whose declared set is a
+// strict SUBSET of what one already-merged sibling carried is credited with that sibling's work,
+// because the run tip carries no attribution at all and full containment is the only substitute
+// available. Same irreducible class as sibling-tip self-integration. Pinned so a future change
+// that happens to close it is noticed rather than silently assumed to still be open.
+test('LIMIT (ownWorkBase residual): a run-tip ref declaring a subset of a merged sibling\'s files is credited with that sibling\'s work (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'plan.md'), twoPhasePlan(), 'utf8')
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+
+    // T1 declares `a.mjs` but its merge also carries `b.mjs` — the cross-phase overlap that
+    // makes containment satisfiable by a branch that is not T2.
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    await writeFile(path.join(root, 'b.mjs'), 'export const b = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+
+    await sh(['branch', '-f', 'teammates/r1/T2', 'run'])
+
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+    const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
+    // The limit: T2 wrote nothing and passes.
+    assert.equal(res.status, 'pass')
+  })
+})
+
+// `landedForWholeSet` is exported alongside the other two so `scripts/doctor.mjs` and any future
+// caller ask the run-tip question the same way, rather than reimplementing containment.
+test('landedForWholeSet requires one parent to carry the whole declared set, and never credits an empty one', () => {
+  const index = new Map([
+    ['P1', new Set(['a.mjs', 'b.mjs'])],
+    ['P2', new Set(['c.mjs'])],
+  ])
+  assert.equal(landedForWholeSet(index, ['a.mjs']), true)
+  assert.equal(landedForWholeSet(index, ['a.mjs', 'b.mjs']), true)
+  // Split across two parents is not one parent carrying the set.
+  assert.equal(landedForWholeSet(index, ['a.mjs', 'c.mjs']), false)
+  assert.equal(landedForWholeSet(index, ['d.mjs']), false)
+  // An empty declared set is never creditable, though it is a subset of everything.
+  assert.equal(landedForWholeSet(index, []), false)
+  assert.equal(landedForWholeSet(index, undefined), false)
+  // Normalized the same way the declared/carried paths are everywhere else.
+  assert.equal(landedForWholeSet(new Map([['P', new Set(['./a.mjs'])]]), ['a.mjs']), true)
+  // `exclude` removes the run tip itself, so a later merge naming it cannot self-credit.
+  assert.equal(landedForWholeSet(index, ['c.mjs'], { exclude: 'P2' }), false)
 })
