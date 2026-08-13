@@ -94,8 +94,26 @@ test('the verify step maps rejection to exit 4 with its printed discriminator', 
       'the cannot-verify clause does not tell the teammate to proceed rather than loop')
     assert.ok(at(brief, 'gate does not pass for phase') < at(brief, 'no gate manifest'),
       'the rejection clause must be read before the cannot-verify clause')
-    assert.ok(/exit 2[^]{0,120}malformed/.test(brief),
-      'exit 2 is not described as a malformed manifest')
+    // Exit 2 is a malformed manifest AND every argument error on the invocation. Without a
+    // discriminator a teammate that drops a flag reads "not your work, do not loop" and
+    // proceeds having never run the gate at all.
+    assert.ok(/exit 2[^]{0,200}missing required argument:/.test(brief),
+      'exit 2 does not name the argument-error output that shares its code')
+    assert.ok(brief.includes('unsupported flag spelling:'),
+      'exit 2 does not name the refused-spelling output')
+    assert.ok(brief.includes('--root must not be empty'),
+      'exit 2 does not name the empty-root output')
+    assert.ok(/missing required argument:[^]{0,400}run it again/.test(brief),
+      'a malformed invocation is not the teammate\'s own to fix and re-run')
+    assert.ok(/missing required argument:[^]{0,400}verified NOTHING/.test(brief),
+      'the brief does not say an argument error means the gate never ran')
+    assert.ok(/exit 2[^]{0,600}malformed/.test(brief),
+      'exit 2 no longer describes a malformed manifest')
+    assert.ok(!/exit 2 — teammates\.gate\.json is malformed\. Configuration, not your work\./.test(brief),
+      'exit 2 still maps every case to configuration')
+    // The flag that does not exist on `complete` yet must not be handed to a teammate.
+    assert.ok(!brief.includes('--enforcement-only'),
+      'the brief emits --enforcement-only, which complete rejects with exit 2')
     assert.ok(/exit 1[^]{0,200}status file is missing/.test(brief),
       'exit 1 is not described as missing status bookkeeping')
     // The inverted mapping round 2 shipped must not come back.
@@ -175,7 +193,18 @@ test('the caveman variant keeps every load-bearing instruction', () => {
   assert.ok(brief.includes('IN THE FOREGROUND'))
   assert.ok(brief.includes(FULL.planPath))
   for (const f of TASK.files) assert.ok(brief.includes(f), `missing declared file ${f}`)
-  assert.ok(brief.includes('level full'), 'the caveman level is not substituted')
+})
+
+// Rendered at two distinct levels, because asserting `level full` against `caveman: 'full'`
+// passes just as well when the level is hardcoded — the assertion has to see the value change.
+test('the caveman level is substituted rather than hardcoded', () => {
+  const asFull = composeBrief({ ...FULL, caveman: 'full' })
+  const asUltra = composeBrief({ ...FULL, caveman: 'ultra' })
+  assert.ok(asFull.includes('use it at level full'), 'level full is not substituted')
+  assert.ok(asUltra.includes('use it at level ultra'), 'level ultra is not substituted')
+  assert.ok(!asUltra.includes('level full'),
+    'a brief asked for level ultra still names level full — the level is hardcoded')
+  assert.ok(!asFull.includes('level ultra'))
 })
 
 test('the caveman variant keeps the locate before BASELINE and complete before the commit line', () => {

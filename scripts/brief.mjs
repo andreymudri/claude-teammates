@@ -81,7 +81,11 @@ const locateStep = (task, runId) => (runId ? [
 // The exit codes below are read out of `complete` in scripts/cli.mjs, not inferred:
 //   0  the task passes and is marked done in status.json
 //   1  the gate passed but status.json is missing or does not list the task — bookkeeping
-//   2  teammates.gate.json is present and MALFORMED — configuration only
+//   2  TWO unrelated things: teammates.gate.json is present and MALFORMED (configuration), or
+//      the invocation itself was rejected — a missing required argument, an unknown flag, a
+//      refused flag spelling, an empty --root, a --run escaping .teammates/. The argument
+//      errors are the teammate's own to fix, and on one it has verified nothing at all, so the
+//      brief discriminates them by the printed line the same way it does for exit 4.
 //   4  FOUR different situations: no gate manifest, an underivable context, a task the plan
 //      does not contain, and — the case that matters most — the recomputed gate REJECTING
 //      this task, which prints a first line beginning `gate does not pass for phase`.
@@ -111,8 +115,14 @@ const verifyStep = (task, runId, planPath) => (runId && planPath ? [
   '           plan" — the run cannot be verified from here. That is the run configuration, not',
   '           your work. Quote what it printed in your summary and proceed; do not loop on it,',
   '           and do not report "blocked" for it when the work itself is finished.',
-  '  exit 2 — teammates.gate.json is malformed. Configuration, not your work. Quote it and',
-  '           report it; do not loop.',
+  '  exit 2 — read the printed line here too: two unrelated things share this code.',
+  '           Output naming an argument means YOUR INVOCATION was wrong, not the configuration:',
+  '             "missing required argument:"   "unsupported flag spelling:"',
+  '             "complete does not take"       "--root must not be empty"',
+  '           None of those mention the manifest, and on any of them you have verified NOTHING',
+  '           yet — the gate never ran. Fix the command you typed and run it again.',
+  '           Any other exit 2 means teammates.gate.json itself is malformed. That one is',
+  '           configuration, not your work: quote it and report it; do not loop.',
   '  exit 1 — the gate passed, but the run\'s status file is missing or does not list your task.',
   '           Your work is verified; quote the message and report it.',
   '',
