@@ -11,11 +11,16 @@
 // check that pins them byte-identical; until it lands, the template's copy is still live and
 // is what a `Workflow` dispatch actually renders.
 //
-// Pure: no I/O, no filesystem, no process access — pinned by a source-level test in
-// tests/brief.test.mjs, since an unused import changes no rendered output and no behavioural
-// assertion could catch it. Purity is what lets the generator substitute finished text into
-// generated workflow scripts, which run without filesystem or module access and so could
-// never import this at workflow runtime.
+// Pure: no I/O, no filesystem, no process access. That is what lets the generator substitute
+// finished text into generated workflow scripts, which run without filesystem or module access
+// and so could never import this at workflow runtime.
+//
+// What actually pins it, exactly: a source-level test in tests/brief.test.mjs strips comments
+// and string literals — keeping `${...}` substitutions, which are code — and asserts the
+// remaining executable source contains no static import, no dynamic `import(`, no `require(`,
+// no `process` or `globalThis` reference, and no `eval`/`Function` constructor. A behavioural
+// assertion cannot do this: an unused import changes no rendered output. The check bounds the
+// named routes to the host; it is not a proof of purity in general.
 
 // With a base branch, the brief opens with a checkout that has an explicit start point and a
 // log line the teammate can check against a named ref. With no base there is nothing to branch
@@ -71,6 +76,13 @@ const locateStep = (task, runId) => (runId ? [
 // The instruction the stop-time hook backstops. It needs both a run id and a plan path; with
 // either missing the command could not run, so the section is dropped rather than rendered
 // with an empty flag value.
+//
+// `complete` has three outcomes, not two (scripts/cli.mjs), and the brief states all three.
+// Exit 4 is "cannot verify" — no gate manifest, an underivable context, an unknown task id —
+// which is a fact about the run's configuration, not about the teammate's work. A repository
+// with no tracked teammates.gate.json is a supported state, so telling the teammate to fix
+// whatever a non-zero exit names would send every implementer looping on a message that names
+// nothing to fix, or reporting blocked with the work finished.
 const verifyStep = (task, runId, planPath) => (runId && planPath ? [
   'BEFORE YOU RETURN "done". Run the task gate on your own work, in the FOREGROUND:',
   '',
@@ -80,9 +92,16 @@ const verifyStep = (task, runId, planPath) => (runId && planPath ? [
   '',
   'ROOT must be the MAIN worktree, which is what that command computes — run from inside your',
   'own worktree the CLI would resolve the run branch to your task branch and answer the wrong',
-  'question. Exit 0 means your task passes. Anything else: fix what it names and run it again.',
-  'Returning "done" on a non-zero result wastes the phase, because the gate recomputes exactly',
-  'this and will reject it.',
+  'question. Read the exit code. It has three meanings, and they are not interchangeable:',
+  '  exit 0 — your task passes. Return "done".',
+  '  exit 2 — the gate ran and rejected your task. That is your work: fix exactly what it names',
+  '           and run the command again.',
+  '  exit 4 — it could not verify: no gate manifest, an underivable context, or a task id the',
+  '           plan does not contain. That is a fact about the run configuration, not about your',
+  '           work. Quote what it printed in your summary and proceed. Do not loop on it, and',
+  '           do not report "blocked" for it when the work itself is finished.',
+  'Returning "done" on an exit 2 wastes the phase, because the gate recomputes exactly this and',
+  'will reject it.',
   '',
 ] : [])
 

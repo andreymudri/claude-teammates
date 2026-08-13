@@ -72,6 +72,26 @@ test('the complete command carries run, task and plan and sits after the constra
     'self-verification must precede the final commit instruction')
 })
 
+// `complete` exits 0, 2 or 4 and the three are not interchangeable: 4 is "cannot verify", a
+// fact about the run configuration. A brief that collapses them tells a teammate on a repo
+// with no tracked gate manifest to loop on a message that names nothing to fix.
+test('the verify step distinguishes all three complete exit codes', () => {
+  for (const brief of [composeBrief(FULL), composeBrief({ ...FULL, caveman: 'full' })]) {
+    assert.ok(/exit 0[^\n]*passes/.test(brief), 'exit 0 is not described as passing')
+    assert.ok(brief.includes('exit 2'), 'exit 2 is not named')
+    assert.ok(/exit 2[^]{0,200}fix/.test(brief), 'exit 2 is not the teammate\'s work to fix')
+    assert.ok(brief.includes('exit 4'), 'exit 4 is not named')
+    assert.ok(/exit 4[^]{0,400}could not verify/.test(brief),
+      'exit 4 is not described as a failure to verify')
+    assert.ok(/exit 4[^]{0,600}Do not loop on it/.test(brief),
+      'exit 4 does not tell the teammate to proceed rather than loop')
+    assert.ok(!/Anything else: fix what it names/.test(brief),
+      'the brief still treats every non-zero exit as the teammate\'s defect')
+    assert.ok(at(brief, 'exit 0') < at(brief, 'exit 2') && at(brief, 'exit 2') < at(brief, 'exit 4'),
+      'the exit codes are not listed in order')
+  }
+})
+
 test('with no run id neither the locate nor the verify section is rendered', () => {
   const brief = composeBrief({ ...FULL, runId: '' })
   assert.ok(!brief.includes('locate --run'), 'locate section rendered without a run id')
@@ -176,17 +196,74 @@ test('no rendered line is empty of content yet claims a value it does not have',
   }
 })
 
-// Cross-file, source-level check. The module's purity is a claim about what it does NOT do, and
-// an unused `node:fs` import or a `process.env` read changes no rendered output — so no
-// behavioural assertion over composeBrief's return value can fail on it. This repository already
-// uses cross-file source checks for exactly this shape of claim.
-test('scripts/brief.mjs performs no I/O and touches no host state', async () => {
-  const src = await readFile(new URL('../scripts/brief.mjs', import.meta.url), 'utf8')
-  const code = src.split('\n').filter((l) => !l.trimStart().startsWith('//')).join('\n')
-  for (const forbidden of ['node:fs', 'node:child_process', 'node:os', 'node:path', 'node:process',
-    'require(', 'readFile', 'writeFile', 'execSync', 'spawn', 'process.', 'globalThis', 'fetch(']) {
-    assert.ok(!code.includes(forbidden),
-      `scripts/brief.mjs must stay pure: it references ${forbidden}`)
+// Strips comments and string contents, leaving executable source. Almost every line of
+// brief.mjs is brief prose held in a string literal, so scanning raw text confuses a word in
+// the prose ("respawn", "process.") with a call. Template substitutions are KEPT — `${...}`
+// holds real code — while the literal text around them is dropped. Regex literals are not
+// tracked; brief.mjs contains one (`/^T/`) and it holds no quote, so it does not perturb the
+// scan.
+function executableSource(src) {
+  let out = ''
+  let i = 0
+  const stack = []
+  while (i < src.length) {
+    const c = src[i]
+    const two = src.slice(i, i + 2)
+    if (two === '//') { i = src.indexOf('\n', i); if (i === -1) break; continue }
+    if (two === '/*') { i = src.indexOf('*/', i) + 2; continue }
+    if (c === "'" || c === '"') {
+      const q = c
+      i += 1
+      while (i < src.length && src[i] !== q) i += src[i] === '\\' ? 2 : 1
+      i += 1
+      out += ' '
+      continue
+    }
+    if (c === '`') {
+      i += 1
+      while (i < src.length) {
+        if (src[i] === '\\') { i += 2; continue }
+        if (src[i] === '`') { i += 1; break }
+        if (src.slice(i, i + 2) === '${') {
+          i += 2
+          let depth = 1
+          while (i < src.length && depth > 0) {
+            if (src[i] === '{') depth += 1
+            else if (src[i] === '}') depth -= 1
+            if (depth > 0) out += src[i]
+            i += 1
+          }
+          out += ' '
+          continue
+        }
+        i += 1
+      }
+      out += ' '
+      continue
+    }
+    out += c
+    i += 1
   }
-  assert.ok(!/^\s*import\s/m.test(code), 'scripts/brief.mjs must import nothing')
+  return out
+}
+
+// Cross-file, source-level check. The module's purity is a claim about what it does NOT do:
+// an unused `node:fs` import or a `process.env` read changes no rendered output, so no
+// behavioural assertion over composeBrief's return value can fail on it. This repository
+// already uses cross-file source checks for exactly this shape of claim.
+test('scripts/brief.mjs executable source imports nothing and touches no host state', async () => {
+  const src = await readFile(new URL('../scripts/brief.mjs', import.meta.url), 'utf8')
+  const code = executableSource(src)
+  assert.ok(!/(^|[\s;}])import\s+[\w{*'"]/.test(code), 'scripts/brief.mjs must import nothing')
+  assert.ok(!/\bimport\s*\(/.test(code), 'scripts/brief.mjs must not use a dynamic import')
+  assert.ok(!/\brequire\s*\(/.test(code), 'scripts/brief.mjs must not require anything')
+  assert.ok(!/\bprocess\b/.test(code), 'scripts/brief.mjs must not touch process')
+  assert.ok(!/\bglobalThis\b/.test(code), 'scripts/brief.mjs must not reach through globalThis')
+  assert.ok(!/\b(eval|Function)\s*\(/.test(code),
+    'scripts/brief.mjs must not construct code at runtime')
+  // The stripper is the load-bearing half of this check, so pin it against both directions of
+  // the mistake it exists to prevent.
+  assert.equal(/\bprocess\b/.test(executableSource("const a = 'process.env is prose here'")), false)
+  assert.equal(/\bimport\s*\(/.test(executableSource("await import('node:' + 'fs')")), true)
+  assert.equal(/\bprocess\b/.test(executableSource('const a = `x${process.env.Y}z`')), true)
 })
