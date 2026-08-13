@@ -109,9 +109,17 @@ where the corresponding claim is made:
      Attributing by the merge SUBJECT was rejected on the `status.json` grounds — `tm-integrator`
      writes that subject and is one of the enforced parties.
 
-     What survives, pinned as a LIMIT: a **spare parent**. Two merges crediting the same task —
-     an initial integration plus a fix round's own merge — leave one parent unclaimed, and a
-     run-tip ref whose declared set that spare merge contains in full matches it.
+     The **spare parent** — two merges crediting the same task, an initial integration plus a fix
+     round's own merge, leaving one parent claimed by no ref — was a residual of the first
+     scarcity version and is now closed too. `spentParents` spends a parent that is an ANCESTOR of
+     a task ref whose declared set the parent's carried files intersect, not only one a ref points
+     directly at. Both halves are pinned: ancestry alone would spend a phase-1 parent on behalf of
+     any phase-2 task that forked after it and reintroduce the original false FAIL, so the
+     declared-set intersection is what keeps a later task from spending a parent it never earned.
+
+     No residual is currently known for the run-tip position. That is a statement about what has
+     been executed against it — the four shapes above plus the spare parent and the later-sibling
+     guard — not a proof that none exists.
 
   One variant that used to sit in this bullet is now CAUGHT, and is pinned in
   `tests/adversarial.test.mjs` under the defended section: a teammate pointing a task ref at a
