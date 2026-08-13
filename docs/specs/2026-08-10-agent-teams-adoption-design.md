@@ -138,19 +138,29 @@ is finished.
 
 **The exit codes it returns today cannot carry this decision.** As `scripts/cli.mjs` stands:
 
-- **0** — the task passes; the run's status file is updated (`cli.mjs:2820-2822`).
+- **0** — the task passes; the run's status file is written (`cli.mjs:2819`) and the command
+  returns at `cli.mjs:2821`.
 - **1** — the checks passed but `status.json` is missing or does not list the task
   (`cli.mjs:2815-2817`).
-- **2** — `teammates.gate.json` is present and malformed (`cli.mjs:2759`). A configuration failure
-  and nothing else.
-- **4** — no gate manifest (`cli.mjs:2760`), an underivable context, a task absent from the plan,
-  **or the recomputed gate rejected this task** (`cli.mjs:2811`, pinned by `tests/cli.test.mjs`,
-  "complete exits 4 when the recomputed gate fails").
+- **2** — `teammates.gate.json` is present and malformed (`cli.mjs:2760`) — **or the invocation
+  itself was bad.** Every argv failure exits 2 too: a missing required argument, a rejected flag
+  spelling (`cli.mjs:1242`), an unknown flag, an empty `--root`, a `--run` that escapes
+  `.teammates/`. So 2 means "broken manifest OR malformed invocation", and a reader taking it as a
+  manifest diagnosis will misreport its own bad argv.
+- **4** — no gate manifest (`cli.mjs:2761`), an underivable context, a task absent from the plan,
+  **or the recomputed gate rejected this task** (`cli.mjs:2811`, printing the rejection at
+  `cli.mjs:2803`, pinned by `tests/cli.test.mjs`, "complete exits 4 when the recomputed gate
+  fails").
 
-So exit 4 conflates "the gate rejected this task" with "the gate could not run", and exit 2 means
-only that the manifest is broken. A handler built on these codes would block on a malformed
-manifest and allow every rejected task through — the enforcement inert, and silently so, since the
-inert case looks exactly like a clean pass.
+So exit 4 conflates "the gate rejected this task" with "the gate could not run", and exit 2
+conflates a broken manifest with a mistyped command line. A handler built on these codes would
+block on a malformed manifest or its own bad argv and allow every rejected task through — the
+enforcement inert, and silently so, since the inert case looks exactly like a clean pass.
+
+The invocation above does not parse today either: `complete` does not carry `--enforcement-only` in
+its known-flag table (`cli.mjs:242`), so the command as written is refused as a bad argv — exit 2,
+`complete does not take --enforcement-only` — rather than running the enforcement subset. The flag
+lands with the CLI work, alongside the exit code below.
 
 **This design therefore requires a new exit code**, added to `complete` alongside the rest of the
 CLI work: a code returned for a gate rejection and for nothing else, distinct from every
@@ -208,14 +218,18 @@ the phase gate remains the thing that decides.
 
 - **Any teammate can rewrite any record in the run.** The location records are keyed by task id in
   one directory shared across the run, not scoped per writer, and every teammate has Bash. So this
-  is not merely "writable by its subject": teammate A can run `locate --task T2` naming its own
-  worktree and overwrite B's record. The cost then lands on B, not on A — B's worktree matches
-  nothing, so B's stop is allowed with no check at all, while A's stop resolves to T2 and is judged
-  against a branch that is not its work. Both outcomes are noise, and neither is a false PASS: the
-  gate recomputes every verdict from git, takes its plan path from the operator, and reads nothing
-  under `.teammates/`. What tampering buys is losing the early catch — for whoever it lands on —
-  and nothing more. Tamper-evident, not tamper-proof, on the same footing as everything else in
-  that directory.
+  is not merely "writable by its subject". The simple case is a teammate deleting or rewriting its
+  own record: its worktree then matches nothing, and its stop is allowed unchecked. The
+  cross-teammate case is stranger and worth stating exactly, because it runs opposite to intuition.
+  If A runs `locate --task T2` naming A's own worktree, it overwrites B's record. B's worktree now
+  matches nothing, so B stops with no check at all — B is not harmed, it is merely unenforced. A,
+  meanwhile, has pointed the hook at itself under T2: A's stop resolves to the forged record and is
+  judged against T2's branch, which is not A's work, so A is the one that gets blocked for failures
+  it did not cause. Tampering here removes enforcement from the victim and misdirects it onto the
+  tamperer; it does not let a teammate push a cost onto a rival. What it never does is produce a
+  false PASS: the gate recomputes every verdict from git, takes its plan path from the operator,
+  and reads nothing under `.teammates/`. Losing the early catch is the whole of what any of this
+  buys. Tamper-evident, not tamper-proof, on the same footing as everything else in that directory.
 - **It fails open.** A handler that cannot run — no `node`, a timeout, a malformed run directory —
   exits non-zero-but-not-2, which the harness treats as a non-blocking error. The teammate stops
   and the gate catches what the hook did not. The harness reinforces this from its own side: for
