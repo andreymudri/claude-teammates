@@ -228,24 +228,45 @@ test('the caveman variant keeps every load-bearing instruction', () => {
 
 // The comment above `terse` claims parity with `full` on the load-bearing clauses. Assert it
 // clause by clause rather than trusting the prose, so compression cannot silently lose one.
+// Every clause is matched by its own instruction text: matching a plan path or a file name
+// instead would be satisfied by an incidental occurrence elsewhere in the brief — the `--plan`
+// argument of the complete command already contains the plan path, so `includes(planPath)`
+// stays green with the whole PLAN clause deleted.
+const SPEC_CLAUSES = [
+  'MANDATORY FIRST STEP.',
+  'git checkout -B teammates/substop/T4 master',
+  'RECORD YOUR WORKTREE.',
+  'locate --run substop --task T4',
+  // The plan pointer, by its instruction rather than by the path.
+  'PLAN. Read ' + FULL.planPath + ' and implement the section titled "Task 4:"',
+  'every numbered step, in order. The plan is the spec.',
+  // The baseline, all three steps. Steps 1 and 2 are what make step 3 meaningful: without
+  // them a teammate runs the suite in an uninstalled worktree, sees the RED the next sentence
+  // warns it cannot distinguish from a real failure, and reports blocked.
+  '1. Install the project\'s dependencies as the project requires.',
+  '2. Copy over any untracked config the project needs (for example .env).',
+  '3. Run the project\'s test command once, IN THE FOREGROUND, and confirm it is green.',
+  'Never background it: nothing notifies you when a backgrounded command finishes.',
+  'You may create or modify ONLY these files:',
+  'Touching any other file fails the phase gate.',
+  'BLAST RADIUS. These files are not yours and you may not edit them.',
+  '82%  scripts/cli.mjs',
+  'BEFORE YOU RETURN "done".',
+  'ROOT=$(dirname',
+  '--run substop --task T4 --plan ' + FULL.planPath,
+  'gate does not pass for phase',
+  'GLOBAL CONSTRAINTS:',
+  ...FULL.constraints.map((c) => '- ' + c),
+]
+
 test('the compressed variant carries the same specification clauses as the full one', () => {
-  const full = composeBrief(FULL)
-  const terse = composeBrief({ ...FULL, caveman: 'full' })
-  const clauses = [
-    'MANDATORY FIRST STEP.',
-    'git checkout -B teammates/substop/T4 master',
-    'RECORD YOUR WORKTREE.',
-    'locate --run substop --task T4',
-    'BEFORE YOU RETURN "done".',
-    '--run substop --task T4 --plan ' + FULL.planPath,
-    'ROOT=$(dirname',
-    'gate does not pass for phase',
-    'IN THE FOREGROUND',
-    'You may create or modify ONLY these files:',
-    'GLOBAL CONSTRAINTS:',
-    ...FULL.constraints.map((c) => '- ' + c),
-  ]
-  for (const clause of clauses) {
+  const withNeighbours = {
+    ...FULL,
+    task: { ...TASK, neighbours: [{ path: 'scripts/cli.mjs', confidence: 0.82 }] },
+  }
+  const full = composeBrief(withNeighbours)
+  const terse = composeBrief({ ...withNeighbours, caveman: 'full' })
+  for (const clause of SPEC_CLAUSES) {
     assert.ok(full.includes(clause), `the full variant is missing: ${clause}`)
     assert.ok(terse.includes(clause), `compression dropped a specification clause: ${clause}`)
   }

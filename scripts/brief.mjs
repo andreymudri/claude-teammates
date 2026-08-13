@@ -11,6 +11,10 @@
 // check that pins them byte-identical; until it lands, the template's copy is still live and
 // is what a `Workflow` dispatch actually renders.
 //
+// One command this module emits is also not built yet: `cli.mjs` has no `locate`. See the
+// note above `locateStep`. Nothing here can be dispatched for real until both that command
+// and the rewiring land, and in that order.
+//
 // Pure: no I/O, no filesystem, no process access. That is what lets the generator substitute
 // finished text into generated workflow scripts, which run without filesystem or module access
 // and so could never import this at workflow runtime.
@@ -64,13 +68,23 @@ const blastRadius = (task) => (task.neighbours && task.neighbours.length ? [
 // this record; resolving through the checked-out branch instead would miss a teammate that
 // never created its branch, which is the failure the hook exists to catch. With no run id
 // there is no record to write, so the section disappears rather than emitting `--run ` empty.
+//
+// PREREQUISITE: `cli.mjs` has no `locate` command yet — a later task adds it. Whoever wires a
+// dispatch path onto this module must land that command FIRST, or every brief it renders sends
+// its teammate to an invocation the CLI rejects. This is the same standard applied to
+// `--enforcement-only`, which the verify step deliberately does not emit because `complete`
+// does not accept it yet; the difference is that flag can simply be omitted, while the locate
+// step is the record the hook resolves through and has to be emitted. The rendered text below
+// states the requirement rather than describing the interface as though it already existed.
 const locateStep = (task, runId) => (runId ? [
   'RECORD YOUR WORKTREE. Immediately after the checkout above, run:',
   '',
   '    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" locate --run ' + runId + ' --task ' + task.id,
   '',
-  'It takes no path arguments: it reads your worktree and branch from where you run it.',
-  'This is how your work is identified if you stop before finishing. Do not skip it.',
+  'It is to take no path arguments: it must read your worktree and branch from where you run',
+  'it. This is how your work is identified if you stop before finishing, so do not skip it.',
+  'If the CLI answers that it does not know the command, that command has not landed yet:',
+  'report status "blocked" naming it rather than inventing a substitute or skipping the step.',
   '',
 ] : [])
 
