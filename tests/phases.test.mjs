@@ -116,12 +116,13 @@ test('.. segments: tasks declaring a/b.mjs and a/../a/b.mjs land in different ph
 })
 
 test('multiple spellings converge: four redundant spellings of the same file all conflict', () => {
-  // Key invariant: if normalizeDeclarePath uses the same basic cleanup rules as
-  // enforce.mjs's normalizePath, then normalizeDeclarePath(a) === normalizeDeclarePath(b)
-  // implies paths equal under normalizePath. This test verifies the stronger direction:
-  // four different declared spellings that all collapse to the same canonical form must
-  // all conflict with each other. This proves normalizeDeclarePath correctly identifies
-  // multiple representations as a single file.
+  // This file imports only assignPhases and never calls enforce.mjs's normalizePath, so
+  // it can only pin what normalizeDeclarePath itself does: four different declared
+  // spellings of one file all collapse to the same canonical form, so all four tasks
+  // conflict with each other. It says nothing about whether normalizeDeclarePath's
+  // notion of "same file" matches normalizePath's — that relationship is pinned by
+  // 'a case-only mismatch is a violation' in tests/enforce.test.mjs, which fails if the
+  // two normalizers disagree.
   const out = assignPhases([
     task('T1', ['a/b.mjs']),
     task('T2', ['a/./b.mjs']),      // Interior ./
