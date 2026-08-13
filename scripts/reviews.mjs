@@ -76,15 +76,24 @@ export function printableBlock(value) {
 // with no upstream validation (`--phase` is only checked as an integer for the commands in
 // `NUMERIC_PHASE_COMMANDS`, which neither of these is), so nothing above this function stops a
 // traversing or absolute phase from reaching the join.
+//
+// Both refusals below quote the value that was refused, and `collect-reviews` hands `err.message`
+// straight to `io.out` — so these messages are a print site like any other and the quoted value is
+// attacker-controlled. `JSON.stringify` is kept for the quoting, which is what makes an empty or
+// whitespace-only value readable, but it is not the neutralisation: it escapes quotes and the C0
+// range and leaves the C1 range and U+2028/U+2029 alone. `printable` runs first, on the value, so
+// what `JSON.stringify` quotes already carries no control character at all.
 export function reviewFileName(phase, lens) {
   if (typeof lens !== 'string' || lens === '' || /[\\/]/.test(lens) || lens === '.' || lens === '..') {
-    throw new Error(`a lens must be a non-empty name with no path separators, got ${JSON.stringify(lens)}`)
+    throw new Error(`a lens must be a non-empty name with no path separators, got ${JSON.stringify(printable(lens))}`)
   }
+  // `phaseName` is what gets validated, so `phaseName` is what gets quoted and what gets joined:
+  // re-coercing `phase` a second time would let the checked value and the used value differ.
   const phaseName = String(phase)
   if (phaseName === '' || /[\\/]/.test(phaseName) || phaseName === '.' || phaseName === '..') {
-    throw new Error(`a phase must be a non-empty name with no path separators, got ${JSON.stringify(phase)}`)
+    throw new Error(`a phase must be a non-empty name with no path separators, got ${JSON.stringify(printable(phaseName))}`)
   }
-  return `${phase}-${lens}.json`
+  return `${phaseName}-${lens}.json`
 }
 
 // Reviewer findings describe a diff, and a diff is only identified by the branch tips it was
