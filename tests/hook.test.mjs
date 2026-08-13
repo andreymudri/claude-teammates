@@ -635,16 +635,28 @@ test('hooks.json declares a SessionStart matcher', async () => {
 // A DELIBERATE forgery has to satisfy both legs at once, and one shape of it used to do so
 // in a single expression: a stub padding a `new Function` body so its forged frames land on
 // each case's marker line, carrying an own `toString` returning that case's source slice.
-// That shape is closed now that the source-text leg reads
+// That particular shape no longer works, because the source-text leg reads
 // `Function.prototype.toString.call(body)` instead of `body.toString()` — an own `toString`
 // no longer substitutes for the real source, so the padded stub's REAL text is what gets
-// compared, and it is not the case's source slice. The residue that remains: a stub whose
-// REAL source text genuinely matches the case's own slice, which is not a forgery of
-// behaviour at all, since the code the marker leg's stack frames were forged to attribute
-// is, at that point, the same code the case's own text spells. Four consecutive rounds of
-// this comment have each named a price for forging these markers — thirty-one edits, then
-// one edit, then two lines — and every one of them was falsified by the next reader, twice
-// within a single round. No count of lines or edits bounds this, and none is stated here.
+// compared, and it is not the case's source slice.
+//
+// That leg reads the real source only for as long as `Function.prototype.toString` IS the
+// real method. It is resolved off the mutable `Function.prototype` at call time, so an edit
+// to this file that replaces that method replaces what the leg reads. Measured in a
+// worktree at the tip that introduced this leg: an eight-line edit capturing the real
+// method, installing a WeakMap-backed liar in its place, and registering marker-only
+// `new Function` stubs padded so their frames land on each case's marker line ran the whole
+// file at 49 pass / 0 fail / 0 skipped in 441ms against a 13s healthy baseline, with all
+// thirty-one real hook bodies discarded. Capturing the method into a module-level const at
+// load time would not change this: an edit that installs a liar can equally edit the
+// capture. The attacker and the file are the same thing, so no mechanism written here can
+// bound what an edit to this file may do.
+//
+// Five consecutive rounds of this comment, across two runs, have each named a price for
+// forging these markers — thirty-one edits, then one edit, then two lines, then a claim
+// that only a substitute with genuinely matching real source remained — and every one was
+// falsified by the next reader, twice within a single round. No count of lines or edits
+// bounds this, and none is stated here.
 //
 // The runtime gap is an observation, NOT a defense: a forged run finishes in a fraction of
 // the healthy time precisely because no real body executes. Nothing in this file asserts on
@@ -2121,10 +2133,14 @@ test('(mechanism) a reachable probe means EVERY hook case body executed', (t) =>
   // about its source does NOT pass it: `Function.prototype.toString.call` does not consult
   // that property, so the single-expression forgery described at the hookBodyRan definition
   // and the one-line swallow wrapper with `toString: () => fn.toString()` are both named
-  // here now, pinned by the mechanism-pinned test below. So do not read this assertion as
-  // covering a wrapper "in any spelling that reaches node:test with a function object"; the
-  // residue is narrower than that — only a substitute whose REAL source text genuinely
-  // matches the case's own slice passes, which is not a forgery of behaviour.
+  // here now, pinned by the mechanism-pinned test below. It also reads the real source only
+  // while `Function.prototype.toString` is the real method: the call resolves it off the
+  // mutable prototype at call time, so an edit to this file that replaces that method
+  // replaces what this leg reads — measured at 49 pass / 0 fail / 0 skipped in 441ms with
+  // every real body discarded, described at the hookBodyRan definition above. So do not
+  // read this assertion as covering a wrapper "in any spelling that reaches node:test with
+  // a function object", and do not read any statement of what a forgery must cost into it;
+  // this file cannot bound edits to itself.
   assert.equal(nodeTestRegistrations.length, HOOK_CASES_FROM_SOURCE.cases.length,
     `node:test received ${nodeTestRegistrations.length} hook case registrations for the ` +
     `${HOOK_CASES_FROM_SOURCE.cases.length} this file's source registers — a registration ` +
