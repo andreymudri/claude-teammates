@@ -328,6 +328,23 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
       //     resolve this — it was built to tell a parked ref from a merged one by what a merge
       //     carried, and a ref sitting exactly at the run tip is not named by any merge at all.
       //     Not closed by this change; still open.
+      //
+      //     One closure was tried and REVERTED (`f6e2191`, reverted by `227abf2`) — recorded so
+      //     it is not re-attempted. It asked, for `sha === runSha` only, whether a SINGLE merged
+      //     secondary parent carried the task's WHOLE declared set, on the reasoning that full
+      //     containment substitutes for the attribution the run tip does not carry. It does not:
+      //     the gate for phase N runs BEFORE any phase-N branch is merged, so every phase-N ref
+      //     created by the brief's own `git checkout -B <task> <run branch>` and never committed
+      //     to sits exactly at `runSha`. Executed: T1 (phase 1) declares and merges `a.mjs` plus
+      //     `b.mjs`; T2 (phase 2) declares only `a.mjs`, writes nothing; T1's merge carried a
+      //     superset of T2's declared set, so the gate returned PASS with "every phase in the
+      //     plan is integrated" and `a.mjs` was never modified. A phase-2 task that only MODIFIES
+      //     files phase 1 created has a declared set contained in that merge by construction, so
+      //     this is the routine shape, not a corner — it traded the no-op-teammate case the check
+      //     exists for against one convenience case. Attributing by the merge SUBJECT instead was
+      //     considered and rejected on the same grounds as `status.json`: `tm-integrator` writes
+      //     that subject, and it is one of the enforced parties. Failing closed here costs a
+      //     misleading message on a genuinely landed re-pointed ref; passing open costs the check.
       states.push(landedForFiles(mergedFiles, sha, t.files) && await git.isAncestor(sha, runSha))
     }
     if (states.length > 0 && states.every(Boolean)) integratedPhases.push(phase)
