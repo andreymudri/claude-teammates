@@ -606,7 +606,7 @@ test('writeLocation refuses a branch that would make the record unreadable', asy
     // Without this case the two cover each other and neither dies alone under mutation.
     await assert.rejects(
       writeLocation(root, 'r1', 'T1', { worktree, branch: 'b'.repeat(700) }),
-      /longer than 512 characters/,
+      /longer than 512 bytes/,
     )
     // And a branch at the limit is still accepted, so the bound is a limit and not a ban. Under
     // its own worktree, so the "nothing was written" assertion below still means what it says.
@@ -638,7 +638,6 @@ test('invisible code points the enumerated list missed are refused', async () =>
     const worktree = path.join(root, 'wt', 'agent-1')
     const missedByTheOldList = [
       0x2060, 0x2061, 0x2062, 0x2063, 0x2064, // word joiner and invisible operators
-      0xfe00, 0xfe0f, // variation selectors
       0x00ad, // soft hyphen
       0x180e, // Mongolian vowel separator
       0x061c, // Arabic letter mark
@@ -715,8 +714,16 @@ test('revision syntax is still refused in either id', async () => {
 // serialiser. It was caught only by the whole-record size guard, which nothing pinned.
 test('writeLocation refuses a worktree longer than any real path', async () => {
   await withTempRoot(async (root) => {
-    const B = String.fromCharCode(92)
-    const enormous = `C:${B}${'a'.repeat(70_000)}`
+    // Platform-appropriate, and that is the whole point of this line: the win32 literal
+    // `C:\aaa...` is a RELATIVE path on Linux, so the isLocalAbsolute check rejected it first
+    // and this assertion never saw the message it matches. The test was green on win32 and red
+    // on ubuntu and macos, and while it was dead there the byte bound had NO coverage on the
+    // platforms CI actually runs — deleting the bound survived mutation on Linux. A skip would
+    // have left exactly that hole, so the fixture is built for whichever platform runs it.
+    const enormous = process.platform === 'win32'
+      ? `C:${path.sep}${'a'.repeat(70_000)}`
+      : `${path.sep}${'a'.repeat(70_000)}`
+    assert.equal(isLocalAbsolute(enormous), true, 'the fixture must be absolute on this platform')
     await assert.rejects(
       writeLocation(root, 'r1', 'T1', { worktree: enormous, branch: 'teammates/r1/T1' }),
       /over the 32767 allowed/,
@@ -726,6 +733,109 @@ test('writeLocation refuses a worktree longer than any real path', async () => {
     const deep = path.join(root, ...Array.from({ length: 20 }, (_, i) => `level-${i}`))
     await writeLocation(root, 'r1', 'T1', { worktree: deep, branch: 'teammates/r1/T1' })
     assert.equal((await findTaskByWorktree(root, deep)).taskId, 'T1')
+  })
+})
+
+// The allowlist's whole point: these are refused without any of them being named. The 29 `Cf`
+// code points below are the ones `Default_Ignorable_Code_Point` does NOT cover — its derivation
+// subtracts prepended-concatenation marks and Egyptian format controls — so the previous rule
+// accepted every one of them, and each makes a git ref that renders identically to the honest
+// branch beside it. U+2800 and the `Zs` separators were accepted while ASCII space was refused.
+test('format, separator and blank code points are refused without being enumerated in the rule', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    const cfMissedByTheProperty = [
+      0x0600, 0x0601, 0x0602, 0x0603, 0x0604, 0x0605, // Arabic number signs
+      0x06dd, 0x070f, 0x0890, 0x0891, 0x08e2, // Arabic end of ayah, Syriac abbreviation mark
+      0x110bd, 0x110cd, // Kaithi number signs
+      0x13430, 0x1343f, // Egyptian format controls
+    ]
+    const separatorsAndBlanks = [
+      0x2800, // braille blank — not a space by any property, renders as nothing
+      0x0020, 0x00a0, 0x2000, 0x2009, 0x200a, 0x202f, 0x205f, 0x3000, // Zs
+    ]
+    for (const cp of [...cfMissedByTheProperty, ...separatorsAndBlanks]) {
+      const hostile = `T1${String.fromCodePoint(cp)}`
+      const label = `U+${cp.toString(16).toUpperCase()}`
+      await assert.rejects(
+        writeLocation(root, 'r1', hostile, { worktree, branch: 'b' }),
+        /is not a usable task id/,
+        `${label} was accepted as a task id`,
+      )
+      await plant(root, worktree, { runId: 'r1', taskId: hostile, worktree, branch: 'b' })
+      assert.equal(await findTaskByWorktree(root, worktree), null, `${label} was returned by the reader`)
+    }
+  })
+})
+
+// The allowlist is also a RELAXATION where the blocklist was over-strict: a variation selector
+// is a Mark, so an emoji id that `init-run` and `git check-ref-format` both accept now works
+// here too, where the previous rule refused it and cost that run its enforcement.
+test('a marked or non-ASCII id that git accepts is accepted here', async () => {
+  await withTempRoot(async (root) => {
+    const vs16 = String.fromCodePoint(0xfe0f)
+    // A variation selector on a LETTER, and a Devanagari id whose matras are marks. Note what
+    // is NOT here: an emoji id. The allowlist admits letters, marks and numbers, and an emoji
+    // base is a Symbol (So), so an emoji id stays refused whatever VS16 does — the round-15
+    // note that VS16 alone makes emoji ids work is not borne out; a test asserting it failed.
+    const cases = ['T1', 'café', '日本語', 'run-1_x', 'run.1', '.hidden', 'T1.', `T1${vs16}`, 'हिन्दी']
+    for (const taskId of cases) {
+      const worktree = path.join(root, 'wt', `agent-${cases.indexOf(taskId)}`)
+      await writeLocation(root, 'r1', taskId, { worktree, branch: `teammates/r1/${taskId}` })
+      assert.deepEqual(
+        await findTaskByWorktree(root, worktree),
+        { runId: 'r1', taskId, branch: `teammates/r1/${taskId}` },
+        `${JSON.stringify(taskId)} was refused`,
+      )
+    }
+    // Nesting still works for a run id, and `2026/substop` is what init-run creates.
+    const nested = path.join(root, 'wt', 'agent-nested')
+    await writeLocation(root, '2026/substop', 'T10', { worktree: nested, branch: 'teammates/2026/substop/T10' })
+    assert.equal((await findTaskByWorktree(root, nested)).runId, '2026/substop')
+  })
+})
+
+// A `.` component is as much an alias as `..`: `sub/./substop` names the same directory, and the
+// branch it composes — `teammates/sub/./substop/T1` — is one git cannot resolve. Only `..` was
+// refused before, so the same class was half closed.
+test('a dot component is refused wherever a dot-dot component would be', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    for (const runId of ['sub/./substop', './sub', 'a/.', '.', 'sub/../substop', '..']) {
+      await assert.rejects(
+        writeLocation(root, runId, 'T1', { worktree, branch: `teammates/${runId}/T1` }),
+        /is not a usable run id|escapes the run directory/,
+        `runId ${JSON.stringify(runId)} was accepted`,
+      )
+      await plant(root, worktree, { runId, taskId: 'T1', worktree, branch: `teammates/${runId}/T1` })
+      assert.equal(await findTaskByWorktree(root, worktree), null, `runId ${JSON.stringify(runId)} was returned`)
+    }
+    // `./b` is the shape `isSegment` does NOT catch — path.relative resolves the dot away — so
+    // it is what the single-component rule and the dot-component rule jointly cover.
+    for (const taskId of ['./b', './-b', 'a/b']) {
+      await assert.rejects(
+        writeLocation(root, 'r1', taskId, { worktree, branch: 'b' }),
+        /is not a usable task id|escapes the run directory/,
+        `taskId ${JSON.stringify(taskId)} was accepted`,
+      )
+    }
+  })
+})
+
+// Bounds are bytes, and this is the case that proves it: 32,003 characters of Japanese is inside
+// any code-unit bound and about 96 KB on disk. While the field bounds counted code units and the
+// record bound counted bytes, they did not compose, and three notes claimed they did.
+test('a multibyte worktree is bounded by its byte length, not its character count', async () => {
+  await withTempRoot(async (root) => {
+    const multibyte = `${path.sep}${'日'.repeat(32_000)}`
+    const worktree = process.platform === 'win32' ? `C:${multibyte}` : multibyte
+    assert.equal(worktree.length < 33_000, true, 'the fixture must be inside any code-unit bound')
+    assert.equal(Buffer.byteLength(worktree, 'utf8') > 90_000, true, 'and past the byte bound')
+    await assert.rejects(
+      writeLocation(root, 'r1', 'T1', { worktree, branch: 'teammates/r1/T1' }),
+      /bytes, over the 32767 allowed/,
+    )
+    assert.equal(await findTaskByWorktree(root, worktree), null)
   })
 })
 
@@ -1118,10 +1228,14 @@ test('findTaskByWorktree skips a record path that is not a regular file', async 
   })
 })
 
-// This pins TWO things and not a third, and the difference was measured rather than reasoned.
-// It pins that a FIFO in place of a record does not hang the lookup, and it PINS `O_NONBLOCK`:
-// removing that flag fails this test on WSL Ubuntu (node 24.18.0, ext4) after about 5,011 ms,
-// because the open then waits for a writer that never comes. It does NOT pin `isFile()`: libuv
+// This pins that a FIFO in place of a record does not hang the lookup. Whether it also pins
+// `O_NONBLOCK` is NODE-VERSION DEPENDENT, and the two measurements disagree: on WSL Ubuntu with
+// node 24.18.0 the reviewer measured removing the flag failing this test after about 5,011 ms,
+// while on the same distribution with node 18.19.1 I measured the mutant SURVIVING — the test
+// still passes, so libuv there does not block on the writer-less open even without the flag.
+// Both are recorded rather than one being restated: the flag is worth keeping on the strength of
+// the newer measurement, and this comment does not claim a pin on a runtime where it was not
+// observed. It does NOT pin `isFile()` on either version: libuv
 // opens a writer-less FIFO with O_NONBLOCK without blocking, such a FIFO fstats to size 0, so
 // the bounded read gets nothing and JSON.parse('') throws to the same null the guard returns.
 // An earlier version of this comment claimed both flags were unpinned; only the isFile() half

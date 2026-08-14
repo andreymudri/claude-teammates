@@ -9,18 +9,27 @@ import { taskBranchName } from './enforce.mjs'
 
 const NAMES = new Set(['plan', 'status', 'findings'])
 
-// The only bound a keyed lookup needs: one file is read, and this is how much of it. A
-// legitimate location record is ~200 bytes. There is deliberately no cap on the NUMBER of
-// records — nothing enumerates them, so their count cannot cost a reader anything.
+// EVERY BOUND IN THIS FILE IS UTF-8 BYTES, measured with Buffer.byteLength, and that uniformity
+// is the point rather than a detail. While the field bounds counted UTF-16 code units and the
+// record bound counted bytes, they did not compose: `'C:/' + '日'.repeat(32000)` is 32,003 code
+// units — inside a 32,767 "length" bound — and serialises to about 96 KB, past the record bound.
+// Three separate notes claimed the record guard was subsumed on arithmetic that silently mixed
+// the two units. In one unit the arithmetic is checkable: 255 + 128 + 512 + 32,767 plus JSON
+// overhead is under 34 KB, comfortably inside the 64 KB below.
 const MAX_RECORD_BYTES = 64 * 1024
 
 // A branch name is a refname; git's own limit is the filesystem's, and this is far above any
-// real one while keeping a record comfortably inside MAX_RECORD_BYTES.
-const MAX_BRANCH_LENGTH = 512
+// real one. The canonical maximum this project generates is 394 bytes.
+const MAX_BRANCH_BYTES = 512
 
-// Above any real path: win32 extended-length paths stop at 32,767 characters and POSIX PATH_MAX
-// is typically 4096. This exists because `isLocalAbsolute` checks a prefix and nothing else.
-const MAX_WORKTREE_LENGTH = 32_767
+// Above any real path: win32 extended-length paths stop at 32,767 and POSIX PATH_MAX is
+// typically 4096. This exists because `isLocalAbsolute` checks a prefix and nothing else.
+const MAX_WORKTREE_BYTES = 32_767
+
+// An id is a label a human types; these are generous. Bytes, so a non-ASCII id is bounded by
+// what it costs on disk rather than by how JavaScript happens to count its characters.
+const MAX_RUN_ID_BYTES = 255
+const MAX_TASK_ID_BYTES = 128
 
 // O_NONBLOCK is POSIX-only; on win32 `constants.O_NONBLOCK` is undefined and 0 leaves the open
 // flags untouched, which is the correct no-op there (win32 has no FIFO to block on).
@@ -198,84 +207,104 @@ function isSegment(baseDir, value) {
   return rel !== null && !rel.includes(path.sep)
 }
 
-// WHAT THESE IDS ARE VALIDATED FOR, and what they are NOT.
+// AN ALLOWLIST, NOT A BLOCKLIST — and this is the fourth attempt at these rules, so the reason
+// for the change of shape matters more than the rules themselves.
 //
-// NOT for ref legality. The record's path is `index/<hash>.json` — the ids do not build it — so
-// nothing the STORE does depends on whether an id makes a legal git ref. Earlier rounds tried to
-// answer that here and the attempt is deleted: a hand-maintained approximation of "what git can
-// create on every platform" is an open set, and this file's version of it missed U+2060-2064,
-// U+FE00-FE0F, U+00AD, U+180E, U+061C, U+115F, U+3164, U+FFA0, U+FFF9-FFFB and the U+E0000 tag
-// block, missed `CONIN$`/`CONOUT$`/`com¹`, and REFUSED `com0` and `lpt0`, which Windows does not
-// reserve and git creates happily — a legitimate id costing a whole run its enforcement. It also
-// justified itself with cross-platform uniformity that this store does not have: the key is a
-// hash of a win32-normalised path, so a record written on one OS is unreadable on another
-// regardless. git answers the ref question at the point of use, on the real platform, where a
-// consumer's `rev-parse --verify refs/heads/<branch>` already treats "illegal name" and "no such
-// branch" identically — no usable branch, so block, quoting git's own message.
+// Every blocklist here was incomplete in a way nobody could see by reading it. The last one used
+// `Default_Ignorable_Code_Point`, which is NOT the authority on "invisible": its derivation
+// subtracts the prepended-concatenation marks and the Egyptian format controls, so 29 `Cf` code
+// points still passed — U+0600-0605, U+06DD, U+070F, U+0890, U+0891, U+08E2, U+110BD, U+110CD
+// and U+13430-1343F — each of which makes a git ref that sits beside the honest one and renders
+// identically. Worse than being invisible: because a forged record supplies BOTH the ids and the
+// branch, the canonicality check compares the forgery against itself and confirms it. The same
+// list also let U+2800 and all 16 `Zs` separators through while refusing ASCII space, and was
+// simultaneously too strict — ZWJ, ZWNJ and variation selectors are default-ignorable but
+// functional, so an emoji run id that `init-run` and `check-ref-format` both accept was refused
+// here, costing that run its enforcement.
 //
-// What remains guards what the RECORD does and what its fields are spent as:
-//   - no control or invisible characters, because an id that renders identically to another is
-//     not an identifier at all (see UNSAFE_CHARS);
-//   - no leading `-`, because the id is spent as argv;
-//   - no `..` and none of `~ ^ : ? *`, because the composed branch is spent as a git REVISION
-//     argument, where those are range and revision syntax rather than name characters;
-//   - non-empty, no empty component, length bounds, and no separator inside a task id.
+// An allowlist ends the class instead of patching it again: letters, marks, digits, and the
+// three punctuation characters these ids actually use. It rejects every one of the 29 above, and
+// every future addition to `Cf`, without naming any of them.
 //
-// UNSAFE_CHARS uses the Unicode property rather than a list, which is the same move as deferring
-// refs to git: `Default_Ignorable_Code_Point` is the authority on "invisible", it covers every
-// code point the enumerated list missed, and it stays correct as Unicode grows. It does not
-// cover C0, DEL/C1, the line and paragraph separators, or the interlinear annotation block, so
-// those four ranges are named explicitly — verified against all 42 code points measured this
-// round, with no false positive on `T1`, `café`, `日本語`, `2026/substop` or `run-1_x`.
-const UNSAFE_CHARS = '[\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029\\ufff9-\\ufffb]'
-  + '|\\p{Default_Ignorable_Code_Point}'
-const REF_FORBIDDEN = new RegExp(`${UNSAFE_CHARS}|[ ~^:?*\\[\\\\]`, 'u')
+// TWO CONSEQUENCES, deliberate and stated rather than left to be discovered:
+//
+// 1. It refuses ZWJ and ZWNJ, which a Persian or Devanagari run id may legitimately need. The
+//    reasoning is Unicode's own: UAX #31 allows `Join_Control` in general identifiers and
+//    excludes it from the RESTRICTED profile meant for security-sensitive ones. These ids become
+//    git refs and terminal output, where invisibility is the attack, so restricted is the right
+//    profile. `\p{M}` still admits U+FE0F, so a variation selector on a LETTER is fine — but an
+//    emoji id is not, and it was wrong to say otherwise: an emoji base is a Symbol (`So`), which
+//    this allowlist does not admit at all, so `emoji<heart><VS16>` stays refused whatever the
+//    selector does. Measured, after a test written to assert the opposite failed.
+//
+// 2. It refuses `;`, which `init-run` currently accepts. That divergence is real and is not
+//    closed here: THE STORE'S RULE IS AUTHORITATIVE, and `init-run` (scripts/cli.mjs, a later
+//    task's file) has to adopt it. Until it does, a run id containing `;` is creatable by the
+//    CLI and unrecordable here, which costs that run its enforcement — the cost is visible and
+//    on the CLI's side of the line rather than hidden in a record nobody can read.
+const ID_COMPONENT = /^[\p{L}\p{M}\p{N}._-]+$/u
 
-// The empty-component test is INDIVIDUALLY load-bearing now that the composed-refname check is
-// gone: `/foo` contains no `//`, and with both clauses present neither died alone under mutation
-// — which is what made three reviews call the composed check inert. Removing the pair resolves
-// that rather than documenting it.
-function isRefComponent(component) {
-  if (component === '') return false
-  // `@{` is revision syntax (`branch@{upstream}`, `@{-1}`), so it belongs with `..`, `~`, `^`
-  // and `:` above rather than with the ref-legality rules this round deleted: the reason is
-  // what the composed branch is SPENT as, not whether git would accept it as a name.
-  if (component.includes('@{')) return false
-  return !REF_FORBIDDEN.test(component)
+const INVISIBLE = new RegExp('\\p{Default_Ignorable_Code_Point}', 'u')
+const VARIATION_SELECTOR = new RegExp('^[\\ufe00-\\ufe0f\\u{e0100}-\\u{e01ef}]$', 'u')
+
+// THE ALLOWLIST ALONE IS NOT ENOUGH, and a test written for this round found why: three
+// invisible code points are classified as LETTERS and so pass `\p{L}` — U+115F and U+3164
+// (Hangul fillers) and U+FFA0 (halfwidth filler). They render as nothing, which is exactly the
+// twin-branch attack the allowlist was adopted to end, so "the allowlist rejects every
+// Default_Ignorable point" is false and this clause is what makes it true.
+//
+// The carve-out is variation selectors, kept deliberately: they are default-ignorable but
+// functional, and dropping them would refuse an emoji id that `init-run` and git both accept —
+// the over-strictness half of the same finding. So the rule is: allowlisted characters, minus
+// anything invisible, plus variation selectors. ZWJ and ZWNJ stay refused (UAX #31's restricted
+// profile), which is the stated cost for Persian and Devanagari ids.
+function isIdComponent(component) {
+  if (component === '.' || component === '..') return false
+  // The id is spent as argv, so no component may look like an option.
+  if (component.startsWith('-')) return false
+  if (!ID_COMPONENT.test(component)) return false
+  return ![...component].some((c) => INVISIBLE.test(c) && !VARIATION_SELECTOR.test(c))
 }
 
-// Two clauses here are REDUNDANT and mutation says so, not judgement: `endsWith('/')` is covered
-// by the empty final component it produces, and `allowSeparator: false` is covered by `isSegment`
-// at the call site. Both are kept because each states a property of the value on its own terms,
-// and the check that used to cover the first — the composed-refname one — was deleted this round
-// precisely because nobody could tell what it was for. Everything else here dies alone.
-function isRefPath(value, { maxLength, allowSeparator }) {
+// `..` is checked over the WHOLE value, not per component: it is revision-range syntax, so
+// `a..b` inside one component matters as much as a `..` component does.
+//
+// `allowSeparator: false` is NOT covered by `isSegment` beside the call, and saying it was is a
+// mistake this comment has made before. For `./b`, `path.relative` resolves the `.` away and
+// `isSegment` returns TRUE. The shapes it must cover are `./b` and `./-b`, and what rejects them
+// is this clause TOGETHER WITH the `.`-component rule above: remove either alone and the other
+// still refuses both shapes, so neither dies alone under mutation — measured on win32 and on
+// Linux, not assumed. That is the same jointly-load-bearing shape declared elsewhere in this
+// file, and it is named here so the next reader does not mistake the survivor for dead code.
+function isIdPath(value, { maxBytes, allowSeparator }) {
   if (typeof value !== 'string' || value === '') return false
-  if (value.length > maxLength) return false
-  if (value.startsWith('-')) return false
+  // Bytes, not code units, because every other bound in this file is bytes — see the record
+  // guard in writeLocation. Mixing the two is how a 32,003-character worktree serialised to
+  // 96 KB while passing a 32,767 "length" check.
+  if (Buffer.byteLength(value, 'utf8') > maxBytes) return false
   if (value.includes('..')) return false
-  if (value.endsWith('/')) return false
   const components = value.split('/')
   if (!allowSeparator && components.length !== 1) return false
-  return components.every(isRefComponent)
+  // An empty component — from a leading, trailing or doubled separator — fails ID_COMPONENT,
+  // which requires one character or more. No separate clause is needed for it.
+  return components.every(isIdComponent)
 }
 
 // A run id may nest, because init-run creates nested ones. A task id is exactly one component.
-// The bounds are this project's choice, and are deliberately generous.
 const isRunId = (root, runId) => isContained(path.join(root, '.teammates'), runId)
-  && isRefPath(runId, { maxLength: 255, allowSeparator: true })
+  && isIdPath(runId, { maxBytes: MAX_RUN_ID_BYTES, allowSeparator: true })
 const isTaskId = (root, taskId) => isSegment(path.join(root, '.teammates'), taskId)
-  && isRefPath(taskId, { maxLength: 128, allowSeparator: false })
+  && isIdPath(taskId, { maxBytes: MAX_TASK_ID_BYTES, allowSeparator: false })
 
-// EVERY interpolation of an untrusted id into a message goes through this, the containment
-// messages included: an id crafted to fail containment is precisely the one carrying the escape
-// sequence, and while these guards ran in the other order it reached the throw verbatim.
-// JSON.stringify quotes and escapes C0 only, so the shared class above is escaped after it —
-// shared so the validator and the printer cannot disagree about what is dangerous, which they
-// did once already. `\u{...}` form because the tag block is astral.
-const UNSAFE_TO_PRINT = new RegExp(UNSAFE_CHARS, 'gu')
+// OUTPUT ESCAPING, deliberately INDEPENDENT of the id rule above. The two answer different
+// questions — "may this be an id" versus "is this safe to print" — and `shown` is also used on
+// values that are not ids, such as a worktree path. Keeping them separate means a later
+// relaxation of the id rule cannot silently make the printer unsafe. This one stays a blocklist
+// because that is the right shape for output: anything invisible or control-like is escaped, and
+// being over-broad here costs nothing but an escape sequence in an error message.
+const UNPRINTABLE = new RegExp('[\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]|\\p{Cf}|\\p{Default_Ignorable_Code_Point}', 'gu')
 const shown = (value) => JSON.stringify(String(value))
-  .replace(UNSAFE_TO_PRINT, (c) => `\\u{${c.codePointAt(0).toString(16)}}`)
+  .replace(UNPRINTABLE, (c) => `\\u{${c.codePointAt(0).toString(16)}}`)
 
 // Applied inside the writer rather than at each call site, so that any caller added later
 // inherits it rather than having to remember it — there is none but the tests yet. The writer
@@ -338,8 +367,9 @@ export async function writeLocation(root, runId, taskId, { worktree, branch }) {
   // 70,000-character path resolves lexically (realpath throws for a path that does not exist)
   // and writes a record no read can ever return. Well above any real path limit — win32
   // extended paths stop at 32,767 and POSIX PATH_MAX is typically 4096.
-  if (normalised.length > MAX_WORKTREE_LENGTH) {
-    throw new Error(`--worktree is ${normalised.length} characters, over the ${MAX_WORKTREE_LENGTH} allowed`)
+  const worktreeBytes = Buffer.byteLength(normalised, 'utf8')
+  if (worktreeBytes > MAX_WORKTREE_BYTES) {
+    throw new Error(`--worktree is ${worktreeBytes} bytes, over the ${MAX_WORKTREE_BYTES} allowed`)
   }
   if (!isLocalAbsolute(normalised)) {
     throw new Error(`--worktree ${shown(worktree)} resolves to ${shown(normalised)}, which no record can name`)
@@ -355,8 +385,8 @@ export async function writeLocation(root, runId, taskId, { worktree, branch }) {
   if (branch !== null && branch !== undefined && typeof branch !== 'string') {
     throw new Error(`--branch ${shown(branch)} is not a branch name`)
   }
-  if (typeof branch === 'string' && branch.length > MAX_BRANCH_LENGTH) {
-    throw new Error(`--branch ${shown(branch.slice(0, 40))}... is longer than ${MAX_BRANCH_LENGTH} characters`)
+  if (typeof branch === 'string' && Buffer.byteLength(branch, 'utf8') > MAX_BRANCH_BYTES) {
+    throw new Error(`--branch ${shown(branch.slice(0, 40))}... is longer than ${MAX_BRANCH_BYTES} bytes`)
   }
   const dir = indexDir(root)
   await mkdir(dir, { recursive: true })
@@ -414,9 +444,10 @@ export async function findTaskByWorktree(root, worktree, { maxRecordBytes = MAX_
     // nothing and `JSON.parse('')` throws into the catch — producing exactly the null this line
     // produces. A directory fails its read for the same reason on both platforms. It stays as
     // defence in depth: it is one field of an fstat already performed, and it is the only thing
-    // here that would still hold if a future edit made the read blocking or forgiving. Note the
-    // contrast with `O_NONBLOCK` above, which IS pinned — removing that flag fails the FIFO test
-    // on Linux after ~5 s — so only this line is unobserved, not the pair.
+    // here that would still hold if a future edit made the read blocking or forgiving. As for
+    // `O_NONBLOCK` above: whether IT is pinned depends on the node version — measured failing
+    // the FIFO test after ~5 s on node 24.18.0 and surviving on 18.19.1, both on WSL Ubuntu —
+    // so neither flag is claimed here as pinned on every runtime.
     if (!info.isFile()) return null
     // LOAD-BEARING, unlike the line above, and an earlier comment calling it redundant was
     // wrong: the bounded read only truncates: `{"…valid record…"}` followed by 200 kB of spaces
