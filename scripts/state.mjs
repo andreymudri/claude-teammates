@@ -8,6 +8,13 @@ import { taskBranchName } from './enforce.mjs'
 
 const NAMES = new Set(['plan', 'status', 'findings'])
 
+// Bounds on what one worktree lookup will read. A legitimate location record is ~200 bytes and
+// a run holds one per task, so these are generous by orders of magnitude and exist only to stop
+// a hand-written record from turning a stop-time hook into a timeout. Both are overridable per
+// call so the behaviour can be exercised without writing thousands of files.
+const MAX_RECORD_BYTES = 64 * 1024
+const MAX_RECORDS = 5000
+
 export function runDir(root, runId) {
   return path.join(root, '.teammates', runId)
 }
@@ -49,6 +56,14 @@ export async function claimTask(root, runId, taskId, teammate) {
   }
 }
 
+// Trailing separators are noise EXCEPT at a filesystem root, where the separator is part of the
+// path: stripping it turns `C:\` into the drive-RELATIVE `C:`, which realpath then expands to the
+// process's current directory on that drive. A record claiming `worktree: "C:\\"` would otherwise
+// match whichever directory the reader happens to be standing in.
+function stripTrailingSeparator(p) {
+  return path.parse(p).root === p ? p : p.replace(/[\\/]+$/, '')
+}
+
 // Compared, never displayed. One directory has several spellings: what git prints, what the
 // harness sends in a hook payload, and what a shell reports differ in separator, in drive-letter
 // and path case on Windows, in trailing separators, and — because a worktree can be reached
@@ -69,7 +84,7 @@ export async function claimTask(root, runId, taskId, teammate) {
 // only the early catch — a missed match lets the hook allow the stop, its fail-open default.
 export function normaliseWorktree(p, { resolveLinks = true } = {}) {
   if (typeof p !== 'string' || p === '') return ''
-  const resolved = path.resolve(p).replace(/[\\/]+$/, '')
+  const resolved = stripTrailingSeparator(path.resolve(p))
   let real = resolved
   if (resolveLinks) {
     try {
@@ -78,7 +93,7 @@ export function normaliseWorktree(p, { resolveLinks = true } = {}) {
       real = realpathSync.native(resolved)
     } catch { /* fall back to the lexical form */ }
   }
-  const trimmed = real.replace(/[\\/]+$/, '')
+  const trimmed = stripTrailingSeparator(real)
   return process.platform === 'win32' ? trimmed.replace(/\\/g, '/').toLowerCase() : trimmed
 }
 
@@ -89,7 +104,10 @@ export function normaliseWorktree(p, { resolveLinks = true } = {}) {
 // cost to whoever wrote them. A plain local absolute path cannot do that. Residual, stated
 // rather than fixed: a drive letter mapped to an unreachable share is a local-looking spelling
 // and still pays the stall, and nothing cheap tells the two apart.
-function isLocalAbsolute(p) {
+//
+// Exported so the classification is testable on its own: as a private helper its only witness
+// was the shape of its call site, which pins the name and not one decision it makes.
+export function isLocalAbsolute(p) {
   if (typeof p !== 'string' || p === '') return false
   if (process.platform === 'win32') return /^[A-Za-z]:[\\/]/.test(p)
   return p.startsWith('/') && !p.startsWith('//')
@@ -158,14 +176,25 @@ function laterThan(a, b) {
 // resolve that in readdir order — alphabetically — and enforce a finished run's task against
 // the teammate living there now. The newest record wins instead: it is the one a `locate` at
 // checkout just wrote. See `laterThan` for how equal mtimes are settled.
-export async function findTaskByWorktree(root, worktree) {
+export async function findTaskByWorktree(
+  root,
+  worktree,
+  { maxRecords = MAX_RECORDS, maxRecordBytes = MAX_RECORD_BYTES } = {},
+) {
   // The query comes from the caller (a hook payload's cwd), not from a record, so it is the one
   // path worth resolving through the filesystem — once, here, rather than per record. Records
   // are then compared against both its spellings, which is what lets the common case decide
   // lexically and never touch the filesystem with a value a record supplied.
+  //
+  // This early return and the `lexical === ''` check below are mutually redundant on purpose,
+  // and neither is individually load-bearing: an empty query cannot match a record, because a
+  // record's worktree must be absolute, and an empty record worktree cannot match a query,
+  // because the query is non-empty by the time the loop runs. Deleting either one alone is
+  // therefore safe; the pair exists so that a later change to one side cannot open the other.
   const wantReal = normaliseWorktree(worktree)
   if (wantReal === '') return null
   const wantLexical = normaliseWorktree(worktree, { resolveLinks: false })
+  let examined = 0
   let runs
   try {
     runs = await readdir(path.join(root, '.teammates'), { withFileTypes: true })
@@ -180,13 +209,35 @@ export async function findTaskByWorktree(root, worktree) {
     } catch { continue }
     for (const file of files) {
       if (!file.endsWith('.json')) continue
+      // The read below is the one unbounded cost left, and it is bounded here rather than
+      // trusted: 20,000 four-kilobyte records took 3.88 s on this host and one 512 MB record
+      // took 619 MB of RSS, both linear in what an author chooses to write, and either one
+      // scaled up puts a stop past the hook's 60 s timeout — which the harness treats as a
+      // non-blocking error, switching enforcement off run-wide. Giving up entirely past the
+      // cap keeps that outcome independent of directory order: no partial answer, no readdir
+      // dependence, just the fail-open the hook already defaults to.
+      examined += 1
+      if (examined > maxRecords) return null
       try {
         const full = path.join(dir, file)
+        // stat before read, and reused for the ordering key below. Size caps a record at a
+        // sane multiple of what one legitimately holds (~200 bytes).
+        //
+        // isFile() is worth naming honestly, because deleting it changes nothing observable on
+        // win32: a directory named `T1.json` makes readFile throw EISDIR, which the catch below
+        // already turns into a skip. Its unique value is the POSIX FIFO — opening one blocks
+        // until a writer appears, and a hook that blocks forever is enforcement switched off.
+        // That vector is UNVERIFIED on this host (win32 has no FIFO to test it with) and is
+        // pinned only by a POSIX-only test that skips here. The guard is one cheap stat field,
+        // so it stays on the strength of the argument rather than of a local measurement.
+        const info = await stat(full)
+        if (!info.isFile()) continue
+        if (info.size > maxRecordBytes) continue
         const record = JSON.parse(await readFile(full, 'utf8'))
         // ORDER MATTERS. Everything below that can reject a record on string comparison alone
         // runs before any filesystem call on a value the record supplies. A record that fails
-        // these costs one read and one parse; put the worktree resolution first instead and a
-        // record needs no valid taskId at all to make this lookup stall (see `isLocalAbsolute`).
+        // these costs one stat and one bounded read; put the worktree resolution first instead
+        // and a record needs no valid taskId to make this lookup stall (see `isLocalAbsolute`).
         //
         // taskId comes from file CONTENT, which the writer's guard never saw: any teammate
         // with a shell can write this file directly, and the value is handed to a caller that
@@ -195,6 +246,13 @@ export async function findTaskByWorktree(root, worktree) {
         // JSON gets, because a hook must degrade to "no match" rather than propagate a path.
         if (!isSegment(dir, record.taskId)) continue
         if (record.taskId !== file.slice(0, -'.json'.length)) continue
+        // A relative worktree is a wildcard, not a location: path.resolve would resolve it
+        // against the READER's cwd, so `"worktree": "."` matches whoever is asking without
+        // naming any victim. The hook runs in the session directory — the cwd a subagent that
+        // is NOT worktree-isolated reports, including this plugin's own read-only reviewer —
+        // so such a record would blame an agent that has no task at all. A record must name an
+        // absolute path or it names nothing.
+        if (typeof record.worktree !== 'string' || !path.isAbsolute(record.worktree)) continue
         const lexical = normaliseWorktree(record.worktree, { resolveLinks: false })
         if (lexical === '') continue
         let matched = lexical === wantReal || lexical === wantLexical
@@ -203,7 +261,7 @@ export async function findTaskByWorktree(root, worktree) {
           matched = real === wantReal || real === wantLexical
         }
         if (!matched) continue
-        const { mtimeMs } = await stat(full)
+        const mtimeMs = info.mtimeMs
         const candidate = {
           mtimeMs,
           file,
@@ -257,8 +315,8 @@ export async function releaseClaim(root, runId, taskId) {
 // teammate's worktree, and newest-wins then resolves that directory to the forged record — so
 // the victim is blocked, or judged against a branch that is not its work, while the author of
 // the record pays nothing. What that still cannot do is manufacture a PASS: the gate recomputes
-// every verdict from git and reads nothing under .teammates/, so the reachable damage is a
-// wrong or missing early catch, never a task that ships unverified.
+// every verdict from git, so the reachable damage is a wrong or missing early catch, never a
+// task that ships unverified.
 export function readFixRounds(status, phase) {
   return status?.fixRounds?.[String(phase)] ?? {}
 }

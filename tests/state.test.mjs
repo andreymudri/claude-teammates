@@ -16,6 +16,7 @@ import {
   readFixRounds,
   recordFixRound,
   normaliseWorktree,
+  isLocalAbsolute,
   writeLocation,
   findTaskByWorktree,
 } from '../scripts/state.mjs'
@@ -183,10 +184,13 @@ test('findTaskByWorktree returns null for an unknown worktree and for an empty q
       worktree: path.join(root, 'wt', 'agent-1'),
       branch: 'teammates/r1/T1',
     })
-    // A record with no `worktree` field at all — a shape a hand-written record produces, and the
-    // one that makes the empty-query guard load-bearing: it normalises to '' just as an empty or
-    // missing cwd does, so without the early return a hook called with no cwd would match it and
-    // enforce T2 against whatever agent stopped.
+    // A record with no `worktree` field at all — a shape a hand-written record produces. Note
+    // what this does NOT show: the empty-query early return and the loop's `lexical === ''`
+    // check are mutually redundant, and deleting either one alone leaves this green, because
+    // the other still rejects the pair. That redundancy is deliberate (see the comment in
+    // findTaskByWorktree) and no assertion here should be read as pinning one of them
+    // individually — what is pinned is the outcome: an empty or missing cwd matches nothing,
+    // and a record naming no worktree is reachable from no query.
     const dir = path.join(root, '.teammates', 'r1', 'worktrees')
     await writeFile(path.join(dir, 'T2.json'), JSON.stringify({ taskId: 'T2', branch: 'b' }), 'utf8')
     assert.equal(await findTaskByWorktree(root, path.join(root, 'wt', 'nobody')), null)
@@ -617,6 +621,174 @@ test('findTaskByWorktree validates the taskId before resolving any record-suppli
     'the first pass over a record-supplied path must not touch the filesystem',
   )
   assert.match(body, /isLocalAbsolute\(record\.worktree\)/, 'realpath must stay behind the guard')
+})
+
+// The classification itself, not the shape of its call site. Everything realpath must never see
+// has to be rejected here, because this predicate is the only thing standing between a record's
+// worktree and a synchronous network timeout inside the hook.
+test('isLocalAbsolute accepts only plain local absolute paths', () => {
+  for (const p of ['//unreachable-host/share/w', '\\\\host\\share\\w', 'relative/path', '.', '..', '', null, undefined, 42, {}]) {
+    assert.equal(isLocalAbsolute(p), false, `${JSON.stringify(p)} was classified as local`)
+  }
+  assert.equal(isLocalAbsolute(process.platform === 'win32' ? 'C:/x' : '/x'), true)
+  assert.equal(isLocalAbsolute(process.platform === 'win32' ? 'C:\\x' : '/x/y'), true)
+  if (process.platform === 'win32') {
+    assert.equal(isLocalAbsolute('z:\\mapped'), true) // the stated residual: a mapped drive passes
+    assert.equal(isLocalAbsolute('C:relative'), false) // drive-relative is not absolute
+  }
+})
+
+test('normaliseWorktree honours resolveLinks: false by leaving the link spelling alone', async (t) => {
+  await withTempRoot(async (root) => {
+    const real = path.join(root, 'real', 'agent-1')
+    await mkdir(real, { recursive: true })
+    const link = path.join(root, 'linked')
+    try {
+      await symlink(path.join(root, 'real'), link, 'junction')
+    } catch (err) {
+      t.skip(`symlinks unavailable here: ${err.code}`)
+      return
+    }
+    const through = path.join(link, 'agent-1')
+    // The option is the whole difference between touching the filesystem and not, so the two
+    // results must differ: resolved collapses onto the real path, unresolved keeps the link.
+    assert.notEqual(
+      normaliseWorktree(through, { resolveLinks: false }),
+      normaliseWorktree(through),
+      'resolveLinks: false still resolved the link',
+    )
+    assert.equal(normaliseWorktree(through), normaliseWorktree(real))
+    assert.equal(normaliseWorktree(through, { resolveLinks: false }), normaliseWorktree(through, { resolveLinks: false }))
+  })
+})
+
+// `path.resolve('C:\\')` is `C:\`; stripping that separator leaves the drive-RELATIVE `C:`,
+// which realpath expands to the process's cwd on that drive — so the record matches the reader.
+test('normaliseWorktree keeps a filesystem root distinct from the current directory', async () => {
+  await withTempRoot(async (root) => {
+    const driveRoot = process.platform === 'win32' ? `${process.cwd().slice(0, 2)}\\` : '/'
+    assert.notEqual(normaliseWorktree(driveRoot), normaliseWorktree(process.cwd()))
+    assert.equal(normaliseWorktree(driveRoot), normaliseWorktree(driveRoot))
+    // And through the lookup, which is where the false match landed: a record claiming the
+    // drive root must not answer a query for the directory the reader happens to be in.
+    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
+    await mkdir(dir, { recursive: true })
+    await writeFile(
+      path.join(dir, 'T1.json'),
+      JSON.stringify({ taskId: 'T1', worktree: driveRoot, branch: 'teammates/r1/T1' }),
+      'utf8',
+    )
+    assert.equal(await findTaskByWorktree(root, process.cwd()), null)
+    // The record is still findable by what it actually names, so this is a fix, not a ban.
+    assert.deepEqual(await findTaskByWorktree(root, driveRoot), {
+      runId: 'r1',
+      taskId: 'T1',
+      branch: 'teammates/r1/T1',
+    })
+  })
+})
+
+// A relative worktree resolves against the READER's cwd, so it matches whoever asks — including
+// a subagent that is not worktree-isolated at all and owns no task.
+test('findTaskByWorktree ignores a record whose worktree is relative', async () => {
+  await withTempRoot(async (root) => {
+    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
+    await mkdir(dir, { recursive: true })
+    for (const worktree of ['.', '', 'relative/path', './wt/agent-1', '..']) {
+      await writeFile(
+        path.join(dir, 'T1.json'),
+        JSON.stringify({ taskId: 'T1', worktree, branch: 'teammates/r1/T1' }),
+        'utf8',
+      )
+      assert.equal(
+        await findTaskByWorktree(root, process.cwd()),
+        null,
+        `a record with worktree ${JSON.stringify(worktree)} matched the reader's own directory`,
+      )
+      assert.equal(await findTaskByWorktree(root, path.resolve(worktree || '.')), null)
+    }
+  })
+})
+
+// The read is the last unbounded cost: unbounded in size, and unbounded in count.
+test('findTaskByWorktree skips a record larger than the size cap', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
+    await mkdir(dir, { recursive: true })
+    // Valid JSON and a perfectly honest record — only its size disqualifies it.
+    const padded = JSON.stringify({ taskId: 'T1', worktree, branch: 'teammates/r1/T1', pad: 'x'.repeat(200_000) })
+    await writeFile(path.join(dir, 'T1.json'), padded, 'utf8')
+    assert.equal(await findTaskByWorktree(root, worktree), null)
+    // Raising the cap for this call finds it, so the skip is the cap and not a parse failure.
+    assert.deepEqual(await findTaskByWorktree(root, worktree, { maxRecordBytes: 1_000_000 }), {
+      runId: 'r1',
+      taskId: 'T1',
+      branch: 'teammates/r1/T1',
+    })
+  })
+})
+
+test('findTaskByWorktree gives up rather than scanning past the record cap', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    for (const taskId of ['T1', 'T2', 'T3', 'T4']) {
+      await writeLocation(root, 'r1', taskId, { worktree, branch: `teammates/r1/${taskId}` })
+    }
+    // Under the cap the lookup answers normally.
+    assert.notEqual(await findTaskByWorktree(root, worktree, { maxRecords: 10 }), null)
+    // Past it the answer is null — fail-open, and independent of which records came first.
+    assert.equal(await findTaskByWorktree(root, worktree, { maxRecords: 3 }), null)
+    assert.equal(await findTaskByWorktree(root, worktree, { maxRecords: 0 }), null)
+  })
+})
+
+test('findTaskByWorktree skips a .json path that is not a regular file', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
+    await mkdir(dir, { recursive: true })
+    // A directory named like a record. Note what this does NOT pin: on win32 readFile would
+    // throw EISDIR anyway, so deleting the isFile() guard leaves this green. The FIFO test
+    // below is the one that pins the guard, and it runs only on POSIX.
+    await mkdir(path.join(dir, 'T1.json'), { recursive: true })
+    await assert.doesNotReject(findTaskByWorktree(root, worktree))
+    assert.equal(await findTaskByWorktree(root, worktree), null)
+    // An honest record beside it is still found, so one bad entry does not lose the run.
+    await writeLocation(root, 'r1', 'T2', { worktree, branch: 'teammates/r1/T2' })
+    assert.deepEqual(await findTaskByWorktree(root, worktree), {
+      runId: 'r1',
+      taskId: 'T2',
+      branch: 'teammates/r1/T2',
+    })
+  })
+})
+
+// The vector isFile() actually exists for. Opening a FIFO with no writer blocks in open(2), so
+// without the guard one such file under any run's worktrees/ would hang the hook forever — no
+// timeout of ours, no stop, no enforcement. win32 has no FIFO, so this can only run on POSIX;
+// the assertion is that the lookup finishes at all and skips the entry.
+test('findTaskByWorktree does not block on a FIFO named like a record', {
+  skip: process.platform === 'win32' ? 'POSIX only: win32 has no FIFO' : false,
+}, async (t) => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
+    await mkdir(dir, { recursive: true })
+    try {
+      execFileSync('mkfifo', [path.join(dir, 'T1.json')], { stdio: 'ignore' })
+    } catch (err) {
+      t.skip(`mkfifo unavailable: ${err.code ?? err.message}`)
+      return
+    }
+    await writeLocation(root, 'r1', 'T2', { worktree, branch: 'teammates/r1/T2' })
+    // Without the isFile() guard this call never returns and the test times out.
+    assert.deepEqual(await findTaskByWorktree(root, worktree), {
+      runId: 'r1',
+      taskId: 'T2',
+      branch: 'teammates/r1/T2',
+    })
+  })
 })
 
 // A cross-file source assertion, not a behavioural one. Observing a torn read requires winning
