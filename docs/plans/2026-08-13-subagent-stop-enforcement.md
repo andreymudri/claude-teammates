@@ -625,8 +625,19 @@ with this plugin installed, so the no-op path must be cheap.
 **Files:**
 - Modify: `scripts/cli.mjs`
 - Test: `tests/cli.test.mjs`
+- Test: `tests/adversarial.test.mjs`
 
 **Depends:** T2, T3
+
+`tests/adversarial.test.mjs` is in the set because **step 3b changes an exit code**, and an exit
+code is pinned by every test that asserts it. `tests/adversarial.test.mjs:195` asserts
+`complete` exits 4 inside *"a forged status.json PASS changes neither the gate verdict nor
+complete"*; the subject of that test is unchanged — the forged PASS still buys nothing — and only
+the number carrying the rejection moves. It is the only assertion outside `tests/cli.test.mjs`
+that touches `complete`'s exit codes, confirmed by grep across `tests/`.
+
+Adjust the number and the adjacent comment clause. Do not weaken, skip or delete the test: its
+subject is the tamper-evidence property, which this change does not touch.
 
 **Model:** capable
 
