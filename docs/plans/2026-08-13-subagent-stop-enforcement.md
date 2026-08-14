@@ -626,6 +626,8 @@ with this plugin installed, so the no-op path must be cheap.
 - Modify: `scripts/cli.mjs`
 - Test: `tests/cli.test.mjs`
 - Test: `tests/adversarial.test.mjs`
+- Modify: `scripts/brief.mjs`
+- Test: `tests/brief.test.mjs`
 
 **Depends:** T2, T3
 
@@ -638,6 +640,36 @@ that touches `complete`'s exit codes, confirmed by grep across `tests/`.
 
 Adjust the number and the adjacent comment clause. Do not weaken, skip or delete the test: its
 subject is the tamper-evidence property, which this change does not touch.
+
+`scripts/brief.mjs` and `tests/brief.test.mjs` are in the set for the same reason, found by review
+rather than foreseen: **an exit code is documented by every place that renders it to a human**, not
+only by every test that asserts it. `scripts/brief.mjs:127` renders the exit-code table a teammate
+reads, and it maps a gate rejection to exit 4 — the code this task moves to 3. Left alone, a
+teammate that hits 3 finds no row for it, and the only "gate does not pass" row it can find sits
+under exit 4 beside a sibling row telling it exit 4 is a run-configuration problem to quote and
+proceed past. That is worse than a stale test: it is an instruction to ignore the rejection.
+
+**Step 3c:** update that table for the narrowed contract below, and pin it — the brief's exit-code
+rows must fail if the code changes again.
+
+### The narrowed contract for exit 3
+
+Review proved by execution that returning 3 for *any* non-PASS verdict blocks a compliant teammate
+on facts it does not own: a manifest typo leaving a non-optional check `pending`, uncommitted
+changes in the **main** worktree failing `ownership`, and anyone committing directly to the run
+branch. `runOwnershipCheck` is deliberately run-wide (`gate-runner.mjs`), and Global Constraints
+forbid changing any gate check — so the fix is in the exit-code mapping, not in the check:
+
+```
+complete --enforcement-only returns 3 only when a TASK-SCOPED check rejects — fileset, merge.
+A run-wide check that fails, and any check that could not run, returns 4.
+```
+
+4 is what the handler allows, and the phase gate still catches everything. This preserves the
+stop-time value the design promised — "did you stray outside your file set, is your branch empty,
+will this merge" — while ending the case where one teammate's stop is blocked by another's commit
+and the remediation invites it to cherry-pick a foreign commit onto its own branch, which then
+trips `fileset`.
 
 **Model:** capable
 
