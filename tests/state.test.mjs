@@ -509,39 +509,176 @@ test('an id containing .. anywhere is refused at both ends', async () => {
   })
 })
 
-// A trailing `.` is a WHOLE-REFNAME rule. `init-run --run 'trailing.'` exits 0 and
-// `git check-ref-format refs/heads/teammates/trailing./T1` exits 0, so refusing it here aborted
-// `locate` for a fully working run — the fail-closed direction the ref rule must not cause. The
-// same character IS refused at the end of a task id, which is where the refname actually ends.
-test('a trailing dot is allowed mid-refname and refused at its end', async () => {
+// A component ending in `.` is refused ANYWHERE, and this assertion was reversed deliberately.
+// It previously asserted that `trailing.` is fine mid-refname, on the strength of
+// `git check-ref-format` accepting `teammates/trailing./T1` — which it does. But git-for-Windows
+// then cannot create that ref: `git branch` fails with `Unable to create '...T1.lock': Invalid
+// argument`, because Windows strips a trailing dot. `check-ref-format` is the oracle for the
+// rule, not for what can be created, and an id that validates here but cannot be branched
+// reaches a teammate as remediation that fails in its hands.
+test('a component ending in a dot is refused wherever it appears', async () => {
   await withTempRoot(async (root) => {
     const worktree = path.join(root, 'wt', 'agent-1')
-    await writeLocation(root, 'trailing.', 'T1', { worktree, branch: 'teammates/trailing./T1' })
-    assert.deepEqual(await findTaskByWorktree(root, worktree), {
-      runId: 'trailing.',
-      taskId: 'T1',
-      branch: 'teammates/trailing./T1',
-    })
+    await assert.rejects(
+      writeLocation(root, 'trailing.', 'T1', { worktree, branch: 'teammates/trailing./T1' }),
+      /is not a usable run id/,
+    )
     await assert.rejects(
       writeLocation(root, 'r1', 'T1.', { worktree, branch: 'b' }),
       /is not a usable task id/,
     )
+    await plant(root, worktree, { runId: 'trailing.', taskId: 'T1', worktree, branch: 'teammates/trailing./T1' })
+    assert.equal(await findTaskByWorktree(root, worktree), null)
+    // An interior dot is ordinary and still passes, so this is not a ban on dots.
+    await writeLocation(root, 'run.1', 'T1.a', { worktree, branch: 'teammates/run.1/T1.a' })
+    assert.equal((await findTaskByWorktree(root, worktree)).taskId, 'T1.a')
   })
 })
 
-// The pair is validated as one refname, which is the thing git checks and the string a consumer
-// hands to `git checkout -B`. Neither id is a refname on its own.
-test('a runId and taskId that individually pass but compose an invalid branch are refused', async () => {
+// The writer's check on the NORMALISED worktree. A directory symlink to a UNC target splits the
+// raw spelling (looks local) from the resolved one (does not), which is the only way to reach
+// that guard — and it is reachable, contrary to what an earlier version of this suite recorded.
+// No cmd.exe: the target is built from char codes because a shell mangles the backslashes, and
+// that mangling is exactly what produced the false "unreachable" measurement.
+test('writeLocation refuses a worktree whose resolved form the reader would reject', async (t) => {
+  await withTempRoot(async (root) => {
+    const B = String.fromCharCode(92)
+    const targets = [
+      B + B + 'wsl.localhost' + B + 'Ubuntu' + B + 'tmp',
+      B + B + 'localhost' + B + 'C$' + B + 'Users',
+      B + B + 'localhost' + B + 'C$',
+    ]
+    let link = null
+    for (const target of targets) {
+      const candidate = path.join(root, `wt-link-${targets.indexOf(target)}`)
+      try {
+        await symlink(target, candidate, 'dir')
+      } catch { continue }
+      // Only a target that actually resolves to a UNC path exercises the guard.
+      if (isLocalAbsolute(candidate) && !isLocalAbsolute(normaliseWorktree(candidate))) {
+        link = candidate
+        break
+      }
+    }
+    if (link === null) {
+      t.skip('no UNC target on this host resolves to a non-local path')
+      return
+    }
+    await assert.rejects(
+      writeLocation(root, 'r1', 'T1', { worktree: link, branch: 'teammates/r1/T1' }),
+      /which no record can name/,
+    )
+    // And nothing was left behind for that key, so a failed write cannot displace a good record.
+    assert.equal(await findTaskByWorktree(root, link), null)
+  })
+})
+
+// The empty-component clause and the composed-refname check cover each other rather than being
+// individually load-bearing: `/foo` contains no `//`, so the `//` rule does not catch it, and
+// removing BOTH clauses accepts it as branch `teammates//foo/T1`. This pins the outcome; the
+// source comment records which clauses jointly provide it.
+test('a leading or trailing separator in an id is refused, at both ends', async () => {
   await withTempRoot(async (root) => {
     const worktree = path.join(root, 'wt', 'agent-1')
-    const composed = (runId, taskId) => `teammates/${runId}/${taskId}`
-    // `x.` + `.lock` composes `teammates/x./.lock`, whose last component begins with a dot and
-    // ends with .lock; each id is checked again as part of the whole name.
-    assert.equal(composed('x.', 'y'), 'teammates/x./y')
+    for (const runId of ['/foo', 'foo/', 'a//b', '/']) {
+      await assert.rejects(
+        writeLocation(root, runId, 'T1', { worktree, branch: 'b' }),
+        /is not a usable run id|escapes the run directory|do not name a valid branch/,
+        `runId ${JSON.stringify(runId)} was accepted`,
+      )
+      await plant(root, worktree, { runId, taskId: 'T1', worktree, branch: `teammates/${runId}/T1` })
+      assert.equal(await findTaskByWorktree(root, worktree), null, `runId ${JSON.stringify(runId)} was returned`)
+    }
+  })
+})
+
+// Git accepts these in a refname; this project does not. A zero-width space makes a REAL branch
+// distinct from its visible twin, and every diagnostic renders the two identically, so a forged
+// record would enforce against a ref the victim never used and no inspection could tell. U+202E
+// reverses the error line that reports it (Trojan Source, CVE-2021-42574).
+test('invisible and bidi control characters are refused as ids and escaped when printed', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    const zwsp = String.fromCharCode(0x200b)
+    const rtlOverride = String.fromCharCode(0x202e)
+    const lrm = String.fromCharCode(0x200e)
+    const isolate = String.fromCharCode(0x2066)
+    const bom = String.fromCharCode(0xfeff)
+    for (const hostile of [`T1${zwsp}`, `a${rtlOverride}b`, `r${lrm}1`, `a${isolate}b`, `${bom}T1`]) {
+      const message = await writeLocation(root, 'r1', hostile, { worktree, branch: 'b' })
+        .then(() => null, (err) => err.message)
+      assert.notEqual(message, null, `taskId ${JSON.stringify(hostile)} was accepted`)
+      // Reported escaped, so the message cannot be reshaped by what it reports.
+      assert.doesNotMatch(message, new RegExp('[\\u200b-\\u200f\\u202a-\\u202e\\u2066-\\u2069\\ufeff]'))
+      await assert.rejects(writeLocation(root, hostile, 'T1', { worktree, branch: 'b' }), /is not a usable run id/)
+      await plant(root, worktree, { runId: 'r1', taskId: hostile, worktree, branch: 'b' })
+      assert.equal(await findTaskByWorktree(root, worktree), null, `taskId ${JSON.stringify(hostile)} was returned`)
+    }
+  })
+})
+
+// `git check-ref-format` accepts these and git-for-Windows then cannot create the ref, because
+// Windows strips a trailing dot and reserves device names, so the `.lock` file fails. An id that
+// validates but cannot be branched reaches a teammate as remediation that fails in its hands.
+test('components git cannot branch on win32 are refused on every platform', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    for (const runId of ['trailing.', 'a/trailing.', 'nul', 'CON', 'com1', 'lpt9', 'nul.txt', 'aux/x']) {
+      await assert.rejects(
+        writeLocation(root, runId, 'T1', { worktree, branch: 'b' }),
+        /is not a usable run id/,
+        `runId ${JSON.stringify(runId)} was accepted`,
+      )
+    }
+    for (const taskId of ['T1.', 'nul', 'PRN', 'com9']) {
+      await assert.rejects(
+        writeLocation(root, 'r1', taskId, { worktree, branch: 'b' }),
+        /is not a usable task id/,
+        `taskId ${JSON.stringify(taskId)} was accepted`,
+      )
+    }
+    // Names that merely CONTAIN a reserved word are ordinary and must still pass.
+    for (const runId of ['console', 'nullable', 'com', 'auxiliary', 'lpt']) {
+      await writeLocation(root, runId, 'T1', { worktree, branch: `teammates/${runId}/T1` })
+      assert.equal((await findTaskByWorktree(root, worktree)).runId, runId)
+    }
+  })
+})
+
+// `branch` was the only record field with no bound, which is enough on its own to write a record
+// the reader refuses on size for ever after.
+test('writeLocation refuses a branch that would make the record unreadable', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
     await assert.rejects(
-      writeLocation(root, 'r1', '.hidden', { worktree, branch: 'b' }),
-      /is not a usable task id|do not name a valid branch/,
+      writeLocation(root, 'r1', 'T1', { worktree, branch: 'b'.repeat(70_000) }),
+      /longer than|could never be read back/,
     )
+    // Distinguishes the length bound from the whole-record bound: 700 characters is over the
+    // branch limit and nowhere near the record limit, so only the branch bound can reject it.
+    // Without this case the two cover each other and neither dies alone under mutation.
+    await assert.rejects(
+      writeLocation(root, 'r1', 'T1', { worktree, branch: 'b'.repeat(700) }),
+      /longer than 512 characters/,
+    )
+    // And a branch at the limit is still accepted, so the bound is a limit and not a ban. Under
+    // its own worktree, so the "nothing was written" assertion below still means what it says.
+    const accepted = path.join(root, 'wt', 'agent-limit')
+    await writeLocation(root, 'r1', 'T1', { worktree: accepted, branch: 'b'.repeat(512) })
+    assert.deepEqual(await findTaskByWorktree(root, accepted), { runId: 'r1', taskId: 'T1', branch: null })
+    for (const branch of [42, {}, []]) {
+      await assert.rejects(
+        writeLocation(root, 'r1', 'T1', { worktree, branch }),
+        /is not a branch name/,
+        `branch ${JSON.stringify(branch)} was accepted`,
+      )
+    }
+    // Nothing was written, so a refused write cannot displace an existing good record.
+    assert.equal(await findTaskByWorktree(root, worktree), null)
+    // A null or absent branch stays legal: a teammate that never created its task branch is the
+    // case the hook exists to catch, and it must still be able to record where it is.
+    await writeLocation(root, 'r1', 'T1', { worktree, branch: null })
+    assert.deepEqual(await findTaskByWorktree(root, worktree), { runId: 'r1', taskId: 'T1', branch: null })
   })
 })
 
