@@ -194,8 +194,13 @@ test('normaliseWorktree collapses the spellings it compares and rejects non-stri
 // A backslash ends a path on win32 and is an ordinary filename character on POSIX, so the
 // trailing-separator strip has to be platform-specific: collapsing `/a/foo\` onto `/a/foo`
 // would make one record answer for a different directory, and the reader's key-agreement check
-// would recompute the same collapsed form and agree with it. Both branches assert, so this runs
-// meaningfully on every platform rather than skipping on the one it cannot reproduce.
+// would recompute the same collapsed form and agree with it.
+//
+// THE POSIX BRANCH IS THE PIN; the win32 branch is a smoke assertion and nothing more. On win32
+// `path.resolve` has already removed the trailing separator before `stripTrailingSeparator` ever
+// sees the value, so that assertion holds even if the strip is disabled entirely — verified by
+// replacing the pattern with one that never matches, which leaves the whole suite green here.
+// The load-bearing win32 case for that function is the filesystem-root guard, pinned separately.
 test('a trailing backslash is a separator on win32 and a filename character on POSIX', () => {
   const base = path.resolve(path.join('a', 'foo'))
   const withBackslash = `${base}\\`
@@ -321,30 +326,153 @@ test('writeLocation accepts a nested runId, as init-run does', async () => {
 
 // Both ids are spent as argv by the consumer and interpolated into refs and stderr, so path
 // safety is not enough on its own: containment accepts every one of these.
-test('writeLocation refuses ids that are contained but unusable as tokens', async () => {
+// Both ids become git refs, argv and stderr, so they are validated as git-ref-legal component
+// sequences rather than by charset. These are the shapes a charset got wrong in both directions.
+test('writeLocation refuses ids that are contained but illegal as ref components', async () => {
   await withTempRoot(async (root) => {
     const args = { worktree: path.join(root, 'wt', 'agent-1'), branch: 'b' }
-    for (const runId of ['--no-fleet', '-r', 'a b', 'a;rm -rf', 'a\nb', '[2Jred', 'x'.repeat(129)]) {
+    const badRunIds = [
+      'sub/../substop', // contained (path.join normalises it) yet carries `..` to any consumer
+      '--no-fleet', '-r', // reaches argv as a flag
+      'a b', 'a\nb', // space and control bytes
+      'a~b', 'a^b', 'a:b', 'a?b', 'a*b', 'a[b', 'a\\b', // git's forbidden set
+      'a@{b', // reflog syntax
+      'sub//substop', 'sub/', 'sub/.hidden/x', 'sub/x.lock', 'trailing.',
+      '.leading', 'x'.repeat(256),
+    ]
+    for (const runId of badRunIds) {
       await assert.rejects(
         writeLocation(root, runId, 'T1', args),
-        /is not a usable run id/,
+        /is not a usable run id|escapes the run directory/,
         `runId ${JSON.stringify(runId)} was accepted`,
       )
     }
-    for (const taskId of ['--force', '-rf', 'a b', 'a;rm', 'a\nb', '[31m', 'x'.repeat(65)]) {
+    for (const taskId of ['--force', '-rf', 'a b', 'a\nb', 'a~b', 'a:b', 'a.lock', '.hidden', 'T1.', 'x'.repeat(129)]) {
       await assert.rejects(
         writeLocation(root, 'r1', taskId, args),
-        /is not a usable task id/,
+        /is not a usable task id|escapes the run directory/,
         `taskId ${JSON.stringify(taskId)} was accepted`,
       )
     }
   })
 })
 
-// The writer must refuse exactly what the reader refuses. It used to accept a relative or UNC
-// spelling, key it by the resolved path, report success — and the reader then rejected the
-// stored value, so the record answered for nothing while having replaced the good record for
-// that directory: a worktree that had enforcement lost it on a successful write.
+// The shape a single-segment path check cannot see: `T1/` joins to the same directory as `T1`,
+// so containment accepts it, and only the one-component rule rejects it. Under a widened
+// pattern it reaches `complete --task T1/` and `refs/heads/teammates/r1/T1/`.
+test('a trailing slash is refused in a task id, at both ends', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    await assert.rejects(
+      writeLocation(root, 'r1', 'T1/', { worktree, branch: 'b' }),
+      /is not a usable task id/,
+    )
+    await plant(root, worktree, { runId: 'r1', taskId: 'T1/', worktree, branch: 'b' })
+    assert.equal(await findTaskByWorktree(root, worktree), null)
+  })
+})
+
+// A run id that aliases its own directory satisfies both sides of the branch equality check,
+// because the record's author writes both. Rejecting the spelling is what closes it.
+test('findTaskByWorktree skips a runId that aliases its run directory', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    await plant(root, worktree, {
+      runId: 'sub/../substop',
+      taskId: 'T1',
+      worktree,
+      branch: 'teammates/sub/../substop/T1',
+    })
+    assert.equal(await findTaskByWorktree(root, worktree), null)
+  })
+})
+
+// The other direction: ids git accepts and init-run creates must keep working, or `locate`
+// aborts and the whole run loses enforcement.
+test('ids that git and init-run accept are accepted here', async () => {
+  await withTempRoot(async (root) => {
+    const cases = [
+      ['café', 'T1'],
+      ['2026/substop', 'T10'],
+      ['run.1', 'task_a'],
+      ['a-b/c-d', 'a.b'],
+      ['ünïcode/日本語', 'T7'],
+      ['x'.repeat(255), 'y'.repeat(128)],
+    ]
+    for (const [runId, taskId] of cases) {
+      const worktree = path.join(root, 'wt', `agent-${encodeURIComponent(runId).slice(0, 20)}-${taskId.slice(0, 8)}`)
+      await writeLocation(root, runId, taskId, { worktree, branch: `teammates/${runId}/${taskId}` })
+      assert.deepEqual(
+        await findTaskByWorktree(root, worktree),
+        { runId, taskId, branch: `teammates/${runId}/${taskId}` },
+        `${JSON.stringify(runId)} / ${JSON.stringify(taskId)} was refused`,
+      )
+    }
+  })
+})
+
+// An id crafted to FAIL containment is exactly the one carrying the escape sequence, and that
+// message used to interpolate it raw. Printed by `locate`, it clears the terminal and prints
+// attacker-chosen text that reads as a verdict.
+test('a rejected id is never interpolated raw into the error that reports it', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    const esc = String.fromCharCode(27)
+    const del = String.fromCharCode(127)
+    const csi = String.fromCharCode(0x9b)
+    const lineSep = String.fromCharCode(0x2028)
+    const hostile = [
+      `../${esc}[2J${esc}[31mPWNED`, // fails containment
+      `..${esc}[2Jx`,
+      `${esc}[2Jcontained-but-unusable`, // fails the ref rule
+      `run${del}${csi}31m${lineSep}x`,
+    ]
+    const unsafe = new RegExp('[\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]')
+    for (const id of hostile) {
+      const fromRun = await writeLocation(root, id, 'T1', { worktree, branch: 'b' }).then(
+        () => null,
+        (err) => err.message,
+      )
+      const fromTask = await writeLocation(root, 'r1', id, { worktree, branch: 'b' }).then(
+        () => null,
+        (err) => err.message,
+      )
+      for (const message of [fromRun, fromTask]) {
+        assert.notEqual(message, null, `${JSON.stringify(id)} was accepted`)
+        assert.doesNotMatch(message, unsafe, `raw control bytes survived into: ${JSON.stringify(message)}`)
+        // And the bytes are still reported, escaped, rather than silently dropped.
+        assert.match(message, /\\u001b|\\u007f|\\u009b|\\u2028|\\n/)
+      }
+    }
+  })
+})
+
+// isLocalAbsolute was applied to the RAW value while the NORMALISED one is what gets stored and
+// what the reader checks. A symlink whose target is a UNC share splits the two: the write
+// succeeds, and every read of the record it wrote returns null. Written, unreadable, forever.
+test('writeLocation refuses a worktree whose normalised form the reader would reject', async (t) => {
+  await withTempRoot(async (root) => {
+    const link = path.join(root, 'unc-link')
+    try {
+      // A junction whose target is a UNC path to this host's own admin share.
+      execFileSync('cmd.exe', ['/c', 'mklink', '/J', link, '\\\\localhost\\C$\\Users'], { stdio: 'ignore' })
+    } catch (err) {
+      t.skip(`UNC junction unavailable here: ${err.code ?? err.message}`)
+      return
+    }
+    assert.equal(isLocalAbsolute(link), true, 'the raw spelling must look local, or this pins nothing')
+    const normalised = normaliseWorktree(link)
+    if (isLocalAbsolute(normalised)) {
+      t.skip('this host does not resolve the junction to a UNC path')
+      return
+    }
+    await assert.rejects(
+      writeLocation(root, 'r1', 'T1', { worktree: link, branch: 'teammates/r1/T1' }),
+      /which no record can name/,
+    )
+  })
+})
+
 test('writeLocation refuses a worktree the reader could never accept', async () => {
   await withTempRoot(async (root) => {
     for (const worktree of ['', null, undefined, 42, '.', 'relative/path', '\\\\host\\share\\wt']) {
@@ -516,7 +644,9 @@ test('findTaskByWorktree skips a record whose taskId is a traversal', async () =
 test('findTaskByWorktree skips a taskId that could be read as an option or is overlong', async () => {
   await withTempRoot(async (root) => {
     const worktree = path.join(root, 'wt', 'agent-1')
-    for (const taskId of ['--force', '-rf', '--', '-', 'T1 --force', 'a b', 'T1;rm', 'T1\n', 'x'.repeat(65)]) {
+    // `;` is absent: git accepts it in a ref and the consumer spawns an argv array, never a
+    // shell, so the ref rule is the authority here rather than a shell-metacharacter list.
+    for (const taskId of ['--force', '-rf', '--', '-', 'T1 --force', 'a b', 'T1\n', 'x'.repeat(129)]) {
       await plant(root, worktree, { runId: 'r1', taskId, worktree, branch: 'b' })
       assert.equal(
         await findTaskByWorktree(root, worktree),
@@ -544,7 +674,7 @@ test('findTaskByWorktree skips a runId that is unusable as a token or escapes th
     const worktree = path.join(root, 'wt', 'agent-1')
     for (const runId of [
       '../..', '../escaped', '..', '.', '', 42, null, { id: 'r1' },
-      '--no-fleet', '-r', 'a b', 'a;rm -rf /', 'a\nb', '[2J[31mred', 'x'.repeat(129),
+      '--no-fleet', '-r', 'a b', 'a\nb', '\u001b[2J\u001b[31mred', 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', 'sub/../substop', 'sub//substop', 'sub/', '.leading', 'x.lock',
     ]) {
       await plant(root, worktree, { runId, taskId: 'T1', worktree, branch: 'b' })
       assert.equal(

@@ -180,27 +180,70 @@ function isSegment(baseDir, value) {
   return rel !== null && !rel.includes(path.sep)
 }
 
-// PATH SAFETY AND TOKEN SAFETY ARE DIFFERENT PROPERTIES, and each id needs both.
+// PATH SAFETY AND TOKEN SAFETY ARE DIFFERENT PROPERTIES, and each id needs both. Containment
+// (above) answers "can this value escape the store". What follows answers what containment
+// cannot: both ids become a git ref through `taskBranchName`, argv through
+// `complete --run <id> --task <id>`, and text in a teammate's stderr.
 //
-// Containment (above) answers "can this value escape the store". The patterns below answer a
-// question containment cannot: both ids are handed to a consumer that spends them as argv —
-// `complete --run <runId> --task <taskId>` — and are interpolated into `refs/heads/...` and into
-// stderr shown to a teammate. `isContained` happily accepts `--no-fleet`, a semicolon, a newline
-// or an ESC byte, none of which a run id had back when it was a directory name and all of which
-// are now reachable from file content. A leading dash is refused so an id can never arrive as a
-// flag, control characters are refused so an id cannot rewrite a terminal, and both are bounded.
+// A CHARSET CANNOT EXPRESS THAT, and the one that used to be here was wrong in both directions.
+// Too permissive: `sub/../substop` is contained, because path.join normalises the alias away,
+// and passes any class containing `.` and `/` — yet `git check-ref-format` rejects it, the
+// returned string carries `..` into anything that joins it onto a path, and because the record's
+// author writes both the runId and the branch, the branch equality check compares two values it
+// chose and agrees. Too strict: `café` is accepted by init-run and by git, but was refused here,
+// which would abort `locate` and take enforcement off that entire run.
 //
-// The run id pattern permits `/` because init-run does; the task id pattern does not, because a
-// task id is a single segment everywhere it is used.
-const RUN_ID = /^[A-Za-z0-9._][A-Za-z0-9._/-]{0,127}$/
-const TASK_ID = /^[A-Za-z0-9._][A-Za-z0-9._-]{0,63}$/
+// THIS IS A SUBSET of `git check-ref-format`, which is the authority. Implemented: no empty
+// component, none equal to `.` or `..`, none beginning with `.` or ending with `.lock`, no ASCII
+// control byte or DEL, no space, none of `~ ^ : ? * [ \`, no `@{`, no `//`, no trailing `/` or
+// `.`. Deliberately NOT implemented, because nothing here generates them: the `refs/` prefix
+// rules, the lone-`@` rule, and the `--normalize` / `--allow-onelevel` variants. Two additions
+// git does not make and this project needs: no leading `-`, because the id reaches argv, and a
+// length bound.
+const REF_FORBIDDEN = new RegExp('[\\u0000-\\u001f\\u007f ~^:?*\\[\\\\]')
 
-const isRunId = (root, runId) => isContained(path.join(root, '.teammates'), runId) && RUN_ID.test(runId)
-const isTaskId = (root, taskId) => isSegment(path.join(root, '.teammates'), taskId) && TASK_ID.test(taskId)
+// Three clauses below are provably redundant, and mutation testing says so rather than my
+// judgement: `.` and `..` are already refused by the leading-dot rule, and the empty-component
+// rule is what refuses `//`. They are written out anyway because this function's contract is
+// "the git rule", and a reader checking it against `git check-ref-format` should find each
+// clause rather than have to re-derive which other clause happens to cover it.
+function isRefComponent(component) {
+  if (component === '' || component === '.' || component === '..') return false
+  if (component.startsWith('.') || component.endsWith('.lock')) return false
+  if (component.includes('@{')) return false
+  return !REF_FORBIDDEN.test(component)
+}
 
-// Rendered through JSON.stringify so an id carrying ESC or a newline cannot format the very
-// message that reports it.
-const shown = (value) => JSON.stringify(typeof value === 'string' ? value : String(value))
+function isRefPath(value, { maxLength, allowSeparator }) {
+  if (typeof value !== 'string' || value === '') return false
+  if (value.length > maxLength) return false
+  if (value.startsWith('-')) return false
+  if (value.endsWith('/') || value.endsWith('.')) return false
+  if (value.includes('//')) return false
+  const components = value.split('/')
+  if (!allowSeparator && components.length !== 1) return false
+  return components.every(isRefComponent)
+}
+
+// A run id may nest, because init-run creates nested ones. A task id is exactly one component.
+// The trailing-slash shape a single-segment path check cannot see — `T1/` joins to the same
+// directory as `T1`, so containment accepts it — is caught by the no-trailing-`/` rule above,
+// which means `allowSeparator: false` is itself redundant with `isSegment` here; it stays so the
+// predicate reads correctly on its own if the path check beside it ever changes. The bounds are
+// this project's choice rather than git's, and are deliberately generous.
+const isRunId = (root, runId) => isContained(path.join(root, '.teammates'), runId)
+  && isRefPath(runId, { maxLength: 255, allowSeparator: true })
+const isTaskId = (root, taskId) => isSegment(path.join(root, '.teammates'), taskId)
+  && isRefPath(taskId, { maxLength: 128, allowSeparator: false })
+
+// EVERY interpolation of an untrusted id into a message goes through this, the containment
+// messages included: an id crafted to fail containment is precisely the one carrying the escape
+// sequence, and while these guards ran in the other order it reached the throw verbatim.
+// JSON.stringify quotes and escapes C0; it passes DEL, the C1 block (U+009B is CSI, a control
+// introducer needing no ESC), and U+2028/U+2029 through raw, so those are escaped after it.
+const UNSAFE_TO_PRINT = new RegExp('[\\u007f-\\u009f\\u2028\\u2029]', 'g')
+const shown = (value) => JSON.stringify(String(value))
+  .replace(UNSAFE_TO_PRINT, (c) => `\\u${c.codePointAt(0).toString(16).padStart(4, '0')}`)
 
 // Applied inside the writer rather than at each call site, so that any caller added later
 // inherits it rather than having to remember it — there is none but the tests yet. The writer
@@ -208,13 +251,14 @@ const shown = (value) => JSON.stringify(typeof value === 'string' ? value : Stri
 // take a worktree's enforcement away silently.
 function assertIds(root, runId, taskId) {
   if (!isContained(path.join(root, '.teammates'), runId)) {
-    throw new Error(`--run ${runId} escapes the run directory`)
+    throw new Error(`--run ${shown(runId)} escapes the run directory`)
   }
   if (!isSegment(path.join(root, '.teammates'), taskId)) {
-    throw new Error(`--task ${taskId} escapes the run directory`)
+    throw new Error(`--task ${shown(taskId)} escapes the run directory`)
   }
-  if (!RUN_ID.test(runId)) throw new Error(`--run ${shown(runId)} is not a usable run id`)
-  if (!TASK_ID.test(taskId)) throw new Error(`--task ${shown(taskId)} is not a usable task id`)
+  if (!isRunId(root, runId)) throw new Error(`--run ${shown(runId)} is not a usable run id`)
+  if (!isTaskId(root, taskId)) throw new Error(`--task ${shown(taskId)} is not a usable task id`)
+
 }
 
 // The record's address IS its worktree. Hashing the normalised path gives a fixed-length,
@@ -238,16 +282,23 @@ export function indexDir(root) {
 // them any more. A stale record is only reachable by asking about the exact directory it names.
 export async function writeLocation(root, runId, taskId, { worktree, branch }) {
   assertIds(root, runId, taskId)
-  // The SAME predicate the reader applies. Without it the writer accepted a relative or UNC
-  // spelling, keyed it by the resolved path, reported success — and the reader then rejected the
-  // stored value, so the record answered for nothing while having replaced the good record for
-  // that directory. A worktree that had enforcement lost it, silently, on a successful write.
+  // The SAME predicate the reader applies, on BOTH the value handed in and the value stored.
+  // The raw check keeps a reader-dependent spelling (`.`, `relative/x`) from being recorded as
+  // whatever directory the writer happened to stand in. The check on the NORMALISED value is
+  // the one that matters for readability, and it was missing: a symlink whose target is a UNC
+  // share is `isLocalAbsolute` as written, so the write succeeded and returned a path, while
+  // the stored `//host/share/...` is not `isLocalAbsolute`, so every later read returned null —
+  // written successfully, unreadable forever, which is the exact outcome this guard exists to
+  // prevent. Normalising first and re-checking closes it, whatever the link resolves to.
   if (!isLocalAbsolute(worktree)) {
     throw new Error(`--worktree ${shown(worktree)} is not a path a record can name`)
   }
   // Stored normalised, not raw, so the value on disk is the one the key was computed from and
   // the two cannot disagree about which directory this record is for.
   const normalised = normaliseWorktree(worktree)
+  if (!isLocalAbsolute(normalised)) {
+    throw new Error(`--worktree ${shown(worktree)} resolves to ${shown(normalised)}, which no record can name`)
+  }
   const key = worktreeKey(normalised)
   if (key === '') throw new Error(`--worktree ${shown(worktree)} is not a path a record can name`)
   const dir = indexDir(root)
