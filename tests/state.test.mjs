@@ -117,7 +117,7 @@ test('writeLocation files a record under the hash of its worktree', async () => 
       runId: 'r1',
       taskId: 'T1',
       branch: 'teammates/r1/T1',
-      worktree,
+      worktree: normaliseWorktree(worktree),
     })
     assert.deepEqual(await findTaskByWorktree(root, worktree), {
       runId: 'r1',
@@ -188,6 +188,22 @@ test('normaliseWorktree collapses the spellings it compares and rejects non-stri
   if (process.platform === 'win32') {
     assert.equal(normaliseWorktree(base), normaliseWorktree(base.replace(/\\/g, '/')))
     assert.equal(normaliseWorktree(base), normaliseWorktree(base.toUpperCase()))
+  }
+})
+
+// A backslash ends a path on win32 and is an ordinary filename character on POSIX, so the
+// trailing-separator strip has to be platform-specific: collapsing `/a/foo\` onto `/a/foo`
+// would make one record answer for a different directory, and the reader's key-agreement check
+// would recompute the same collapsed form and agree with it. Both branches assert, so this runs
+// meaningfully on every platform rather than skipping on the one it cannot reproduce.
+test('a trailing backslash is a separator on win32 and a filename character on POSIX', () => {
+  const base = path.resolve(path.join('a', 'foo'))
+  const withBackslash = `${base}\\`
+  if (process.platform === 'win32') {
+    assert.equal(worktreeKey(withBackslash), worktreeKey(base))
+  } else {
+    assert.notEqual(worktreeKey(withBackslash), worktreeKey(base))
+    assert.equal(worktreeKey(`${base}/`), worktreeKey(base))
   }
 })
 
@@ -282,20 +298,78 @@ test('writeLocation refuses a taskId that is not a single path segment', async (
 test('writeLocation refuses a runId that climbs out of .teammates', async () => {
   await withTempRoot(async (root) => {
     const args = { worktree: path.join(root, 'wt', 'agent-1'), branch: 'b' }
-    for (const runId of ['../..', '../escaped', 'nested/r1', '..', '.']) {
+    for (const runId of ['../..', '../escaped', '..', '.']) {
       await assert.rejects(writeLocation(root, runId, 'T1', args), /escapes the run directory/)
     }
   })
 })
 
-test('writeLocation refuses a worktree it cannot name', async () => {
+// `init-run --run 2026/substop` is accepted by the CLI and creates .teammates/2026/substop, so
+// refusing a nested run id here would abort `locate` for a run the CLI legitimately made and
+// leave that whole run unenforced. Containment, not single-segment, is the rule for a run id.
+test('writeLocation accepts a nested runId, as init-run does', async () => {
   await withTempRoot(async (root) => {
-    for (const worktree of ['', null, undefined, 42]) {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    await writeLocation(root, '2026/substop', 'T1', { worktree, branch: 'teammates/2026/substop/T1' })
+    assert.deepEqual(await findTaskByWorktree(root, worktree), {
+      runId: '2026/substop',
+      taskId: 'T1',
+      branch: 'teammates/2026/substop/T1',
+    })
+  })
+})
+
+// Both ids are spent as argv by the consumer and interpolated into refs and stderr, so path
+// safety is not enough on its own: containment accepts every one of these.
+test('writeLocation refuses ids that are contained but unusable as tokens', async () => {
+  await withTempRoot(async (root) => {
+    const args = { worktree: path.join(root, 'wt', 'agent-1'), branch: 'b' }
+    for (const runId of ['--no-fleet', '-r', 'a b', 'a;rm -rf', 'a\nb', '[2Jred', 'x'.repeat(129)]) {
+      await assert.rejects(
+        writeLocation(root, runId, 'T1', args),
+        /is not a usable run id/,
+        `runId ${JSON.stringify(runId)} was accepted`,
+      )
+    }
+    for (const taskId of ['--force', '-rf', 'a b', 'a;rm', 'a\nb', '[31m', 'x'.repeat(65)]) {
+      await assert.rejects(
+        writeLocation(root, 'r1', taskId, args),
+        /is not a usable task id/,
+        `taskId ${JSON.stringify(taskId)} was accepted`,
+      )
+    }
+  })
+})
+
+// The writer must refuse exactly what the reader refuses. It used to accept a relative or UNC
+// spelling, key it by the resolved path, report success — and the reader then rejected the
+// stored value, so the record answered for nothing while having replaced the good record for
+// that directory: a worktree that had enforcement lost it on a successful write.
+test('writeLocation refuses a worktree the reader could never accept', async () => {
+  await withTempRoot(async (root) => {
+    for (const worktree of ['', null, undefined, 42, '.', 'relative/path', '\\\\host\\share\\wt']) {
       await assert.rejects(
         writeLocation(root, 'r1', 'T1', { worktree, branch: 'b' }),
         /is not a path a record can name/,
+        `worktree ${JSON.stringify(worktree)} was accepted by the writer`,
       )
     }
+  })
+})
+
+test('writeLocation stores the normalised worktree, not the caller spelling', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    const written = await writeLocation(root, 'r1', 'T1', {
+      worktree: `${worktree}${path.sep}`,
+      branch: 'teammates/r1/T1',
+    })
+    const record = JSON.parse(await readFile(written, 'utf8'))
+    assert.equal(record.worktree, normaliseWorktree(worktree))
+    // Whatever is stored must satisfy the reader's own admission check and hash to this file.
+    assert.equal(isLocalAbsolute(record.worktree), true)
+    assert.equal(worktreeKey(record.worktree), path.basename(written, '.json'))
+    assert.equal((await findTaskByWorktree(root, worktree)).taskId, 'T1')
   })
 })
 
@@ -460,10 +534,18 @@ test('findTaskByWorktree skips a taskId that could be read as an option or is ov
 
 // runId used to be a directory name and could not lie. Under a keyed layout it comes from file
 // content like everything else, so it is validated like everything else.
-test('findTaskByWorktree skips a record whose runId is not a plain segment', async () => {
+// A runId reaches `complete --run <id>` in the consumer's argv, `refs/heads/<branch>` through
+// taskBranchName, and the stderr a teammate is shown. `--no-fleet` alone makes that CLI print a
+// usage dump and exit 2, which the specified handler maps to BLOCK — so the victim is blocked at
+// every stop with a usage dump as its verdict, and the record's author controls both sides of
+// the branch equality check, so nothing downstream catches it.
+test('findTaskByWorktree skips a runId that is unusable as a token or escapes the store', async () => {
   await withTempRoot(async (root) => {
     const worktree = path.join(root, 'wt', 'agent-1')
-    for (const runId of ['../..', '../escaped', 'nested/r1', '..', '.', '', 42, null, { id: 'r1' }]) {
+    for (const runId of [
+      '../..', '../escaped', '..', '.', '', 42, null, { id: 'r1' },
+      '--no-fleet', '-r', 'a b', 'a;rm -rf /', 'a\nb', '[2J[31mred', 'x'.repeat(129),
+    ]) {
       await plant(root, worktree, { runId, taskId: 'T1', worktree, branch: 'b' })
       assert.equal(
         await findTaskByWorktree(root, worktree),
@@ -471,6 +553,9 @@ test('findTaskByWorktree skips a record whose runId is not a plain segment', asy
         `a record carrying runId ${JSON.stringify(runId)} was returned rather than skipped`,
       )
     }
+    // A nested run id is legitimate — init-run creates them — so the guard must not refuse it.
+    await plant(root, worktree, { runId: '2026/substop', taskId: 'T1', worktree, branch: 'b' })
+    assert.equal((await findTaskByWorktree(root, worktree)).runId, '2026/substop')
   })
 })
 
@@ -510,7 +595,13 @@ test('findTaskByWorktree drops a branch the record could not legitimately name',
 // has to be rejected here, because this predicate is the only thing standing between a record's
 // worktree and a synchronous network timeout inside the hook.
 test('isLocalAbsolute accepts only plain local absolute paths', () => {
-  for (const p of ['//unreachable-host/share/w', '\\\\host\\share\\w', 'relative/path', '.', '..', '', null, undefined, 42, {}]) {
+  for (const p of [
+    '//unreachable-host/share/w', '\\\\host\\share\\w', 'relative/path', '.', '..', '', null, undefined, 42, {},
+    // A drive-letter-plus-separator INSIDE a UNC path. Without the `^` anchor these classify as
+    // local and reach realpathSync.native on a network path — the multi-second stall this
+    // predicate exists to prevent.
+    '\\\\host\\share\\C:\\x', '//host/share/C:/x',
+  ]) {
     assert.equal(isLocalAbsolute(p), false, `${JSON.stringify(p)} was classified as local`)
   }
   assert.equal(isLocalAbsolute(process.platform === 'win32' ? 'C:/x' : '/x'), true)
@@ -600,6 +691,16 @@ test('findTaskByWorktree skips a record larger than the size cap', async () => {
       runId: 'r1', taskId: 'T1', branch: 'teammates/r1/T1', worktree, pad: 'x'.repeat(200_000),
     })
     assert.equal(await findTaskByWorktree(root, worktree), null)
+    // The shape that proves the cap is load-bearing rather than redundant with the bounded
+    // read: a short, entirely valid record followed by whitespace past the cap. Truncating it
+    // yields JSON that parses cleanly, so only the fstat'd size can reject this file.
+    const padded = `${JSON.stringify({ runId: 'r1', taskId: 'T1', branch: 'teammates/r1/T1', worktree })}${' '.repeat(200_000)}`
+    await plant(root, worktree, padded)
+    assert.equal(JSON.parse(padded.slice(0, 64 * 1024)).taskId, 'T1', 'the truncated prefix must parse, or this pins nothing')
+    assert.equal(await findTaskByWorktree(root, worktree), null)
+    await plant(root, worktree, {
+      runId: 'r1', taskId: 'T1', branch: 'teammates/r1/T1', worktree, pad: 'x'.repeat(200_000),
+    })
     // Raising the cap for this call finds it, so the skip is the cap and not a parse failure.
     assert.deepEqual(await findTaskByWorktree(root, worktree, { maxRecordBytes: 1_000_000 }), {
       runId: 'r1',
@@ -612,18 +713,22 @@ test('findTaskByWorktree skips a record larger than the size cap', async () => {
 test('findTaskByWorktree skips a record path that is not a regular file', async () => {
   await withTempRoot(async (root) => {
     const worktree = path.join(root, 'wt', 'agent-1')
-    // A directory named like a record. Note what this does NOT pin: on win32 the read would
-    // fail anyway, so deleting the isFile() guard leaves this green. The FIFO test below is the
-    // one that pins the guard, and it runs only on POSIX.
+    // A directory in place of a record. What this pins is the OUTCOME — null, no throw — and
+    // not the isFile() guard: on both platforms the read of a directory fails on its own, so
+    // deleting that guard leaves this green. Measured, not assumed; see state.mjs.
     await mkdir(recordPath(root, worktree), { recursive: true })
     await assert.doesNotReject(findTaskByWorktree(root, worktree))
     assert.equal(await findTaskByWorktree(root, worktree), null)
   })
 })
 
-// The vector isFile() actually exists for. Opening a FIFO with no writer blocks in open(2), so
-// without the guard the lookup would hang forever — no timeout of ours, no stop, no
-// enforcement. win32 has no FIFO, so this can only run on POSIX.
+// What this pins is that a FIFO in place of a record does not hang the lookup. It does NOT pin
+// the isFile() guard, and an earlier version of this comment wrongly claimed it did: libuv opens
+// a writer-less FIFO without blocking, and such a FIFO fstats to size 0, so the bounded read
+// gets nothing and JSON.parse('') throws to the same null the guard returns. Deleting the guard,
+// or O_NONBLOCK, or both, leaves this green here and on Linux — measured on WSL Ubuntu, not
+// inferred. The test still earns its place: "a FIFO must not hang this" is exactly the property
+// a future change to the read could break, and it is the one thing no other test covers.
 test('findTaskByWorktree does not block on a FIFO in place of a record', {
   skip: process.platform === 'win32' ? 'POSIX only: win32 has no FIFO' : false,
 }, async (t) => {
@@ -665,9 +770,10 @@ test('findTaskByWorktree validates ids before resolving paths, and reads a bound
   const start = source.indexOf('export async function findTaskByWorktree')
   assert.notEqual(start, -1, 'findTaskByWorktree is no longer declared under that name')
   const body = source.slice(start, source.indexOf('\n}', start))
-  const idsAt = body.indexOf('isSegment(indexDir(root), record.taskId)')
+  const idsAt = body.indexOf('isTaskId(root, record.taskId)')
   const resolveAt = body.indexOf('worktreeKey(record.worktree)')
-  assert.notEqual(idsAt, -1, 'the taskId segment check is gone')
+  assert.notEqual(idsAt, -1, 'the taskId check is gone')
+  assert.notEqual(body.indexOf('isRunId(root, record.runId)'), -1, 'the runId check is gone')
   assert.notEqual(resolveAt, -1, 'the record worktree is no longer hashed')
   assert.equal(idsAt < resolveAt, true, 'ids must be validated before a record-supplied path is resolved')
   assert.match(body, /isLocalAbsolute\(record\.worktree\)/, 'realpath must stay behind the guard')

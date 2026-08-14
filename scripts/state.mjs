@@ -79,18 +79,27 @@ export async function claimTask(root, runId, taskId, teammate) {
 // directories, bytes) was chosen by whoever wrote the files, and the order they were visited in
 // was chosen by the filesystem, which also made its tests unportable between NTFS, ext4 and APFS.
 //
-// KNOWN LIMITATION, by design rather than oversight: the key is the hash of the RESOLVED path,
-// so a worktree that has been deleted by the time it is looked up no longer realpaths the way it
-// did when the record was written, hashes differently, and is not found. The lookup returns null
-// and a hook fails open — no enforcement rather than enforcement against the wrong task.
+// KNOWN LIMITATION, by design rather than oversight, and narrower than it first looks: the key
+// is the hash of the RESOLVED path, so a record is missed after its worktree is deleted ONLY if
+// resolving that path used to change it — a symlinked parent, an 8.3 short name, a case
+// difference. For an ordinary path realpath simply throws once the directory is gone,
+// `normaliseWorktree` falls back to the lexical form, that form is what was hashed at write
+// time, and the record is still found. Where it does miss, the lookup returns null and a hook
+// fails open — no enforcement rather than enforcement against the wrong task.
 // ---------------------------------------------------------------------------------------------
 
 // Trailing separators are noise EXCEPT at a filesystem root, where the separator is part of the
 // path: stripping it turns `C:\` into the drive-RELATIVE `C:`, which realpath then expands to the
 // process's current directory on that drive. A record claiming `worktree: "C:\\"` would otherwise
 // match whichever directory the reader happens to be standing in.
+// Only the platform's OWN separators: on win32 both `\` and `/` end a path, but on POSIX a
+// backslash is an ordinary filename character, so stripping it there would collapse `/a/foo\`
+// and `/a/foo` onto one key — two different directories answered by one record, and the
+// reader's key-agreement check would recompute the same collapsed form and agree with it.
+const TRAILING_SEPARATORS = process.platform === 'win32' ? /[\\/]+$/ : /\/+$/
+
 function stripTrailingSeparator(p) {
-  return path.parse(p).root === p ? p : p.replace(/[\\/]+$/, '')
+  return path.parse(p).root === p ? p : p.replace(TRAILING_SEPARATORS, '')
 }
 
 // Compared, never displayed. One directory has several spellings: what git prints, what the
@@ -150,22 +159,62 @@ export function isLocalAbsolute(p) {
 // error message below was copied from that function to keep the two readable side by side,
 // but nothing cross-checks the wording — if cli.mjs is reworded, this text simply stays as
 // it is. Treat the match as a convention, not a guarantee.
-function isSegment(baseDir, segment) {
-  if (typeof segment !== 'string' || segment === '') return false
-  const rel = path.relative(path.resolve(baseDir), path.resolve(path.join(baseDir, segment)))
-  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel) && !rel.includes(path.sep)
+function relativeInside(baseDir, value) {
+  if (typeof value !== 'string' || value === '') return null
+  const rel = path.relative(path.resolve(baseDir), path.resolve(path.join(baseDir, value)))
+  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return null
+  return rel
 }
 
+// Containment only — nesting allowed. This is `assertContained`'s semantics from
+// scripts/cli.mjs:591, and it has to be, because `init-run --run 2026/substop` is accepted
+// there and creates `.teammates/2026/substop/`. A stricter rule here would throw for a run the
+// CLI legitimately made, `locate` would abort, and enforcement would be off for that whole run.
+function isContained(baseDir, value) {
+  return relativeInside(baseDir, value) !== null
+}
+
+// Containment AND single-segment. A taskId names one file in one directory and never descends.
+function isSegment(baseDir, value) {
+  const rel = relativeInside(baseDir, value)
+  return rel !== null && !rel.includes(path.sep)
+}
+
+// PATH SAFETY AND TOKEN SAFETY ARE DIFFERENT PROPERTIES, and each id needs both.
+//
+// Containment (above) answers "can this value escape the store". The patterns below answer a
+// question containment cannot: both ids are handed to a consumer that spends them as argv —
+// `complete --run <runId> --task <taskId>` — and are interpolated into `refs/heads/...` and into
+// stderr shown to a teammate. `isContained` happily accepts `--no-fleet`, a semicolon, a newline
+// or an ESC byte, none of which a run id had back when it was a directory name and all of which
+// are now reachable from file content. A leading dash is refused so an id can never arrive as a
+// flag, control characters are refused so an id cannot rewrite a terminal, and both are bounded.
+//
+// The run id pattern permits `/` because init-run does; the task id pattern does not, because a
+// task id is a single segment everywhere it is used.
+const RUN_ID = /^[A-Za-z0-9._][A-Za-z0-9._/-]{0,127}$/
+const TASK_ID = /^[A-Za-z0-9._][A-Za-z0-9._-]{0,63}$/
+
+const isRunId = (root, runId) => isContained(path.join(root, '.teammates'), runId) && RUN_ID.test(runId)
+const isTaskId = (root, taskId) => isSegment(path.join(root, '.teammates'), taskId) && TASK_ID.test(taskId)
+
+// Rendered through JSON.stringify so an id carrying ESC or a newline cannot format the very
+// message that reports it.
+const shown = (value) => JSON.stringify(typeof value === 'string' ? value : String(value))
+
 // Applied inside the writer rather than at each call site, so that any caller added later
-// inherits it rather than having to remember it — there is none but the tests yet.
-// A taskId is a single path segment and nothing else: `--task ../claims/T5` would otherwise
-// plant a claim file that makes T5 unclaimable for the rest of the run — the phase then
-// finishes with T5 silently unimplemented — and `--task ../status` would overwrite
-// status.json, while more `..` escapes the repository.
-function assertSegment(baseDir, segment, flagName) {
-  if (!isSegment(baseDir, segment)) {
-    throw new Error(`${flagName} ${segment} escapes the run directory`)
+// inherits it rather than having to remember it — there is none but the tests yet. The writer
+// refuses exactly what the reader refuses: a record that could be written but never read would
+// take a worktree's enforcement away silently.
+function assertIds(root, runId, taskId) {
+  if (!isContained(path.join(root, '.teammates'), runId)) {
+    throw new Error(`--run ${runId} escapes the run directory`)
   }
+  if (!isSegment(path.join(root, '.teammates'), taskId)) {
+    throw new Error(`--task ${taskId} escapes the run directory`)
+  }
+  if (!RUN_ID.test(runId)) throw new Error(`--run ${shown(runId)} is not a usable run id`)
+  if (!TASK_ID.test(taskId)) throw new Error(`--task ${shown(taskId)} is not a usable task id`)
 }
 
 // The record's address IS its worktree. Hashing the normalised path gives a fixed-length,
@@ -188,25 +237,28 @@ export function indexDir(root) {
 // record stays — nothing deletes records, and nothing needs to, because no reader enumerates
 // them any more. A stale record is only reachable by asking about the exact directory it names.
 export async function writeLocation(root, runId, taskId, { worktree, branch }) {
-  assertSegment(path.join(root, '.teammates'), runId, '--run')
-  assertSegment(path.join(root, '.teammates'), taskId, '--task')
-  const key = worktreeKey(worktree)
-  if (key === '') throw new Error(`--worktree ${worktree} is not a path a record can name`)
+  assertIds(root, runId, taskId)
+  // The SAME predicate the reader applies. Without it the writer accepted a relative or UNC
+  // spelling, keyed it by the resolved path, reported success — and the reader then rejected the
+  // stored value, so the record answered for nothing while having replaced the good record for
+  // that directory. A worktree that had enforcement lost it, silently, on a successful write.
+  if (!isLocalAbsolute(worktree)) {
+    throw new Error(`--worktree ${shown(worktree)} is not a path a record can name`)
+  }
+  // Stored normalised, not raw, so the value on disk is the one the key was computed from and
+  // the two cannot disagree about which directory this record is for.
+  const normalised = normaliseWorktree(worktree)
+  const key = worktreeKey(normalised)
+  if (key === '') throw new Error(`--worktree ${shown(worktree)} is not a path a record can name`)
   const dir = indexDir(root)
   await mkdir(dir, { recursive: true })
   const target = path.join(dir, `${key}.json`)
   // Unique temp name, then rename: a concurrent reader never sees a half-written record.
   const tmp = `${target}.${process.pid}.${Math.floor(performance.now() * 1000)}.tmp`
-  await writeFile(tmp, `${JSON.stringify({ runId, taskId, branch, worktree })}\n`, 'utf8')
+  await writeFile(tmp, `${JSON.stringify({ runId, taskId, branch, worktree: normalised })}\n`, 'utf8')
   await rename(tmp, target)
   return target
 }
-
-// A task id is spent as `complete --task <id>` by the consumer this returns to, so it must not
-// be able to look like anything but an id. `isSegment` already keeps it inside one directory;
-// this keeps it out of an argument parser — a leading dash is rejected so `--force` or `-rf`
-// can never arrive as a task id — and bounds its length.
-const TASK_ID = /^[A-Za-z0-9._][A-Za-z0-9._-]{0,63}$/
 
 // Returns { runId, taskId, branch } for the location record naming `worktree`, or null.
 // Reads exactly one file, whose name is derived from the query, so there is no directory to
@@ -234,13 +286,19 @@ export async function findTaskByWorktree(root, worktree, { maxRecordBytes = MAX_
     // it does not exist on win32, where 0 leaves the flags unchanged.
     handle = await open(path.join(indexDir(root), `${key}.json`), O_RDONLY | O_NONBLOCK)
     const info = await handle.stat()
-    // isFile() is unobservable on win32 — the read of a directory fails anyway — and its real
-    // subject is the POSIX FIFO, pinned by a test that runs only there. Stated rather than
-    // implied: on this platform deleting it changes no outcome.
+    // NO TEST ON ANY PLATFORM OBSERVES THIS GUARD, and the reason is measured rather than
+    // assumed: libuv opens a writer-less FIFO without blocking (node resolves immediately where
+    // `cat` hangs), and such a FIFO then fstats to size 0, so the bounded read below reads
+    // nothing and `JSON.parse('')` throws into the catch — producing exactly the null this line
+    // produces. A directory fails its read for the same reason on both platforms. It stays as
+    // defence in depth: it is one field of an fstat already performed, and it is the only thing
+    // here that would still hold if a future edit made the read blocking or forgiving. An
+    // earlier version of this comment claimed a POSIX test pinned it; that claim was false.
     if (!info.isFile()) return null
-    // Likewise redundant with the bounded read below, which truncates an oversized file into
-    // unparseable JSON and returns null by that route. Mutation confirms no test separates
-    // them. It stays because rejecting on the fstat'd size avoids reading any of a huge file.
+    // LOAD-BEARING, unlike the line above, and an earlier comment calling it redundant was
+    // wrong: the bounded read only truncates: `{"…valid record…"}` followed by 200 kB of spaces
+    // parses perfectly from its first bytes, so without this an oversized file is accepted in
+    // full. Rejecting on the fstat'd size is what makes the cap real.
     if (info.size > maxRecordBytes) return null
     // Bounded read, not handle.readFile: readFile drains to EOF regardless of what fstat said,
     // so a file that grows between the two would defeat the size check entirely and the cap
@@ -254,10 +312,11 @@ export async function findTaskByWorktree(root, worktree, { maxRecordBytes = MAX_
 
     // Cheap string validation before anything touches the filesystem again. Both ids now arrive
     // from file CONTENT — runId used to be a directory name and could not lie; under this layout
-    // it can — so both get the same treatment, and a failure is a skip rather than a throw.
-    if (!isSegment(indexDir(root), record.runId)) return null
-    if (!isSegment(indexDir(root), record.taskId)) return null
-    if (!TASK_ID.test(record.taskId)) return null
+    // it can — so each is checked for containment AND for being a usable token. They are not
+    // checked identically: a run id may nest (`2026/substop`), a task id may not, which is why
+    // there are two predicates rather than one applied twice. A failure is a skip, not a throw.
+    if (!isRunId(root, record.runId)) return null
+    if (!isTaskId(root, record.taskId)) return null
 
     // The record must name a worktree that hashes back to the file it was found in. This
     // replaces the old filename-equality check and is strictly stronger: a forged record has to
