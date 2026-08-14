@@ -337,8 +337,11 @@ test('writeLocation refuses ids that are contained but illegal as ref components
       'a b', 'a\nb', // space and control bytes
       'a~b', 'a^b', 'a:b', 'a?b', 'a*b', 'a[b', 'a\\b', // git's forbidden set
       'a@{b', // reflog syntax
-      'sub//substop', 'sub/', 'sub/.hidden/x', 'sub/x.lock', 'trailing.',
+      'sub//substop', 'sub/', 'sub/.hidden/x', 'sub/x.lock',
       '.leading', 'x'.repeat(256),
+      // `trailing.` is deliberately ABSENT: it is a valid mid-refname component, git accepts
+      // `teammates/trailing./T1`, and init-run creates such runs. Refusing it here would abort
+      // `locate` for a working run. It is asserted as ACCEPTED in its own test below.
     ]
     for (const runId of badRunIds) {
       await assert.rejects(
@@ -447,38 +450,110 @@ test('a rejected id is never interpolated raw into the error that reports it', a
   })
 })
 
-// isLocalAbsolute was applied to the RAW value while the NORMALISED one is what gets stored and
-// what the reader checks. A symlink whose target is a UNC share splits the two: the write
-// succeeds, and every read of the record it wrote returns null. Written, unreadable, forever.
-test('writeLocation refuses a worktree whose normalised form the reader would reject', async (t) => {
+/// The validator and the printer must agree about which bytes are dangerous. They did not: the
+// printer escaped the C1 block and U+2028/U+2029 while the validator certified them, so an id
+// carrying U+009B — CSI, a control introducer that needs no ESC — was returned verbatim to a
+// consumer that spends it as argv and prints it.
+test('an id carrying C1 or line-separator code points is refused, not just escaped when printed', async () => {
   await withTempRoot(async (root) => {
-    const link = path.join(root, 'unc-link')
-    try {
-      // A junction whose target is a UNC path to this host's own admin share.
-      execFileSync('cmd.exe', ['/c', 'mklink', '/J', link, '\\\\localhost\\C$\\Users'], { stdio: 'ignore' })
-    } catch (err) {
-      t.skip(`UNC junction unavailable here: ${err.code ?? err.message}`)
-      return
+    const worktree = path.join(root, 'wt', 'agent-1')
+    const csi = String.fromCharCode(0x9b)
+    const nel = String.fromCharCode(0x85)
+    const lineSep = String.fromCharCode(0x2028)
+    const paraSep = String.fromCharCode(0x2029)
+    const del = String.fromCharCode(127)
+    for (const hostile of [`T2${csi}K`, `run${nel}x`, `a${lineSep}b`, `a${paraSep}b`, `a${del}b`]) {
+      await assert.rejects(
+        writeLocation(root, hostile, 'T1', { worktree, branch: 'b' }),
+        /is not a usable run id/,
+        `runId ${JSON.stringify(hostile)} was accepted`,
+      )
+      await assert.rejects(
+        writeLocation(root, 'r1', hostile, { worktree, branch: 'b' }),
+        /is not a usable task id/,
+        `taskId ${JSON.stringify(hostile)} was accepted`,
+      )
+      // And the reader refuses a hand-written record carrying the same bytes.
+      await plant(root, worktree, { runId: 'r1', taskId: hostile, worktree, branch: 'b' })
+      assert.equal(await findTaskByWorktree(root, worktree), null, `taskId ${JSON.stringify(hostile)} was returned`)
+      await plant(root, worktree, { runId: hostile, taskId: 'T1', worktree, branch: 'b' })
+      assert.equal(await findTaskByWorktree(root, worktree), null, `runId ${JSON.stringify(hostile)} was returned`)
     }
-    assert.equal(isLocalAbsolute(link), true, 'the raw spelling must look local, or this pins nothing')
-    const normalised = normaliseWorktree(link)
-    if (isLocalAbsolute(normalised)) {
-      t.skip('this host does not resolve the junction to a UNC path')
-      return
+  })
+})
+
+// Git's rule 3 forbids `..` ANYWHERE in a refname, not merely as a whole component. Beyond the
+// refname being rejected by git, `..` is revision-range syntax, so `teammates/a..b/T1` parses as
+// a range rather than failing outright in a consumer that accepts ranges.
+test('an id containing .. anywhere is refused at both ends', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    for (const bad of ['a..b', 'x..y', 'a...b', 'sub..stop']) {
+      await assert.rejects(
+        writeLocation(root, bad, 'T1', { worktree, branch: 'b' }),
+        /is not a usable run id/,
+        `runId ${JSON.stringify(bad)} was accepted`,
+      )
+      await assert.rejects(
+        writeLocation(root, 'r1', bad, { worktree, branch: 'b' }),
+        /is not a usable task id/,
+        `taskId ${JSON.stringify(bad)} was accepted`,
+      )
+      await plant(root, worktree, { runId: bad, taskId: 'T1', worktree, branch: `teammates/${bad}/T1` })
+      assert.equal(await findTaskByWorktree(root, worktree), null, `runId ${JSON.stringify(bad)} was returned`)
     }
+    // The multi-component spellings git also refuses.
+    for (const bad of ['a..b/c', 'a/b..c']) {
+      await assert.rejects(writeLocation(root, bad, 'T1', { worktree, branch: 'b' }), /is not a usable run id/)
+    }
+  })
+})
+
+// A trailing `.` is a WHOLE-REFNAME rule. `init-run --run 'trailing.'` exits 0 and
+// `git check-ref-format refs/heads/teammates/trailing./T1` exits 0, so refusing it here aborted
+// `locate` for a fully working run — the fail-closed direction the ref rule must not cause. The
+// same character IS refused at the end of a task id, which is where the refname actually ends.
+test('a trailing dot is allowed mid-refname and refused at its end', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    await writeLocation(root, 'trailing.', 'T1', { worktree, branch: 'teammates/trailing./T1' })
+    assert.deepEqual(await findTaskByWorktree(root, worktree), {
+      runId: 'trailing.',
+      taskId: 'T1',
+      branch: 'teammates/trailing./T1',
+    })
     await assert.rejects(
-      writeLocation(root, 'r1', 'T1', { worktree: link, branch: 'teammates/r1/T1' }),
-      /which no record can name/,
+      writeLocation(root, 'r1', 'T1.', { worktree, branch: 'b' }),
+      /is not a usable task id/,
     )
   })
 })
 
+// The pair is validated as one refname, which is the thing git checks and the string a consumer
+// hands to `git checkout -B`. Neither id is a refname on its own.
+test('a runId and taskId that individually pass but compose an invalid branch are refused', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    const composed = (runId, taskId) => `teammates/${runId}/${taskId}`
+    // `x.` + `.lock` composes `teammates/x./.lock`, whose last component begins with a dot and
+    // ends with .lock; each id is checked again as part of the whole name.
+    assert.equal(composed('x.', 'y'), 'teammates/x./y')
+    await assert.rejects(
+      writeLocation(root, 'r1', '.hidden', { worktree, branch: 'b' }),
+      /is not a usable task id|do not name a valid branch/,
+    )
+  })
+})
+
+// The writer must refuse exactly what the reader refuses. A reader-dependent spelling recorded
+// here would name whatever directory the writer happened to stand in; a UNC one would be stored
+// and then rejected on every read, leaving a worktree silently unenforced.
 test('writeLocation refuses a worktree the reader could never accept', async () => {
   await withTempRoot(async (root) => {
-    for (const worktree of ['', null, undefined, 42, '.', 'relative/path', '\\\\host\\share\\wt']) {
+    for (const worktree of ['', null, undefined, 42, '.', 'relative/path', './wt/x', '\\\\host\\share\\wt', '//host/share/wt']) {
       await assert.rejects(
         writeLocation(root, 'r1', 'T1', { worktree, branch: 'b' }),
-        /is not a path a record can name/,
+        /is not a path a record can name|which no record can name/,
         `worktree ${JSON.stringify(worktree)} was accepted by the writer`,
       )
     }

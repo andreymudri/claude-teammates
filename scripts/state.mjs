@@ -139,9 +139,19 @@ export function normaliseWorktree(p, { resolveLinks = true } = {}) {
 // with a shell can write a file under `.teammates/` — and a UNC path to an unreachable host is
 // the measured stall above. Ten such records would keep every stop inside this lookup for
 // minutes, past the hook's own timeout, which switches enforcement off for the whole run at no
-// cost to whoever wrote them. A plain local absolute path cannot do that. Residual, stated
-// rather than fixed: a drive letter mapped to an unreachable share is a local-looking spelling
-// and still pays the stall, and nothing cheap tells the two apart.
+// cost to whoever wrote them. What this predicate buys is that the obvious network spellings —
+// `//host/share` and `\\host\share` — never reach realpath at all.
+//
+// RESIDUAL, stated rather than fixed, and NOT win32-only, which an earlier version of this
+// comment implied by naming only the win32 case and claiming "a plain local absolute path
+// cannot do that". Any path that merely looks local while resolving over the network still pays
+// the stall: on win32 a drive letter mapped to an unreachable share, and on POSIX an automounter
+// path such as `/net/<host>/wt`, or any autofs or NFS mount point, which is an ordinary absolute
+// path by every syntactic test. Nothing cheap separates those from local directories, and
+// rejecting them by prefix would reject ordinary paths, so the residual stands on both platforms.
+// UNVERIFIED on the POSIX side: this host is win32 with no autofs, so that half is reasoned from
+// how autofs behaves rather than measured. Confirming it needs a Linux host with an autofs map
+// pointing at an unreachable server, then timing `normaliseWorktree('/net/<unreachable>/wt')`.
 //
 // Exported so the classification is testable on its own: as a private helper its only witness
 // was the shape of its call site, which pins the name and not one decision it makes.
@@ -194,19 +204,27 @@ function isSegment(baseDir, value) {
 // which would abort `locate` and take enforcement off that entire run.
 //
 // THIS IS A SUBSET of `git check-ref-format`, which is the authority. Implemented: no empty
-// component, none equal to `.` or `..`, none beginning with `.` or ending with `.lock`, no ASCII
-// control byte or DEL, no space, none of `~ ^ : ? * [ \`, no `@{`, no `//`, no trailing `/` or
-// `.`. Deliberately NOT implemented, because nothing here generates them: the `refs/` prefix
-// rules, the lone-`@` rule, and the `--normalize` / `--allow-onelevel` variants. Two additions
-// git does not make and this project needs: no leading `-`, because the id reaches argv, and a
-// length bound.
-const REF_FORBIDDEN = new RegExp('[\\u0000-\\u001f\\u007f ~^:?*\\[\\\\]')
+// component, none equal to `.` or `..`, none beginning with `.` or ending with `.lock`, no `..`
+// anywhere, no ASCII control byte or DEL, no space, none of `~ ^ : ? * [ \`, no `@{`, no `//`,
+// and no refname ending in `/` or `.`. Deliberately NOT implemented, because nothing here
+// generates them: the `refs/` prefix rules, the lone-`@` rule, and the `--normalize` /
+// `--allow-onelevel` variants. Three additions git does not make and this project needs: no
+// leading `-`, because the id reaches argv; a length bound; and the C1 block plus U+2028/U+2029,
+// which git permits in a refname but which this project has no use for and which the printer in
+// this same file already classifies as unsafe. That last one is why the class below is shared
+// with `shown()` — one definition, so the validator and the printer cannot disagree about which
+// bytes are dangerous, which they did: an id carrying U+009B (CSI, a control introducer needing
+// no ESC) was certified usable and returned verbatim while being escaped on the way to stderr.
+const CONTROL_CHARS = '\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029'
+const REF_FORBIDDEN = new RegExp('[' + CONTROL_CHARS + ' ~^:?*\\[\\\\]')
 
-// Three clauses below are provably redundant, and mutation testing says so rather than my
-// judgement: `.` and `..` are already refused by the leading-dot rule, and the empty-component
-// rule is what refuses `//`. They are written out anyway because this function's contract is
-// "the git rule", and a reader checking it against `git check-ref-format` should find each
-// clause rather than have to re-derive which other clause happens to cover it.
+// Declared redundancies, verified by mutation rather than asserted: the `''`, `'.'` and `'..'`
+// equality tests, the `//` test, the trailing-`/` test and `allowSeparator: false` are each
+// subsumed by another clause — `''` and `//` by each other, `.` and `..` by the leading-dot and
+// no-`..` rules, a trailing `/` by the empty final component it produces, and a nested task id
+// by `isSegment` beside the call. None is load-bearing on its own. They are written out anyway
+// because this function's contract is "the git rule", and a reader checking it against
+// `git check-ref-format` should find each clause rather than re-derive which one covers it.
 function isRefComponent(component) {
   if (component === '' || component === '.' || component === '..') return false
   if (component.startsWith('.') || component.endsWith('.lock')) return false
@@ -214,11 +232,17 @@ function isRefComponent(component) {
   return !REF_FORBIDDEN.test(component)
 }
 
-function isRefPath(value, { maxLength, allowSeparator }) {
+// `terminal` says whether this value ends the refname it will be part of. A trailing `.` is a
+// WHOLE-REFNAME rule, not a component rule: `teammates/trailing./T1` is a name git accepts and
+// init-run can create, so applying it to the runId refused a fully working run and would have
+// aborted `locate` for every teammate in it. It does apply to a task id, which is terminal.
+function isRefPath(value, { maxLength, allowSeparator, terminal }) {
   if (typeof value !== 'string' || value === '') return false
   if (value.length > maxLength) return false
   if (value.startsWith('-')) return false
-  if (value.endsWith('/') || value.endsWith('.')) return false
+  if (value.includes('..')) return false
+  if (value.endsWith('/')) return false
+  if (terminal && value.endsWith('.')) return false
   if (value.includes('//')) return false
   const components = value.split('/')
   if (!allowSeparator && components.length !== 1) return false
@@ -226,22 +250,30 @@ function isRefPath(value, { maxLength, allowSeparator }) {
 }
 
 // A run id may nest, because init-run creates nested ones. A task id is exactly one component.
-// The trailing-slash shape a single-segment path check cannot see — `T1/` joins to the same
-// directory as `T1`, so containment accepts it — is caught by the no-trailing-`/` rule above,
-// which means `allowSeparator: false` is itself redundant with `isSegment` here; it stays so the
-// predicate reads correctly on its own if the path check beside it ever changes. The bounds are
-// this project's choice rather than git's, and are deliberately generous.
+// The bounds are this project's choice rather than git's, and are deliberately generous.
 const isRunId = (root, runId) => isContained(path.join(root, '.teammates'), runId)
-  && isRefPath(runId, { maxLength: 255, allowSeparator: true })
+  && isRefPath(runId, { maxLength: 255, allowSeparator: true, terminal: false })
 const isTaskId = (root, taskId) => isSegment(path.join(root, '.teammates'), taskId)
-  && isRefPath(taskId, { maxLength: 128, allowSeparator: false })
+  && isRefPath(taskId, { maxLength: 128, allowSeparator: false, terminal: true })
+
+// The pair is also checked as ONE refname, which is the thing git actually validates and the
+// only place a whole-refname rule belongs. Neither id is a refname by itself.
+//
+// This check is REDUNDANT as the rules stand, and mutation says so: with both ids validated, no
+// pair composes an invalid name — a `..` cannot straddle the join because neither id may end or
+// begin with `.`, an empty component cannot appear because neither id may be empty or end in
+// `/`, and the terminal rules already apply to the task id, which is the end of the name. It
+// stays because it is the assertion that remains true if either id rule is later relaxed, and
+// because a name git refuses would come back to a teammate as remediation it cannot carry out.
+const isRefName = (name) => isRefPath(name, { maxLength: 512, allowSeparator: true, terminal: true })
+const namesAValidBranch = (runId, taskId) => isRefName(taskBranchName(runId, taskId))
 
 // EVERY interpolation of an untrusted id into a message goes through this, the containment
 // messages included: an id crafted to fail containment is precisely the one carrying the escape
 // sequence, and while these guards ran in the other order it reached the throw verbatim.
-// JSON.stringify quotes and escapes C0; it passes DEL, the C1 block (U+009B is CSI, a control
-// introducer needing no ESC), and U+2028/U+2029 through raw, so those are escaped after it.
-const UNSAFE_TO_PRINT = new RegExp('[\\u007f-\\u009f\\u2028\\u2029]', 'g')
+// JSON.stringify quotes and escapes C0; it passes DEL, the C1 block and U+2028/U+2029 through
+// raw, so the shared class above is escaped after it.
+const UNSAFE_TO_PRINT = new RegExp('[' + CONTROL_CHARS + ']', 'g')
 const shown = (value) => JSON.stringify(String(value))
   .replace(UNSAFE_TO_PRINT, (c) => `\\u${c.codePointAt(0).toString(16).padStart(4, '0')}`)
 
@@ -258,6 +290,9 @@ function assertIds(root, runId, taskId) {
   }
   if (!isRunId(root, runId)) throw new Error(`--run ${shown(runId)} is not a usable run id`)
   if (!isTaskId(root, taskId)) throw new Error(`--task ${shown(taskId)} is not a usable task id`)
+  if (!namesAValidBranch(runId, taskId)) {
+    throw new Error(`--run ${shown(runId)} and --task ${shown(taskId)} do not name a valid branch`)
+  }
 
 }
 
@@ -284,12 +319,19 @@ export async function writeLocation(root, runId, taskId, { worktree, branch }) {
   assertIds(root, runId, taskId)
   // The SAME predicate the reader applies, on BOTH the value handed in and the value stored.
   // The raw check keeps a reader-dependent spelling (`.`, `relative/x`) from being recorded as
-  // whatever directory the writer happened to stand in. The check on the NORMALISED value is
-  // the one that matters for readability, and it was missing: a symlink whose target is a UNC
-  // share is `isLocalAbsolute` as written, so the write succeeded and returned a path, while
-  // the stored `//host/share/...` is not `isLocalAbsolute`, so every later read returned null —
-  // written successfully, unreadable forever, which is the exact outcome this guard exists to
-  // prevent. Normalising first and re-checking closes it, whatever the link resolves to.
+  // whatever directory the writer happened to stand in, and is pinned by test.
+  //
+  // The check on the NORMALISED value is UNPINNED, and honestly so: no test in this suite
+  // exercises it, because no input measured here reaches it. It exists for a link whose target
+  // is a UNC share, where the raw spelling looks local and the stored one does not — but
+  // `realpath` only returns the UNC form if that share is REACHABLE, and when it is not it
+  // throws and normaliseWorktree falls back to the local link path. Measured on this host:
+  // `mklink /J` refuses a UNC target outright ("local volumes are required"), `mklink /D`
+  // creates the link but `realpathSync.native` then throws ENOENT, so the normalised value
+  // stays local. The POSIX construction fails for the same reason — a dangling `//host/share`
+  // target throws — and Linux collapses a leading `//` anyway. Reaching this line needs a host
+  // with an ACCESSIBLE network share to link to; the guard stays because it costs one call and
+  // is the only thing standing between a successful write and a permanently unreadable record.
   if (!isLocalAbsolute(worktree)) {
     throw new Error(`--worktree ${shown(worktree)} is not a path a record can name`)
   }
@@ -368,6 +410,10 @@ export async function findTaskByWorktree(root, worktree, { maxRecordBytes = MAX_
     // there are two predicates rather than one applied twice. A failure is a skip, not a throw.
     if (!isRunId(root, record.runId)) return null
     if (!isTaskId(root, record.taskId)) return null
+    // And the pair as one refname, which is what git validates and what a consumer will hand to
+    // `git checkout -B`. A name git refuses would be printed back as remediation the teammate
+    // cannot carry out, once per stop up to the block cap.
+    if (!namesAValidBranch(record.runId, record.taskId)) return null
 
     // The record must name a worktree that hashes back to the file it was found in. This
     // replaces the old filename-equality check and is strictly stronger: a forged record has to
