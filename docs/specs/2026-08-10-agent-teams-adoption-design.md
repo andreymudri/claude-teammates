@@ -127,11 +127,24 @@ itself, and `teammates/<runId>/<taskId>` exists only once the implementer create
 resolution would miss precisely the teammate that did nothing, which is the case the hook exists
 for. So this design adds a location record, addressed by the worktree it describes rather than
 composed from the run and task ids: the implementer contract and the dispatched brief gain a step
-running `cli.mjs locate --run <runId> --task <taskId>` as the first act after checkout — no path
-argument, because the command files the record under the worktree it is run in — and the
+running `cli.mjs locate --run <runId> --task <taskId>` as the first act after checkout, and the
 handler maps `cwd` back to a task through it. A `cwd` that matches no
 record is allowed to stop — and then fails the gate, which is the correct order: this hook is an
 early catch, never the thing that decides.
+
+That invocation carries no path, and the command therefore resolves two paths of its own that must
+not be conflated. The **worktree** the record describes is the directory `locate` is run in — that
+is the whole point of taking no path argument, and it is a statement about the command's CLI
+surface, not about `state.mjs`'s `writeLocation`, which is given a worktree and phrases its
+rejections as `--worktree …`. The **store** the record is filed in is `.teammates/index/` beneath
+the **main** repository root, and `locate` must derive that root the way the handler derives its
+own — `git rev-parse --path-format=absolute --git-common-dir` and take the parent, as **Three
+arguments the hook is not given** sets out below. It must not inherit the CLI's shared default,
+`flags.root ?? process.cwd()` (`scripts/cli.mjs:1258`): run inside a teammate's worktree that
+files the record under *that* worktree's `.teammates/`, which is gitignored, so the directory
+appears and the command exits 0 with nothing to notice. The handler then computes the same key
+against the main root and finds no file. Every teammate, every run: the stop is allowed with no
+check, and — as with every other way this can go inert — it looks exactly like a clean no-op.
 
 ### What it runs
 
@@ -236,31 +249,40 @@ the phase gate remains the thing that decides.
   then resolves to whatever that record says.
 
   Keying on the worktree alone, with nothing pruning the store, has a second consequence worth
-  stating as a limit even where no attacker is involved: worktree paths are reused. A record left
-  behind by a finished run resolves the next occupant of that directory to the previous occupant's
-  task — enforcement against the wrong task, in a wrong run.
+  stating as a limit even where no attacker is involved: worktree paths are reused, so a record
+  left behind by a finished run is still the answer for that directory. It does not follow that
+  the next occupant is misresolved as a matter of course — the `locate` step above runs first and
+  overwrites the stale record, so a teammate that follows its brief resolves to itself. The limit
+  bites the teammate that skipped the step, which is exactly the teammate this hook exists to
+  catch: instead of matching no record and being allowed through, it is judged against the previous
+  occupant's task, in a run that has finished.
 
-  The `branch` field deserves separate statement, because it is the one that needs no mismatch to
-  do damage. A record that satisfies the key/content check above — one naming the very directory it
-  is filed under — still hands an attacker-chosen ref to whatever consumes it. Through the handler
-  specified here that alone is enough: a `branch`
-  naming any ref that exists makes the branch precheck succeed, so a teammate that created no
-  branch is waved straight past — the do-nothing case this entire design exists to catch. Worse, a
-  `branch` naming a rival's ref gets the victim blocked and then told, by the handler's own
-  remediation text, to `git checkout -B <that ref>` and commit, so a compliant teammate is walked
-  into force-moving another task's ref. The requirement that follows: the handler must not treat a
-  record's branch as an identity. It must check that the ref is one that record could legitimately
-  name before believing it, and fall back to the conventional name rather than trusting a supplied
-  one.
+  The ref a record resolves to deserves separate statement, because the obvious half of it is
+  already closed at the reader and the hazard survives that anyway. The closed half: a record's
+  `branch` is returned only when it equals the conventional name built from that record's own
+  `runId` and `taskId`, and drops to `null` otherwise (`scripts/state.mjs:482`), so a record naming
+  `master`, or a rival's ref, yields no branch at all and the caller recomputes the conventional
+  name instead. A supplied branch is not an identity.
 
-  Consequences reachable from that include, and are not limited to: a teammate leaving itself
-  unenforced, so its stop is allowed with no check; a *different* teammate left unenforced, its
-  record deleted or overwritten with ids no check will reject; and a teammate judged against a task
-  that is not its own, because the record filed under its worktree describes someone else's work.
-  Which of these a given forgery produces depends on the file it writes and on which worktree that
-  file is addressed to, and this list is not offered as exhaustive — three earlier versions of this
-  paragraph each named a single direction of harm and each was falsified by an attack shape it had
-  not considered.
+  What remains is that the conventional name is built from the ids, and the ids are the fields a
+  forged record chooses freely. A record planted under the victim's worktree naming another task's
+  `runId` and `taskId` resolves to that task's ref through the honest construction rather than
+  around it, and the two consequences are the ones that made this worth stating: a teammate waved
+  past on a branch it never created — the do-nothing case this entire design exists to catch — and
+  a compliant teammate blocked and then told, by the handler's own remediation text, to
+  `git checkout -B <that ref>` and commit, i.e. walked into force-moving another task's ref. The
+  requirement that follows lands on the remediation text rather than on the branch check: a ref
+  derived from a record is only as trustworthy as the record, so the handler may name it in a
+  diagnosis and must not instruct anyone to move it.
+
+  Consequences reachable from record forgery include, and are not limited to: a teammate leaving
+  itself unenforced, so its stop is allowed with no check; a *different* teammate left unenforced,
+  its record deleted or overwritten with ids no check will reject; and a teammate judged against a
+  task that is not its own, because the record filed under its worktree describes someone else's
+  work. Which of these a given forgery produces depends on the file it writes and on which worktree
+  that file is addressed to, and this list is not offered as exhaustive — three earlier versions of
+  this paragraph each named a single direction of harm and each was falsified by an attack shape it
+  had not considered.
 
   The bound that does hold, and the only one worth resting on, is that **none of it produces a
   false gate PASS**, because the verdict is recomputed from git: `deriveContext` resolves base, run,
