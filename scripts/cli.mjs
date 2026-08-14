@@ -666,7 +666,7 @@ function idRefusal(flagName, value, { nested, maxBytes }) {
     if (component === '' || component === '.') return `${flagName} ${show(value)} has an empty or '.' component`
     // The id is spent as argv, so no component may look like an option.
     if (component.startsWith('-')) return `${flagName} ${show(value)} has a component starting with '-', which would read as an option`
-    const bad = ''
+    const bad = offendingIdChar(component)
     if (bad !== '') {
       // Escaped, always: this rule refuses several characters that render as nothing, and a
       // refusal that silently drops the character it is complaining about names nothing.
