@@ -449,9 +449,13 @@ export async function findTaskByWorktree(root, worktree, { maxRecordBytes = MAX_
     if (!isTaskId(root, record.taskId)) return null
 
     // The record must name a worktree that hashes back to the file it was found in. This
-    // replaces the old filename-equality check and is strictly stronger: a forged record has to
-    // name the very directory whose key it was filed under, so it can only ever answer for that
-    // one directory — it cannot be planted to answer for someone else's.
+    // replaces the old filename-equality check and is strictly stronger, but state its reach
+    // exactly: it buys one thing only, that a record cannot be filed under key A while naming
+    // directory B. It does NOT stop a record being planted to answer for a directory its writer
+    // does not own — anyone who knows a victim's worktree path can file under the hash of that
+    // path and name it honestly, satisfy this check, and win by being the newest writer. That
+    // wider limit is the one spelled out near `readFixRounds` below, and this check does not
+    // narrow it.
     //
     // `isLocalAbsolute` first, because the hash below realpaths a value the record supplies:
     // a UNC path to an unreachable host blocks the thread for tens of seconds, and a relative
@@ -471,14 +475,16 @@ export async function findTaskByWorktree(root, worktree, { maxRecordBytes = MAX_
       runId: record.runId,
       taskId: record.taskId,
       // `branch` is the field that survives an honest taskId and an honest worktree, so nothing
-      // cross-checked above constrains it. Unvalidated it is a lever on the caller's git: any
-      // existing ref waves past a teammate that created no branch at all, and a rival's ref
-      // turns a hook's remediation text into an instruction to force-move another task's
-      // branch. A record may name exactly one branch — the one this run gives this task — and
-      // anything else drops to null rather than discarding the record, because the record that
-      // legitimately carries a non-canonical branch is the teammate that never checked its task
-      // branch out, i.e. precisely the do-nothing case the hook exists to catch. Null is what
-      // the caller falls back on, and it recomputes the same name from runId and taskId.
+      // cross-checked above constrains it. Unvalidated it is a lever on the caller: any
+      // existing ref waves past a teammate that created no branch at all, and a ref of the
+      // record's choosing reaches the caller's remediation text, which then tells a blocked
+      // teammate to create and commit under another task's name — its work lands there and the
+      // gate reads those commits as that task's. A record may name exactly one branch — the one
+      // this run gives this task — and anything else drops to null rather than discarding the
+      // record, because the record that legitimately carries a non-canonical branch is the
+      // teammate that never checked its task branch out, i.e. precisely the do-nothing case the
+      // hook exists to catch. Null is what the caller falls back on, and it recomputes the same
+      // name from runId and taskId.
       branch: record.branch === taskBranchName(record.runId, record.taskId) ? record.branch : null,
     }
   } catch {
