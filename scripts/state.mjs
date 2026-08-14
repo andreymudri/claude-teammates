@@ -212,9 +212,15 @@ function isSegment(baseDir, value) {
 // open — every Unicode revision can add another invisible or confusable code point, and a rule
 // that has to be updated to stay correct will not be.
 //
-// Ids are normalised to NFC first, so that one rendering has one representation. Without it
-// `cafe` + combining acute and the precomposed `café` are two different ids that no one can
-// tell apart, and so are the two orderings of a doubly-marked letter.
+// An id that is not already in NFC is REFUSED rather than folded, so that one rendering has one
+// representation without this file rewriting anyone's input. Folding here would have been the
+// only normalisation in the repository — `init-run` creates the run directory byte-exactly and
+// `taskBranchName` builds the ref byte-exactly — so a folded id would name a directory that does
+// not exist and a branch git does not hold.
+//
+// STATED LIMIT, not fixed: this addresses invisibility, not confusability. Latin `T1` and
+// Cyrillic `Т1` are both accepted and render identically. A single-script restriction would be
+// the fix and would refuse legitimate multilingual ids, so the trade is taken deliberately.
 //
 // The rule refuses `;`, which `init-run` currently accepts. THE STORE'S RULE IS AUTHORITATIVE
 // and `init-run` (scripts/cli.mjs, a later task's file) has to adopt it; until it does, such a
@@ -245,33 +251,36 @@ function isIdComponent(component) {
 
 // `..` is checked over the WHOLE value rather than per component, because it is revision-range
 // syntax wherever it appears: `a..b` inside one component matters as much as a `..` component.
-function isIdPath(value, { maxBytes, allowSeparator }) {
+//
+// A non-NFC id is REFUSED, not folded. Folding was worse than the problem: nothing else in the
+// repository normalises — `init-run` creates `.teammates/<runId>/` byte-exactly and
+// `taskBranchName` builds the ref byte-exactly — so a folded id names a directory that does not
+// exist and recomputes a branch that is not the one git holds. Refusing is a closed rule: it
+// changes nothing behind the caller's back, and it cannot drift from consumers that do not
+// normalise. The caller keeps whichever spelling it chose, or is told to pick one.
+function isIdPath(value, { maxBytes }) {
   if (typeof value !== 'string' || value === '') return false
   // Bytes, matching how the record's own size is measured, so a non-ASCII id is bounded by what
-  // it costs on disk rather than by how JavaScript counts its characters.
+  // it costs on disk rather than by how JavaScript counts its characters. Checked against the
+  // same bytes that get stored, which is only true because nothing rewrites the value.
   if (Buffer.byteLength(value, 'utf8') > maxBytes) return false
+  if (value.normalize('NFC') !== value) return false
   if (value.includes('..')) return false
-  const components = value.split('/')
-  // A task id names one file in one directory and never descends.
-  if (!allowSeparator && components.length !== 1) return false
-  return components.every(isIdComponent)
+  return value.split('/').every(isIdComponent)
 }
 
-// Ids arrive from a CLI flag or from file content; normalising here means every later
-// comparison, hash and stored byte sees the same form.
-const toNfc = (value) => (typeof value === 'string' ? value.normalize('NFC') : value)
-
-// A run id may nest, because init-run creates nested ones. A task id is exactly one component.
+// A run id may nest, because init-run creates nested ones. A task id is one component, which
+// `isSegment` below is what enforces.
 const isRunId = (root, runId) => isContained(path.join(root, '.teammates'), runId)
-  && isIdPath(runId, { maxBytes: MAX_RUN_ID_BYTES, allowSeparator: true })
+  && isIdPath(runId, { maxBytes: MAX_RUN_ID_BYTES })
 const isTaskId = (root, taskId) => isSegment(path.join(root, '.teammates'), taskId)
-  && isIdPath(taskId, { maxBytes: MAX_TASK_ID_BYTES, allowSeparator: false })
+  && isIdPath(taskId, { maxBytes: MAX_TASK_ID_BYTES })
 
-// A worktree path is not an id — it comes from the filesystem and may contain almost anything —
-// but it is still written into a record and printed in errors, so control characters are
-// refused. No real path on either platform contains them, and they are what makes a stored path
-// unreadable in a diagnostic and expensive in a serialised record.
-const CONTROL_CHARS = new RegExp('[\\u0000-\\u001f\\u007f-\\u009f]', 'u')
+// A worktree path is not an id — it comes from the filesystem, and both filesystems permit
+// bytes an id may not have, including DEL and the C1 range. Only C0 is refused: those cannot
+// appear in a path from any real source, and they are what makes a stored path undiagnosable
+// in an error message. The record's size is guaranteed by the record bound rather than here.
+const CONTROL_CHARS = new RegExp('[\\u0000-\\u001f]', 'u')
 
 // OUTPUT ESCAPING, deliberately independent of the id rule: this answers "is this safe to
 // print", it is applied to values that are not ids such as worktree paths, and it must stay
@@ -279,7 +288,7 @@ const CONTROL_CHARS = new RegExp('[\\u0000-\\u001f\\u007f-\\u009f]', 'u')
 // blank is escaped — a refusal message that silently drops the character it is complaining
 // about cannot be acted on.
 const UNPRINTABLE = new RegExp(
-  '[\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029\\u2800]|\\p{Cf}|\\p{Zs}|\\p{Zl}|\\p{Zp}'
+  '[\\u0000-\\u001f\\u007f-\\u009f\\u2800]|\\p{Cf}|\\p{Zs}|\\p{Zl}|\\p{Zp}'
   + '|\\p{Default_Ignorable_Code_Point}',
   'gu',
 )
@@ -322,8 +331,6 @@ export function indexDir(root) {
 // record stays — nothing deletes records, and nothing needs to, because no reader enumerates
 // them any more. A stale record is only reachable by asking about the exact directory it names.
 export async function writeLocation(root, runId, taskId, { worktree, branch }) {
-  runId = toNfc(runId)
-  taskId = toNfc(taskId)
   assertIds(root, runId, taskId)
   // The SAME predicate the reader applies, on BOTH the value handed in and the value stored.
   // The raw check keeps a reader-dependent spelling (`.`, `relative/x`) from being recorded as
@@ -438,10 +445,6 @@ export async function findTaskByWorktree(root, worktree, { maxRecordBytes = MAX_
     // it can — so each is checked for containment AND for being a usable token. They are not
     // checked identically: a run id may nest (`2026/substop`), a task id may not, which is why
     // there are two predicates rather than one applied twice. A failure is a skip, not a throw.
-    // Normalised before validating, so a record cannot smuggle a second spelling of an id past
-    // rules that were written for one form.
-    record.runId = toNfc(record.runId)
-    record.taskId = toNfc(record.taskId)
     if (!isRunId(root, record.runId)) return null
     if (!isTaskId(root, record.taskId)) return null
 

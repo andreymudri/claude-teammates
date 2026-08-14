@@ -23,6 +23,7 @@ import {
 } from '../scripts/state.mjs'
 
 const MAX_BRANCH_CODE_UNITS = 512
+const MAX_WORKTREE_TEST_BYTES = 32_767
 
 async function withTempRoot(fn) {
   const root = await mkdtemp(path.join(tmpdir(), 'tm-'))
@@ -870,34 +871,83 @@ test('a zero-width or variation selector on a letter is refused', async () => {
   })
 })
 
-// One rendering, one representation: without normalisation the decomposed and precomposed
-// spellings of the same word are two different ids that look identical everywhere.
-test('ids are normalised to NFC on the way in and on the way out', async () => {
+// One rendering, one representation — enforced by REFUSING a non-NFC id rather than folding it.
+// Folding would be the only normalisation in the repository: `init-run` creates the run
+// directory byte-exactly and `taskBranchName` builds the ref byte-exactly, so a folded id names
+// a directory nobody created and a branch git does not hold, and the canonicality check then
+// compares a recomputed name against the stored one and disagrees with itself.
+test('a non-NFC id is refused rather than folded', async () => {
   await withTempRoot(async (root) => {
     const worktree = path.join(root, 'wt', 'agent-1')
     const decomposed = `cafe${String.fromCodePoint(0x301)}`
-    const precomposed = 'caf\u00e9'
+    const precomposed = 'café'
     assert.notEqual(decomposed, precomposed)
-    const written = await writeLocation(root, 'r1', decomposed, { worktree, branch: `teammates/r1/${precomposed}` })
-    // Stored in one form, whichever form the caller used.
+    assert.equal(decomposed.normalize('NFC'), precomposed)
+    await assert.rejects(
+      writeLocation(root, 'r1', decomposed, { worktree, branch: `teammates/r1/${decomposed}` }),
+      /is not a usable task id/,
+    )
+    await assert.rejects(
+      writeLocation(root, decomposed, 'T1', { worktree, branch: 'b' }),
+      /is not a usable run id/,
+    )
+    // A hand-written record carrying the decomposed form is skipped, not silently rewritten.
+    await plant(root, worktree, { runId: 'r1', taskId: decomposed, worktree, branch: 'b' })
+    assert.equal(await findTaskByWorktree(root, worktree), null)
+    // The composed form is an ordinary id and is stored byte-for-byte as the caller wrote it,
+    // which is what keeps it equal to the directory init-run made and the ref git holds.
+    const written = await writeLocation(root, 'r1', precomposed, {
+      worktree,
+      branch: `teammates/r1/${precomposed}`,
+    })
     assert.equal(JSON.parse(await readFile(written, 'utf8')).taskId, precomposed)
-    const found = await findTaskByWorktree(root, worktree)
-    assert.equal(found.taskId, precomposed)
-    // And the branch canonicality check agrees, rather than being defeated by the spelling.
-    assert.equal(found.branch, `teammates/r1/${precomposed}`)
-    // A record written by hand in the decomposed form reads back in the composed one.
-    await plant(root, worktree, { runId: 'r1', taskId: decomposed, worktree, branch: `teammates/r1/${decomposed}` })
-    assert.equal((await findTaskByWorktree(root, worktree)).taskId, precomposed)
+    assert.deepEqual(await findTaskByWorktree(root, worktree), {
+      runId: 'r1',
+      taskId: precomposed,
+      branch: `teammates/r1/${precomposed}`,
+    })
   })
 })
 
-// A worktree path is not an id, but it is stored and printed, so control characters are refused.
-// They also cost six bytes each once serialised while counting as one against the field bound,
-// which is how a path inside its own limit produced a record far past the record limit.
-test('a worktree containing control characters is refused', async () => {
+// The bound is checked against the bytes that get stored, which is only meaningful because
+// nothing rewrites the value between the check and the write. U+FB2C is 3 bytes and its NFC
+// form is 6, so a fold after the check would store twice what was measured.
+test('the byte bound is measured against the stored bytes', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    const expanding = String.fromCodePoint(0xfb2c)
+    assert.equal(Buffer.byteLength(expanding, 'utf8'), 3)
+    assert.equal(Buffer.byteLength(expanding.normalize('NFC'), 'utf8'), 6)
+    // Refused for being non-NFC, so the question of which form was measured never arises.
+    await assert.rejects(
+      writeLocation(root, 'r1', `T${expanding}`, { worktree, branch: 'b' }),
+      /is not a usable task id/,
+    )
+    const composed = expanding.normalize('NFC')
+    const written = await writeLocation(root, 'r1', `T${composed}`, { worktree, branch: 'b' })
+    const stored = JSON.parse(await readFile(written, 'utf8')).taskId
+    assert.equal(stored, `T${composed}`)
+    assert.equal(Buffer.byteLength(stored, 'utf8') <= 128, true)
+  })
+})
+
+// A worktree path is not an id: only C0 is refused, because those cannot come from a real path
+// and make a stored path undiagnosable in an error. DEL and the C1 range are legal in filenames
+// on both platforms, so refusing them would deny a record to a directory that really exists and
+// leave the hook with nothing to find.
+test('a worktree containing C0 controls is refused, and one with DEL or C1 is not', async () => {
   await withTempRoot(async (root) => {
     const prefix = process.platform === 'win32' ? 'C:/' : '/'
-    for (const cp of [0x0001, 0x001f, 0x007f, 0x009b]) {
+    for (const cp of [0x007f, 0x009b]) {
+      const worktree = `${prefix}wt${String.fromCodePoint(cp)}agent`
+      await writeLocation(root, 'r1', 'T1', { worktree, branch: 'teammates/r1/T1' })
+      assert.equal(
+        (await findTaskByWorktree(root, worktree)).taskId,
+        'T1',
+        `U+${cp.toString(16)} should be legal in a worktree path`,
+      )
+    }
+    for (const cp of [0x0001, 0x001f]) {
       const worktree = `${prefix}wt${String.fromCodePoint(cp)}agent`
       await assert.rejects(
         writeLocation(root, 'r1', 'T1', { worktree, branch: 'teammates/r1/T1' }),
@@ -980,15 +1030,111 @@ test('characters that render as blank are escaped in error messages', async () =
       const message = await writeLocation(root, 'r1', taskId, { worktree, branch: 'b' })
         .then(() => null, (err) => err.message)
       assert.notEqual(message, null, `U+${cp.toString(16)} was accepted`)
-      // Compared after NFC, because normalisation maps some blanks onto others — U+2000
-      // becomes U+2002 before it ever reaches the message.
-      const escaped = String.fromCodePoint(cp).normalize('NFC').codePointAt(0).toString(16)
+      const escaped = cp.toString(16)
       assert.match(
         message,
         new RegExp(`\\\\u\\{${escaped}\\}|\\\\[tn]`),
         `U+${cp.toString(16)} was not escaped in: ${JSON.stringify(message)}`,
       )
     }
+  })
+})
+
+// The record bound counts BYTES on disk. An all-ASCII fixture cannot tell that from counting
+// code units, so this one is sized to pass a code-unit bound and fail a byte bound: quotes
+// double under JSON escaping, and the multibyte tail costs three bytes per character but one
+// code unit each.
+test('the record bound is measured in bytes, not code units', async () => {
+  await withTempRoot(async (root) => {
+    const prefix = process.platform === 'win32' ? 'C:/' : '/'
+    const tail = '日'.repeat(17)
+    const quotes = '"'.repeat(MAX_WORKTREE_TEST_BYTES - prefix.length - Buffer.byteLength(tail, 'utf8'))
+    const worktree = `${prefix}${quotes}${tail}`
+    const record = { runId: 'r1', taskId: 'T1', branch: 'teammates/r1/T1', worktree }
+    const serialised = `${JSON.stringify(record)}\n`
+    assert.equal(Buffer.byteLength(worktree, 'utf8') <= MAX_WORKTREE_TEST_BYTES, true, 'passes the field bound')
+    assert.equal(serialised.length < 65_536, true, 'passes a code-unit bound')
+    assert.equal(Buffer.byteLength(serialised, 'utf8') > 65_536, true, 'fails the byte bound')
+    await assert.rejects(
+      writeLocation(root, 'r1', 'T1', { worktree, branch: 'teammates/r1/T1' }),
+      /could never be read back/,
+    )
+    assert.equal(await findTaskByWorktree(root, worktree), null)
+  })
+})
+
+// Each alternative in the printer's class is the only cover for something, so each gets an input
+// only it catches. A refusal that silently swallows the character it names cannot be acted on.
+test('every class of unprintable character is escaped in a message', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    const covered = [
+      [0x0600, 'a format character that is not default-ignorable'],
+      [0xfe0f, 'a default-ignorable that is not a format character'],
+      [0x2028, 'a line separator'],
+      [0x2029, 'a paragraph separator'],
+      [0x00a0, 'a space separator'],
+      [0x2800, 'a braille blank, which no property covers'],
+      [0x0001, 'a C0 control'],
+      [0x009b, 'a C1 control'],
+      [0x007f, 'DEL'],
+    ]
+    for (const [cp, why] of covered) {
+      const taskId = `T1${String.fromCodePoint(cp)}`
+      const message = await writeLocation(root, 'r1', taskId, { worktree, branch: 'b' })
+        .then(() => null, (err) => err.message)
+      assert.notEqual(message, null, `U+${cp.toString(16)} (${why}) was accepted as an id`)
+      // Two escape spellings are both correct: JSON.stringify escapes C0 itself, and anything
+      // it leaves raw is escaped afterwards in the braced form.
+      const hex = cp.toString(16)
+      assert.match(
+        message,
+        new RegExp(`\\\\u\\{${hex}\\}|\\\\u${hex.padStart(4, '0')}|\\\\[tn]`),
+        `U+${hex} (${why}) reached the message unescaped: ${JSON.stringify(message)}`,
+      )
+    }
+  })
+})
+
+// `;` is refused, and this file is where that is decided: `init-run` accepts it today, so the
+// divergence is deliberate and has to fail visibly rather than by producing an unreadable record.
+test('a semicolon and other punctuation outside the allowlist are refused', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    for (const taskId of [';', 'T1;rm', 'T1;', 'a,b', 'a+b', 'a=b', 'a!b', "a'b", 'a`b', 'a$b']) {
+      await assert.rejects(
+        writeLocation(root, 'r1', taskId, { worktree, branch: 'b' }),
+        /is not a usable task id/,
+        `${JSON.stringify(taskId)} was accepted`,
+      )
+      await plant(root, worktree, { runId: 'r1', taskId, worktree, branch: 'b' })
+      assert.equal(await findTaskByWorktree(root, worktree), null, `${JSON.stringify(taskId)} was returned`)
+    }
+  })
+})
+
+// The control-character rule applies to the RESOLVED path, which is the one that gets stored.
+// A link whose own name is ordinary can resolve to a target whose name is not.
+test('a worktree resolving to a path with control characters is refused', {
+  skip: process.platform === 'win32' ? 'POSIX only: NTFS forbids control characters in names' : false,
+}, async (t) => {
+  await withTempRoot(async (root) => {
+    const target = path.join(root, `wt${String.fromCodePoint(0x0001)}dir`)
+    try {
+      await mkdir(target, { recursive: true })
+    } catch (err) {
+      t.skip(`this filesystem refuses control characters in names: ${err.code}`)
+      return
+    }
+    const link = path.join(root, 'ordinary-link')
+    await symlink(target, link, 'dir')
+    // The link's own spelling is clean, so only a check on the resolved form can catch this.
+    assert.doesNotMatch(link, /[\u0000-\u001f]/)
+    assert.match(normaliseWorktree(link), /[\u0000-\u001f]/)
+    await assert.rejects(
+      writeLocation(root, 'r1', 'T1', { worktree: link, branch: 'teammates/r1/T1' }),
+      /contains control characters/,
+    )
   })
 })
 
