@@ -260,20 +260,36 @@ the phase gate remains the thing that decides.
   The ref a record resolves to deserves separate statement, because the obvious half of it is
   already closed at the reader and the hazard survives that anyway. The closed half: a record's
   `branch` is returned only when it equals the conventional name built from that record's own
-  `runId` and `taskId`, and drops to `null` otherwise (`scripts/state.mjs:482`), so a record naming
-  `master`, or a rival's ref, yields no branch at all and the caller recomputes the conventional
-  name instead. A supplied branch is not an identity.
+  `runId` and `taskId`, and drops to `null` otherwise (`scripts/state.mjs:482`). So a branch that
+  disagrees with the record's own ids — `master`, or a ref belonging to a task the record does not
+  name — yields no branch at all and the caller recomputes the conventional name instead. The clamp
+  is about agreement, not about ownership, and the distinction matters to anyone building on it: a
+  record carrying another task's ids *and* that task's ref agrees with itself, passes, and is
+  returned verbatim.
 
-  What remains is that the conventional name is built from the ids, and the ids are the fields a
-  forged record chooses freely. A record planted under the victim's worktree naming another task's
-  `runId` and `taskId` resolves to that task's ref through the honest construction rather than
-  around it, and the two consequences are the ones that made this worth stating: a teammate waved
-  past on a branch it never created — the do-nothing case this entire design exists to catch — and
-  a compliant teammate blocked and then told, by the handler's own remediation text, to
-  `git checkout -B <that ref>` and commit, i.e. walked into force-moving another task's ref. The
-  requirement that follows lands on the remediation text rather than on the branch check: a ref
-  derived from a record is only as trustworthy as the record, so the handler may name it in a
-  diagnosis and must not instruct anyone to move it.
+  Which is the half that stays open. The conventional name is built from the ids, and the ids are
+  the fields a forged record chooses freely, so a record planted under the victim's worktree naming
+  another task's `runId` and `taskId` resolves to that task's ref through the honest construction
+  rather than around it. Two consequences follow, according to whether that ref exists. Where it
+  does, the victim is waved past on a branch it never created — the do-nothing case this entire
+  design exists to catch. Where it does not, the victim is blocked and told to create a branch
+  under *another task's* name and commit to it, so its work lands there and the gate reads those
+  commits as that task's: a file set and an ownership answer for work that task never did. Nothing
+  is force-moved in either case — the precheck blocks only on an absent ref
+  (`docs/plans/2026-08-13-subagent-stop-enforcement.md:507`), so there is never a live ref to move.
+  Something is planted instead.
+
+  The requirement that follows lands on the remediation text rather than on the branch check, which
+  is already clamped as far as a record's own contents allow: a ref derived from a record is only
+  as trustworthy as the record, so the handler may name one in a diagnosis and must not direct
+  anyone to create it or commit to it. A teammate told its branch is missing takes the name from
+  the task its own brief gave it, not from a file any teammate can write. That requirement
+  contradicts what the implementation plan currently prescribes — its precheck emits exactly such
+  an instruction, `git checkout -B ${branch} <base>` at
+  `docs/plans/2026-08-13-subagent-stop-enforcement.md:502-513` — and the contradiction is this
+  requirement's doing, not a defect in the block when it was written against the earlier one.
+  Reconciling the two belongs to whoever dispatches that step, before an implementer meets both and
+  keeps whichever it read second.
 
   Consequences reachable from record forgery include, and are not limited to: a teammate leaving
   itself unenforced, so its stop is allowed with no check; a *different* teammate left unenforced,
