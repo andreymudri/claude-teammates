@@ -72,36 +72,42 @@ test('the complete command carries run, task and plan and sits after the constra
     'self-verification must precede the final commit instruction')
 })
 
-// Read out of `complete` in scripts/cli.mjs: the recomputed gate REJECTING the task exits 4,
-// the same code as no-manifest / underivable-context / unknown-task. Only the printed first
-// line `gate does not pass for phase` separates them. A brief that maps 4 to "proceed", or
-// puts the rejection on 2, tells a teammate with a failing fileset check to return done.
-test('the verify step maps rejection to exit 4 with its printed discriminator', () => {
+// Read out of `complete` in scripts/cli.mjs. The rejection is its OWN code now — the printed
+// first line no longer has to carry that distinction, because `COMPLETE_REJECTED` does — but the
+// guidance attached to each code is unchanged in kind, and it is what this test is about: a brief
+// that maps the rejection to "proceed", or the cannot-verify to "fix it", tells a teammate with a
+// failing fileset check to return done, or sends a compliant one to clean someone else's tree.
+//
+// The codes themselves are pinned against cli.mjs's constants further down; here they are written
+// out, so that a change to the mapping fails BOTH as a broken cross-file pin and as guidance that
+// no longer reads correctly.
+test('the verify step attaches the right guidance to the rejection and the cannot-verify codes', () => {
   for (const brief of [composeBrief(FULL), composeBrief({ ...FULL, caveman: 'full' })]) {
     assert.ok(/exit 0[^\n]*passes/.test(brief), 'exit 0 is not described as passing')
-    assert.ok(brief.includes('gate does not pass for phase'),
-      'the brief does not name the line that identifies a rejection')
-    // Assert the GUIDANCE inside the rejection clause, not the presence of a word the clause
-    // itself supplies: `/REJECTED/ || /fix/i` short-circuited on its own text and stayed green
-    // when the guidance was swapped for "quote it and proceed", which is the inversion again.
-    const rejection = brief.slice(at(brief, 'gate does not pass for phase'), at(brief, 'no gate manifest'))
+    // Assert the GUIDANCE inside the rejection row, not the presence of a word the row itself
+    // supplies: `/REJECTED/ || /fix/i` short-circuited on its own text and stayed green when the
+    // guidance was swapped for "quote it and proceed", which is the inversion again.
+    const rejection = brief.slice(at(brief, 'exit 3 — '), at(brief, 'exit 4 — '))
     assert.ok(/Fix exactly the checks it names/.test(rejection),
-      'the rejection clause does not tell the teammate to fix the checks it names')
+      'the rejection row does not tell the teammate to fix the checks it names')
     assert.ok(/run the command again/.test(rejection),
-      'the rejection clause does not tell the teammate to re-run')
+      'the rejection row does not tell the teammate to re-run')
     for (const wrong of ['proceed', 'do not loop', 'Quote']) {
       assert.ok(!rejection.includes(wrong),
-        `the rejection clause tells the teammate to "${wrong}" — that is the cannot-verify guidance`)
+        `the rejection row tells the teammate to "${wrong}" — that is the cannot-verify guidance`)
     }
-    assert.ok(/exit 4, output beginning "gate does not pass for phase"/.test(brief),
-      'the rejection is not keyed to exit 4 and its printed first line')
-    // ...and the cannot-verify clause must be a DIFFERENT exit-4 clause, the one that proceeds.
-    assert.ok(/exit 4, output "no gate manifest"/.test(brief),
+    // The cannot-verify row is a DIFFERENT code, and it is the one that proceeds.
+    assert.ok(/exit 4 — no check scoped to your task rejected you/.test(brief),
       'the cannot-verify situations are not keyed to exit 4')
-    assert.ok(/no gate manifest[^]{0,400}do not loop on it/i.test(brief),
-      'the cannot-verify clause does not tell the teammate to proceed rather than loop')
-    assert.ok(at(brief, 'gate does not pass for phase') < at(brief, 'no gate manifest'),
-      'the rejection clause must be read before the cannot-verify clause')
+    // Scoped to the row rather than to a character distance from a phrase: the row grew when it
+    // had to separate three kinds of failure, and a magic gap silently stops reaching.
+    const cannotVerify = brief.slice(at(brief, 'exit 4 — '), at(brief, 'exit 2 — '))
+    assert.ok(cannotVerify.includes('no gate manifest'),
+      'the cannot-verify row does not name the outputs it covers')
+    assert.ok(/do not loop on it/i.test(cannotVerify),
+      'the cannot-verify row does not tell the teammate to proceed rather than loop')
+    assert.ok(at(brief, 'exit 3 — ') < at(brief, 'exit 4 — '),
+      'the rejection row must be read before the cannot-verify row')
     // Exit 2 is a malformed manifest AND every argument error on the invocation. Without a
     // discriminator a teammate that drops a flag reads "not your work, do not loop" and
     // proceeds having never run the gate at all.
@@ -124,9 +130,11 @@ test('the verify step maps rejection to exit 4 with its printed discriminator', 
       'exit 2 no longer describes a malformed manifest')
     assert.ok(!/exit 2 — teammates\.gate\.json is malformed\. Configuration, not your work\./.test(brief),
       'exit 2 still maps every case to configuration')
-    // The flag that does not exist on `complete` yet must not be handed to a teammate.
+    // `complete` accepts `--enforcement-only` now, and the brief still must not emit it: the
+    // teammate's own verification is the full one. The flag exists for the stop-time hook, which
+    // trades command checks for speed and deliberately marks nothing done.
     assert.ok(!brief.includes('--enforcement-only'),
-      'the brief emits --enforcement-only, which complete rejects with exit 2')
+      'the brief emits --enforcement-only, which would have the teammate verify less than it should')
     assert.ok(/exit 1[^]{0,200}status file is missing/.test(brief),
       'exit 1 is not described as missing status bookkeeping')
     // The inverted mapping round 2 shipped must not come back.
@@ -259,7 +267,11 @@ const SPEC_CLAUSES = [
   'BEFORE YOU RETURN "done".',
   'ROOT=$(dirname',
   '--run substop --task T4 --plan ' + FULL.planPath,
-  'gate does not pass for phase',
+  // The exit-code guidance, by the row that tells the teammate its work was rejected. This used
+  // to be the phrase `gate does not pass for phase`, because the code alone could not separate a
+  // rejection from a cannot-verify and only the printed line could. A distinct code replaced
+  // that, so the clause worth pinning is the row keyed to it.
+  'exit 3 — a check scoped to your task REJECTED it',
   'GLOBAL CONSTRAINTS:',
   ...FULL.constraints.map((c) => '- ' + c),
 ]
@@ -442,4 +454,109 @@ test('scripts/brief.mjs executable source imports nothing and touches no host st
   assert.equal(/\bimport\b/.test(executableSource("import{readFileSync}from'node:fs'")), true)
   assert.equal(/\bexport\b[^;\n]*\bfrom\b/.test(executableSource("export * from 'node:fs'")), true)
   assert.equal(/\bprocess\b/.test(executableSource('const a = `x${process.env.Y}z`')), true)
+})
+
+// ---------------------------------------------------------------------------
+// The exit-code table is part of the contract, and it is pinned ACROSS FILES.
+// ---------------------------------------------------------------------------
+//
+// The brief's table is the only place a teammate learns what a code means. When the rejection
+// moved from 4 to 3 the table stayed behind, and a teammate hitting 3 would have found no row at
+// all — while the nearest "gate does not pass" row sat under exit 4 next to a sibling telling it
+// exit 4 was a configuration problem to quote and proceed past. That is an instruction to ignore
+// its own rejection, and no test in either file would have caught it, because each file was
+// internally consistent.
+//
+// So these read the numbers out of `scripts/cli.mjs` itself. Change the mapping there and this
+// fails here, which is the only arrangement that makes the rendered table trustworthy. Source
+// scanning rather than an import, for the same reason the purity check above scans: `brief.mjs`
+// may not import anything, so the two cannot be wired together at runtime.
+const CODE_RE = (name) => new RegExp(`^const ${name} = (\\d+)$`, 'm')
+
+function cliExitCode(source, name) {
+  const found = CODE_RE(name).exec(source)
+  assert.ok(found, `scripts/cli.mjs no longer declares ${name} — this pin is reading the wrong thing`)
+  return Number(found[1])
+}
+
+// The rendered rows, keyed by the code each one documents. A row runs from its own `exit <n> —`
+// line to the start of the next one, so the continuation lines belong to the row they explain.
+function exitRows(brief) {
+  const starts = [...brief.matchAll(/^ {2}exit (\d+) — /gm)]
+  assert.ok(starts.length > 0, 'the brief renders no exit-code rows at all')
+  const rows = new Map()
+  starts.forEach((match, i) => {
+    const end = i + 1 < starts.length ? starts[i + 1].index : brief.length
+    rows.set(Number(match[1]), brief.slice(match.index, end))
+  })
+  return rows
+}
+
+test('the brief documents the exit codes scripts/cli.mjs actually returns', async () => {
+  const cli = await readFile(new URL('../scripts/cli.mjs', import.meta.url), 'utf8')
+  const rejected = cliExitCode(cli, 'COMPLETE_REJECTED')
+  const cannotVerify = cliExitCode(cli, 'COMPLETE_CANNOT_VERIFY')
+  assert.notEqual(rejected, cannotVerify, 'the two codes must stay distinct or the hook cannot decide')
+
+  const rows = exitRows(composeBrief(FULL))
+  // Every code the CLI can return has a row: a teammate that hits an undocumented code has
+  // nothing to act on, which is exactly the gap this pin closes.
+  for (const code of [0, 1, 2, rejected, cannotVerify]) {
+    assert.ok(rows.has(code), `the brief documents no exit ${code}`)
+  }
+  assert.match(rows.get(rejected), /REJECTED it/)
+  assert.match(rows.get(rejected), /not a configuration problem/)
+  assert.match(rows.get(cannotVerify), /no check scoped to your task rejected you/)
+})
+
+test('the brief attributes a run-wide check to the code that does not block', async () => {
+  const cli = await readFile(new URL('../scripts/cli.mjs', import.meta.url), 'utf8')
+  const rejected = cliExitCode(cli, 'COMPLETE_REJECTED')
+  const cannotVerify = cliExitCode(cli, 'COMPLETE_CANNOT_VERIFY')
+
+  // The kinds cli.mjs treats as scoped to the calling task. `ownership` must not be among them:
+  // it reads every commit on the run branch and the main worktree's cleanliness, so a teammate
+  // blocked on it is blocked by work that is not its own.
+  const declared = /^const TASK_SCOPED_KINDS = new Set\(\[([^\]]*)\]\)$/m.exec(cli)
+  assert.ok(declared, 'scripts/cli.mjs no longer declares TASK_SCOPED_KINDS')
+  const kinds = [...declared[1].matchAll(/'([^']+)'/g)].map((m) => m[1])
+  assert.deepEqual(kinds.slice().sort(), ['fileset', 'merge'])
+  assert.ok(!kinds.includes('ownership'), 'ownership is run-wide and must never be task-scoped')
+
+  const rows = exitRows(composeBrief(FULL))
+  // Named where it can happen, and not where it cannot.
+  assert.match(rows.get(cannotVerify), /ownership/)
+  assert.ok(!rows.get(rejected).includes('ownership'),
+    'the rejection row names a run-wide check, which would send a teammate to fix another\'s work')
+  // And the two instructions a teammate must NOT follow are ruled out in words, because both
+  // were reachable from the old table: cleaning a worktree it may not touch, and cherry-picking
+  // a foreign commit onto its own branch, which then fails its own file set.
+  assert.match(rows.get(cannotVerify), /Do NOT clean the main worktree/)
+  assert.match(rows.get(cannotVerify), /cherry-pick/)
+  // The row must NOT wave everything through: a `command` check earns this code too, and it
+  // tests the merged tree. A teammate told "not your work" here returns done on a red suite.
+  assert.match(rows.get(cannotVerify), /this project's test command/)
+  assert.match(rows.get(cannotVerify), /That one you do fix/)
+  // Every quoted marker the row tells a teammate to look for must appear WHOLE on one line —
+  // wrapped across two, the string it would search its own output for is not in the brief.
+  for (const marker of ['"no gate manifest"', '"cannot verify completion"', `"no task ${TASK.id} in the plan"`]) {
+    assert.ok(
+      rows.get(cannotVerify).split('\n').some((line) => line.includes(marker)),
+      `the marker ${marker} is split across lines and could never be matched`,
+    )
+  }
+})
+
+// The specific regression, stated as itself: no row may describe a gate rejection as the code
+// that the handler ALLOWS on.
+test('no brief row calls a gate rejection the cannot-verify code', async () => {
+  const cli = await readFile(new URL('../scripts/cli.mjs', import.meta.url), 'utf8')
+  const cannotVerify = cliExitCode(cli, 'COMPLETE_CANNOT_VERIFY')
+  const rows = exitRows(composeBrief(FULL))
+  assert.ok(!/REJECTED it/.test(rows.get(cannotVerify)),
+    `the exit ${cannotVerify} row still describes a rejection`)
+  for (const brief of [composeBrief(FULL), composeBrief({ ...FULL, caveman: 'full' })]) {
+    assert.ok(!/exit 4, output beginning "gate does not pass for phase"/.test(brief),
+      'the superseded exit-4 rejection row is still rendered')
+  }
 })

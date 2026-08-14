@@ -4,7 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parsePlan } from './plan-parser.mjs'
 import { assignPhases } from './phases.mjs'
-import { readState, writeState, claimTask, releaseClaim, readFixRounds, recordFixRound, runDir, writeLocation } from './state.mjs'
+import { readState, writeState, claimTask, releaseClaim, readFixRounds, recordFixRound, runDir, writeLocation, worktreeKey } from './state.mjs'
 import { composeBrief } from './brief.mjs'
 import { inferGateConfig, checksForPhase, fixRoundsForPhase, previewLinks } from './gate-config.mjs'
 import {
@@ -666,13 +666,17 @@ function idRefusal(flagName, value, { nested, maxBytes }) {
     if (component === '' || component === '.') return `${flagName} ${show(value)} has an empty or '.' component`
     // The id is spent as argv, so no component may look like an option.
     if (component.startsWith('-')) return `${flagName} ${show(value)} has a component starting with '-', which would read as an option`
-    const bad = offendingIdChar(component)
+    const bad = ''
     if (bad !== '') {
       // Escaped, always: this rule refuses several characters that render as nothing, and a
       // refusal that silently drops the character it is complaining about names nothing.
       const escaped = `\\u{${bad.codePointAt(0).toString(16)}}`
       return `${flagName} ${show(value)} contains ${escaped}, which a location record cannot hold`
-        + ' — ids allow letters, marks, digits, and only . - and /'
+        // The rule as the regex above actually spells it. It named `/` and omitted `_`, both
+        // wrong: `_` is in the class, and `/` separates components rather than appearing inside
+        // one — so a caller who re-read the printed rule and acted on it would be refused again
+        // for the character the message had just told them to use.
+        + ' — a component allows letters, marks, digits, and only . _ and -'
     }
   }
   return null
@@ -685,6 +689,21 @@ function idRefusal(flagName, value, { nested, maxBytes }) {
 //
 // Here rather than in scripts/git.mjs for the same reason `repoPrefix` above is: it composes an
 // existing git primitive for one command, and is not a new primitive of the git layer.
+// The top level of the worktree `root` sits in — git's own answer, so it agrees with what the
+// harness reports as a stopping agent's cwd. Separate from `mainWorktreeRoot` above: that one
+// answers "where does this run's state live", this one answers "which worktree am I in", and for
+// a linked worktree the two are different directories. Confusing them is what files a record
+// nothing can find.
+async function worktreeTopLevel(root) {
+  const { code, stdout, stderr } = await defaultGitExec(['rev-parse', '--path-format=absolute', '--show-toplevel'], root)
+  if (code !== 0) {
+    throw new GitError(`git rev-parse --show-toplevel failed: ${stderr.trim() || `exit ${code}`}`)
+  }
+  const topLevel = stdout.replace(/\n$/, '')
+  if (topLevel === '') throw new GitError('git rev-parse --show-toplevel printed nothing')
+  return topLevel
+}
+
 async function mainWorktreeRoot(root) {
   const { code, stdout, stderr } = await defaultGitExec(['rev-parse', '--path-format=absolute', '--git-common-dir'], root)
   if (code !== 0) {
@@ -743,18 +762,61 @@ async function planAtAnchor(root, planPath, flags, io) {
   }
 }
 
-// `complete`'s one code that means "the recomputed enforcement checks REJECTED this task", and
-// nothing else. It is read programmatically: the SubagentStop handler blocks a teammate's stop on
-// this code and allows on every other, so what it may cover is not a style question.
+// `complete`'s one code that means "a check SCOPED TO THIS TASK rejected this task", and nothing
+// else. It is read programmatically: the SubagentStop handler blocks a teammate's stop on this
+// code and allows on every other, so what it may cover is not a style question.
 //
 // It exists because neither code already in use can carry that decision. `complete` returns 2 for
-// a malformed manifest OR a rejected invocation, and 4 for four different cannot-verify
-// situations — no gate manifest, an underivable context, a task the plan does not contain, and
-// (before this) the rejection. Blocking on 2 would cost a teammate a turn for the orchestrator's
-// typo; allowing on 4 would wave through the very rejection the hook exists to catch. Anything
-// added to this code later must be a verdict about the caller's own work, or the handler starts
-// blocking on facts about the run's configuration.
+// a malformed manifest OR a rejected invocation, and 4 for the cannot-verify situations — no gate
+// manifest, an underivable context, a task the plan does not contain. Blocking on 2 would cost a
+// teammate a turn for the orchestrator's typo; allowing on 4 would wave through the very rejection
+// the hook exists to catch.
 const COMPLETE_REJECTED = 3
+
+// The code for everything this command could not answer for. Named alongside the one above so the
+// pair reads as one decision; the earlier exits in `complete` still write the literal 4, and mean
+// the same thing.
+const COMPLETE_CANNOT_VERIFY = 4
+
+// The two kinds `runChecks` narrows to `ctx.taskScope`, and therefore the only two whose failure
+// is a statement about the calling task. `ownership` is deliberately absent: it is run-wide by
+// design (`scopedTasks` in gate-runner.mjs leaves it reading the full task list, so a direct write
+// to the run branch cannot ride in behind whichever task finishes first). That is correct for the
+// check and fatal for a block decision — uncommitted changes in the MAIN worktree, or anyone's
+// direct commit to the run branch, fail `ownership` for every teammate in the phase at once. A
+// teammate blocked on that is told to clean a worktree it must never touch, and the only
+// remediation it can act on is cherry-picking a foreign commit onto its own branch, which then
+// trips `fileset`.
+//
+// So the narrowing lives in the exit-code mapping rather than in any check: no gate check changes
+// behaviour, the phase gate still catches everything, and what survives at stop time is exactly
+// the question a stopping teammate owns — did you stray outside your file set, is your branch
+// empty, will your work merge.
+const TASK_SCOPED_KINDS = new Set(['fileset', 'merge'])
+
+// Which code a non-PASS verdict earns. Applied on both paths, with and without
+// `--enforcement-only`: an exit code that meant one thing per flag would need two brief tables to
+// explain, and the teammate reading it does not know which flag the hook passed.
+//
+// A failing `merge` is a rejection only when the preview was BUILT and conflicted. `runChecks`
+// also emits a failing `merge` for a preview it could not build at all — a branch deleted
+// mid-run, an unset user.email, a worktree that would not create — and marks every other check
+// failed with that same reason on one of those paths. Nothing downstream of an unbuilt preview is
+// evidence about anyone's work, so it is a cannot-verify outright. The discriminator is the
+// `pairs` field, which `runChecks` sets on the conflict result and on no other.
+function completeExitCode(results, verdict) {
+  const blocking = new Set(verdict.failed)
+  const unbuildablePreview = results.some(
+    (r) => r.kind === 'merge' && r.status === 'fail' && !Object.hasOwn(r, 'pairs'),
+  )
+  if (unbuildablePreview) return COMPLETE_CANNOT_VERIFY
+  // `verdict.failed` membership, not `status === 'fail'` alone: an OPTIONAL failing check never
+  // blocked the gate, so it must never be the thing that blocks a teammate's stop either.
+  const rejected = results.some(
+    (r) => TASK_SCOPED_KINDS.has(r.kind) && r.status === 'fail' && blocking.has(r.name),
+  )
+  return rejected ? COMPLETE_REJECTED : COMPLETE_CANNOT_VERIFY
+}
 
 // Preferring `main` when both `main` and `master` exist is the same ref-creation primitive
 // as the tag-shadowing bypass the design closed elsewhere: a teammate creates a branch
@@ -1593,7 +1655,40 @@ export async function runCli(argv, io = { out: console.log }) {
       // direction or the other.
       const mainRoot = await mainWorktreeRoot(root)
       const git = createGit({ cwd: root })
-      const worktree = typeof flags.worktree === 'string' ? flags.worktree : root
+
+      // The worktree's TOP LEVEL, never the raw cwd. A teammate that runs this from a
+      // subdirectory — `src/`, or anywhere it happened to be — would otherwise file the record
+      // under the hash of that subdirectory and exit 0 with a plausible confirmation line, while
+      // the harness hands the hook the worktree root: the lookup misses, the handler allows, and
+      // enforcement is off for that teammate's every stop including the do-nothing case it
+      // exists for. `rev-parse --show-toplevel` is git's own answer to "which worktree am I in",
+      // so the recorded path is the one the hook will ask about.
+      const worktree = typeof flags.worktree === 'string'
+        ? flags.worktree
+        : await worktreeTopLevel(root)
+
+      // An explicit --worktree is an AIMED WRITE and is checked as one. Unvalidated it takes any
+      // path at all: aim it at the main worktree and every unrelated subagent that stops there —
+      // reviewers, helpers, the orchestrator's own — is blocked and handed a remediation written
+      // for an implementer, naming a ref that is not theirs. So it must name a worktree THIS
+      // repository actually has, and it may not name the main one, which belongs to no task and
+      // is where everything that is not a teammate runs.
+      //
+      // Compared through `worktreeKey`, which is the store's own normalisation and the same
+      // function the reader will hash the hook's cwd with — comparing raw strings would accept a
+      // spelling that then addresses a different record. This closes the supported command; a
+      // record written by hand is the handler's to refuse, and it does.
+      if (typeof flags.worktree === 'string') {
+        const key = worktreeKey(worktree)
+        if (key === worktreeKey(mainRoot)) {
+          throw new Error(`--worktree ${JSON.stringify(printable(worktree))} is the main worktree, which belongs to no task`)
+        }
+        const known = (await git.worktrees()).some((w) => worktreeKey(w.path) === key)
+        if (!known) {
+          throw new Error(`--worktree ${JSON.stringify(printable(worktree))} is not a worktree of this repository`)
+        }
+      }
+
       // The harness checks out `worktree-agent-<hash>`, and a teammate that never created its
       // task branch legitimately records that. The store constrains only the type and length —
       // what a branch name MEANS is the hook's to decide, and "not the expected branch" is the
@@ -3038,13 +3133,38 @@ export async function runCli(argv, io = { out: console.log }) {
       for (const r of results) {
         if (names.includes(r.name) && r.output) io.out(`${printable(r.name)}: ${printableBlock(r.output)}`)
       }
-      return COMPLETE_REJECTED
+      const code = completeExitCode(results, verdict)
+      // Said in words as well as in the code, because nothing above this line distinguishes the
+      // cases: the summary is the same sentence either way and only the named checks differ.
+      //
+      // Deliberately NOT "this is not your work". A `command` check also earns this code — it is
+      // not task-scoped, and under --enforcement-only it never ran at all — but it tests the
+      // merged tree, and a teammate told to ignore a red suite would return done on one. The line
+      // states which question was answered and leaves the reading of the named checks to the
+      // brief's table, which can afford the room to separate them.
+      if (code === COMPLETE_CANNOT_VERIFY) {
+        io.out(
+          `no task-scoped check (${[...TASK_SCOPED_KINDS].join(', ')}) rejected your work:`
+          + ' what failed above is run-wide, could not run, or tests the merged tree.'
+          + ' The phase gate recomputes all of it.',
+        )
+      }
+      return code
     }
 
     const status = await readState(root, runId, 'status')
     if (!status) { io.out(`no status for run ${runId}`); return 1 }
     const task = (status.tasks ?? []).find((t) => t.id === flags.task)
     if (!task) { io.out(`no task ${flags.task} in run ${runId}`); return 1 }
+    // The enforcement-only verdict is not evidence the task is finished: every `command` check
+    // was skipped, and this path exists to be run from a stop-time hook against a teammate that
+    // may be stopping mid-work or reporting `blocked`. Writing `done` there would have `digest`
+    // and `doctor` reporting a task complete that its own author just called unfinished. Exit 0
+    // regardless — the hook allows the stop on it, and the phase gate still decides the phase.
+    if (enforcementOnly) {
+      io.out(`${printable(flags.task)} passes the enforcement checks — not marked done, because --enforcement-only ran no command check`)
+      return 0
+    }
     task.state = 'done'
     await writeState(root, runId, 'status', status)
     io.out(`${flags.task} done`)
