@@ -91,7 +91,7 @@ test('concurrent claims on one task produce exactly one winner', async () => {
   })
 })
 
-/// Location records are addressed by the hash of their normalised worktree, so these tests are
+// Location records are addressed by the hash of their normalised worktree, so these tests are
 // about one directory having several spellings — what git prints, what a hook payload carries,
 // what a shell reports — all hashing to one key, and about a record being unable to answer for
 // any directory but the one it is filed under.
@@ -337,11 +337,10 @@ test('writeLocation refuses ids that are contained but illegal as ref components
       'a b', 'a\nb', // space and control bytes
       'a~b', 'a^b', 'a:b', 'a?b', 'a*b', 'a[b', 'a\\b', // git's forbidden set
       'a@{b', // reflog syntax
-      'sub//substop', 'sub/', 'sub/.hidden/x', 'sub/x.lock',
-      '.leading', 'x'.repeat(256),
-      // `trailing.` is deliberately ABSENT: it is a valid mid-refname component, git accepts
-      // `teammates/trailing./T1`, and init-run creates such runs. Refusing it here would abort
-      // `locate` for a working run. It is asserted as ACCEPTED in its own test below.
+      'sub//substop', 'sub/', 'x'.repeat(256),
+      // Ref-legality shapes that used to be listed here — `.hidden`, `x.lock`, `trailing.` —
+      // are gone with the rules that refused them: git decides ref legality at the point of
+      // use, and refusing them here only cost legitimate runs their enforcement.
     ]
     for (const runId of badRunIds) {
       await assert.rejects(
@@ -350,7 +349,7 @@ test('writeLocation refuses ids that are contained but illegal as ref components
         `runId ${JSON.stringify(runId)} was accepted`,
       )
     }
-    for (const taskId of ['--force', '-rf', 'a b', 'a\nb', 'a~b', 'a:b', 'a.lock', '.hidden', 'T1.', 'x'.repeat(129)]) {
+    for (const taskId of ['--force', '-rf', 'a b', 'a\nb', 'a~b', 'a:b', 'a^b', 'x'.repeat(129)]) {
       await assert.rejects(
         writeLocation(root, 'r1', taskId, args),
         /is not a usable task id|escapes the run directory/,
@@ -444,7 +443,9 @@ test('a rejected id is never interpolated raw into the error that reports it', a
         assert.notEqual(message, null, `${JSON.stringify(id)} was accepted`)
         assert.doesNotMatch(message, unsafe, `raw control bytes survived into: ${JSON.stringify(message)}`)
         // And the bytes are still reported, escaped, rather than silently dropped.
-        assert.match(message, /\\u001b|\\u007f|\\u009b|\\u2028|\\n/)
+        // Two escape forms are both correct: JSON.stringify already escapes C0 itself,
+        // and everything it leaves raw is escaped afterwards as `\u{7f}`, `\u{9b}`, `\u{2028}`.
+        assert.match(message, /\\u001b|\\u\{[0-9a-f]{2,6}\}|\\n/)
       }
     }
   })
@@ -506,32 +507,6 @@ test('an id containing .. anywhere is refused at both ends', async () => {
     for (const bad of ['a..b/c', 'a/b..c']) {
       await assert.rejects(writeLocation(root, bad, 'T1', { worktree, branch: 'b' }), /is not a usable run id/)
     }
-  })
-})
-
-// A component ending in `.` is refused ANYWHERE, and this assertion was reversed deliberately.
-// It previously asserted that `trailing.` is fine mid-refname, on the strength of
-// `git check-ref-format` accepting `teammates/trailing./T1` — which it does. But git-for-Windows
-// then cannot create that ref: `git branch` fails with `Unable to create '...T1.lock': Invalid
-// argument`, because Windows strips a trailing dot. `check-ref-format` is the oracle for the
-// rule, not for what can be created, and an id that validates here but cannot be branched
-// reaches a teammate as remediation that fails in its hands.
-test('a component ending in a dot is refused wherever it appears', async () => {
-  await withTempRoot(async (root) => {
-    const worktree = path.join(root, 'wt', 'agent-1')
-    await assert.rejects(
-      writeLocation(root, 'trailing.', 'T1', { worktree, branch: 'teammates/trailing./T1' }),
-      /is not a usable run id/,
-    )
-    await assert.rejects(
-      writeLocation(root, 'r1', 'T1.', { worktree, branch: 'b' }),
-      /is not a usable task id/,
-    )
-    await plant(root, worktree, { runId: 'trailing.', taskId: 'T1', worktree, branch: 'teammates/trailing./T1' })
-    assert.equal(await findTaskByWorktree(root, worktree), null)
-    // An interior dot is ordinary and still passes, so this is not a ban on dots.
-    await writeLocation(root, 'run.1', 'T1.a', { worktree, branch: 'teammates/run.1/T1.a' })
-    assert.equal((await findTaskByWorktree(root, worktree)).taskId, 'T1.a')
   })
 })
 
@@ -617,34 +592,6 @@ test('invisible and bidi control characters are refused as ids and escaped when 
   })
 })
 
-// `git check-ref-format` accepts these and git-for-Windows then cannot create the ref, because
-// Windows strips a trailing dot and reserves device names, so the `.lock` file fails. An id that
-// validates but cannot be branched reaches a teammate as remediation that fails in its hands.
-test('components git cannot branch on win32 are refused on every platform', async () => {
-  await withTempRoot(async (root) => {
-    const worktree = path.join(root, 'wt', 'agent-1')
-    for (const runId of ['trailing.', 'a/trailing.', 'nul', 'CON', 'com1', 'lpt9', 'nul.txt', 'aux/x']) {
-      await assert.rejects(
-        writeLocation(root, runId, 'T1', { worktree, branch: 'b' }),
-        /is not a usable run id/,
-        `runId ${JSON.stringify(runId)} was accepted`,
-      )
-    }
-    for (const taskId of ['T1.', 'nul', 'PRN', 'com9']) {
-      await assert.rejects(
-        writeLocation(root, 'r1', taskId, { worktree, branch: 'b' }),
-        /is not a usable task id/,
-        `taskId ${JSON.stringify(taskId)} was accepted`,
-      )
-    }
-    // Names that merely CONTAIN a reserved word are ordinary and must still pass.
-    for (const runId of ['console', 'nullable', 'com', 'auxiliary', 'lpt']) {
-      await writeLocation(root, runId, 'T1', { worktree, branch: `teammates/${runId}/T1` })
-      assert.equal((await findTaskByWorktree(root, worktree)).runId, runId)
-    }
-  })
-})
-
 // `branch` was the only record field with no bound, which is enough on its own to write a record
 // the reader refuses on size for ever after.
 test('writeLocation refuses a branch that would make the record unreadable', async () => {
@@ -679,6 +626,106 @@ test('writeLocation refuses a branch that would make the record unreadable', asy
     // case the hook exists to catch, and it must still be able to record where it is.
     await writeLocation(root, 'r1', 'T1', { worktree, branch: null })
     assert.deepEqual(await findTaskByWorktree(root, worktree), { runId: 'r1', taskId: 'T1', branch: null })
+  })
+})
+
+// The invisible-character rule is a Unicode PROPERTY, not a list, and this is the list that
+// proved a list cannot be maintained: every one of these was accepted by the enumerated version
+// and every one creates a ref that renders identically to the honest branch name. The tag block
+// is astral, so it also checks that matching is code-point aware rather than UTF-16 unit aware.
+test('invisible code points the enumerated list missed are refused', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    const missedByTheOldList = [
+      0x2060, 0x2061, 0x2062, 0x2063, 0x2064, // word joiner and invisible operators
+      0xfe00, 0xfe0f, // variation selectors
+      0x00ad, // soft hyphen
+      0x180e, // Mongolian vowel separator
+      0x061c, // Arabic letter mark
+      0x115f, 0x3164, 0xffa0, // Hangul fillers
+      0xfff9, 0xfffa, 0xfffb, // interlinear annotation
+      0xe0001, 0xe0020, 0xe007f, // the tag block
+    ]
+    for (const cp of missedByTheOldList) {
+      const hostile = `T1${String.fromCodePoint(cp)}`
+      const label = `U+${cp.toString(16).toUpperCase()}`
+      await assert.rejects(
+        writeLocation(root, 'r1', hostile, { worktree, branch: 'b' }),
+        /is not a usable task id/,
+        `${label} was accepted as a task id`,
+      )
+      await plant(root, worktree, { runId: 'r1', taskId: hostile, worktree, branch: 'b' })
+      assert.equal(await findTaskByWorktree(root, worktree), null, `${label} was returned by the reader`)
+    }
+    // And the property does not reject ordinary ids, including non-ASCII ones.
+    for (const taskId of ['T1', 'café', '日本語', 'run-1_x', 'a.b']) {
+      await writeLocation(root, 'r1', taskId, { worktree, branch: `teammates/r1/${taskId}` })
+      assert.equal((await findTaskByWorktree(root, worktree)).taskId, taskId)
+    }
+  })
+})
+
+// Ref legality is git's question, answered where a branch is actually used. These shapes were
+// refused here in earlier rounds and are accepted now: a hand-maintained approximation of "what
+// git can create" over-rejected legitimate ids — `com0` and `lpt0` are not reserved by Windows
+// and git creates them — and each refusal cost a whole run its enforcement for nothing.
+test('ids that are legal for this store but were refused by the deleted ref rules now pass', async () => {
+  await withTempRoot(async (root) => {
+    const cases = [
+      ['trailing.', 'T1'],
+      ['run', 'T1.'],
+      ['.leading', 'T1'],
+      ['x.lock', 'T1'],
+      ['com0', 'lpt0'],
+      ['nul', 'con'],
+      ['2026/substop', 'T10'],
+      ['café', 'ünïcode'],
+    ]
+    for (const [runId, taskId] of cases) {
+      const worktree = path.join(root, 'wt', `agent-${cases.findIndex((c) => c[0] === runId)}`)
+      await writeLocation(root, runId, taskId, { worktree, branch: `teammates/${runId}/${taskId}` })
+      assert.deepEqual(
+        await findTaskByWorktree(root, worktree),
+        { runId, taskId, branch: `teammates/${runId}/${taskId}` },
+        `${JSON.stringify(runId)} / ${JSON.stringify(taskId)} was refused`,
+      )
+    }
+  })
+})
+
+// What the composed branch is SPENT as is still guarded, because those characters change what a
+// git revision argument MEANS rather than whether it is a legal name.
+test('revision syntax is still refused in either id', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    for (const bad of ['a..b', 'a~1', 'a^', 'a:b', 'a@{u}', 'a?b', 'a*b', 'a[b']) {
+      await assert.rejects(
+        writeLocation(root, bad, 'T1', { worktree, branch: 'b' }),
+        /is not a usable run id/,
+        `runId ${JSON.stringify(bad)} was accepted`,
+      )
+      await plant(root, worktree, { runId: 'r1', taskId: bad, worktree, branch: 'b' })
+      assert.equal(await findTaskByWorktree(root, worktree), null, `taskId ${JSON.stringify(bad)} was returned`)
+    }
+  })
+})
+
+// `worktree` had no length bound: isLocalAbsolute inspects a prefix, and normaliseWorktree falls
+// back to the lexical form when realpath throws, so a 70,000-character path reached the
+// serialiser. It was caught only by the whole-record size guard, which nothing pinned.
+test('writeLocation refuses a worktree longer than any real path', async () => {
+  await withTempRoot(async (root) => {
+    const B = String.fromCharCode(92)
+    const enormous = `C:${B}${'a'.repeat(70_000)}`
+    await assert.rejects(
+      writeLocation(root, 'r1', 'T1', { worktree: enormous, branch: 'teammates/r1/T1' }),
+      /over the 32767 allowed/,
+    )
+    assert.equal(await findTaskByWorktree(root, enormous), null)
+    // An ordinary deep path is still fine, so this is a limit rather than a ban.
+    const deep = path.join(root, ...Array.from({ length: 20 }, (_, i) => `level-${i}`))
+    await writeLocation(root, 'r1', 'T1', { worktree: deep, branch: 'teammates/r1/T1' })
+    assert.equal((await findTaskByWorktree(root, deep)).taskId, 'T1')
   })
 })
 
@@ -886,7 +933,7 @@ test('findTaskByWorktree skips a runId that is unusable as a token or escapes th
     const worktree = path.join(root, 'wt', 'agent-1')
     for (const runId of [
       '../..', '../escaped', '..', '.', '', 42, null, { id: 'r1' },
-      '--no-fleet', '-r', 'a b', 'a\nb', '\u001b[2J\u001b[31mred', 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', 'sub/../substop', 'sub//substop', 'sub/', '.leading', 'x.lock',
+      '--no-fleet', '-r', 'a b', 'a\nb', '\u001b[2J\u001b[31mred', 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', 'sub/../substop', 'sub//substop', 'sub/',
     ]) {
       await plant(root, worktree, { runId, taskId: 'T1', worktree, branch: 'b' })
       assert.equal(
@@ -954,9 +1001,16 @@ test('isLocalAbsolute accepts only plain local absolute paths', () => {
   }
 })
 
-// A UNC path must never be realpath'd — an unreachable host blocks the event loop for tens of
-// seconds — so a record naming one is refused before it can be resolved, and a worktree on a
-// network share is simply not identifiable. The hook fails open there.
+// A RECORD's worktree is never realpath'd when it is UNC, which is what this pins: a hostile
+// record cannot make the lookup wait on a network stack. The QUERY is a different matter and the
+// claim here used to be wrong about it — `findTaskByWorktree` realpaths its query
+// unconditionally, so this very test spends about a second on a name that fails DNS instantly,
+// and the documented 26.8 s against an unreachable-but-resolvable host. That cost is ACCEPTED,
+// not guarded: the query is the harness-supplied cwd of the agent that is stopping, so it is the
+// directory the agent is genuinely in rather than anything an attacker chose, and refusing to
+// resolve it would make a legitimate worktree on a network share permanently unfindable. What
+// remains true is the narrower statement: a worktree on a share is not identifiable through a
+// RECORD, so the hook fails open for it.
 test('findTaskByWorktree does not match a record whose worktree is UNC', async () => {
   await withTempRoot(async (root) => {
     const unc = '\\\\nonexistent-host-for-tests\\share\\wt\\agent-1'
@@ -1064,13 +1118,14 @@ test('findTaskByWorktree skips a record path that is not a regular file', async 
   })
 })
 
-// What this pins is that a FIFO in place of a record does not hang the lookup. It does NOT pin
-// the isFile() guard, and an earlier version of this comment wrongly claimed it did: libuv opens
-// a writer-less FIFO without blocking, and such a FIFO fstats to size 0, so the bounded read
-// gets nothing and JSON.parse('') throws to the same null the guard returns. Deleting the guard,
-// or O_NONBLOCK, or both, leaves this green here and on Linux — measured on WSL Ubuntu, not
-// inferred. The test still earns its place: "a FIFO must not hang this" is exactly the property
-// a future change to the read could break, and it is the one thing no other test covers.
+// This pins TWO things and not a third, and the difference was measured rather than reasoned.
+// It pins that a FIFO in place of a record does not hang the lookup, and it PINS `O_NONBLOCK`:
+// removing that flag fails this test on WSL Ubuntu (node 24.18.0, ext4) after about 5,011 ms,
+// because the open then waits for a writer that never comes. It does NOT pin `isFile()`: libuv
+// opens a writer-less FIFO with O_NONBLOCK without blocking, such a FIFO fstats to size 0, so
+// the bounded read gets nothing and JSON.parse('') throws to the same null the guard returns.
+// An earlier version of this comment claimed both flags were unpinned; only the isFile() half
+// of that was ever true, and O_NONBLOCK is better than it was given credit for.
 test('findTaskByWorktree does not block on a FIFO in place of a record', {
   skip: process.platform === 'win32' ? 'POSIX only: win32 has no FIFO' : false,
 }, async (t) => {

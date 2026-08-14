@@ -18,6 +18,10 @@ const MAX_RECORD_BYTES = 64 * 1024
 // real one while keeping a record comfortably inside MAX_RECORD_BYTES.
 const MAX_BRANCH_LENGTH = 512
 
+// Above any real path: win32 extended-length paths stop at 32,767 characters and POSIX PATH_MAX
+// is typically 4096. This exists because `isLocalAbsolute` checks a prefix and nothing else.
+const MAX_WORKTREE_LENGTH = 32_767
+
 // O_NONBLOCK is POSIX-only; on win32 `constants.O_NONBLOCK` is undefined and 0 leaves the open
 // flags untouched, which is the correct no-op there (win32 has no FIFO to block on).
 const { O_RDONLY } = constants
@@ -194,101 +198,84 @@ function isSegment(baseDir, value) {
   return rel !== null && !rel.includes(path.sep)
 }
 
-// PATH SAFETY AND TOKEN SAFETY ARE DIFFERENT PROPERTIES, and each id needs both. Containment
-// (above) answers "can this value escape the store". What follows answers what containment
-// cannot: both ids become a git ref through `taskBranchName`, argv through
-// `complete --run <id> --task <id>`, and text in a teammate's stderr.
+// WHAT THESE IDS ARE VALIDATED FOR, and what they are NOT.
 //
-// A CHARSET CANNOT EXPRESS THAT, and the one that used to be here was wrong in both directions.
-// Too permissive: `sub/../substop` is contained, because path.join normalises the alias away,
-// and passes any class containing `.` and `/` — yet git rejects it, the returned string carries
-// `..` into anything that joins it onto a path, and because the record's author writes both the
-// runId and the branch, the branch equality check compares two values it chose and agrees. Too
-// strict: `café` is accepted by init-run and by git, but was refused here, which would abort
-// `locate` and take enforcement off that entire run.
+// NOT for ref legality. The record's path is `index/<hash>.json` — the ids do not build it — so
+// nothing the STORE does depends on whether an id makes a legal git ref. Earlier rounds tried to
+// answer that here and the attempt is deleted: a hand-maintained approximation of "what git can
+// create on every platform" is an open set, and this file's version of it missed U+2060-2064,
+// U+FE00-FE0F, U+00AD, U+180E, U+061C, U+115F, U+3164, U+FFA0, U+FFF9-FFFB and the U+E0000 tag
+// block, missed `CONIN$`/`CONOUT$`/`com¹`, and REFUSED `com0` and `lpt0`, which Windows does not
+// reserve and git creates happily — a legitimate id costing a whole run its enforcement. It also
+// justified itself with cross-platform uniformity that this store does not have: the key is a
+// hash of a win32-normalised path, so a record written on one OS is unreadable on another
+// regardless. git answers the ref question at the point of use, on the real platform, where a
+// consumer's `rev-parse --verify refs/heads/<branch>` already treats "illegal name" and "no such
+// branch" identically — no usable branch, so block, quoting git's own message.
 //
-// TWO ORACLES, NOT ONE. `git check-ref-format` is the authority for the RULE, and this is a
-// subset of it. It is NOT the authority for what can actually be created: measured on git
-// 2.53.0.windows.1, `check-ref-format teammates/run./T1` exits 0 while `git branch`,
-// `git update-ref` and `git checkout -B` all fail with `Unable to create '...T1.lock': Invalid
-// argument`, and the same holds for components named `nul`, `con`, `NUL`. Windows strips a
-// trailing dot and reserves device names, so the `.lock` file the ref machinery needs cannot be
-// created. An id git validates but cannot branch is worse than a rejected one: it passes here,
-// reaches a teammate as `git checkout -B <name>`, and fails in its hands. So the platform's
-// creation rules are enforced too, on every platform, because a record must mean the same thing
-// wherever it is read.
+// What remains guards what the RECORD does and what its fields are spent as:
+//   - no control or invisible characters, because an id that renders identically to another is
+//     not an identifier at all (see UNSAFE_CHARS);
+//   - no leading `-`, because the id is spent as argv;
+//   - no `..` and none of `~ ^ : ? *`, because the composed branch is spent as a git REVISION
+//     argument, where those are range and revision syntax rather than name characters;
+//   - non-empty, no empty component, length bounds, and no separator inside a task id.
 //
-// Implemented from the git rule: no empty component, none equal to `.` or `..`, none beginning
-// with `.` or ending with `.lock`, no `..` anywhere, no ASCII control byte or DEL, no space,
-// none of `~ ^ : ? * [ \`, no `@{`, no `//`, no refname ending in `/`. Deliberately NOT
-// implemented, because nothing here generates them: the `refs/` prefix rules, the lone-`@` rule,
-// and the `--normalize` / `--allow-onelevel` variants. Added beyond git: no component ending in
-// `.` and no Windows reserved device name (both above); no leading `-`, because the id reaches
-// argv; a length bound; and the invisible-character class below.
-//
-// INVISIBLE CHARACTERS ARE IDS THAT CANNOT BE READ. Git accepts U+200B and friends in a
-// refname, so `teammates/run/T1<ZWSP>` is a real ref, distinct from `teammates/run/T1`, that
-// renders identically in `git for-each-ref` and in every diagnostic — a forged record enforcing
-// against a branch the victim never used, undetectable by inspection. U+202E (RTL override) is
-// the Trojan Source trick (CVE-2021-42574) and reverses the text of the error line that reports
-// it. The class is shared with `shown()` so the validator and the printer cannot disagree about
-// which code points are dangerous, which they did once already.
-const CONTROL_CHARS = '\\u0000-\\u001f\\u007f-\\u009f\\u200b-\\u200f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069\\ufeff'
-const REF_FORBIDDEN = new RegExp('[' + CONTROL_CHARS + ' ~^:?*\\[\\\\]')
-const WIN_RESERVED = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$/i
+// UNSAFE_CHARS uses the Unicode property rather than a list, which is the same move as deferring
+// refs to git: `Default_Ignorable_Code_Point` is the authority on "invisible", it covers every
+// code point the enumerated list missed, and it stays correct as Unicode grows. It does not
+// cover C0, DEL/C1, the line and paragraph separators, or the interlinear annotation block, so
+// those four ranges are named explicitly — verified against all 42 code points measured this
+// round, with no false positive on `T1`, `café`, `日本語`, `2026/substop` or `run-1_x`.
+const UNSAFE_CHARS = '[\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029\\ufff9-\\ufffb]'
+  + '|\\p{Default_Ignorable_Code_Point}'
+const REF_FORBIDDEN = new RegExp(`${UNSAFE_CHARS}|[ ~^:?*\\[\\\\]`, 'u')
 
-// REDUNDANCY, stated precisely, because the previous version of this note named a subsumer that
-// was not one. `''`, `'.'` and `'..'` as whole components are each covered elsewhere — `'.'` and
-// `'..'` by the leading-dot and no-`..` rules. The EMPTY-component test is NOT covered by the
-// `//` rule: `/foo` contains no `//`. It is covered only jointly, by `//` for interior doubles
-// and by `namesAValidBranch` for a leading or trailing one, and removing BOTH accepts `/foo`
-// with branch `teammates//foo/T1`. So they are JOINTLY load-bearing: neither dies alone under
-// mutation, which is exactly why three separate reviews called the composed check inert. Every
-// clause is written out because this function's contract is "the rule", and a reader auditing it
-// should find each one rather than re-derive which other clause happens to cover it.
+// The empty-component test is INDIVIDUALLY load-bearing now that the composed-refname check is
+// gone: `/foo` contains no `//`, and with both clauses present neither died alone under mutation
+// — which is what made three reviews call the composed check inert. Removing the pair resolves
+// that rather than documenting it.
 function isRefComponent(component) {
-  if (component === '' || component === '.' || component === '..') return false
-  if (component.startsWith('.') || component.endsWith('.lock')) return false
-  if (component.endsWith('.')) return false
-  if (WIN_RESERVED.test(component)) return false
+  if (component === '') return false
+  // `@{` is revision syntax (`branch@{upstream}`, `@{-1}`), so it belongs with `..`, `~`, `^`
+  // and `:` above rather than with the ref-legality rules this round deleted: the reason is
+  // what the composed branch is SPENT as, not whether git would accept it as a name.
   if (component.includes('@{')) return false
   return !REF_FORBIDDEN.test(component)
 }
 
+// Two clauses here are REDUNDANT and mutation says so, not judgement: `endsWith('/')` is covered
+// by the empty final component it produces, and `allowSeparator: false` is covered by `isSegment`
+// at the call site. Both are kept because each states a property of the value on its own terms,
+// and the check that used to cover the first — the composed-refname one — was deleted this round
+// precisely because nobody could tell what it was for. Everything else here dies alone.
 function isRefPath(value, { maxLength, allowSeparator }) {
   if (typeof value !== 'string' || value === '') return false
   if (value.length > maxLength) return false
   if (value.startsWith('-')) return false
   if (value.includes('..')) return false
   if (value.endsWith('/')) return false
-  if (value.includes('//')) return false
   const components = value.split('/')
   if (!allowSeparator && components.length !== 1) return false
   return components.every(isRefComponent)
 }
 
 // A run id may nest, because init-run creates nested ones. A task id is exactly one component.
-// The bounds are this project's choice rather than git's, and are deliberately generous.
+// The bounds are this project's choice, and are deliberately generous.
 const isRunId = (root, runId) => isContained(path.join(root, '.teammates'), runId)
   && isRefPath(runId, { maxLength: 255, allowSeparator: true })
 const isTaskId = (root, taskId) => isSegment(path.join(root, '.teammates'), taskId)
   && isRefPath(taskId, { maxLength: 128, allowSeparator: false })
 
-// The pair is also checked as ONE refname, which is what git validates and what a consumer hands
-// to `git checkout -B`. Neither id is a refname by itself. See the redundancy note above: this
-// is one half of the pair that catches a leading or trailing separator, so it is load-bearing
-// jointly with the empty-component test even though neither fails alone.
-const isRefName = (name) => isRefPath(name, { maxLength: 512, allowSeparator: true })
-const namesAValidBranch = (runId, taskId) => isRefName(taskBranchName(runId, taskId))
-
 // EVERY interpolation of an untrusted id into a message goes through this, the containment
 // messages included: an id crafted to fail containment is precisely the one carrying the escape
 // sequence, and while these guards ran in the other order it reached the throw verbatim.
-// JSON.stringify quotes and escapes C0; it passes DEL, C1, the bidi and zero-width blocks and
-// U+FEFF through raw, so the shared class above is escaped after it.
-const UNSAFE_TO_PRINT = new RegExp('[' + CONTROL_CHARS + ']', 'g')
+// JSON.stringify quotes and escapes C0 only, so the shared class above is escaped after it —
+// shared so the validator and the printer cannot disagree about what is dangerous, which they
+// did once already. `\u{...}` form because the tag block is astral.
+const UNSAFE_TO_PRINT = new RegExp(UNSAFE_CHARS, 'gu')
 const shown = (value) => JSON.stringify(String(value))
-  .replace(UNSAFE_TO_PRINT, (c) => `\\u${c.codePointAt(0).toString(16).padStart(4, '0')}`)
+  .replace(UNSAFE_TO_PRINT, (c) => `\\u{${c.codePointAt(0).toString(16)}}`)
 
 // Applied inside the writer rather than at each call site, so that any caller added later
 // inherits it rather than having to remember it — there is none but the tests yet. The writer
@@ -303,9 +290,6 @@ function assertIds(root, runId, taskId) {
   }
   if (!isRunId(root, runId)) throw new Error(`--run ${shown(runId)} is not a usable run id`)
   if (!isTaskId(root, taskId)) throw new Error(`--task ${shown(taskId)} is not a usable task id`)
-  if (!namesAValidBranch(runId, taskId)) {
-    throw new Error(`--run ${shown(runId)} and --task ${shown(taskId)} do not name a valid branch`)
-  }
 
 }
 
@@ -350,6 +334,13 @@ export async function writeLocation(root, runId, taskId, { worktree, branch }) {
   // Stored normalised, not raw, so the value on disk is the one the key was computed from and
   // the two cannot disagree about which directory this record is for.
   const normalised = normaliseWorktree(worktree)
+  // `isLocalAbsolute` only inspects the prefix, so without this a worktree is unbounded: a
+  // 70,000-character path resolves lexically (realpath throws for a path that does not exist)
+  // and writes a record no read can ever return. Well above any real path limit — win32
+  // extended paths stop at 32,767 and POSIX PATH_MAX is typically 4096.
+  if (normalised.length > MAX_WORKTREE_LENGTH) {
+    throw new Error(`--worktree is ${normalised.length} characters, over the ${MAX_WORKTREE_LENGTH} allowed`)
+  }
   if (!isLocalAbsolute(normalised)) {
     throw new Error(`--worktree ${shown(worktree)} resolves to ${shown(normalised)}, which no record can name`)
   }
@@ -372,10 +363,15 @@ export async function writeLocation(root, runId, taskId, { worktree, branch }) {
   const target = path.join(dir, `${key}.json`)
   const serialised = `${JSON.stringify({ runId, taskId, branch, worktree: normalised })}\n`
   // The general form of the same rule: whatever the fields are, refuse to write a record this
-  // module's own reader would reject on size. UNREACHABLE as the bounds currently stand — runId
-  // 255 + taskId 128 + branch 512 + a filesystem-bounded path cannot approach 64 KB, and
-  // mutation confirms no test distinguishes it — so it is defence for a field added later
-  // rather than a live check, which is exactly the gap `branch` itself walked through.
+  // module's own reader would reject on size.
+  //
+  // An earlier note called this unreachable by adding up the other bounds. That arithmetic left
+  // out `worktree`, which had NO length bound at all: `isLocalAbsolute` is a prefix test, and
+  // when realpath throws — which it does for a path that does not exist — `normaliseWorktree`
+  // falls back to the lexical form, so `'C:\' + 'a'.repeat(70000)` reached the serialiser and
+  // this guard was the only thing that stopped it. It is now bounded above, which returns this
+  // check to being a backstop for a field added later; mutation confirms nothing distinguishes
+  // it once the field bounds hold, and that is the accurate claim rather than "unreachable".
   if (Buffer.byteLength(serialised, 'utf8') > MAX_RECORD_BYTES) {
     throw new Error(`record for ${shown(taskId)} is larger than ${MAX_RECORD_BYTES} bytes and could never be read back`)
   }
@@ -412,14 +408,15 @@ export async function findTaskByWorktree(root, worktree, { maxRecordBytes = MAX_
     // it does not exist on win32, where 0 leaves the flags unchanged.
     handle = await open(path.join(indexDir(root), `${key}.json`), O_RDONLY | O_NONBLOCK)
     const info = await handle.stat()
-    // NO TEST ON ANY PLATFORM OBSERVES THIS GUARD, and the reason is measured rather than
-    // assumed: libuv opens a writer-less FIFO without blocking (node resolves immediately where
-    // `cat` hangs), and such a FIFO then fstats to size 0, so the bounded read below reads
+    // NO TEST ON ANY PLATFORM OBSERVES THIS PARTICULAR LINE, and the reason is measured rather
+    // than assumed: libuv opens a writer-less FIFO without blocking (node resolves immediately
+    // where `cat` hangs), and such a FIFO then fstats to size 0, so the bounded read below reads
     // nothing and `JSON.parse('')` throws into the catch — producing exactly the null this line
     // produces. A directory fails its read for the same reason on both platforms. It stays as
     // defence in depth: it is one field of an fstat already performed, and it is the only thing
-    // here that would still hold if a future edit made the read blocking or forgiving. An
-    // earlier version of this comment claimed a POSIX test pinned it; that claim was false.
+    // here that would still hold if a future edit made the read blocking or forgiving. Note the
+    // contrast with `O_NONBLOCK` above, which IS pinned — removing that flag fails the FIFO test
+    // on Linux after ~5 s — so only this line is unobserved, not the pair.
     if (!info.isFile()) return null
     // LOAD-BEARING, unlike the line above, and an earlier comment calling it redundant was
     // wrong: the bounded read only truncates: `{"…valid record…"}` followed by 200 kB of spaces
@@ -443,10 +440,6 @@ export async function findTaskByWorktree(root, worktree, { maxRecordBytes = MAX_
     // there are two predicates rather than one applied twice. A failure is a skip, not a throw.
     if (!isRunId(root, record.runId)) return null
     if (!isTaskId(root, record.taskId)) return null
-    // And the pair as one refname, which is what git validates and what a consumer will hand to
-    // `git checkout -B`. A name git refuses would be printed back as remediation the teammate
-    // cannot carry out, once per stop up to the block cap.
-    if (!namesAValidBranch(record.runId, record.taskId)) return null
 
     // The record must name a worktree that hashes back to the file it was found in. This
     // replaces the old filename-equality check and is strictly stronger: a forged record has to
