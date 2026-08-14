@@ -270,31 +270,18 @@ the phase gate remains the thing that decides.
   Which is the half that stays open. The conventional name is built from the ids, and the ids are
   the fields a forged record chooses freely, so a record planted under the victim's worktree naming
   another task's `runId` and `taskId` resolves to that task's ref through the honest construction
-  rather than around it. What follows divides on whether that ref exists. Where it does, the victim
-  is waved past on a branch it never created — the do-nothing case this entire design exists to
-  catch. Where it does not, the victim is blocked and told to create a branch under *another
-  task's* name and commit to it. The handler force-moves nothing itself — its precheck blocks only
-  on an absent ref (`docs/plans/2026-08-13-subagent-stop-enforcement.md:507`), so at the moment it
-  speaks there is no live ref to move — but the victim's compliance creates one, in the victim's
-  own worktree.
+  rather than around it. Two harms follow, stated as what such a record can cause and not as a
+  sequence that unfolds, because everything past the moment of causing them depends on dispatch
+  configuration this design does not fix. The handler's precheck divides them: it blocks only on an
+  absent ref (`docs/plans/2026-08-13-subagent-stop-enforcement.md:507`).
 
-  What happens after that turns on whether the victim's worktree still holds the ref, not on
-  whether the named task ever starts. While it holds it — which is every task of the same phase,
-  since this design gives each implementer its own worktree — git refuses the honest owner's
-  identical first step outright: `fatal: 'teammates/<runId>/<taskId>' is already used by worktree
-  at <the victim's path>`, exit 128. Nothing is moved and nothing is discarded, and two harms stand
-  together. The planted commits stay on the ref, and the gate reads them as that task's: a file set
-  and an ownership answer for work that task never did. And the honest owner is denied its own
-  start — its `git log --oneline -1` does not show the base tip, which is the brief's own
-  instruction to stop and report `blocked` (`scripts/brief.mjs:40`) — so one task is kept from
-  starting by a record another teammate forged.
-
-  Only once that worktree is pruned does the owner's `checkout -B` succeed, and then it resets the
-  ref to the base and the planted commits are no longer reachable from it. There the victim loses
-  its work and is left branchless on the task it was actually given, never enforced against it,
-  because every stop it makes still resolves through the planted record to someone else's task.
-  That ordering needs the victim's worktree already gone, so it is the later and rarer of the two,
-  and neither is among the consequences listed below.
+  Where the named ref exists, the victim is waved past on a branch it never created — the
+  do-nothing case this entire design exists to catch. Where it does not, the victim is blocked and
+  told to create a branch under *another task's* name and commit to it, so its commits sit on that
+  ref and the gate reads them as that task's: a file set and an ownership answer for work that task
+  never did. What becomes of those commits afterwards turns on whether some worktree still holds
+  the ref when the honest owner runs its own first step, which is a property of how the run was
+  dispatched rather than of anything specified here, and is not predicted.
 
   The requirement that follows lands on the remediation text rather than on the branch check, which
   is already clamped as far as a record's own contents allow: a ref derived from a record is only
