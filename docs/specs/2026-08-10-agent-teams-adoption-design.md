@@ -111,7 +111,9 @@ no run at all. It returns success — allowing the stop — immediately unless a
 
 - `stop_hook_active` is false, and
 - `cwd` is a string that resolves inside a git repository, and
-- a location record under `.teammates/<runId>/worktrees/` names that worktree, and
+- a location record exists at the address derived from that worktree — the handler recomputes the
+  record's key from `cwd` and opens that one file, rather than searching for a record that names it
+  — and
 - the run's recorded plan path is present.
 
 Anything else is not this plugin's business, and the handler must be cheap enough to say so — the
@@ -123,8 +125,10 @@ The payload carries `agent_id` and `agent_type`, and no task identifier. It cann
 through the checked-out branch either: the harness names the worktree branch `worktree-agent-<hash>`
 itself, and `teammates/<runId>/<taskId>` exists only once the implementer creates it — so branch
 resolution would miss precisely the teammate that did nothing, which is the case the hook exists
-for. So this design adds a location record: the implementer contract and the dispatched brief gain
-a step writing `.teammates/<runId>/worktrees/<taskId>.json` as the first act after checkout, and the
+for. So this design adds a location record, addressed by the worktree it describes rather than
+composed from the run and task ids: the implementer contract and the dispatched brief gain a step
+running `cli.mjs locate --run <runId> --task <taskId>` as the first act after checkout — no path
+argument, because the command files the record under the worktree it is run in — and the
 handler maps `cwd` back to a task through it. A `cwd` that matches no
 record is allowed to stop — and then fails the gate, which is the correct order: this hook is an
 early catch, never the thing that decides.
@@ -216,15 +220,30 @@ the phase gate remains the thing that decides.
 
 ### Two limits, stated in the handler
 
-- **Any teammate can create or overwrite any record in the run.** The records live in one directory
-  keyed by task id, shared across the run and not access-controlled, and every teammate has a
-  shell — so the `locate` command is one way to write one, not the only way. All three fields are
-  attacker-chosen: a record may name a worktree that is not the writer's, may be filed under a task
-  id the writer was not given (including one no task uses), and may name any `branch` at all.
+- **Any teammate can plant or overwrite the record for any worktree it can name.** The records live
+  in one directory, `.teammates/index/`, each filed under the sha256 of its normalised worktree
+  path. That directory is *not* under `<runId>/`: it is shared by every run in the repository,
+  nothing prunes it, and it is not access-controlled — every teammate has a shell, so the `locate`
+  command is one way to write a record, not the only way.
+
+  The reader binds a record to its own address: it recomputes the key from the record's `worktree`
+  field and refuses the record unless that key is the file name it was found under. That check buys
+  exactly one thing and nothing beyond it — a record cannot be filed under key A while naming
+  directory B. It does not stop a record being planted to answer for someone else's directory. A
+  record's address *is* its worktree path, and any teammate can read a sibling's worktree path, so
+  an attacker who knows the victim's path writes the file at the key of that path, naming that path
+  honestly and any `runId`, `taskId` and `branch` it likes. Last writer wins, and the victim's stop
+  then resolves to whatever that record says.
+
+  Keying on the worktree alone, with nothing pruning the store, has a second consequence worth
+  stating as a limit even where no attacker is involved: worktree paths are reused. A record left
+  behind by a finished run resolves the next occupant of that directory to the previous occupant's
+  task — enforcement against the wrong task, in a wrong run.
 
   The `branch` field deserves separate statement, because it is the one that needs no mismatch to
-  do damage. A record with an honest task id and an honest worktree still hands an attacker-chosen
-  ref to whatever consumes it. Through the handler specified here that alone is enough: a `branch`
+  do damage. A record that satisfies the key/content check above — one naming the very directory it
+  is filed under — still hands an attacker-chosen ref to whatever consumes it. Through the handler
+  specified here that alone is enough: a `branch`
   naming any ref that exists makes the branch precheck succeed, so a teammate that created no
   branch is waved straight past — the do-nothing case this entire design exists to catch. Worse, a
   `branch` naming a rival's ref gets the victim blocked and then told, by the handler's own
@@ -236,11 +255,12 @@ the phase gate remains the thing that decides.
 
   Consequences reachable from that include, and are not limited to: a teammate leaving itself
   unenforced, so its stop is allowed with no check; a *different* teammate left unenforced, its
-  worktree no longer matching any record; and a teammate judged against a task that is not its own,
-  because the record its worktree now resolves through describes someone else's work. Which of
-  these a given forgery produces depends on the file it writes and on the resolution order, and
-  this list is not offered as exhaustive — three earlier versions of this paragraph each named a
-  single direction of harm and each was falsified by an attack shape it had not considered.
+  record deleted or overwritten with ids no check will reject; and a teammate judged against a task
+  that is not its own, because the record filed under its worktree describes someone else's work.
+  Which of these a given forgery produces depends on the file it writes and on which worktree that
+  file is addressed to, and this list is not offered as exhaustive — three earlier versions of this
+  paragraph each named a single direction of harm and each was falsified by an attack shape it had
+  not considered.
 
   The bound that does hold, and the only one worth resting on, is that **none of it produces a
   false gate PASS**, because the verdict is recomputed from git: `deriveContext` resolves base, run,
