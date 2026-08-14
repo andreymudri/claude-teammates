@@ -111,6 +111,11 @@ test('the verify step maps rejection to exit 4 with its printed discriminator', 
       'exit 2 does not name the refused-spelling output')
     assert.ok(brief.includes('--root must not be empty'),
       'exit 2 does not name the empty-root output')
+    // cli.mjs prints `--run <value> escapes the run directory` for a traversal in --run. An
+    // unlisted marker falls through to the malformed-manifest line, diagnosing configuration
+    // for a rejected invocation on which the gate never ran.
+    assert.ok(brief.includes('escapes the run directory'),
+      'exit 2 does not name the run-directory-escape output')
     assert.ok(/missing required argument:[^]{0,400}run it again/.test(brief),
       'a malformed invocation is not the teammate\'s own to fix and re-run')
     assert.ok(/missing required argument:[^]{0,400}verified NOTHING/.test(brief),

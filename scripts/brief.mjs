@@ -97,9 +97,15 @@ const locateStep = (task, runId) => (runId ? [
 //   1  the gate passed but status.json is missing or does not list the task — bookkeeping
 //   2  TWO unrelated things: teammates.gate.json is present and MALFORMED (configuration), or
 //      the invocation itself was rejected — a missing required argument, an unknown flag, a
-//      refused flag spelling, an empty --root, a --run escaping .teammates/. The argument
-//      errors are the teammate's own to fix, and on one it has verified nothing at all, so the
-//      brief discriminates them by the printed line the same way it does for exit 4.
+//      refused flag spelling, an empty --root, a --run escaping .teammates/ (which prints
+//      `--run <value> escapes the run directory`). The argument errors are the teammate's own
+//      to fix, and on one it has verified nothing at all, so the brief discriminates all five
+//      by the printed line the same way it does for exit 4. The escape case is narrow — a
+//      runId carrying a traversal cannot come from `init-run`, so it reaches a teammate only
+//      through a caller composing a brief with an unvalidated runId — but it is listed in the
+//      rendered text because this comment claims it is, and an unlisted marker falls through
+//      to the malformed-manifest line: a false configuration diagnosis for a rejected
+//      invocation on which nothing was verified.
 //   4  FOUR different situations: no gate manifest, an underivable context, a task the plan
 //      does not contain, and — the case that matters most — the recomputed gate REJECTING
 //      this task, which prints a first line beginning `gate does not pass for phase`.
@@ -134,6 +140,7 @@ const verifyStep = (task, runId, planPath) => (runId && planPath ? [
   '           Output naming an argument means YOUR INVOCATION was wrong, not the configuration:',
   '             "missing required argument:"   "unsupported flag spelling:"',
   '             "complete does not take"       "--root must not be empty"',
+  '             "escapes the run directory"',
   '           None of those mention the manifest, and on any of them you have verified NOTHING',
   '           yet — the gate never ran. Fix the command you typed and run it again.',
   '           Any other exit 2 means teammates.gate.json itself is malformed. That one is',
