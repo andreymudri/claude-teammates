@@ -273,19 +273,36 @@ the phase gate remains the thing that decides.
   rather than around it. Two consequences follow, according to whether that ref exists. Where it
   does, the victim is waved past on a branch it never created — the do-nothing case this entire
   design exists to catch. Where it does not, the victim is blocked and told to create a branch
-  under *another task's* name and commit to it, so its work lands there and the gate reads those
-  commits as that task's: a file set and an ownership answer for work that task never did. Nothing
-  is force-moved in either case — the precheck blocks only on an absent ref
-  (`docs/plans/2026-08-13-subagent-stop-enforcement.md:507`), so there is never a live ref to move.
-  Something is planted instead.
+  under *another task's* name and commit to it. The handler force-moves nothing itself — its
+  precheck blocks only on an absent ref (`docs/plans/2026-08-13-subagent-stop-enforcement.md:507`),
+  so at the moment it speaks there is no live ref to move — but the victim's compliance creates
+  one, and where those commits end up depends on whether the named task ever starts.
+
+  If it never starts, they stay, and the gate reads them as that task's: a file set and an
+  ownership answer for work that task never did. If it does start, its own mandatory first step is
+  `git checkout -B teammates/<runId>/<taskId> <base>`, which moves that ref off the planted commits
+  and onto the base. The victim's work is then discarded, and the victim is left branchless on the
+  task it was actually given and never enforced against it — every stop it makes resolves through
+  the planted record to someone else's task, so its own do-nothing case goes uncaught. That
+  ordering costs the victim its work and this design its catch, and it is not a consequence the
+  paragraph below would otherwise reach.
 
   The requirement that follows lands on the remediation text rather than on the branch check, which
   is already clamped as far as a record's own contents allow: a ref derived from a record is only
   as trustworthy as the record, so the handler may name one in a diagnosis and must not direct
-  anyone to create it or commit to it. A teammate told its branch is missing takes the name from
-  the task its own brief gave it, not from a file any teammate can write. That requirement
-  contradicts what the implementation plan currently prescribes — its precheck emits exactly such
-  an instruction, `git checkout -B ${branch} <base>` at
+  anyone to create it or commit to it. A teammate told its branch is missing should be sent back to
+  its own brief, which is fixed text already in its context rather than a file the handler consults
+  at stop time. That contrast is about *when* the name was fixed, not about who could have written
+  it: the brief's branch string is itself built from `.teammates/<runId>/plan.json` — `workflow`
+  reads that record (`scripts/cli.mjs:1399`), the branch is composed from its `id`
+  (`scripts/workflow-gen.mjs:60`), and it is rendered into the checkout line
+  (`scripts/brief.mjs:37`) — and that file is writable by any teammate, like everything else in
+  that directory. It fails closed, because the gate resolves the conventional name from the plan
+  committed in git and reports a branch that does not exist, so it bounds this argument rather than
+  opening a second hole.
+
+  That requirement contradicts what the implementation plan currently prescribes — its precheck
+  emits exactly such an instruction, `git checkout -B ${branch} <base>` at
   `docs/plans/2026-08-13-subagent-stop-enforcement.md:502-513` — and the contradiction is this
   requirement's doing, not a defect in the block when it was written against the earlier one.
   Reconciling the two belongs to whoever dispatches that step, before an implementer meets both and
