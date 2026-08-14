@@ -20,8 +20,12 @@ Decisions taken before planning:
 - **A separate location record, not the claim.** `claim` is invoked on exactly one path today
   (`fleet-lifecycle`'s mid-run **add `<role>`**), never by a dispatched implementer, and its `wx`
   flag means a fix-round respawn re-entering a claimed task writes nothing. A new `locate` command
-  writes `.teammates/<runId>/worktrees/<taskId>.json`, overwrite allowed, run by every implementer
-  as its first act after checkout. `claim`'s atomicity guarantee is left exactly as it is.
+  writes `.teammates/index/<sha256 of the normalised worktree>.json`, overwrite allowed, run by
+  every implementer as its first act after checkout. The record is addressed by the worktree it
+  describes, not composed from the run and task ids, and the store sits under the **main**
+  repository root — `locate` must derive that root the way the handler does rather than inherit
+  `flags.root ?? process.cwd()`, or it files the record inside the teammate's own worktree where
+  nothing will ever find it. `claim`'s atomicity guarantee is left exactly as it is.
 - **The hook runs `complete --enforcement-only`.** The full gate's `command` checks are the
   project's test suite; running that synchronously inside a stop hook means the common outcome is a
   hook timeout, which is a non-blocking error — enforcement that looks installed and does nothing.
@@ -75,8 +79,15 @@ catch.
 
 - [ ] **Step 3:** Retitle `## The \`TeammateIdle\` hook` to `## The \`SubagentStop\` hook` and rewrite
       its body to describe the handler this plan builds: no-ops unless `cwd` resolves to a recorded
-      worktree, returns success while `stop_hook_active` is true, blocks on
-      `complete --enforcement-only` exit 2 and allows on exit 4.
+      worktree, returns success while `stop_hook_active` is true, and blocks **only** on the
+      rejection-specific exit code Task 5 adds to `complete --enforcement-only`.
+
+      Do not write "blocks on exit 2 and allows on exit 4". Both are wrong today and in opposite
+      directions: `complete` returns **2** for a malformed manifest *or* an argv error, and **4**
+      for a gate rejection *or* a cannot-verify. Blocking on 2 blocks a teammate for the
+      orchestrator's typo; allowing on 4 waves through the rejection this hook exists to catch.
+      That is why Task 5 adds a code meaning *rejected and nothing else*, and why this sentence
+      must name that code rather than either of the two it conflates.
 
 - [ ] **Step 4:** Correct the sentence in `## The property this design protects` reading "it is the
       verification the teammate was already told to run before returning, moved to a point the
@@ -389,16 +400,20 @@ scale-up path depends on, and a record that must be re-writable on every respawn
       describes, the hook that reads it is an early catch, and its worst failure is losing the catch
       — the gate recomputes every verdict from git and reads nothing here.
 
-- [ ] **Step 6:** In `tests/state.test.mjs`, add a test that `writeLocation` creates
-      `.teammates/<runId>/worktrees/<taskId>.json` containing `taskId`, `worktree` and `branch`, and
-      that calling it a second time with a different worktree overwrites rather than failing.
+- [ ] **Step 6:** In `tests/state.test.mjs`, add a test that `writeLocation` creates its record
+      containing `taskId`, `worktree` and `branch`, and that calling it a second time with a
+      different worktree overwrites rather than failing. **As built, the store is
+      `.teammates/index/<sha256 of the normalised worktree>.json`** — keyed by the worktree, not
+      composed from the run and task ids — so assert on the path `writeLocation` returns rather
+      than on a path this step composes. The scanning layout this step originally described was
+      replaced during the run after its resource bounds failed three separate ways.
 
 - [ ] **Step 7:** Add a test that `findTaskByWorktree` finds a record written under one spelling of a
       path when queried with another — a trailing separator, and on `win32` a differing drive-letter
       case — and returns `{ runId, taskId, branch }`.
 
 - [ ] **Step 8:** Add a test that `findTaskByWorktree` returns `null` for an unknown worktree, for a
-      root with no `.teammates` directory, for a run with no `worktrees/` directory, and for a
+      root with no `.teammates` directory, for a root with no `index/` directory, and for a
       record holding malformed JSON — the malformed one must be skipped without throwing.
 
 - [ ] **Step 9:** Add a test that `claimTask` still returns `false` on a second claim and still
@@ -507,12 +522,27 @@ with this plugin installed, so the no-op path must be cheap.
         if (!git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], root)) {
           process.stderr.write(
             `Task ${found.taskId} has no branch ${branch}. Your work is not on a branch this run can `
-            + `merge, so nothing you did is visible to the gate. Create it with `
-            + `"git checkout -B ${branch} <base>", commit your work, then finish.\n`
+            + `merge, so nothing you did is visible to the gate. Your brief names the branch to `
+            + `create and the command to create it with; follow that step, commit your work, then `
+            + `finish.\n`
           )
           return BLOCK
         }
       ```
+
+      **The remediation must not tell anyone to create or commit to this ref, and must not
+      interpolate `branch` into a shell command.** Both were true of the earlier draft
+      (`git checkout -B ${branch} <base>`) and both are now forbidden by the adopted design, which
+      states: *a ref derived from a record is only as trustworthy as the record, so the handler may
+      name one in a diagnosis and must not direct anyone to create it or commit to it.*
+
+      The reason is not shell quoting. `found.branch` is clamped by the reader to the conventional
+      name built from the record's own `runId` and `taskId`, but **those ids are attacker-chosen**,
+      so a planted record resolves to another task's ref through the honest construction. A victim
+      that obeys a create-and-commit instruction puts its commits on that task's branch, where
+      `fileset` and `ownership` read them as that task's work — verified by execution, twice. The
+      teammate's own brief already carries the branch name from the dispatch, which is the
+      trustworthy source; send it there instead of naming a ref the record chose.
 
 - [ ] **Step 5:** Run the enforcement subset and split the exit codes, which is the difference
       between an early catch and a teammate wedged by broken state:
@@ -524,10 +554,14 @@ with this plugin installed, so the no-op path must be cheap.
         // hook means the usual outcome is a timeout — which is a non-blocking error, i.e.
         // enforcement that looks installed and does nothing. The phase gate still runs it all.
         //
-        // Exit 2 is a verdict: the checks ran and rejected this task. Exit 4 is "cannot verify" —
-        // no gate manifest, an underivable context, an unknown task id — which is a fact about
-        // the run's configuration, not about this teammate's work, and must never cost it a turn.
-        // Anything else is a broken handler and allows too.
+        // Block on REJECTED and on nothing else. `complete`'s existing codes cannot carry this
+        // decision, and the earlier draft of this comment had them backwards in both directions:
+        // 2 is a malformed manifest OR an argv error, and 4 is a gate rejection OR a
+        // cannot-verify (no manifest, an underivable context, an unknown task id). Blocking on 2
+        // costs a teammate a turn for the orchestrator's typo; allowing on 4 waves through the
+        // rejection this handler exists to catch. Task 5 adds REJECTED for exactly this, and
+        // every other code — including 2 and 4 — allows, because a fact about the run's
+        // configuration must never cost a teammate a turn.
         const cli = path.join(path.dirname(fileURLToPath(import.meta.url)), 'cli.mjs')
         const result = spawnSync(process.execPath, [
           cli, 'complete',
@@ -538,12 +572,17 @@ with this plugin installed, so the no-op path must be cheap.
           '--enforcement-only',
         ], { encoding: 'utf8', timeout: 60_000 })
 
-        if (result.status === BLOCK) {
+        if (result.status === REJECTED) {
           process.stderr.write(`${(result.stdout || '').trim()}\n`)
           return BLOCK
         }
         return ALLOW
       ```
+
+      `REJECTED` is the code Task 5 adds; it is not `BLOCK`. `BLOCK` is this handler's own exit
+      status to the harness (2). Conflating the two is what produced the inverted comment above:
+      the code `complete` returns and the code this hook returns are different vocabularies that
+      happen to share a number.
 
 - [ ] **Step 6:** Add a comment above the `complete` call recording the one case where it misfires:
       `complete` derives the run branch from whatever the main worktree has checked out, so if the
@@ -609,6 +648,27 @@ entry makes a new flag silently unknown.
       and extend `complete` to `['run', 'task', 'plan', 'base', 'phase', 'enforcement-only']`. Both
       tables must be updated or a new flag is refused as unknown and a new command goes unvalidated.
 
+      Verified before this run: `complete`'s table genuinely lacks `enforcement-only` today, while
+      `root` passes as a `UNIVERSAL_FLAG` (`scripts/cli.mjs:232`) — so this one entry is the whole
+      gap, and `complete --enforcement-only` currently prints `complete does not take
+      --enforcement-only` and exits **2**.
+
+- [ ] **Step 3b:** Add a **rejection-specific exit code** to `complete`, distinct from every code it
+      returns today, and return it only when the recomputed enforcement checks reject the task.
+      Task 4's handler blocks on this code and on nothing else.
+
+      This is the load-bearing half of the two. `complete` currently returns **2** for a malformed
+      manifest *or* an argv error (`cli.mjs:2760`, `:1242`) and **4** for a gate rejection *or* a
+      cannot-verify (`cli.mjs:2761`, `:2811`). Neither can carry a block decision: 2 would block a
+      teammate for the orchestrator's typo, 4 would allow the very rejection the hook exists to
+      catch.
+
+      `tests/cli.test.mjs:3040` pins the current behaviour under the name *"complete exits 4 when
+      the recomputed gate fails"* and asserts both `code === 4` and `/gate does not pass for
+      phase/`. That test must be updated in the same step, not left to fail — it is the pin that
+      makes the old code meaningful, so changing the code without it leaves the suite red for a
+      reason unrelated to the defect being fixed.
+
 - [ ] **Step 4:** Add the `locate` command. It defaults both values from where it is run, so the
       brief can carry one bare command instead of a shell dance the teammate can get wrong, and it
       resolves the main worktree itself:
@@ -660,6 +720,22 @@ entry makes a new flag silently unknown.
       await writeState(root, runId, 'plan', { runId, totalPhases, tasks, planPath })
       ```
 
+- [ ] **Step 7b:** Make `init-run` apply the **same id rule as the location record**, and treat the
+      store as authoritative where they differ.
+
+      They diverge today on `;`, space, `:`, `*`, a leading `-`, emoji, ZWNJ and tab: `init-run`
+      admits ids that `writeLocation` and `findTaskByWorktree` then refuse. A run initialised with
+      such an id parses, phases and dispatches normally, and every teammate's `locate` fails at the
+      first act after checkout — so the hook resolves nothing for the whole run and enforcement is
+      silently off, which is indistinguishable from a clean pass.
+
+      The store's rule, as built: `/^[\p{L}\p{M}\p{N}._-]+$/u`, no component `.` or `..`, no `..`
+      anywhere, no leading `-`; a runId may nest, a taskId is exactly one component. It is an
+      allowlist, not a blocklist, and that is deliberate — blocklists over Unicode proved
+      unbounded, and `Default_Ignorable` alone missed 29 `Cf` points while wrongly excluding
+      functional joiners. Reject at `init-run` with a message naming the offending id and
+      character, rather than letting the run reach dispatch.
+
 - [ ] **Step 8:** Add the `brief` command. It must source the plan exactly as `workflow` does
       (`scripts/cli.mjs:1416-1428`) — from git at the run anchor, never from the working tree. The
       comment there records why: reading the checked-out copy let the constraints injected into
@@ -700,9 +776,23 @@ entry makes a new flag silently unknown.
       `brief` calls it itself.
 
 - [ ] **Step 11:** In `tests/cli.test.mjs`, add a test that `locate --run r1 --task T1` run from
-      inside a linked worktree writes `.teammates/r1/worktrees/T1.json` under the **main** worktree,
-      with that worktree's own path and current branch, and a test that explicit `--worktree` and
-      `--branch` override both.
+      inside a linked worktree writes its record **under the main worktree**, with that worktree's
+      own path and current branch, and a test that explicit `--worktree` and `--branch` override
+      both.
+
+      Assert on **the path `writeLocation` returns**, not on `.teammates/r1/worktrees/T1.json` —
+      that is the superseded layout and nothing writes it. As built the record is
+      `.teammates/index/<sha256 of the normalised worktree>.json`, so a test that composes the
+      path from the ids cannot pass.
+
+      The "under the main worktree" half is the part worth testing hardest: `locate` takes no path
+      argument, so an implementation that inherits the CLI's shared default
+      (`flags.root ?? process.cwd()`, `scripts/cli.mjs:1258`) files the record inside the
+      teammate's own worktree. `.teammates/` is gitignored, so that directory appears silently and
+      the command exits 0 with nothing to notice — while the handler, which resolves the main root
+      via `git rev-parse --path-format=absolute --git-common-dir` and takes the parent, then finds
+      no record for any cwd and allows every stop. Enforcement would be inert and indistinguishable
+      from a clean pass.
 
 - [ ] **Step 12:** Add a test that `complete --enforcement-only` on a phase whose manifest declares
       no enforcement check exits 2 with the refusal message, matching `finish` and `prune-run`.
@@ -732,7 +822,13 @@ entry makes a new flag silently unknown.
 - Modify: `templates/phase-workflow.js`
 - Test: `tests/workflow-gen.test.mjs`
 
-**Depends:** T2
+**Depends:** T2, T5
+
+`T5` was added after phasing was first computed. This task composes briefs that carry the `locate`
+step, and `locate` is the command Task 5 builds — generating a brief for a command that does not
+exist yet is how a brief ships an invocation the CLI rejects. Adding the dependency moves this task
+out of Task 5's phase and into the next one; validated against `init-run`, the layout becomes
+phase 1 `T1 T2 T3` · phase 2 `T4 T5` · phase 3 `T6 T7 T8`.
 
 - [ ] **Step 1:** In `scripts/workflow-gen.mjs`, add `BRIEFS` to the marker pattern at line 19:
       `const MARKER = /__(?:META|TASKS|BRIEFS|PLAN_PATH|BASE_BRANCH|CONSTRAINTS|CAVEMAN|EFFORT)__/g`.
@@ -903,11 +999,25 @@ entry makes a new flag silently unknown.
 
 ---
 
+## Follow-up owed after Task 5 lands
+
+- [ ] **Re-measure the spec's `cli.mjs` citations.** `docs/specs/2026-08-10-agent-teams-adoption-design.md`
+      cites `scripts/cli.mjs` at roughly ten places (`:242`, `:1242`, `:1258`, `:1399`, `:2722`,
+      `:2727-2735`, `:2760`, `:2761`, `:2803`, `:2811`, `:2814`, `:2815-2817`, `:2819`, `:2821`).
+      All were verified correct against the pre-Task-5 tree and will drift the moment Task 5 edits
+      `cli.mjs`. The spec is **not** in Task 5's declared file set, so Task 5 cannot fix them and
+      must not try — this is a separate follow-up, and whoever dispatches it owns re-measuring
+      every one against the merged tree rather than against a task branch.
+
+      A stale citation here is not cosmetic: this run already produced a medium where six added
+      comment lines moved a clamp from `state.mjs:482` to `:488` and left the spec pointing at
+      prose. That defect existed only in the merge and was invisible on either branch alone.
+
 ## Verification
 
 - [ ] `node --test tests/*.test.mjs` is green.
 - [ ] `node scripts/cli.mjs init-run docs/plans/2026-08-13-subagent-stop-enforcement.md --run plancheck --root .`
-      prints three phases: T1 T2 T3 / T4 T5 T6 / T7 T8. Remove `.teammates/plancheck` afterwards.
+      prints three phases: T1 T2 T3 / T4 T5 / T6 T7 T8. Remove `.teammates/plancheck` afterwards.
 - [ ] With the plugin installed, a teammate that stops having created no branch is blocked once and
       told which branch to create; stopping a second time is allowed through, and the phase gate
       still fails the task.
