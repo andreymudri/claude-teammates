@@ -34,6 +34,29 @@ The session goal hook may still say "no low" — the amended bar wins, and say s
 4. When phase 2 clears: `git checkout --detach`, dispatch `tm-integrator` at `mid`/sonnet, then
    `git checkout run/substop` to re-attach.
 
+## Pinned before dispatch: the rejection exit code is **3**
+
+T4 and T5 share an interface and run in the same phase, so neither sees the other's work. T4's
+handler blocks on the rejection-specific exit code; T5 is the task that adds that code to
+`complete`. **The number is fixed by the dispatch, not chosen by either teammate:**
+
+```
+complete --enforcement-only exits 3, and only 3, when the recomputed enforcement checks reject.
+The handler blocks on 3 and on nothing else. Every other code allows.
+```
+
+3 is free: `complete` uses 0 pass / 1 bookkeeping / 2 malformed-manifest-or-argv / 4
+gate-rejected-or-cannot-verify today.
+
+**Why this had to be pinned centrally.** If T4 writes `REJECTED = 3` and T5 returns `5`, both
+tasks pass their own tests, both pass `fileset` and `ownership`, the phase gates green — and the
+merged handler never blocks. Enforcement would be inert and indistinguishable from a clean pass,
+which is the precise failure this whole design exists to prevent. No check in the gate compares a
+constant in one task's file against a return value in another's.
+
+Do not confuse this with the handler's **own** exit status to the harness: `ALLOW = 0`,
+`BLOCK = 2`. Two vocabularies that share small integers; the plan says so at Task 4 step 5.
+
 ## Owed before phase 3, and easy to lose
 
 **Re-measure the spec's `cli.mjs` citations after T5 lands.** `docs/specs/2026-08-10-agent-teams-adoption-design.md`
