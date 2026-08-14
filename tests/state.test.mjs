@@ -423,6 +423,28 @@ test('findTaskByWorktree breaks an exact mtime tie across runs deterministically
   })
 })
 
+// The property is determinism, NOT recency: a run id is free text and carries no time, so when
+// the ids tie on mtime the winner may well be the older run. Here `zulu` is written first and
+// `alpha` second, so lexical order and write order disagree — and the answer must still be the
+// same one every time rather than whatever readdir yields.
+test('an exact mtime tie resolves the same way even when the newer run sorts lower', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    const older = await writeLocation(root, 'zulu', 'T1', { worktree, branch: 'teammates/zulu/T1' })
+    const newer = await writeLocation(root, 'alpha', 'T1', { worktree, branch: 'teammates/alpha/T1' })
+    const same = new Date(1_700_000_000_000)
+    await utimes(older, same, same)
+    await utimes(newer, same, same)
+    for (let i = 0; i < 3; i += 1) {
+      assert.deepEqual(await findTaskByWorktree(root, worktree), {
+        runId: 'zulu',
+        taskId: 'T1',
+        branch: 'teammates/zulu/T1',
+      })
+    }
+  })
+})
+
 // The run id cannot settle a tie between two records of the SAME run, and that is the reachable
 // case: a respawned teammate reuses an agent-<hash> path within one run, on a filesystem whose
 // mtime granularity collapses both writes onto one timestamp.
@@ -570,9 +592,13 @@ test('findTaskByWorktree drops a branch the record could not legitimately name',
   })
 })
 
-// A UNC path is the spelling that must never reach realpath: an unreachable host blocks the
-// event loop for tens of seconds per record. It still has to compare, just lexically.
-test('findTaskByWorktree still matches a UNC worktree by its literal spelling', async () => {
+// A UNC path must never reach realpath: an unreachable host blocks the event loop for tens of
+// seconds per record. Since round 8 it is not matchable at all — `isLocalAbsolute` is now the
+// admission check for a record's worktree, and it excludes UNC. This test pins that DELIBERATE
+// limitation (it previously asserted the opposite, that UNC matched lexically): a worktree on a
+// network share is outside what this lookup can identify, so the hook fails open there, which
+// is no enforcement rather than wrong enforcement.
+test('findTaskByWorktree does not match a UNC worktree at all', async () => {
   await withTempRoot(async (root) => {
     const dir = path.join(root, '.teammates', 'r1', 'worktrees')
     await mkdir(dir, { recursive: true })
@@ -582,13 +608,9 @@ test('findTaskByWorktree still matches a UNC worktree by its literal spelling', 
       JSON.stringify({ taskId: 'T1', worktree: unc, branch: 'teammates/r1/T1' }),
       'utf8',
     )
-    const found = await findTaskByWorktree(root, unc)
-    if (process.platform === 'win32') {
-      assert.deepEqual(found, { runId: 'r1', taskId: 'T1', branch: 'teammates/r1/T1' })
-    } else {
-      // On POSIX that string is a relative path, not a UNC one, and resolves under cwd.
-      assert.equal(found === null || found.taskId === 'T1', true)
-    }
+    // Queried by the very spelling it records, so nothing but the admission check rejects it.
+    assert.equal(await findTaskByWorktree(root, unc), null)
+    assert.equal(await findTaskByWorktree(root, unc.replace(/\\/g, '/')), null)
   })
 })
 
@@ -694,7 +716,10 @@ test('findTaskByWorktree ignores a record whose worktree is relative', async () 
   await withTempRoot(async (root) => {
     const dir = path.join(root, '.teammates', 'r1', 'worktrees')
     await mkdir(dir, { recursive: true })
-    for (const worktree of ['.', '', 'relative/path', './wt/agent-1', '..']) {
+    // `\foo` is the subtle one: path.isAbsolute says true on win32, yet path.resolve completes
+    // it from the reader's CURRENT DRIVE, so one record names C:\foo for one reader and D:\foo
+    // for another — the very property this guard exists to remove.
+    for (const worktree of ['.', '', 'relative/path', './wt/agent-1', '..', '\\tm-probe-victim\\agent-1']) {
       await writeFile(
         path.join(dir, 'T1.json'),
         JSON.stringify({ taskId: 'T1', worktree, branch: 'teammates/r1/T1' }),
@@ -729,17 +754,82 @@ test('findTaskByWorktree skips a record larger than the size cap', async () => {
   })
 })
 
-test('findTaskByWorktree gives up rather than scanning past the record cap', async () => {
+test('findTaskByWorktree stops scanning past the record cap but keeps the match it has', async () => {
   await withTempRoot(async (root) => {
     const worktree = path.join(root, 'wt', 'agent-1')
-    for (const taskId of ['T1', 'T2', 'T3', 'T4']) {
-      await writeLocation(root, 'r1', taskId, { worktree, branch: `teammates/r1/${taskId}` })
+    // Padding named so it is reached AFTER the honest record, which is the case the fix covers.
+    await writeLocation(root, 'r1', 'T1', { worktree, branch: 'teammates/r1/T1' })
+    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
+    for (let i = 0; i < 20; i += 1) {
+      await writeFile(path.join(dir, `zpad${i}.json`), '{}', 'utf8')
     }
-    // Under the cap the lookup answers normally.
-    assert.notEqual(await findTaskByWorktree(root, worktree, { maxRecords: 10 }), null)
-    // Past it the answer is null — fail-open, and independent of which records came first.
-    assert.equal(await findTaskByWorktree(root, worktree, { maxRecords: 3 }), null)
-    assert.equal(await findTaskByWorktree(root, worktree, { maxRecords: 0 }), null)
+    const found = { runId: 'r1', taskId: 'T1', branch: 'teammates/r1/T1' }
+    assert.deepEqual(await findTaskByWorktree(root, worktree, { maxRecords: 50 }), found)
+    // Truncating the scan must not throw away a validated match: returning null here would be
+    // indistinguishable from "this agent owns no task", i.e. silent suppression.
+    assert.deepEqual(await findTaskByWorktree(root, worktree, { maxRecords: 5, warn: () => {} }), found)
+    assert.deepEqual(await findTaskByWorktree(root, worktree, { maxRecords: 2, warn: () => {} }), found)
+  })
+})
+
+// The residual, asserted rather than left implied. Keeping `best` fixes suppression by padding
+// that is reached after the honest record; it does NOT fix padding reached before it, because
+// directory order decides what the truncated scan ever sees. Whoever changes this later should
+// see the limit spelled out instead of inferring a guarantee the cap does not provide.
+test('padding reached before the honest record still suppresses it, and says so', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    await writeLocation(root, 'r1', 'T9', { worktree, branch: 'teammates/r1/T9' })
+    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
+    for (let i = 0; i < 20; i += 1) {
+      await writeFile(path.join(dir, `aaa-pad${i}.json`), '{}', 'utf8')
+    }
+    const warnings = []
+    assert.equal(
+      await findTaskByWorktree(root, worktree, { maxRecords: 3, warn: (m) => warnings.push(m) }),
+      null,
+    )
+    // The one thing that must not happen silently: the warning is what distinguishes this from
+    // an honest "no task here", and it is the reason the cap is not a silent kill switch.
+    assert.equal(warnings.length > 0, true, 'suppression by padding produced no warning')
+  })
+})
+
+test('the record cap is per run directory, so one padded run cannot starve another', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    // A padded, unrelated run directory that sorts BEFORE the run holding the real record.
+    const padDir = path.join(root, '.teammates', 'aaa-padded', 'worktrees')
+    await mkdir(padDir, { recursive: true })
+    for (let i = 0; i < 20; i += 1) {
+      await writeFile(path.join(padDir, `pad${i}.json`), '{}', 'utf8')
+    }
+    await writeLocation(root, 'zzz-real', 'T1', { worktree, branch: 'teammates/zzz-real/T1' })
+    assert.deepEqual(await findTaskByWorktree(root, worktree, { maxRecords: 5, warn: () => {} }), {
+      runId: 'zzz-real',
+      taskId: 'T1',
+      branch: 'teammates/zzz-real/T1',
+    })
+  })
+})
+
+test('a truncated scan is reported rather than silently degrading', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
+    await mkdir(dir, { recursive: true })
+    for (let i = 0; i < 10; i += 1) {
+      await writeFile(path.join(dir, `pad${i}.json`), '{}', 'utf8')
+    }
+    const warnings = []
+    await findTaskByWorktree(root, worktree, { maxRecords: 3, warn: (m) => warnings.push(m) })
+    assert.equal(warnings.length > 0, true, 'a truncated scan produced no warning at all')
+    assert.match(warnings.join(''), /exceeds 3 records/)
+    assert.match(warnings.join(''), /skipped/)
+    // And an untruncated scan stays quiet, so the signal means something.
+    const quiet = []
+    await findTaskByWorktree(root, worktree, { maxRecords: 500, warn: (m) => quiet.push(m) })
+    assert.deepEqual(quiet, [])
   })
 })
 
@@ -782,12 +872,13 @@ test('findTaskByWorktree does not block on a FIFO named like a record', {
       return
     }
     await writeLocation(root, 'r1', 'T2', { worktree, branch: 'teammates/r1/T2' })
-    // Without the isFile() guard this call never returns and the test times out.
-    assert.deepEqual(await findTaskByWorktree(root, worktree), {
-      runId: 'r1',
-      taskId: 'T2',
-      branch: 'teammates/r1/T2',
-    })
+    // Raced against a timer: a regression here does not fail, it HANGS — open(2) on a FIFO with
+    // no writer never returns — and a hung job reports a suite timeout rather than naming this
+    // guard. Losing the race is the assertion.
+    const timer = new Promise((resolve) => { setTimeout(() => resolve('timed out'), 5_000).unref() })
+    const result = await Promise.race([findTaskByWorktree(root, worktree), timer])
+    assert.notEqual(result, 'timed out', 'the lookup blocked on a FIFO instead of skipping it')
+    assert.deepEqual(result, { runId: 'r1', taskId: 'T2', branch: 'teammates/r1/T2' })
   })
 })
 
