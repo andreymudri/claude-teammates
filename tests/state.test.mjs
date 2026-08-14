@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, rm, symlink, utimes, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, open, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 // Spawned inside a test body, never at module load, and never bash: `fsutil` is the only way to
 // create a deterministic 8.3 short name on a volume where auto-generation is disabled.
@@ -17,6 +17,7 @@ import {
   recordFixRound,
   normaliseWorktree,
   isLocalAbsolute,
+  worktreeKey,
   writeLocation,
   findTaskByWorktree,
 } from '../scripts/state.mjs'
@@ -90,42 +91,61 @@ test('concurrent claims on one task produce exactly one winner', async () => {
   })
 })
 
-// The location record. These tests are about one directory having several spellings: what git
-// prints, what a hook payload carries, and what a shell reports are three different strings for
-// the same worktree, and the lookup is only useful if all three find the same record.
+/// Location records are addressed by the hash of their normalised worktree, so these tests are
+// about one directory having several spellings — what git prints, what a hook payload carries,
+// what a shell reports — all hashing to one key, and about a record being unable to answer for
+// any directory but the one it is filed under.
 
-test('writeLocation writes .teammates/<runId>/worktrees/<taskId>.json with taskId, worktree and branch', async () => {
+const recordPath = (root, worktree) => path.join(root, '.teammates', 'index', `${worktreeKey(worktree)}.json`)
+
+// Writes a record byte-for-byte, bypassing writeLocation, the way a teammate with a shell can.
+async function plant(root, keyFor, contents) {
+  const dir = path.join(root, '.teammates', 'index')
+  await mkdir(dir, { recursive: true })
+  const target = path.join(dir, `${worktreeKey(keyFor)}.json`)
+  await writeFile(target, typeof contents === 'string' ? contents : JSON.stringify(contents), 'utf8')
+  return target
+}
+
+test('writeLocation files a record under the hash of its worktree', async () => {
   await withTempRoot(async (root) => {
     const worktree = path.join(root, 'wt', 'agent-1')
     const written = await writeLocation(root, 'r1', 'T1', { worktree, branch: 'teammates/r1/T1' })
-    assert.equal(written, path.join(root, '.teammates', 'r1', 'worktrees', 'T1.json'))
+    assert.equal(written, recordPath(root, worktree))
+    assert.match(path.basename(written), /^[0-9a-f]{64}\.json$/)
     assert.deepEqual(JSON.parse(await readFile(written, 'utf8')), {
+      runId: 'r1',
       taskId: 'T1',
+      branch: 'teammates/r1/T1',
       worktree,
+    })
+    assert.deepEqual(await findTaskByWorktree(root, worktree), {
+      runId: 'r1',
+      taskId: 'T1',
       branch: 'teammates/r1/T1',
     })
   })
 })
 
-test('writeLocation called a second time overwrites rather than failing', async () => {
+test('rewriting one worktree overwrites in place, and a second worktree gets its own record', async () => {
   await withTempRoot(async (root) => {
     const first = path.join(root, 'wt', 'agent-1')
     const second = path.join(root, 'wt', 'agent-2')
     await writeLocation(root, 'r1', 'T1', { worktree: first, branch: 'teammates/r1/T1' })
-    await assert.doesNotReject(
-      writeLocation(root, 'r1', 'T1', { worktree: second, branch: 'teammates/r1/T1' }),
-    )
-    const record = JSON.parse(
-      await readFile(path.join(root, '.teammates', 'r1', 'worktrees', 'T1.json'), 'utf8'),
-    )
-    assert.equal(record.worktree, second)
-    // The old worktree no longer resolves; the respawned one does.
-    assert.equal(await findTaskByWorktree(root, first), null)
-    assert.deepEqual(await findTaskByWorktree(root, second), {
+    // Same worktree, re-recorded: one file, updated.
+    await assert.doesNotReject(writeLocation(root, 'r1', 'T2', { worktree: first, branch: 'teammates/r1/T2' }))
+    assert.deepEqual(await findTaskByWorktree(root, first), {
       runId: 'r1',
-      taskId: 'T1',
-      branch: 'teammates/r1/T1',
+      taskId: 'T2',
+      branch: 'teammates/r1/T2',
     })
+    // A respawn into a different worktree writes a different key. The old record survives and
+    // still answers for the old directory — nothing deletes records, and nothing needs to,
+    // because a stale record is only reachable by asking about the exact path it names.
+    await writeLocation(root, 'r1', 'T2', { worktree: second, branch: 'teammates/r1/T2' })
+    assert.equal((await findTaskByWorktree(root, second)).taskId, 'T2')
+    assert.equal((await findTaskByWorktree(root, first)).taskId, 'T2')
+    assert.notEqual(recordPath(root, first), recordPath(root, second))
   })
 })
 
@@ -145,19 +165,12 @@ test('findTaskByWorktree on win32 matches across drive-letter case and separator
   skip: process.platform !== 'win32' ? 'win32 only' : false,
 }, async () => {
   await withTempRoot(async (root) => {
-    // Written the way the harness spells it: backslashes, upper-case drive letter.
     const worktree = path.resolve(path.join(root, 'wt', 'agent-1'))
     const upper = worktree[0].toUpperCase() + worktree.slice(1)
     await writeLocation(root, 'r1', 'T4', { worktree: upper, branch: 'teammates/r1/T4' })
     const expected = { runId: 'r1', taskId: 'T4', branch: 'teammates/r1/T4' }
-    // The way git prints it: forward slashes.
     assert.deepEqual(await findTaskByWorktree(root, upper.replace(/\\/g, '/')), expected)
-    // The way a shell reports it: lower-case drive letter.
-    assert.deepEqual(
-      await findTaskByWorktree(root, upper[0].toLowerCase() + upper.slice(1)),
-      expected,
-    )
-    // And all three at once, with a trailing separator on top.
+    assert.deepEqual(await findTaskByWorktree(root, upper[0].toLowerCase() + upper.slice(1)), expected)
     assert.deepEqual(
       await findTaskByWorktree(root, `${upper[0].toLowerCase()}${upper.slice(1).replace(/\\/g, '/')}/`),
       expected,
@@ -178,78 +191,55 @@ test('normaliseWorktree collapses the spellings it compares and rejects non-stri
   }
 })
 
+test('worktreeKey is empty for a path it cannot name, and stable for one it can', () => {
+  assert.equal(worktreeKey(''), '')
+  assert.equal(worktreeKey(null), '')
+  assert.equal(worktreeKey(undefined), '')
+  const base = path.resolve(path.join('some', 'where'))
+  assert.equal(worktreeKey(base), worktreeKey(`${base}${path.sep}`))
+  assert.notEqual(worktreeKey(base), worktreeKey(path.join(base, 'else')))
+  assert.match(worktreeKey(base), /^[0-9a-f]{64}$/)
+})
+
 test('findTaskByWorktree returns null for an unknown worktree and for an empty query', async () => {
   await withTempRoot(async (root) => {
     await writeLocation(root, 'r1', 'T1', {
       worktree: path.join(root, 'wt', 'agent-1'),
       branch: 'teammates/r1/T1',
     })
-    // A record with no `worktree` field at all — a shape a hand-written record produces. Note
-    // what this does NOT show: the empty-query early return and the loop's `lexical === ''`
-    // check are mutually redundant, and deleting either one alone leaves this green, because
-    // the other still rejects the pair. That redundancy is deliberate (see the comment in
-    // findTaskByWorktree) and no assertion here should be read as pinning one of them
-    // individually — what is pinned is the outcome: an empty or missing cwd matches nothing,
-    // and a record naming no worktree is reachable from no query.
-    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
-    await writeFile(path.join(dir, 'T2.json'), JSON.stringify({ taskId: 'T2', branch: 'b' }), 'utf8')
     assert.equal(await findTaskByWorktree(root, path.join(root, 'wt', 'nobody')), null)
     assert.equal(await findTaskByWorktree(root, ''), null)
     assert.equal(await findTaskByWorktree(root, undefined), null)
-    // The honest record beside it still resolves, so the guard skips a record, not the run.
-    assert.deepEqual(await findTaskByWorktree(root, path.join(root, 'wt', 'agent-1')), {
-      runId: 'r1',
-      taskId: 'T1',
-      branch: 'teammates/r1/T1',
-    })
+    assert.equal(await findTaskByWorktree(root, 42), null)
   })
 })
 
-test('findTaskByWorktree returns null when there is no .teammates directory at all', async () => {
+test('findTaskByWorktree returns null when there is no index at all', async () => {
   await withTempRoot(async (root) => {
     assert.equal(await findTaskByWorktree(root, path.join(root, 'wt', 'agent-1')), null)
   })
 })
 
-test('findTaskByWorktree skips a run with no worktrees directory', async () => {
+test('findTaskByWorktree returns null for a malformed record and does not throw', async () => {
   await withTempRoot(async (root) => {
-    await writeState(root, 'r0', 'plan', { tasks: [] })
-    await writeLocation(root, 'r1', 'T2', {
-      worktree: path.join(root, 'wt', 'agent-2'),
-      branch: 'teammates/r1/T2',
-    })
-    assert.deepEqual(await findTaskByWorktree(root, path.join(root, 'wt', 'agent-2')), {
-      runId: 'r1',
-      taskId: 'T2',
-      branch: 'teammates/r1/T2',
-    })
-  })
-})
-
-test('findTaskByWorktree skips a malformed record without throwing and still finds a good one', async () => {
-  await withTempRoot(async (root) => {
-    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
-    await mkdir(dir, { recursive: true })
-    await writeFile(path.join(dir, 'T1.json'), 'not json at all', 'utf8')
-    await writeFile(path.join(dir, 'notes.txt'), 'ignored', 'utf8')
-    const worktree = path.join(root, 'wt', 'agent-3')
+    const worktree = path.join(root, 'wt', 'agent-1')
+    await plant(root, worktree, 'not json at all')
+    await assert.doesNotReject(findTaskByWorktree(root, worktree))
+    assert.equal(await findTaskByWorktree(root, worktree), null)
+    // Rewriting it honestly makes it findable, so the skip was the content and nothing else.
     await writeLocation(root, 'r1', 'T3', { worktree, branch: 'teammates/r1/T3' })
     assert.deepEqual(await findTaskByWorktree(root, worktree), {
       runId: 'r1',
       taskId: 'T3',
       branch: 'teammates/r1/T3',
     })
-    // And a query that matches nothing still returns null rather than throwing on the bad file.
-    assert.equal(await findTaskByWorktree(root, path.join(root, 'wt', 'agent-9')), null)
   })
 })
 
 test('findTaskByWorktree reports a null branch for a record that carries none', async () => {
   await withTempRoot(async (root) => {
-    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
-    await mkdir(dir, { recursive: true })
     const worktree = path.join(root, 'wt', 'agent-4')
-    await writeFile(path.join(dir, 'T5.json'), JSON.stringify({ taskId: 'T5', worktree }), 'utf8')
+    await plant(root, worktree, { runId: 'r1', taskId: 'T5', worktree })
     assert.deepEqual(await findTaskByWorktree(root, worktree), {
       runId: 'r1',
       taskId: 'T5',
@@ -261,7 +251,7 @@ test('findTaskByWorktree reports a null branch for a record that carries none', 
 // A taskId reaches writeLocation from `locate --task`, i.e. from the teammate. It is a single
 // path segment and nothing else: the traversals below are the ones that do real damage.
 
-test('writeLocation refuses a taskId that climbs out of the worktrees directory', async () => {
+test('writeLocation refuses a taskId that is not a single path segment', async () => {
   await withTempRoot(async (root) => {
     const args = { worktree: path.join(root, 'wt', 'agent-1'), branch: 'b' }
     for (const taskId of [
@@ -271,9 +261,8 @@ test('writeLocation refuses a taskId that climbs out of the worktrees directory'
       '../../../../escaped',
       'nested/T1',
       '..',
-      // `.` writes `..json`, whose stem is `.` and therefore equals its own taskId — so this
-      // one segment defeats the writer's guard and the reader's equality check together, and
-      // only isSegment's `rel !== ''` clause stops it at either end.
+      // `.` used to write `..json`, whose stem equalled its own taskId; it is refused at the
+      // writer for the same reason every other traversal is.
       '.',
       path.join(root, 'absolute'),
     ]) {
@@ -293,8 +282,19 @@ test('writeLocation refuses a taskId that climbs out of the worktrees directory'
 test('writeLocation refuses a runId that climbs out of .teammates', async () => {
   await withTempRoot(async (root) => {
     const args = { worktree: path.join(root, 'wt', 'agent-1'), branch: 'b' }
-    for (const runId of ['../..', '../escaped', 'nested/r1', '..']) {
+    for (const runId of ['../..', '../escaped', 'nested/r1', '..', '.']) {
       await assert.rejects(writeLocation(root, runId, 'T1', args), /escapes the run directory/)
+    }
+  })
+})
+
+test('writeLocation refuses a worktree it cannot name', async () => {
+  await withTempRoot(async (root) => {
+    for (const worktree of ['', null, undefined, 42]) {
+      await assert.rejects(
+        writeLocation(root, 'r1', 'T1', { worktree, branch: 'b' }),
+        /is not a path a record can name/,
+      )
     }
   })
 })
@@ -303,7 +303,7 @@ test('writeLocation still accepts an ordinary task and run id after the guard', 
   await withTempRoot(async (root) => {
     const worktree = path.join(root, 'wt', 'agent-1')
     const written = await writeLocation(root, 'run-1_x', 'T10', { worktree, branch: 'b' })
-    assert.equal(written, path.join(root, '.teammates', 'run-1_x', 'worktrees', 'T10.json'))
+    assert.equal(written, recordPath(root, worktree))
   })
 })
 
@@ -319,27 +319,46 @@ test('findTaskByWorktree matches a worktree reached through a symlinked parent',
       return
     }
     // Recorded as git prints it (the real path); queried as the harness reports it (through
-    // the link). Lexical normalisation alone cannot see these are one directory.
+    // the link). Both hash the resolved path, so both name one record.
     await writeLocation(root, 'r1', 'T1', { worktree: real, branch: 'teammates/r1/T1' })
     assert.deepEqual(await findTaskByWorktree(root, path.join(link, 'agent-1')), {
       runId: 'r1',
       taskId: 'T1',
       branch: 'teammates/r1/T1',
     })
-    // And the other way round: recorded through the link, queried by the real path. Under a
-    // second run id, with the first record's mtime forced into the past, so the answer does not
-    // depend on two writes microseconds apart landing on distinct mtimes — they tie on any
-    // filesystem with coarse mtime granularity, and this assertion would then flip on CI.
-    const stale = new Date(Date.now() - 86_400_000)
-    await utimes(path.join(root, '.teammates', 'r1', 'worktrees', 'T1.json'), stale, stale)
-    await writeLocation(root, 'r2', 'T2', {
+    // And the other way round: recorded through the link, queried by the real path.
+    await writeLocation(root, 'r1', 'T2', {
       worktree: path.join(link, 'agent-1'),
-      branch: 'teammates/r2/T2',
+      branch: 'teammates/r1/T2',
     })
-    assert.deepEqual(await findTaskByWorktree(root, real), {
-      runId: 'r2',
-      taskId: 'T2',
-      branch: 'teammates/r2/T2',
+    assert.equal((await findTaskByWorktree(root, real)).taskId, 'T2')
+  })
+})
+
+// TWO junctions to one target: recorded under one spelling, queried under the other, with the
+// real path never used by either side. This is the case a conjunction of the lexical and
+// resolved comparisons would break — the spellings differ, only the resolved forms agree.
+test('findTaskByWorktree matches across two different links to one worktree', async (t) => {
+  await withTempRoot(async (root) => {
+    const real = path.join(root, 'real', 'agent-1')
+    await mkdir(real, { recursive: true })
+    const linkA = path.join(root, 'linked-a')
+    const linkB = path.join(root, 'linked-b')
+    try {
+      await symlink(path.join(root, 'real'), linkA, 'junction')
+      await symlink(path.join(root, 'real'), linkB, 'junction')
+    } catch (err) {
+      t.skip(`symlinks unavailable here: ${err.code}`)
+      return
+    }
+    const spellingA = path.join(linkA, 'agent-1')
+    const spellingB = path.join(linkB, 'agent-1')
+    assert.notEqual(normaliseWorktree(spellingA, { resolveLinks: false }), normaliseWorktree(spellingB, { resolveLinks: false }))
+    await writeLocation(root, 'r1', 'T1', { worktree: spellingA, branch: 'teammates/r1/T1' })
+    assert.deepEqual(await findTaskByWorktree(root, spellingB), {
+      runId: 'r1',
+      taskId: 'T1',
+      branch: 'teammates/r1/T1',
     })
   })
 })
@@ -360,11 +379,8 @@ test('normaliseWorktree maps a Windows 8.3 short name onto its long spelling', {
       t.skip(`8.3 short names unavailable on this volume: ${err.code ?? err.message}`)
       return
     }
-    // Precondition: the two spellings really are one directory, and they really do differ —
-    // otherwise this test would pass without proving anything.
     assert.notEqual(short.toLowerCase(), long.toLowerCase())
     assert.equal(normaliseWorktree(short), normaliseWorktree(long))
-    // And through the lookup: recorded long, queried short.
     await writeLocation(root, 'r1', 'T1', { worktree: long, branch: 'teammates/r1/T1' })
     assert.deepEqual(await findTaskByWorktree(root, short), {
       runId: 'r1',
@@ -374,105 +390,30 @@ test('normaliseWorktree maps a Windows 8.3 short name onto its long spelling', {
   })
 })
 
-// Records are never deleted and worktree paths are reused, so several runs can hold a record
-// for one directory. Whichever one `locate` wrote most recently is the live teammate's.
-test('findTaskByWorktree resolves duplicate records by write time, not readdir order', async () => {
+// The read side validates content, because content is what a teammate with a shell controls.
+// The file NAME is now a hash of the worktree, so the binding it enforces is stronger than the
+// old stem equality: a record must name the very directory whose key it is filed under.
+
+test('findTaskByWorktree ignores a record filed under a key it does not name', async () => {
   await withTempRoot(async (root) => {
-    const worktree = path.join(root, 'wt', 'agent-1')
-    const stale = await writeLocation(root, 'aaa-old', 'T9', { worktree, branch: 'teammates/aaa-old/T9' })
-    const live = await writeLocation(root, 'zzz-current', 'T2', { worktree, branch: 'teammates/zzz-current/T2' })
-    const old = new Date(Date.now() - 86_400_000)
-    await utimes(stale, old, old)
-    assert.deepEqual(await findTaskByWorktree(root, worktree), {
-      runId: 'zzz-current',
-      taskId: 'T2',
-      branch: 'teammates/zzz-current/T2',
-    })
-    // The mirror case, which readdir order and reverse-alphabetical order both get wrong:
-    // the newest record now sorts FIRST by name.
-    const newer = await writeLocation(root, 'bbb-newest', 'T3', { worktree, branch: 'teammates/bbb-newest/T3' })
-    const past = new Date(Date.now() - 3_600_000)
-    await utimes(live, past, past)
-    const soon = new Date(Date.now() + 60_000)
-    await utimes(newer, soon, soon)
-    assert.deepEqual(await findTaskByWorktree(root, worktree), {
-      runId: 'bbb-newest',
-      taskId: 'T3',
-      branch: 'teammates/bbb-newest/T3',
+    const victim = path.join(root, 'wt', 'victim')
+    const other = path.join(root, 'wt', 'somewhere-else')
+    // Filed under the victim's key, but naming a different directory: the forgery a planted
+    // record would need, and the one the key binding refuses.
+    await plant(root, victim, { runId: 'r1', taskId: 'T1', branch: 'teammates/r1/T1', worktree: other })
+    assert.equal(await findTaskByWorktree(root, victim), null)
+    // Naming its own directory, it answers normally.
+    await plant(root, victim, { runId: 'r1', taskId: 'T1', branch: 'teammates/r1/T1', worktree: victim })
+    assert.deepEqual(await findTaskByWorktree(root, victim), {
+      runId: 'r1',
+      taskId: 'T1',
+      branch: 'teammates/r1/T1',
     })
   })
 })
 
-// Both records are named T1.json, so the file-name key cannot separate them and only the run-id
-// key can: with equal mtimes and equal file names, deleting that key leaves readdir order.
-test('findTaskByWorktree breaks an exact mtime tie across runs deterministically rather than by directory order', async () => {
+test('findTaskByWorktree skips a record whose taskId is a traversal', async () => {
   await withTempRoot(async (root) => {
-    const worktree = path.join(root, 'wt', 'agent-1')
-    const a = await writeLocation(root, 'aaa', 'T1', { worktree, branch: 'teammates/aaa/T1' })
-    const b = await writeLocation(root, 'zzz', 'T1', { worktree, branch: 'teammates/zzz/T1' })
-    const same = new Date(1_700_000_000_000)
-    await utimes(a, same, same)
-    await utimes(b, same, same)
-    for (let i = 0; i < 3; i += 1) {
-      assert.deepEqual(await findTaskByWorktree(root, worktree), {
-        runId: 'zzz',
-        taskId: 'T1',
-        branch: 'teammates/zzz/T1',
-      })
-    }
-  })
-})
-
-// The property is determinism, NOT recency: a run id is free text and carries no time, so when
-// the ids tie on mtime the winner may well be the older run. Here `zulu` is written first and
-// `alpha` second, so lexical order and write order disagree — and the answer must still be the
-// same one every time rather than whatever readdir yields.
-test('an exact mtime tie resolves the same way even when the newer run sorts lower', async () => {
-  await withTempRoot(async (root) => {
-    const worktree = path.join(root, 'wt', 'agent-1')
-    const older = await writeLocation(root, 'zulu', 'T1', { worktree, branch: 'teammates/zulu/T1' })
-    const newer = await writeLocation(root, 'alpha', 'T1', { worktree, branch: 'teammates/alpha/T1' })
-    const same = new Date(1_700_000_000_000)
-    await utimes(older, same, same)
-    await utimes(newer, same, same)
-    for (let i = 0; i < 3; i += 1) {
-      assert.deepEqual(await findTaskByWorktree(root, worktree), {
-        runId: 'zulu',
-        taskId: 'T1',
-        branch: 'teammates/zulu/T1',
-      })
-    }
-  })
-})
-
-// The run id cannot settle a tie between two records of the SAME run, and that is the reachable
-// case: a respawned teammate reuses an agent-<hash> path within one run, on a filesystem whose
-// mtime granularity collapses both writes onto one timestamp.
-test('findTaskByWorktree breaks an exact mtime tie inside one run rather than by directory order', async () => {
-  await withTempRoot(async (root) => {
-    const worktree = path.join(root, 'wt', 'agent-1')
-    const first = await writeLocation(root, 'r1', 'T1', { worktree, branch: 'teammates/r1/T1' })
-    const second = await writeLocation(root, 'r1', 'T2', { worktree, branch: 'teammates/r1/T2' })
-    const same = new Date(1_700_000_000_000)
-    await utimes(first, same, same)
-    await utimes(second, same, same)
-    for (let i = 0; i < 3; i += 1) {
-      assert.deepEqual(await findTaskByWorktree(root, worktree), {
-        runId: 'r1',
-        taskId: 'T2',
-        branch: 'teammates/r1/T2',
-      })
-    }
-  })
-})
-
-// writeLocation's guard constrains the record's FILENAME. A teammate with a shell can write the
-// file itself and put anything in its CONTENT, and the taskId read back out is handed to a caller
-// that spends it as `complete --task`. So the read side validates too.
-test('findTaskByWorktree skips a hand-written record whose taskId is a traversal', async () => {
-  await withTempRoot(async (root) => {
-    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
-    await mkdir(dir, { recursive: true })
     const worktree = path.join(root, 'wt', 'agent-1')
     for (const taskId of [
       '../../../escaped',
@@ -486,7 +427,7 @@ test('findTaskByWorktree skips a hand-written record whose taskId is a traversal
       null,
       { id: 'T1' },
     ]) {
-      await writeFile(path.join(dir, 'T1.json'), JSON.stringify({ taskId, worktree, branch: 'b' }), 'utf8')
+      await plant(root, worktree, { runId: 'r1', taskId, worktree, branch: 'b' })
       assert.equal(
         await findTaskByWorktree(root, worktree),
         null,
@@ -496,81 +437,58 @@ test('findTaskByWorktree skips a hand-written record whose taskId is a traversal
   })
 })
 
-// The two conjuncts of the read-side guard have to be pinned separately, and a hostile payload
-// in T1.json only ever reaches the equality check. These file names are the ones whose STEM is
-// itself a traversal — `...json` has stem `..` and `.json` has stem `''` — so equality passes
-// and isSegment is the only thing left standing between the record and its caller.
-test('findTaskByWorktree skips a record whose file stem is itself a traversal', async () => {
+// A task id is spent as `complete --task <id>`. A segment check alone lets through ids that a
+// parser reads as options, so the charset guard is what keeps `--force` out of an argv.
+test('findTaskByWorktree skips a taskId that could be read as an option or is overlong', async () => {
   await withTempRoot(async (root) => {
-    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
-    await mkdir(dir, { recursive: true })
     const worktree = path.join(root, 'wt', 'agent-1')
-    // `..json` has stem `.`, which is what pins isSegment's `rel !== ''` clause: `.` resolves to
-    // the directory itself, so relative() returns '' and only that clause rejects it.
-    for (const [file, taskId] of [['...json', '..'], ['.json', ''], ['....json', '...'], ['..json', '.']]) {
-      // Precondition: the equality conjunct accepts this pairing, so a failure here is
-      // isSegment's alone.
-      assert.equal(file.slice(0, -'.json'.length), taskId)
-      const full = path.join(dir, file)
-      await writeFile(full, JSON.stringify({ taskId, worktree, branch: 'b' }), 'utf8')
+    for (const taskId of ['--force', '-rf', '--', '-', 'T1 --force', 'a b', 'T1;rm', 'T1\n', 'x'.repeat(65)]) {
+      await plant(root, worktree, { runId: 'r1', taskId, worktree, branch: 'b' })
       assert.equal(
         await findTaskByWorktree(root, worktree),
         null,
-        `a record in ${file} carrying taskId ${JSON.stringify(taskId)} was returned`,
+        `taskId ${JSON.stringify(taskId)} reached the caller`,
       )
-      await rm(full)
+    }
+    // The ids a run actually uses still pass, so the guard is not merely refusing everything.
+    for (const taskId of ['T1', 'T10', 'task_1', 'task.a', 'a-b', 'x'.repeat(64)]) {
+      await plant(root, worktree, { runId: 'r1', taskId, worktree, branch: 'b' })
+      assert.equal((await findTaskByWorktree(root, worktree)).taskId, taskId)
     }
   })
 })
 
-test('findTaskByWorktree skips a record whose taskId does not name its own file', async () => {
+// runId used to be a directory name and could not lie. Under a keyed layout it comes from file
+// content like everything else, so it is validated like everything else.
+test('findTaskByWorktree skips a record whose runId is not a plain segment', async () => {
   await withTempRoot(async (root) => {
-    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
-    await mkdir(dir, { recursive: true })
     const worktree = path.join(root, 'wt', 'agent-1')
-    // Each is a plain segment, so the traversal check alone would pass all of them — but
-    // T1.json claiming to be something else means one of the two is a lie, and the file name is
-    // the half the writer's guard bounds. The check has to be exact equality, not a substring
-    // relation: `T` is a strict PREFIX of the stem, so a `file.startsWith(taskId)` weakening
-    // would hand `complete --task T` to the caller, and `T1.json` is contained in the file name,
-    // so a `file.includes(taskId)` weakening would pass it too. `T9` alone catches neither.
-    for (const taskId of ['T9', 'T', 'T1.json', 'T1x', 'json']) {
-      await writeFile(path.join(dir, 'T1.json'), JSON.stringify({ taskId, worktree }), 'utf8')
+    for (const runId of ['../..', '../escaped', 'nested/r1', '..', '.', '', 42, null, { id: 'r1' }]) {
+      await plant(root, worktree, { runId, taskId: 'T1', worktree, branch: 'b' })
       assert.equal(
         await findTaskByWorktree(root, worktree),
         null,
-        `T1.json carrying taskId ${JSON.stringify(taskId)} was returned rather than skipped`,
+        `a record carrying runId ${JSON.stringify(runId)} was returned rather than skipped`,
       )
     }
-    await rm(path.join(dir, 'T1.json'))
-    // The honest record next to it is still found, so this skips a record rather than the run.
-    await writeLocation(root, 'r1', 'T2', { worktree, branch: 'teammates/r1/T2' })
-    assert.deepEqual(await findTaskByWorktree(root, worktree), {
-      runId: 'r1',
-      taskId: 'T2',
-      branch: 'teammates/r1/T2',
-    })
   })
 })
 
-// `branch` is the field a forged record can carry while its taskId and worktree are entirely
-// honest, so neither read-side guard constrains it. A record may name exactly one branch.
+// `branch` is the field a forged record can carry while its ids and worktree are entirely
+// honest, so nothing cross-checked above constrains it. A record may name exactly one branch.
 test('findTaskByWorktree drops a branch the record could not legitimately name', async () => {
   await withTempRoot(async (root) => {
-    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
-    await mkdir(dir, { recursive: true })
     const worktree = path.join(root, 'wt', 'agent-2')
     for (const branch of [
       'teammates/r1/T5', // a rival task's ref: the hook would tell T2 to force-move it
       'master', // any existing ref: waves past a teammate that created no branch at all
       'refs/heads/teammates/r1/T2', // fully-qualified: not the name the run uses
       'teammates/r2/T2', // right task, wrong run
-      'teammates/r1/T2 --force', // a plain segment prefix with an argument stapled on
+      'teammates/r1/T2 --force', // the right name with an argument stapled on
       42,
       null,
     ]) {
-      // taskId honest, filename honest, worktree honest — only `branch` is forged.
-      await writeFile(path.join(dir, 'T2.json'), JSON.stringify({ taskId: 'T2', worktree, branch }), 'utf8')
+      await plant(root, worktree, { runId: 'r1', taskId: 'T2', worktree, branch })
       assert.deepEqual(
         await findTaskByWorktree(root, worktree),
         { runId: 'r1', taskId: 'T2', branch: null },
@@ -579,70 +497,13 @@ test('findTaskByWorktree drops a branch the record could not legitimately name',
     }
     // The one branch it may name survives untouched, so this narrows the field rather than
     // blanking it: a caller can still tell a recorded task branch from an absent one.
-    await writeFile(
-      path.join(dir, 'T2.json'),
-      JSON.stringify({ taskId: 'T2', worktree, branch: 'teammates/r1/T2' }),
-      'utf8',
-    )
+    await plant(root, worktree, { runId: 'r1', taskId: 'T2', worktree, branch: 'teammates/r1/T2' })
     assert.deepEqual(await findTaskByWorktree(root, worktree), {
       runId: 'r1',
       taskId: 'T2',
       branch: 'teammates/r1/T2',
     })
   })
-})
-
-// A UNC path must never reach realpath: an unreachable host blocks the event loop for tens of
-// seconds per record. Since round 8 it is not matchable at all — `isLocalAbsolute` is now the
-// admission check for a record's worktree, and it excludes UNC. This test pins that DELIBERATE
-// limitation (it previously asserted the opposite, that UNC matched lexically): a worktree on a
-// network share is outside what this lookup can identify, so the hook fails open there, which
-// is no enforcement rather than wrong enforcement.
-test('findTaskByWorktree does not match a UNC worktree at all', async () => {
-  await withTempRoot(async (root) => {
-    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
-    await mkdir(dir, { recursive: true })
-    const unc = '\\\\nonexistent-host-for-tests\\share\\wt\\agent-1'
-    await writeFile(
-      path.join(dir, 'T1.json'),
-      JSON.stringify({ taskId: 'T1', worktree: unc, branch: 'teammates/r1/T1' }),
-      'utf8',
-    )
-    // Queried by the very spelling it records, so nothing but the admission check rejects it.
-    assert.equal(await findTaskByWorktree(root, unc), null)
-    assert.equal(await findTaskByWorktree(root, unc.replace(/\\/g, '/')), null)
-  })
-})
-
-// Ordering, asserted against the source. The property is "no filesystem call on a value the
-// record supplies happens before the checks that can reject it on string comparison alone",
-// and the cost of getting it wrong is a stall measured in tens of seconds — which a test can
-// only reproduce by depending on an unreachable network host, i.e. by being unrunnable offline
-// and flaky everywhere else. So the order itself is pinned, the same way the tmp+rename is.
-test('findTaskByWorktree validates the taskId before resolving any record-supplied path', async () => {
-  const source = await readFile(
-    path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'state.mjs'),
-    'utf8',
-  )
-  const start = source.indexOf('export async function findTaskByWorktree')
-  assert.notEqual(start, -1, 'findTaskByWorktree is no longer declared under that name')
-  const body = source.slice(start, source.indexOf('\n}', start))
-  const isSegmentAt = body.indexOf('isSegment(dir, record.taskId)')
-  const stemAt = body.indexOf("file.slice(0, -'.json'.length)")
-  const resolveAt = body.indexOf('normaliseWorktree(record.worktree')
-  assert.notEqual(isSegmentAt, -1, 'the taskId segment check is gone')
-  assert.notEqual(stemAt, -1, 'the filename equality check is gone')
-  assert.notEqual(resolveAt, -1, 'the record worktree is no longer normalised')
-  assert.equal(isSegmentAt < resolveAt, true, 'the segment check must precede path resolution')
-  assert.equal(stemAt < resolveAt, true, 'the filename check must precede path resolution')
-  // And the first resolution of a record's worktree must be the link-free one; the realpath
-  // form is reached only behind the isLocalAbsolute guard.
-  assert.match(
-    body.slice(resolveAt, resolveAt + 120),
-    /normaliseWorktree\(record\.worktree, \{ resolveLinks: false \}\)/,
-    'the first pass over a record-supplied path must not touch the filesystem',
-  )
-  assert.match(body, /isLocalAbsolute\(record\.worktree\)/, 'realpath must stay behind the guard')
 })
 
 // The classification itself, not the shape of its call site. Everything realpath must never see
@@ -658,6 +519,35 @@ test('isLocalAbsolute accepts only plain local absolute paths', () => {
     assert.equal(isLocalAbsolute('z:\\mapped'), true) // the stated residual: a mapped drive passes
     assert.equal(isLocalAbsolute('C:relative'), false) // drive-relative is not absolute
   }
+})
+
+// A UNC path must never be realpath'd — an unreachable host blocks the event loop for tens of
+// seconds — so a record naming one is refused before it can be resolved, and a worktree on a
+// network share is simply not identifiable. The hook fails open there.
+test('findTaskByWorktree does not match a record whose worktree is UNC', async () => {
+  await withTempRoot(async (root) => {
+    const unc = '\\\\nonexistent-host-for-tests\\share\\wt\\agent-1'
+    await plant(root, unc, { runId: 'r1', taskId: 'T1', worktree: unc, branch: 'teammates/r1/T1' })
+    assert.equal(await findTaskByWorktree(root, unc), null)
+  })
+})
+
+// A worktree that is not reader-independent is a wildcard, not a location: `"."` resolves
+// against whoever is reading. The hook runs in the session directory — the cwd a subagent that
+// is NOT worktree-isolated reports, including this plugin's own read-only reviewer.
+test('findTaskByWorktree ignores a record whose worktree is relative', async () => {
+  await withTempRoot(async (root) => {
+    for (const worktree of ['.', '', 'relative/path', './wt/agent-1', '..', '\\tm-probe-victim\\agent-1']) {
+      // Filed under the key the reader's own cwd hashes to, which is the best case for such a
+      // record: even then it must not answer.
+      await plant(root, process.cwd(), { runId: 'r1', taskId: 'T1', worktree, branch: 'b' })
+      assert.equal(
+        await findTaskByWorktree(root, process.cwd()),
+        null,
+        `a record with worktree ${JSON.stringify(worktree)} matched the reader's own directory`,
+      )
+    }
+  })
 })
 
 test('normaliseWorktree honours resolveLinks: false by leaving the link spelling alone', async (t) => {
@@ -680,7 +570,6 @@ test('normaliseWorktree honours resolveLinks: false by leaving the link spelling
       'resolveLinks: false still resolved the link',
     )
     assert.equal(normaliseWorktree(through), normaliseWorktree(real))
-    assert.equal(normaliseWorktree(through, { resolveLinks: false }), normaliseWorktree(through, { resolveLinks: false }))
   })
 })
 
@@ -690,18 +579,11 @@ test('normaliseWorktree keeps a filesystem root distinct from the current direct
   await withTempRoot(async (root) => {
     const driveRoot = process.platform === 'win32' ? `${process.cwd().slice(0, 2)}\\` : '/'
     assert.notEqual(normaliseWorktree(driveRoot), normaliseWorktree(process.cwd()))
-    assert.equal(normaliseWorktree(driveRoot), normaliseWorktree(driveRoot))
-    // And through the lookup, which is where the false match landed: a record claiming the
-    // drive root must not answer a query for the directory the reader happens to be in.
-    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
-    await mkdir(dir, { recursive: true })
-    await writeFile(
-      path.join(dir, 'T1.json'),
-      JSON.stringify({ taskId: 'T1', worktree: driveRoot, branch: 'teammates/r1/T1' }),
-      'utf8',
-    )
+    assert.notEqual(worktreeKey(driveRoot), worktreeKey(process.cwd()))
+    // And through the lookup: a record claiming the drive root must not answer a query for the
+    // directory the reader happens to be standing in.
+    await plant(root, driveRoot, { runId: 'r1', taskId: 'T1', worktree: driveRoot, branch: 'teammates/r1/T1' })
     assert.equal(await findTaskByWorktree(root, process.cwd()), null)
-    // The record is still findable by what it actually names, so this is a fix, not a ban.
     assert.deepEqual(await findTaskByWorktree(root, driveRoot), {
       runId: 'r1',
       taskId: 'T1',
@@ -710,40 +592,13 @@ test('normaliseWorktree keeps a filesystem root distinct from the current direct
   })
 })
 
-// A relative worktree resolves against the READER's cwd, so it matches whoever asks — including
-// a subagent that is not worktree-isolated at all and owns no task.
-test('findTaskByWorktree ignores a record whose worktree is relative', async () => {
-  await withTempRoot(async (root) => {
-    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
-    await mkdir(dir, { recursive: true })
-    // `\foo` is the subtle one: path.isAbsolute says true on win32, yet path.resolve completes
-    // it from the reader's CURRENT DRIVE, so one record names C:\foo for one reader and D:\foo
-    // for another — the very property this guard exists to remove.
-    for (const worktree of ['.', '', 'relative/path', './wt/agent-1', '..', '\\tm-probe-victim\\agent-1']) {
-      await writeFile(
-        path.join(dir, 'T1.json'),
-        JSON.stringify({ taskId: 'T1', worktree, branch: 'teammates/r1/T1' }),
-        'utf8',
-      )
-      assert.equal(
-        await findTaskByWorktree(root, process.cwd()),
-        null,
-        `a record with worktree ${JSON.stringify(worktree)} matched the reader's own directory`,
-      )
-      assert.equal(await findTaskByWorktree(root, path.resolve(worktree || '.')), null)
-    }
-  })
-})
-
-// The read is the last unbounded cost: unbounded in size, and unbounded in count.
 test('findTaskByWorktree skips a record larger than the size cap', async () => {
   await withTempRoot(async (root) => {
     const worktree = path.join(root, 'wt', 'agent-1')
-    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
-    await mkdir(dir, { recursive: true })
     // Valid JSON and a perfectly honest record — only its size disqualifies it.
-    const padded = JSON.stringify({ taskId: 'T1', worktree, branch: 'teammates/r1/T1', pad: 'x'.repeat(200_000) })
-    await writeFile(path.join(dir, 'T1.json'), padded, 'utf8')
+    await plant(root, worktree, {
+      runId: 'r1', taskId: 'T1', branch: 'teammates/r1/T1', worktree, pad: 'x'.repeat(200_000),
+    })
     assert.equal(await findTaskByWorktree(root, worktree), null)
     // Raising the cap for this call finds it, so the skip is the cap and not a parse failure.
     assert.deepEqual(await findTaskByWorktree(root, worktree, { maxRecordBytes: 1_000_000 }), {
@@ -754,132 +609,74 @@ test('findTaskByWorktree skips a record larger than the size cap', async () => {
   })
 })
 
-test('findTaskByWorktree stops scanning past the record cap but keeps the match it has', async () => {
+test('findTaskByWorktree skips a record path that is not a regular file', async () => {
   await withTempRoot(async (root) => {
     const worktree = path.join(root, 'wt', 'agent-1')
-    // Padding named so it is reached AFTER the honest record, which is the case the fix covers.
-    await writeLocation(root, 'r1', 'T1', { worktree, branch: 'teammates/r1/T1' })
-    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
-    for (let i = 0; i < 20; i += 1) {
-      await writeFile(path.join(dir, `zpad${i}.json`), '{}', 'utf8')
-    }
-    const found = { runId: 'r1', taskId: 'T1', branch: 'teammates/r1/T1' }
-    assert.deepEqual(await findTaskByWorktree(root, worktree, { maxRecords: 50 }), found)
-    // Truncating the scan must not throw away a validated match: returning null here would be
-    // indistinguishable from "this agent owns no task", i.e. silent suppression.
-    assert.deepEqual(await findTaskByWorktree(root, worktree, { maxRecords: 5, warn: () => {} }), found)
-    assert.deepEqual(await findTaskByWorktree(root, worktree, { maxRecords: 2, warn: () => {} }), found)
-  })
-})
-
-// The residual, asserted rather than left implied. Keeping `best` fixes suppression by padding
-// that is reached after the honest record; it does NOT fix padding reached before it, because
-// directory order decides what the truncated scan ever sees. Whoever changes this later should
-// see the limit spelled out instead of inferring a guarantee the cap does not provide.
-test('padding reached before the honest record still suppresses it, and says so', async () => {
-  await withTempRoot(async (root) => {
-    const worktree = path.join(root, 'wt', 'agent-1')
-    await writeLocation(root, 'r1', 'T9', { worktree, branch: 'teammates/r1/T9' })
-    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
-    for (let i = 0; i < 20; i += 1) {
-      await writeFile(path.join(dir, `aaa-pad${i}.json`), '{}', 'utf8')
-    }
-    const warnings = []
-    assert.equal(
-      await findTaskByWorktree(root, worktree, { maxRecords: 3, warn: (m) => warnings.push(m) }),
-      null,
-    )
-    // The one thing that must not happen silently: the warning is what distinguishes this from
-    // an honest "no task here", and it is the reason the cap is not a silent kill switch.
-    assert.equal(warnings.length > 0, true, 'suppression by padding produced no warning')
-  })
-})
-
-test('the record cap is per run directory, so one padded run cannot starve another', async () => {
-  await withTempRoot(async (root) => {
-    const worktree = path.join(root, 'wt', 'agent-1')
-    // A padded, unrelated run directory that sorts BEFORE the run holding the real record.
-    const padDir = path.join(root, '.teammates', 'aaa-padded', 'worktrees')
-    await mkdir(padDir, { recursive: true })
-    for (let i = 0; i < 20; i += 1) {
-      await writeFile(path.join(padDir, `pad${i}.json`), '{}', 'utf8')
-    }
-    await writeLocation(root, 'zzz-real', 'T1', { worktree, branch: 'teammates/zzz-real/T1' })
-    assert.deepEqual(await findTaskByWorktree(root, worktree, { maxRecords: 5, warn: () => {} }), {
-      runId: 'zzz-real',
-      taskId: 'T1',
-      branch: 'teammates/zzz-real/T1',
-    })
-  })
-})
-
-test('a truncated scan is reported rather than silently degrading', async () => {
-  await withTempRoot(async (root) => {
-    const worktree = path.join(root, 'wt', 'agent-1')
-    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
-    await mkdir(dir, { recursive: true })
-    for (let i = 0; i < 10; i += 1) {
-      await writeFile(path.join(dir, `pad${i}.json`), '{}', 'utf8')
-    }
-    const warnings = []
-    await findTaskByWorktree(root, worktree, { maxRecords: 3, warn: (m) => warnings.push(m) })
-    assert.equal(warnings.length > 0, true, 'a truncated scan produced no warning at all')
-    assert.match(warnings.join(''), /exceeds 3 records/)
-    assert.match(warnings.join(''), /skipped/)
-    // And an untruncated scan stays quiet, so the signal means something.
-    const quiet = []
-    await findTaskByWorktree(root, worktree, { maxRecords: 500, warn: (m) => quiet.push(m) })
-    assert.deepEqual(quiet, [])
-  })
-})
-
-test('findTaskByWorktree skips a .json path that is not a regular file', async () => {
-  await withTempRoot(async (root) => {
-    const worktree = path.join(root, 'wt', 'agent-1')
-    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
-    await mkdir(dir, { recursive: true })
-    // A directory named like a record. Note what this does NOT pin: on win32 readFile would
-    // throw EISDIR anyway, so deleting the isFile() guard leaves this green. The FIFO test
-    // below is the one that pins the guard, and it runs only on POSIX.
-    await mkdir(path.join(dir, 'T1.json'), { recursive: true })
+    // A directory named like a record. Note what this does NOT pin: on win32 the read would
+    // fail anyway, so deleting the isFile() guard leaves this green. The FIFO test below is the
+    // one that pins the guard, and it runs only on POSIX.
+    await mkdir(recordPath(root, worktree), { recursive: true })
     await assert.doesNotReject(findTaskByWorktree(root, worktree))
     assert.equal(await findTaskByWorktree(root, worktree), null)
-    // An honest record beside it is still found, so one bad entry does not lose the run.
-    await writeLocation(root, 'r1', 'T2', { worktree, branch: 'teammates/r1/T2' })
-    assert.deepEqual(await findTaskByWorktree(root, worktree), {
-      runId: 'r1',
-      taskId: 'T2',
-      branch: 'teammates/r1/T2',
-    })
   })
 })
 
 // The vector isFile() actually exists for. Opening a FIFO with no writer blocks in open(2), so
-// without the guard one such file under any run's worktrees/ would hang the hook forever — no
-// timeout of ours, no stop, no enforcement. win32 has no FIFO, so this can only run on POSIX;
-// the assertion is that the lookup finishes at all and skips the entry.
-test('findTaskByWorktree does not block on a FIFO named like a record', {
+// without the guard the lookup would hang forever — no timeout of ours, no stop, no
+// enforcement. win32 has no FIFO, so this can only run on POSIX.
+test('findTaskByWorktree does not block on a FIFO in place of a record', {
   skip: process.platform === 'win32' ? 'POSIX only: win32 has no FIFO' : false,
 }, async (t) => {
   await withTempRoot(async (root) => {
     const worktree = path.join(root, 'wt', 'agent-1')
-    const dir = path.join(root, '.teammates', 'r1', 'worktrees')
-    await mkdir(dir, { recursive: true })
+    const target = recordPath(root, worktree)
+    await mkdir(path.dirname(target), { recursive: true })
     try {
-      execFileSync('mkfifo', [path.join(dir, 'T1.json')], { stdio: 'ignore' })
+      execFileSync('mkfifo', [target], { stdio: 'ignore' })
     } catch (err) {
       t.skip(`mkfifo unavailable: ${err.code ?? err.message}`)
       return
     }
-    await writeLocation(root, 'r1', 'T2', { worktree, branch: 'teammates/r1/T2' })
-    // Raced against a timer: a regression here does not fail, it HANGS — open(2) on a FIFO with
-    // no writer never returns — and a hung job reports a suite timeout rather than naming this
-    // guard. Losing the race is the assertion.
+    // Raced against a timer: a regression here does not fail, it HANGS. Losing the race is the
+    // assertion — and then the FIFO is opened for writing, which releases the blocked open(2)
+    // so the process can exit and the runner reports this failure instead of a job timeout.
     const timer = new Promise((resolve) => { setTimeout(() => resolve('timed out'), 5_000).unref() })
     const result = await Promise.race([findTaskByWorktree(root, worktree), timer])
+    if (result === 'timed out') {
+      const writer = await open(target, 'w')
+      await writer.close()
+    }
     assert.notEqual(result, 'timed out', 'the lookup blocked on a FIFO instead of skipping it')
-    assert.deepEqual(result, { runId: 'r1', taskId: 'T2', branch: 'teammates/r1/T2' })
+    assert.equal(result, null)
   })
+})
+
+// Two properties of the single-file read that no behavioural test can reach, pinned against the
+// source the way the tmp+rename is. The first is ordering: a record's ids are validated before
+// anything resolves a path the record supplied, and getting it wrong costs a stall only an
+// unreachable network host could reproduce. The second is the bounded read: `handle.readFile`
+// drains to EOF regardless of the fstat'd size, so using it would make the size cap advisory,
+// and the only way to observe the difference is to win a race against a growing file.
+test('findTaskByWorktree validates ids before resolving paths, and reads a bounded count', async () => {
+  const source = await readFile(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'state.mjs'),
+    'utf8',
+  )
+  const start = source.indexOf('export async function findTaskByWorktree')
+  assert.notEqual(start, -1, 'findTaskByWorktree is no longer declared under that name')
+  const body = source.slice(start, source.indexOf('\n}', start))
+  const idsAt = body.indexOf('isSegment(indexDir(root), record.taskId)')
+  const resolveAt = body.indexOf('worktreeKey(record.worktree)')
+  assert.notEqual(idsAt, -1, 'the taskId segment check is gone')
+  assert.notEqual(resolveAt, -1, 'the record worktree is no longer hashed')
+  assert.equal(idsAt < resolveAt, true, 'ids must be validated before a record-supplied path is resolved')
+  assert.match(body, /isLocalAbsolute\(record\.worktree\)/, 'realpath must stay behind the guard')
+  assert.match(body, /handle\.read\(buffer, 0, want, 0\)/, 'the read must be bounded by the cap')
+  // Comment lines dropped first: this file explains in prose why readFile is not used, and an
+  // assertion that cannot tell the explanation from the call would fail on the explanation.
+  const code = body.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n')
+  assert.doesNotMatch(code, /handle\.readFile/, 'readFile drains to EOF and makes the size cap advisory')
+  assert.match(body, /await handle\?\.close\(\)/, 'the handle must be closed on every path')
 })
 
 // A cross-file source assertion, not a behavioural one. Observing a torn read requires winning

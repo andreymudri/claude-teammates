@@ -1,5 +1,6 @@
-import { mkdir, open, readdir, readFile, writeFile, rename, unlink } from 'node:fs/promises'
+import { mkdir, open, readFile, writeFile, rename, unlink } from 'node:fs/promises'
 import { constants, realpathSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import path from 'node:path'
 // The single definition of `teammates/<runId>/<taskId>`. Imported rather than restated so the
 // branch a record is allowed to name cannot drift from the branch the run actually uses.
@@ -8,23 +9,15 @@ import { taskBranchName } from './enforce.mjs'
 
 const NAMES = new Set(['plan', 'status', 'findings'])
 
-// Bounds on what one worktree lookup will read. A legitimate location record is ~200 bytes and
-// a run holds one per task, so these are generous by orders of magnitude and exist only to stop
-// a hand-written record from turning a stop-time hook into a timeout. Both are overridable per
-// call so the behaviour can be exercised without writing thousands of files.
+// The only bound a keyed lookup needs: one file is read, and this is how much of it. A
+// legitimate location record is ~200 bytes. There is deliberately no cap on the NUMBER of
+// records — nothing enumerates them, so their count cannot cost a reader anything.
 const MAX_RECORD_BYTES = 64 * 1024
-const MAX_RECORDS = 5000
 
 // O_NONBLOCK is POSIX-only; on win32 `constants.O_NONBLOCK` is undefined and 0 leaves the open
 // flags untouched, which is the correct no-op there (win32 has no FIFO to block on).
 const { O_RDONLY } = constants
 const O_NONBLOCK = constants.O_NONBLOCK ?? 0
-
-// Degradation has to be audible. A lookup that silently returns "no match" is indistinguishable
-// from the honest answer for an agent that owns no task, so a truncated scan says so on stderr,
-// which the harness surfaces from a hook even when the handler allows the stop. Injectable so a
-// test can assert the message exists rather than asserting the absence of one.
-const warnToStderr = (message) => { process.stderr.write(message) }
 
 export function runDir(root, runId) {
   return path.join(root, '.teammates', runId)
@@ -68,7 +61,7 @@ export async function claimTask(root, runId, taskId, teammate) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Worktree location records.
+// Worktree location records: `.teammates/index/<sha256 of the normalised worktree>.json`.
 //
 // NOT YET WIRED UP. As of this commit nothing in the repository calls `writeLocation` or
 // `findTaskByWorktree` outside tests: the `locate` command that will write a record and the
@@ -77,6 +70,19 @@ export async function claimTask(root, runId, taskId, teammate) {
 // describe the design those callers are being built to — read every "the hook does X" as "the
 // hook is specified to do X", not as a description of running code — and the threat model is
 // stated in the present tense because the file format is what it constrains, whoever writes it.
+//
+// The layout is keyed rather than searched, and that is the whole security argument: a reader
+// derives one file name from the path it is asking about and opens it. Nothing enumerates the
+// store, so the number of records in it — records are never deleted, and nothing deletes them —
+// costs a lookup nothing, and no quantity of files anyone can write changes what a reader does.
+// The previous scanning layout had no correct bound: every axis that could be capped (records,
+// directories, bytes) was chosen by whoever wrote the files, and the order they were visited in
+// was chosen by the filesystem, which also made its tests unportable between NTFS, ext4 and APFS.
+//
+// KNOWN LIMITATION, by design rather than oversight: the key is the hash of the RESOLVED path,
+// so a worktree that has been deleted by the time it is looked up no longer realpaths the way it
+// did when the record was written, hashes differently, and is not found. The lookup returns null
+// and a hook fails open — no enforcement rather than enforcement against the wrong task.
 // ---------------------------------------------------------------------------------------------
 
 // Trailing separators are noise EXCEPT at a filesystem root, where the separator is part of the
@@ -162,180 +168,136 @@ function assertSegment(baseDir, segment, flagName) {
   }
 }
 
+// The record's address IS its worktree. Hashing the normalised path gives a fixed-length,
+// separator-free file name, so the lookup opens one known file instead of searching for it —
+// which is what removes the scan, and with it every bound that had to be chosen (records,
+// directories, bytes) over input an attacker writes and a filesystem orders.
+export function worktreeKey(worktree, options) {
+  const normalised = normaliseWorktree(worktree, options)
+  if (normalised === '') return ''
+  return createHash('sha256').update(normalised).digest('hex')
+}
+
+export function indexDir(root) {
+  return path.join(root, '.teammates', 'index')
+}
+
 // To be written by the teammate at start and read by the stop-time hook; neither exists yet.
-// Overwritable on purpose: a respawned teammate re-enters the same task from a different
-// worktree, and a record that could not be updated would point the hook at a directory that
-// no longer exists.
+// Overwritable on purpose: a teammate that re-enters the same worktree rewrites that worktree's
+// record in place. A respawn into a DIFFERENT worktree writes a different key, and the old
+// record stays — nothing deletes records, and nothing needs to, because no reader enumerates
+// them any more. A stale record is only reachable by asking about the exact directory it names.
 export async function writeLocation(root, runId, taskId, { worktree, branch }) {
   assertSegment(path.join(root, '.teammates'), runId, '--run')
-  const dir = path.join(runDir(root, runId), 'worktrees')
-  assertSegment(dir, taskId, '--task')
+  assertSegment(path.join(root, '.teammates'), taskId, '--task')
+  const key = worktreeKey(worktree)
+  if (key === '') throw new Error(`--worktree ${worktree} is not a path a record can name`)
+  const dir = indexDir(root)
   await mkdir(dir, { recursive: true })
-  const target = path.join(dir, `${taskId}.json`)
+  const target = path.join(dir, `${key}.json`)
   // Unique temp name, then rename: a concurrent reader never sees a half-written record.
   const tmp = `${target}.${process.pid}.${Math.floor(performance.now() * 1000)}.tmp`
-  await writeFile(tmp, `${JSON.stringify({ taskId, worktree, branch })}\n`, 'utf8')
+  await writeFile(tmp, `${JSON.stringify({ runId, taskId, branch, worktree })}\n`, 'utf8')
   await rename(tmp, target)
   return target
 }
 
-// A total order over matching records. Only the FIRST key means anything about time: mtime is
-// when the record was written, and newest-wins is the whole point. The other two are
-// tie-breakers and nothing more — a run id is free text from `--run`, so `a.runId > b.runId` is
-// a string comparison with no relation to which run started later, and `zulu` beats a newer
-// `alpha`. That is not recency and this comment does not claim it is; it is a fixed rule that
-// makes an exact-mtime tie DETERMINISTIC instead of readdir-ordered.
-//
-// All three keys are needed for totality: mtime alone ties on a coarse filesystem clock (FAT 2s,
-// ext3 and HFS+ 1s, some overlay mounts), and run id alone still ties for two records written
-// inside ONE run, which is the respawn-into-a-reused-worktree case this lookup exists for. With
-// the file name last no pair compares equal, so the answer never falls through to directory
-// order. When ids tie on mtime the winner may well be the older run; the guarantee is that it
-// is the same winner every time, on every platform.
-function laterThan(a, b) {
-  if (a.mtimeMs !== b.mtimeMs) return a.mtimeMs > b.mtimeMs
-  if (a.runId !== b.runId) return a.runId > b.runId
-  return a.file > b.file
-}
+// A task id is spent as `complete --task <id>` by the consumer this returns to, so it must not
+// be able to look like anything but an id. `isSegment` already keeps it inside one directory;
+// this keeps it out of an argument parser — a leading dash is rejected so `--force` or `-rf`
+// can never arrive as a task id — and bounds its length.
+const TASK_ID = /^[A-Za-z0-9._][A-Za-z0-9._-]{0,63}$/
 
-// Returns { runId, taskId, branch } for the location record whose worktree is `worktree`,
-// or null. Reads only; a malformed or unreadable record is skipped rather than thrown,
-// because the sole caller is a hook whose failure mode must be "allow the stop", never
-// "crash every agent on this machine".
+// Returns { runId, taskId, branch } for the location record naming `worktree`, or null.
+// Reads exactly one file, whose name is derived from the query, so there is no directory to
+// enumerate, nothing to order, and no quantity of records anyone can write that changes the
+// cost of a lookup. A missing file is the ordinary answer and is not an error.
 //
-// Records are never deleted, and the harness reuses `agent-<hash>` worktree paths, so one
-// directory can match records from several runs at once. Returning the first match would
-// resolve that in readdir order — alphabetically — and enforce a finished run's task against
-// the teammate living there now. The newest record wins instead: it is the one a `locate` at
-// checkout just wrote. See `laterThan` for how equal mtimes are settled.
-export async function findTaskByWorktree(
-  root,
-  worktree,
-  { maxRecords = MAX_RECORDS, maxRecordBytes = MAX_RECORD_BYTES, warn = warnToStderr } = {},
-) {
-  // The query comes from the caller (a hook payload's cwd), not from a record, so it is the one
-  // path worth resolving through the filesystem — once, here, rather than per record. Records
-  // are then compared against both its spellings, which is what lets the common case decide
-  // lexically and never touch the filesystem with a value a record supplied.
-  //
-  // This early return and the `lexical === ''` check below are mutually redundant on purpose,
-  // and neither is individually load-bearing: an empty query cannot match a record, because a
-  // record's worktree must be absolute, and an empty record worktree cannot match a query,
-  // because the query is non-empty by the time the loop runs. Deleting either one alone is
-  // therefore safe; the pair exists so that a later change to one side cannot open the other.
-  const wantReal = normaliseWorktree(worktree)
-  if (wantReal === '') return null
-  const wantLexical = normaliseWorktree(worktree, { resolveLinks: false })
-  let runs
+// Every rejection below returns null rather than throwing: the caller is a hook whose failure
+// mode must be "allow the stop", never "crash every agent on this machine".
+export async function findTaskByWorktree(root, worktree, { maxRecordBytes = MAX_RECORD_BYTES } = {}) {
+  // The query comes from the caller (a hook payload's cwd), and it is the only path this
+  // function resolves through the filesystem on trust.
+  const key = worktreeKey(worktree)
+  // Redundant and kept deliberately: an empty key would build `index/.json`, which does not
+  // exist, so the open below already fails to null. Mutation confirms no test can tell the two
+  // apart. It stays as a statement of intent — "an unnameable path is not a lookup" — not as a
+  // guard anything depends on.
+  if (key === '') return null
+  let handle
   try {
-    runs = await readdir(path.join(root, '.teammates'), { withFileTypes: true })
-  } catch { return null }
-  let best = null
-  for (const run of runs) {
-    if (!run.isDirectory()) continue
-    const dir = path.join(root, '.teammates', run.name, 'worktrees')
-    let files
-    try {
-      files = await readdir(dir)
-    } catch { continue }
-    // Counted PER RUN, not across the whole store: a global counter lets one padded directory
-    // starve every other run's records, which turns a cap meant to bound work into a way to
-    // switch enforcement off everywhere. Records are never deleted, so a long-lived repo would
-    // eventually do that to itself with no attacker at all.
-    let examined = 0
-    for (const file of files) {
-      if (!file.endsWith('.json')) continue
-      // The read below is the one unbounded cost left, and it is bounded here rather than
-      // trusted: 20,000 four-kilobyte records took 3.88 s on this host and one 512 MB record
-      // took 619 MB of RSS, both linear in what an author chooses to write, and either one
-      // scaled up puts a stop past the hook's 60 s timeout, which the harness treats as a
-      // non-blocking error.
-      //
-      // Hitting the cap abandons the REST OF THIS DIRECTORY and keeps whatever match is already
-      // in hand — a validated match is strictly better than no answer, and discarding it made
-      // the cap a suppression primitive: pad any directory and every lookup returns null, which
-      // is byte-identical to the honest "this agent owns no task" and so reports nothing.
-      // RESIDUAL, not fixed here: an attacker who pads the victim's OWN run directory ahead of
-      // the honest record still suppresses it, because readdir order decides what is reached
-      // first. What the cap buys is a bound on work and a warning; it is not a safety property.
-      examined += 1
-      if (examined > maxRecords) {
-        warn(`teammates: ${dir} exceeds ${maxRecords} records; stopping scan of it early. `
-          + 'Worktree lookup may be incomplete, so a stop-time check can be skipped.\n')
-        break
-      }
-      let handle
-      try {
-        const full = path.join(dir, file)
-        // Open once, then fstat and read THROUGH that handle. A stat-then-read pair is a
-        // time-of-check/time-of-use race — rename(2) is atomic and the record's author can swap
-        // a FIFO in between, and a blocking open(2) on a FIFO with no writer never returns,
-        // which is enforcement switched off rather than merely slowed. One descriptor closes
-        // it: the file that is fstat'd is the file that is read. O_NONBLOCK keeps the open
-        // itself from blocking; it does not exist on win32, where 0 leaves the flags unchanged.
-        handle = await open(full, O_RDONLY | O_NONBLOCK)
-        const info = await handle.stat()
-        if (!info.isFile()) continue
-        if (info.size > maxRecordBytes) continue
-        const record = JSON.parse(await handle.readFile('utf8'))
-        // ORDER MATTERS. Everything below that can reject a record on string comparison alone
-        // runs before any filesystem call on a value the record supplies. A record that fails
-        // these costs one stat and one bounded read; put the worktree resolution first instead
-        // and a record needs no valid taskId to make this lookup stall (see `isLocalAbsolute`).
-        //
-        // taskId comes from file CONTENT, which the writer's guard never saw: any teammate
-        // with a shell can write this file directly, and the value is handed to a caller that
-        // passes it to `complete --task`. Require it to be a plain segment AND to name the
-        // file it was read from, and skip the record otherwise — the same treatment malformed
-        // JSON gets, because a hook must degrade to "no match" rather than propagate a path.
-        if (!isSegment(dir, record.taskId)) continue
-        if (record.taskId !== file.slice(0, -'.json'.length)) continue
-        // A worktree that is not reader-independent is a wildcard, not a location: whatever
-        // path.resolve completes from the reader's own state makes one record designate
-        // different directories for different readers. `"worktree": "."` matches whoever is
-        // asking; on win32 `"\\foo"` is `path.isAbsolute` yet still completes from the reader's
-        // CURRENT DRIVE, so it is `C:\foo` for one reader and `D:\foo` for another. The hook
-        // runs in the session directory — the cwd a subagent that is NOT worktree-isolated
-        // reports, including this plugin's own read-only reviewer — so such a record blames an
-        // agent that owns no task. `isLocalAbsolute` is the predicate that admits neither, and
-        // reusing it here is deliberate: one definition of "a path this record may name".
-        //
-        // It also excludes UNC, so a worktree on a network share is not matchable at all. That
-        // is a real limitation, taken knowingly: such a path can never be realpath'd either
-        // (see isLocalAbsolute), so it could only ever have matched a byte-identical spelling,
-        // and the hook fails open there — no enforcement rather than wrong enforcement.
-        if (!isLocalAbsolute(record.worktree)) continue
-        const lexical = normaliseWorktree(record.worktree, { resolveLinks: false })
-        if (lexical === '') continue
-        let matched = lexical === wantReal || lexical === wantLexical
-        if (!matched && isLocalAbsolute(record.worktree)) {
-          const real = normaliseWorktree(record.worktree)
-          matched = real === wantReal || real === wantLexical
-        }
-        if (!matched) continue
-        const mtimeMs = info.mtimeMs
-        const candidate = {
-          mtimeMs,
-          file,
-          runId: run.name,
-          taskId: record.taskId,
-          // `branch` is the field that survives an HONEST taskId and an HONEST worktree, so no
-          // amount of cross-checking those two constrains it. Unvalidated it is a lever on the
-          // caller's git: any existing ref waves past a teammate that created no branch at all,
-          // and a rival's ref turns the hook's own remediation text into an instruction to
-          // force-move another task's branch. A record may name exactly one branch — the one
-          // this run gives this task — and anything else is dropped to null rather than
-          // discarding the record, because the record that legitimately carries a non-canonical
-          // branch is the teammate that never checked its task branch out, i.e. precisely the
-          // do-nothing case the hook exists to catch. Null is what the caller already falls
-          // back on, and it recomputes the same name from runId and taskId.
-          branch: record.branch === taskBranchName(run.name, record.taskId) ? record.branch : null,
-        }
-        if (best === null || laterThan(candidate, best)) best = candidate
-      } catch { continue } finally { await handle?.close().catch(() => {}) }
+    // Open once, then fstat and read THROUGH that handle. A stat-then-read pair is a
+    // time-of-check/time-of-use race — rename(2) is atomic and the record's author can swap a
+    // FIFO in between, and a blocking open(2) on a FIFO with no writer never returns, which is
+    // enforcement switched off rather than merely slowed. One descriptor closes it: the file
+    // that is fstat'd is the file that is read. O_NONBLOCK keeps the open itself from blocking;
+    // it does not exist on win32, where 0 leaves the flags unchanged.
+    handle = await open(path.join(indexDir(root), `${key}.json`), O_RDONLY | O_NONBLOCK)
+    const info = await handle.stat()
+    // isFile() is unobservable on win32 — the read of a directory fails anyway — and its real
+    // subject is the POSIX FIFO, pinned by a test that runs only there. Stated rather than
+    // implied: on this platform deleting it changes no outcome.
+    if (!info.isFile()) return null
+    // Likewise redundant with the bounded read below, which truncates an oversized file into
+    // unparseable JSON and returns null by that route. Mutation confirms no test separates
+    // them. It stays because rejecting on the fstat'd size avoids reading any of a huge file.
+    if (info.size > maxRecordBytes) return null
+    // Bounded read, not handle.readFile: readFile drains to EOF regardless of what fstat said,
+    // so a file that grows between the two would defeat the size check entirely and the cap
+    // would be advisory. Reading a fixed count makes the cap the actual limit; a file that grew
+    // is then truncated mid-JSON and fails to parse, which is the same null as any other
+    // malformed record.
+    const want = Math.min(info.size, maxRecordBytes)
+    const buffer = Buffer.alloc(want)
+    const { bytesRead } = await handle.read(buffer, 0, want, 0)
+    const record = JSON.parse(buffer.toString('utf8', 0, bytesRead))
+
+    // Cheap string validation before anything touches the filesystem again. Both ids now arrive
+    // from file CONTENT — runId used to be a directory name and could not lie; under this layout
+    // it can — so both get the same treatment, and a failure is a skip rather than a throw.
+    if (!isSegment(indexDir(root), record.runId)) return null
+    if (!isSegment(indexDir(root), record.taskId)) return null
+    if (!TASK_ID.test(record.taskId)) return null
+
+    // The record must name a worktree that hashes back to the file it was found in. This
+    // replaces the old filename-equality check and is strictly stronger: a forged record has to
+    // name the very directory whose key it was filed under, so it can only ever answer for that
+    // one directory — it cannot be planted to answer for someone else's.
+    //
+    // `isLocalAbsolute` first, because the hash below realpaths a value the record supplies:
+    // a UNC path to an unreachable host blocks the thread for tens of seconds, and a relative
+    // value — or a win32 `\foo`, which is `path.isAbsolute` yet drive-relative — is completed
+    // from the READER's own state, so it would hash back to whatever directory the reader is
+    // standing in and answer for it.
+    //
+    // One comparison, on the RESOLVED form, matching how the key was computed. An earlier
+    // version also compared the unresolved form as a disjunction; mutation testing showed no
+    // test could distinguish it, and reasoning agrees — the two forms differ only when links
+    // are involved, and in that case the resolved form is the one both sides agree on, while a
+    // path that does not exist resolves to its own lexical form at both ends anyway.
+    if (!isLocalAbsolute(record.worktree)) return null
+    if (worktreeKey(record.worktree) !== key) return null
+
+    return {
+      runId: record.runId,
+      taskId: record.taskId,
+      // `branch` is the field that survives an honest taskId and an honest worktree, so nothing
+      // cross-checked above constrains it. Unvalidated it is a lever on the caller's git: any
+      // existing ref waves past a teammate that created no branch at all, and a rival's ref
+      // turns a hook's remediation text into an instruction to force-move another task's
+      // branch. A record may name exactly one branch — the one this run gives this task — and
+      // anything else drops to null rather than discarding the record, because the record that
+      // legitimately carries a non-canonical branch is the teammate that never checked its task
+      // branch out, i.e. precisely the do-nothing case the hook exists to catch. Null is what
+      // the caller falls back on, and it recomputes the same name from runId and taskId.
+      branch: record.branch === taskBranchName(record.runId, record.taskId) ? record.branch : null,
     }
+  } catch {
+    // ENOENT is the ordinary "no record for this directory" answer and says nothing further.
+    return null
+  } finally {
+    await handle?.close().catch(() => {})
   }
-  return best === null ? null : { runId: best.runId, taskId: best.taskId, branch: best.branch }
 }
 
 // Returns the task to the pool. Idempotent: releasing an unclaimed or already-released
