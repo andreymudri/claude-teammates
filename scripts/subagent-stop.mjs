@@ -5,21 +5,23 @@
 //
 // It fires for EVERY subagent on this machine — a reviewer in an unrelated project, this
 // plugin's own read-only tm-reviewer, any agent in a repo with no run at all. Everything
-// below is arranged so those cases cost one git call and exit 0.
+// below is arranged so those cases cost one `git rev-parse` and exit 0; the count is pinned
+// by a test that traces the git processes this handler starts, because a cost claim nothing
+// measures is prose, and every subagent on the machine pays whatever it actually costs.
 import { readFileSync } from 'node:fs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { findTaskByWorktree, readState } from './state.mjs'
+import { findTaskByWorktree, normaliseWorktree, readState } from './state.mjs'
 
 // This handler's own exit statuses, which the harness reads.
 const ALLOW = 0
 const BLOCK = 2
 
-// The exit status `complete --enforcement-only` returns when the recomputed enforcement checks
-// reject the task, and the only status this handler blocks on. It is a DIFFERENT vocabulary
-// from ALLOW/BLOCK above, which happens to share small integers with it: REJECTED is a code
-// this process reads, BLOCK is a code this process returns.
+// The exit status `complete --enforcement-only` returns when a TASK-SCOPED enforcement check
+// rejects, and the only status this handler blocks on. It is a DIFFERENT vocabulary from
+// ALLOW/BLOCK above, which happens to share small integers with it: REJECTED is a code this
+// process reads, BLOCK is a code this process returns. See the contract at the spawn below.
 const REJECTED = 3
 
 function payload() {
@@ -62,15 +64,41 @@ async function main() {
   if (!commonDir) return ALLOW
   // `--git-common-dir` is `<main>/.git` for a linked worktree and the repository's own `.git`
   // otherwise, so its parent is the MAIN worktree in both cases — which is where the run's
-  // state lives, and the only root at which a teammate's record can be found.
+  // state lives, and the only root at which a teammate's record can be found. Both halves are
+  // covered: a case runs the handler from inside a real linked worktree, because that is the
+  // only configuration a dispatched teammate is ever in, and `--git-dir` — the plausible
+  // wrong answer — resolves there to `<main>/.git/worktrees/<name>`, under which no record is
+  // ever found and every teammate in the run would stop unchallenged.
   const root = path.dirname(commonDir)
+
+  // A stop in the MAIN worktree is never a teammate's. Teammates are dispatched into their own
+  // worktrees, so the only things that stop here are the orchestrator's own subagents — a
+  // reviewer, a helper — which have no task, no brief, and no business being handed a branch
+  // name to commit to. Without this, a record aimed at the main root (writable directly, which
+  // no guard on `locate` can prevent) makes the next unrelated subagent to stop the victim: it
+  // is blocked and told to commit to a ref the record chose, and `fileset` and `ownership`
+  // then read those commits as that task's work.
+  //
+  // Checked on `cwd` rather than on the record because the two are the same question: the
+  // store is keyed by the normalised worktree and the reader requires the record to name the
+  // directory it is filed under, so a record found for this `cwd` necessarily names it.
+  //
+  // The trade-off, stated rather than hidden: in a run dispatched WITHOUT worktree isolation
+  // every teammate shares the main worktree, and this makes enforcement inert for that run.
+  // That configuration already misresolves — one record per directory means the last teammate
+  // to run `locate` answers for all of them — so this turns "enforced against the wrong task"
+  // into "not enforced", which is the safer of the two. It is not free, and it is not nothing.
+  if (normaliseWorktree(cwd) === normaliseWorktree(root)) return ALLOW
 
   const found = await findTaskByWorktree(root, cwd)
   if (!found) return ALLOW
 
   // Recorded by `init-run`. Without it `complete` cannot run, and a teammate must never be
-  // blocked by state it did not write.
-  const plan = await readState(root, found.runId, 'plan').catch(() => null)
+  // blocked by state it did not write. Deliberately NOT wrapped in a local catch: a plan.json
+  // that is unreadable or malformed is also state the teammate did not write, and the terminal
+  // handler at the bottom of this file turns any throw into an allow. One fail-open path,
+  // tested through this one.
+  const plan = await readState(root, found.runId, 'plan')
   const planPath = plan?.planPath
   if (typeof planPath !== 'string' || planPath === '') return ALLOW
 
@@ -101,17 +129,26 @@ async function main() {
   // hook means the usual outcome is a timeout — which is a non-blocking error, i.e.
   // enforcement that looks installed and does nothing. The phase gate still runs it all.
   //
-  // One case where this misfires, and it misfires in the safe direction: `complete` derives
-  // the run branch from whatever the MAIN worktree has checked out, so if the operator is not
-  // on the run branch it cannot verify and exits 4, and this handler allows the stop. The
-  // phase gate still recomputes every verdict later. That is why 4 must not block.
+  // Block on REJECTED and on nothing else, because a stop may only be refused over something
+  // this teammate did and can fix from its own worktree. The contract `complete` is being
+  // built to, which this file consumes and does not implement:
   //
-  // Block on REJECTED and on nothing else. `complete`'s pre-existing codes cannot carry this
-  // decision: 2 is a malformed manifest OR an argv error, and 4 is a cannot-verify (no
-  // manifest, an underivable context, an unknown task id). Blocking on 2 costs a teammate a
-  // turn for the orchestrator's typo; blocking on 4 costs it a turn for a fact about the
-  // run's configuration. REJECTED exists so that neither has to carry a meaning it does not
-  // have, and every other code allows.
+  //   3  a TASK-SCOPED check rejected — fileset, merge. This teammate's own work.
+  //   4  cannot-verify, OR a run-wide check that failed for reasons outside this task.
+  //   2  a malformed manifest or an argv error.
+  //
+  // The split matters in one direction: several run-wide conditions are indistinguishable
+  // from a task rejection at the level of "did the checks pass" — a manifest typo leaving a
+  // non-optional check pending, uncommitted changes in the MAIN worktree failing `ownership`,
+  // someone committing straight to the run branch. Blocking on those tells a compliant
+  // teammate to fix something it does not own and cannot reach. Blocking on 2 costs it a turn
+  // for the orchestrator's typo. So 3 is the only code that may cost a teammate a turn, and
+  // it is narrowed on the `complete` side to mean exactly that.
+  //
+  // One further case lands in 4 and misfires in the safe direction: `complete` derives the run
+  // branch from whatever the MAIN worktree has checked out, so with the operator on another
+  // branch it cannot verify. The stop is allowed and the phase gate recomputes every verdict
+  // later, which is the whole reason this handler is a backstop rather than the gate.
   const cli = path.join(path.dirname(fileURLToPath(import.meta.url)), 'cli.mjs')
   const result = spawnSync(process.execPath, [
     cli, 'complete',
