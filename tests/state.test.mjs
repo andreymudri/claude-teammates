@@ -22,6 +22,8 @@ import {
   findTaskByWorktree,
 } from '../scripts/state.mjs'
 
+const MAX_BRANCH_CODE_UNITS = 512
+
 async function withTempRoot(fn) {
   const root = await mkdtemp(path.join(tmpdir(), 'tm-'))
   try { await fn(root) } finally { await rm(root, { recursive: true, force: true }) }
@@ -601,9 +603,9 @@ test('writeLocation refuses a branch that would make the record unreadable', asy
       writeLocation(root, 'r1', 'T1', { worktree, branch: 'b'.repeat(70_000) }),
       /longer than|could never be read back/,
     )
-    // Distinguishes the length bound from the whole-record bound: 700 characters is over the
-    // branch limit and nowhere near the record limit, so only the branch bound can reject it.
-    // Without this case the two cover each other and neither dies alone under mutation.
+    // Separates the branch bound from the whole-record bound: 700 characters is over the branch
+    // limit and nowhere near the record limit, so this case can only be rejected by the branch
+    // bound and the assertion names that message specifically.
     await assert.rejects(
       writeLocation(root, 'r1', 'T1', { worktree, branch: 'b'.repeat(700) }),
       /longer than 512 bytes/,
@@ -622,18 +624,21 @@ test('writeLocation refuses a branch that would make the record unreadable', asy
     }
     // Nothing was written, so a refused write cannot displace an existing good record.
     assert.equal(await findTaskByWorktree(root, worktree), null)
-    // A null or absent branch stays legal: a teammate that never created its task branch is the
-    // case the hook exists to catch, and it must still be able to record where it is.
+    // A null branch stays legal, and so does an ABSENT one: a teammate that never created its
+    // task branch is the case the hook exists to catch, and it must still be able to record
+    // where it is, whether its caller passes null or omits the field entirely.
     await writeLocation(root, 'r1', 'T1', { worktree, branch: null })
     assert.deepEqual(await findTaskByWorktree(root, worktree), { runId: 'r1', taskId: 'T1', branch: null })
+    const absent = path.join(root, 'wt', 'agent-absent')
+    await writeLocation(root, 'r1', 'T1', { worktree: absent })
+    assert.deepEqual(await findTaskByWorktree(root, absent), { runId: 'r1', taskId: 'T1', branch: null })
   })
 })
 
-// The invisible-character rule is a Unicode PROPERTY, not a list, and this is the list that
-// proved a list cannot be maintained: every one of these was accepted by the enumerated version
-// and every one creates a ref that renders identically to the honest branch name. The tag block
-// is astral, so it also checks that matching is code-point aware rather than UTF-16 unit aware.
-test('invisible code points the enumerated list missed are refused', async () => {
+// Each of these renders as nothing, so each makes a git ref indistinguishable from the honest
+// one beside it. They are spread across blocks and planes deliberately: the rule has to hold for
+// code points nobody thought to list, which is why it is a property and not an enumeration.
+test('code points that render as nothing are refused as ids', async () => {
   await withTempRoot(async (root) => {
     const worktree = path.join(root, 'wt', 'agent-1')
     const missedByTheOldList = [
@@ -714,12 +719,9 @@ test('revision syntax is still refused in either id', async () => {
 // serialiser. It was caught only by the whole-record size guard, which nothing pinned.
 test('writeLocation refuses a worktree longer than any real path', async () => {
   await withTempRoot(async (root) => {
-    // Platform-appropriate, and that is the whole point of this line: the win32 literal
-    // `C:\aaa...` is a RELATIVE path on Linux, so the isLocalAbsolute check rejected it first
-    // and this assertion never saw the message it matches. The test was green on win32 and red
-    // on ubuntu and macos, and while it was dead there the byte bound had NO coverage on the
-    // platforms CI actually runs — deleting the bound survived mutation on Linux. A skip would
-    // have left exactly that hole, so the fixture is built for whichever platform runs it.
+    // Built for whichever platform runs it, and never skipped: a win32 path literal is merely
+    // RELATIVE on Linux, so it would be rejected by the wrong check there and this assertion
+    // would pass without exercising the bound. A skip would leave the same hole more quietly.
     const enormous = process.platform === 'win32'
       ? `C:${path.sep}${'a'.repeat(70_000)}`
       : `${path.sep}${'a'.repeat(70_000)}`
@@ -773,12 +775,12 @@ test('format, separator and blank code points are refused without being enumerat
 // here too, where the previous rule refused it and cost that run its enforcement.
 test('a marked or non-ASCII id that git accepts is accepted here', async () => {
   await withTempRoot(async (root) => {
-    const vs16 = String.fromCodePoint(0xfe0f)
-    // A variation selector on a LETTER, and a Devanagari id whose matras are marks. Note what
-    // is NOT here: an emoji id. The allowlist admits letters, marks and numbers, and an emoji
-    // base is a Symbol (So), so an emoji id stays refused whatever VS16 does — the round-15
-    // note that VS16 alone makes emoji ids work is not borne out; a test asserting it failed.
-    const cases = ['T1', 'café', '日本語', 'run-1_x', 'run.1', '.hidden', 'T1.', `T1${vs16}`, 'हिन्दी']
+    // Marks on a base character are allowed, because they are visible: a Devanagari id whose
+    // matras are marks, and a digit carrying an enclosing keycap. What the rule is about is
+    // invisibility, not emoji — a character that renders is fine whatever its category.
+
+
+    const cases = ['T1', 'café', '日本語', 'run-1_x', 'run.1', '.hidden', 'T1.', 'हिन्दी', `1${String.fromCodePoint(0x20e3)}`]
     for (const taskId of cases) {
       const worktree = path.join(root, 'wt', `agent-${cases.indexOf(taskId)}`)
       await writeLocation(root, 'r1', taskId, { worktree, branch: `teammates/r1/${taskId}` })
@@ -836,6 +838,157 @@ test('a multibyte worktree is bounded by its byte length, not its character coun
       /bytes, over the 32767 allowed/,
     )
     assert.equal(await findTaskByWorktree(root, worktree), null)
+  })
+})
+
+// Anything that renders as nothing is refused, with no exception for variation selectors. A
+// zero-width character on a Letter makes an id indistinguishable from its honest twin, and a
+// forged record supplies both the id and the branch, so nothing downstream can catch it.
+test('a zero-width or variation selector on a letter is refused', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    const hostile = [
+      `T1${String.fromCodePoint(0xfe0e)}`, // text presentation selector
+      `T1${String.fromCodePoint(0xfe0f)}`, // emoji presentation selector
+      `T1${String.fromCodePoint(0xe0100)}`, // astral variation selector
+      `T1${String.fromCodePoint(0x200b)}`,
+      `T1${String.fromCodePoint(0x1160)}`, // Hangul junseong filler: classified as a letter
+    ]
+    for (const taskId of hostile) {
+      await assert.rejects(
+        writeLocation(root, 'r1', taskId, { worktree, branch: 'b' }),
+        /is not a usable task id/,
+        `${JSON.stringify(taskId)} was accepted`,
+      )
+      await plant(root, worktree, { runId: 'r1', taskId, worktree, branch: 'b' })
+      assert.equal(await findTaskByWorktree(root, worktree), null, `${JSON.stringify(taskId)} was returned`)
+    }
+    // The honest twin is unaffected, which is the point: one of these two is an id and the
+    // other cannot be told apart from it by looking.
+    await writeLocation(root, 'r1', 'T1', { worktree, branch: 'teammates/r1/T1' })
+    assert.equal((await findTaskByWorktree(root, worktree)).taskId, 'T1')
+  })
+})
+
+// One rendering, one representation: without normalisation the decomposed and precomposed
+// spellings of the same word are two different ids that look identical everywhere.
+test('ids are normalised to NFC on the way in and on the way out', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    const decomposed = `cafe${String.fromCodePoint(0x301)}`
+    const precomposed = 'caf\u00e9'
+    assert.notEqual(decomposed, precomposed)
+    const written = await writeLocation(root, 'r1', decomposed, { worktree, branch: `teammates/r1/${precomposed}` })
+    // Stored in one form, whichever form the caller used.
+    assert.equal(JSON.parse(await readFile(written, 'utf8')).taskId, precomposed)
+    const found = await findTaskByWorktree(root, worktree)
+    assert.equal(found.taskId, precomposed)
+    // And the branch canonicality check agrees, rather than being defeated by the spelling.
+    assert.equal(found.branch, `teammates/r1/${precomposed}`)
+    // A record written by hand in the decomposed form reads back in the composed one.
+    await plant(root, worktree, { runId: 'r1', taskId: decomposed, worktree, branch: `teammates/r1/${decomposed}` })
+    assert.equal((await findTaskByWorktree(root, worktree)).taskId, precomposed)
+  })
+})
+
+// A worktree path is not an id, but it is stored and printed, so control characters are refused.
+// They also cost six bytes each once serialised while counting as one against the field bound,
+// which is how a path inside its own limit produced a record far past the record limit.
+test('a worktree containing control characters is refused', async () => {
+  await withTempRoot(async (root) => {
+    const prefix = process.platform === 'win32' ? 'C:/' : '/'
+    for (const cp of [0x0001, 0x001f, 0x007f, 0x009b]) {
+      const worktree = `${prefix}wt${String.fromCodePoint(cp)}agent`
+      await assert.rejects(
+        writeLocation(root, 'r1', 'T1', { worktree, branch: 'teammates/r1/T1' }),
+        /contains control characters/,
+        `U+${cp.toString(16)} was accepted in a worktree`,
+      )
+    }
+    // The shape that motivated it: inside the byte bound, far past the record bound once JSON
+    // has escaped every byte of it.
+    const enormous = `${prefix}${String.fromCodePoint(0x0001).repeat(30_000)}`
+    assert.equal(Buffer.byteLength(enormous, 'utf8') < 32_767, true, 'must be inside the field bound')
+    assert.equal(JSON.stringify(enormous).length > 150_000, true, 'and past the record bound once escaped')
+    await assert.rejects(
+      writeLocation(root, 'r1', 'T1', { worktree: enormous, branch: 'teammates/r1/T1' }),
+      /contains control characters|could never be read back/,
+    )
+    assert.equal(await findTaskByWorktree(root, enormous), null)
+  })
+})
+
+// The record bound is measured on the bytes that reach the disk, so it holds even when a field
+// passes its own bound and then expands. `"` doubles under JSON escaping.
+test('a record that would exceed the size bound once serialised is refused', async () => {
+  await withTempRoot(async (root) => {
+    const prefix = process.platform === 'win32' ? 'C:/' : '/'
+    const quotes = '"'.repeat(32_760)
+    const worktree = `${prefix}${quotes}`
+    assert.equal(Buffer.byteLength(worktree, 'utf8') <= 32_767, true, 'must pass the field bound')
+    // The record the writer builds carries three more fields, so the escaped worktree alone
+    // sits just under the bound and the whole record just over it — which is the point: only a
+    // measurement of the real serialised bytes can see that.
+    assert.equal(JSON.stringify({ runId: 'r1', taskId: 'T1', branch: 'teammates/r1/T1', worktree }).length > 65_536, true, 'and fail once escaped')
+    await assert.rejects(
+      writeLocation(root, 'r1', 'T1', { worktree, branch: 'teammates/r1/T1' }),
+      /could never be read back/,
+    )
+  })
+})
+
+// Bounds are bytes for ids and branch too, not just for the worktree: a multibyte id inside a
+// character count can be far outside the byte budget the record is written against.
+test('id and branch bounds are measured in bytes', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    const multibyteRunId = '日'.repeat(200) // inside 255 counted as characters, 600 bytes
+    assert.equal(multibyteRunId.length < 255, true, 'must pass a code-unit bound')
+    assert.equal(Buffer.byteLength(multibyteRunId, 'utf8') > 255, true, 'and fail a byte bound')
+    await assert.rejects(
+      writeLocation(root, multibyteRunId, 'T1', { worktree, branch: 'b' }),
+      /is not a usable run id/,
+    )
+    const multibyteTaskId = '日'.repeat(100) // inside 128 as characters, 300 bytes
+    await assert.rejects(
+      writeLocation(root, 'r1', multibyteTaskId, { worktree, branch: 'b' }),
+      /is not a usable task id/,
+    )
+    // 413 characters — comfortably inside 512 counted as code units — and 1,213 bytes, which is
+    // what the record is written in. A bound counting characters would accept this.
+    const multibyteBranch = `teammates/r1/${'日'.repeat(400)}`
+    assert.equal(multibyteBranch.length < MAX_BRANCH_CODE_UNITS, true, 'must pass a code-unit bound')
+    assert.equal(Buffer.byteLength(multibyteBranch, 'utf8') > MAX_BRANCH_CODE_UNITS, true, 'and fail a byte bound')
+    await assert.rejects(
+      writeLocation(root, 'r1', 'T1', { worktree, branch: multibyteBranch }),
+      /is longer than 512 bytes/,
+    )
+    // Inside the byte budget, these still work.
+    await writeLocation(root, '日'.repeat(85), '日'.repeat(42), { worktree, branch: 'b' })
+    assert.equal((await findTaskByWorktree(root, worktree)).runId, '日'.repeat(85))
+  })
+})
+
+// A refusal a reader cannot act on is not a refusal: the character being complained about has to
+// survive into the message in a visible form.
+test('characters that render as blank are escaped in error messages', async () => {
+  await withTempRoot(async (root) => {
+    const worktree = path.join(root, 'wt', 'agent-1')
+    const blanks = [0x2800, 0x00a0, 0x2000, 0x3000, 0x2028, 0x200b, 0x0009]
+    for (const cp of blanks) {
+      const taskId = `T1${String.fromCodePoint(cp)}`
+      const message = await writeLocation(root, 'r1', taskId, { worktree, branch: 'b' })
+        .then(() => null, (err) => err.message)
+      assert.notEqual(message, null, `U+${cp.toString(16)} was accepted`)
+      // Compared after NFC, because normalisation maps some blanks onto others — U+2000
+      // becomes U+2002 before it ever reaches the message.
+      const escaped = String.fromCodePoint(cp).normalize('NFC').codePointAt(0).toString(16)
+      assert.match(
+        message,
+        new RegExp(`\\\\u\\{${escaped}\\}|\\\\[tn]`),
+        `U+${cp.toString(16)} was not escaped in: ${JSON.stringify(message)}`,
+      )
+    }
   })
 })
 
@@ -1219,27 +1372,18 @@ test('findTaskByWorktree skips a record larger than the size cap', async () => {
 test('findTaskByWorktree skips a record path that is not a regular file', async () => {
   await withTempRoot(async (root) => {
     const worktree = path.join(root, 'wt', 'agent-1')
-    // A directory in place of a record. What this pins is the OUTCOME — null, no throw — and
-    // not the isFile() guard: on both platforms the read of a directory fails on its own, so
-    // deleting that guard leaves this green. Measured, not assumed; see state.mjs.
+    // A directory in place of a record: the outcome must be null and no throw, whichever of the
+    // open, the fstat or the read is what refuses it.
     await mkdir(recordPath(root, worktree), { recursive: true })
     await assert.doesNotReject(findTaskByWorktree(root, worktree))
     assert.equal(await findTaskByWorktree(root, worktree), null)
   })
 })
 
-// This pins that a FIFO in place of a record does not hang the lookup. Whether it also pins
-// `O_NONBLOCK` is NODE-VERSION DEPENDENT, and the two measurements disagree: on WSL Ubuntu with
-// node 24.18.0 the reviewer measured removing the flag failing this test after about 5,011 ms,
-// while on the same distribution with node 18.19.1 I measured the mutant SURVIVING — the test
-// still passes, so libuv there does not block on the writer-less open even without the flag.
-// Both are recorded rather than one being restated: the flag is worth keeping on the strength of
-// the newer measurement, and this comment does not claim a pin on a runtime where it was not
-// observed. It does NOT pin `isFile()` on either version: libuv
-// opens a writer-less FIFO with O_NONBLOCK without blocking, such a FIFO fstats to size 0, so
-// the bounded read gets nothing and JSON.parse('') throws to the same null the guard returns.
-// An earlier version of this comment claimed both flags were unpinned; only the isFile() half
-// of that was ever true, and O_NONBLOCK is better than it was given credit for.
+// A FIFO in place of a record must not hang the lookup. Opening one for reading blocks until a
+// writer arrives unless O_NONBLOCK is set, and a hook that never returns is enforcement switched
+// off with no error anywhere — so this races the lookup against a timer and fails loudly rather
+// than hanging the runner. POSIX only, because win32 has no FIFO.
 test('findTaskByWorktree does not block on a FIFO in place of a record', {
   skip: process.platform === 'win32' ? 'POSIX only: win32 has no FIFO' : false,
 }, async (t) => {
