@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readdir, rm, stat, symlink, utimes, writeFile, readFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, rename, rm, stat, symlink, utimes, writeFile, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -1026,7 +1026,9 @@ const SANITISED_SITES = [
   },
   {
     site: 'cli.mjs complete — a failing check’s name and its captured output',
-    exit: 4,
+    // 3 is `complete`'s rejection code: the recomputed gate ran and rejected this task. The
+    // verdict is what it always was; only the number carrying it changed.
+    exit: 3,
     async setup({ root, planPath, io }) {
       await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
       // Written as a file rather than inlined into `run`, so no shell quoting stands between the
@@ -1421,8 +1423,15 @@ const SANITISED_SITES = [
     // reaches it from argv (C1 form: it becomes a directory under `.teammates/`), and `phase` and
     // `totalPhases` reach it out of status.json, which the blockedBy row above already treats as
     // a file an agent writes.
+    //
+    // The run directory is built by renaming an ordinary one rather than by `init-run --run
+    // <forgery>`: `init-run` now applies the location record's id rule and refuses this id
+    // outright. That closes one route to such a run and closes NOTHING here — `digest` reads its
+    // run id from argv and applies no id rule, so it must still escape whatever it is handed,
+    // and a run directory is a directory anyone with write access can create.
     async setup({ root, planPath, io }) {
-      await runCli(['init-run', planPath, '--run', CLI_C1_FORGERY, '--root', root], io)
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      await rename(path.join(root, '.teammates', 'r1'), path.join(root, '.teammates', CLI_C1_FORGERY))
       const status = await readStatus(root, CLI_C1_FORGERY)
       status.phase = CLI_ESC_FORGERY
       status.totalPhases = `${CLI_ESC_FORGERY}-total`
@@ -1436,7 +1445,9 @@ const SANITISED_SITES = [
     // The caveman branch of the header is a second template with its own three wrappers, exactly
     // as `describe`/`describeTerse` below are two templates with their own.
     async setup({ root, planPath, io }) {
-      await runCli(['init-run', planPath, '--run', CLI_C1_FORGERY, '--root', root], io)
+      // Same rename as the row above, and for the same reason.
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      await rename(path.join(root, '.teammates', 'r1'), path.join(root, '.teammates', CLI_C1_FORGERY))
       await writeManifest(root, { caveman: 'full', phases: { default: { checks: [] } } })
       const status = await readStatus(root, CLI_C1_FORGERY)
       status.phase = CLI_ESC_FORGERY
@@ -3037,7 +3048,12 @@ test('an absent manifest keeps its own exit code in all three commands', async (
   })
 })
 
-test('complete exits 4 when the recomputed gate fails', async () => {
+// Renamed and re-pinned when `complete` gained a rejection-specific exit code. The old name
+// ("exits 4") described the behaviour this test now refutes: 4 stayed the code for the four
+// cannot-verify situations, and the one case that is a verdict about the teammate's own work
+// moved to 3. The stop-time hook blocks on 3 and on nothing else, so this assertion is what
+// keeps that handler wired to a rejection rather than to a configuration failure.
+test('complete exits 3 when the recomputed gate rejects the task', async () => {
   await withRepo(async ({ root, planPath, io, lines }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     // No task branch (teammates/r1/T1) exists yet, so the fileset check the recomputed
@@ -3045,10 +3061,37 @@ test('complete exits 4 when the recomputed gate fails', async () => {
     await writeEnforcementManifest(root)
     lines.length = 0
     const code = await runCli(['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--root', root], io)
-    assert.equal(code, 4)
+    assert.equal(code, 3)
     assert.match(lines.join('\n'), /gate does not pass for phase/)
     const status = await readStatus(root, 'r1')
     assert.equal(status.tasks.find((t) => t.id === 'T1').state, 'pending')
+  })
+})
+
+// The whole value of the new code is that it is not shared with anything else. A rejection that
+// came back as 2 would have the hook blocking a teammate for the orchestrator's typo; one that
+// came back as 4 would have it allowing the very rejection it exists to catch. Both directions
+// are asserted here against the same repository, so the three codes cannot quietly collapse.
+test('complete keeps 2, 3 and 4 for three different things', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeEnforcementManifest(root)
+
+    // 3 — the gate recomputed this task and rejected it.
+    lines.length = 0
+    assert.equal(await runCli(['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--root', root], io), 3)
+    assert.match(lines.join('\n'), /gate does not pass for phase/)
+
+    // 4 — a task the plan does not contain. Nothing about the teammate's work was verified.
+    lines.length = 0
+    assert.equal(await runCli(['complete', '--run', 'r1', '--task', 'T9', '--plan', 'plan.md', '--root', root], io), 4)
+    assert.match(lines.join('\n'), /no task T9 in the plan/)
+    assert.doesNotMatch(lines.join('\n'), /gate does not pass for phase/)
+
+    // 2 — the invocation itself was rejected.
+    lines.length = 0
+    assert.equal(await runCli(['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--nope', 'x', '--root', root], io), 2)
+    assert.match(lines.join('\n'), /complete does not take --nope/)
   })
 })
 
@@ -3087,8 +3130,8 @@ test('complete ignores a forged status.gates PASS', async () => {
     lines.length = 0
     const code = await runCli(['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--root', root], io)
     // The exit code reflects recomputation, not the forged file: complete never reads
-    // status.gates at all.
-    assert.equal(code, 4)
+    // status.gates at all. 3 is the rejection code the stop-time hook blocks on.
+    assert.equal(code, 3)
     const after = await readStatus(root, 'r1')
     assert.equal(after.tasks.find((t) => t.id === 'T1').state, 'pending')
   })
@@ -3206,7 +3249,7 @@ test('complete prints the failing checks\' output, not just their names', async 
     await writeEnforcementManifest(root)
     lines.length = 0
     const code = await runCli(['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--root', root], io)
-    assert.equal(code, 4)
+    assert.equal(code, 3)
     const out = lines.join('\n')
     assert.match(out, /gate does not pass for phase/)
     // The summary line only lists check names ("fileset"); the actual diagnostic — which
@@ -3268,7 +3311,7 @@ test('complete verifies only the calling task — a sibling with no branch does 
     // T2, which really has not started, still fails on its own missing branch.
     lines.length = 0
     const codeT2 = await runCli(['complete', '--run', 'r1', '--task', 'T2', '--plan', 'plan.md', '--root', root], io)
-    assert.equal(codeT2, 4)
+    assert.equal(codeT2, 3)
     assert.match(lines.join('\n'), /T2/)
   })
 })
@@ -3319,7 +3362,7 @@ test('complete passes for a compliant task even when a sibling stomps its file',
     // T2 is the one at fault and still fails on its own undeclared write.
     lines.length = 0
     const codeT2 = await runCli(['complete', '--run', 'r1', '--task', 'T2', '--plan', 'plan.md', '--root', root], io)
-    assert.equal(codeT2, 4, lines.join('\n'))
+    assert.equal(codeT2, 3, lines.join('\n'))
   })
 })
 
@@ -3378,7 +3421,13 @@ test('complete makes exactly one runChecks call carrying taskScope, and gate set
   const completeBody = src.slice(src.indexOf("if (command === 'complete')"))
   const gateBody = src.slice(src.indexOf("if (command === 'gate')"), src.indexOf("if (command === 'complete')"))
 
-  assert.equal((completeBody.match(/runChecks\(/g) ?? []).length, 1)
+  // `runPhaseChecks` is the shared wrapper `finish` and `prune-run` already go through — it
+  // makes exactly one `runChecks` call in both of its branches, so routing through it keeps the
+  // one-call guarantee this test is about while adding `--enforcement-only`. The bare-call
+  // assertion stays alongside it: a second, direct `runChecks` here would rebuild the preview
+  // and re-emit a duplicate `merge` result exactly as one call per kind did.
+  assert.equal((completeBody.match(/runPhaseChecks\(/g) ?? []).length, 1)
+  assert.equal((completeBody.match(/runChecks\(/g) ?? []).length, 0)
   assert.match(completeBody, /taskScope:\s*flags\.task/)
   // The scoped context must not also narrow `tasks` — runOwnershipCheck has to stay
   // run-wide to explain every commit on the run branch, not just this task's.
@@ -3516,7 +3565,7 @@ async function writeVerdict(root, verdict) {
 test('usage lists the fix subcommand', async () => {
   await withRepo(async ({ io, lines }) => {
     assert.equal(await runCli(['nope'], io), 2)
-    assert.match(lines.join('\n'), /init-run\|gate\|doctor\|liveness\|digest\|claim\|unclaim\|workflow\|complete\|fix/)
+    assert.match(lines.join('\n'), /init-run\|gate\|doctor\|liveness\|digest\|claim\|unclaim\|locate\|brief\|workflow\|complete\|fix/)
     assert.match(lines.join('\n'), /fix\s+--run <id> --phase <n> --verdict <path>/)
   })
 })
@@ -7529,7 +7578,7 @@ test('complete --phase selects the manifest block it names', async () => {
     }), 'utf8')
     lines.length = 0
     // The default block fails, so without the flag the task stays pending.
-    assert.equal(await runCli(['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--root', root], io), 4)
+    assert.equal(await runCli(['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--root', root], io), 3)
     assert.equal((await readStatus(root, 'r1')).tasks.find((t) => t.id === 'T1').state, 'pending')
 
     lines.length = 0
@@ -8453,5 +8502,325 @@ test('liveness refuses a run id with no directory rather than reporting a board 
     assert.match(out, /r11/)
     assert.doesNotMatch(out, /not started/)
     assert.equal(code, 2)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// locate, brief, --enforcement-only, and the recorded plan path.
+// ---------------------------------------------------------------------------
+
+// `locate` and the store are two files, and the record only works if they agree about where it
+// goes. Composing the expected path from the run and task ids cannot express that agreement —
+// the address of a record is the hash of the worktree it names, not the ids — so every
+// assertion below goes through the store's own exported helpers or through the very reader the
+// stop-time hook uses.
+async function stateModule() {
+  return import('../scripts/state.mjs')
+}
+
+test('locate run inside a linked worktree files the record under the MAIN worktree', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const { findTaskByWorktree, indexDir, worktreeKey } = await stateModule()
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const wt = path.join(root, 'wt-T1')
+    g(['worktree', 'add', '--quiet', '-b', 'teammates/r1/T1', wt])
+    lines.length = 0
+
+    // No path arguments at all beyond --root, which is the teammate's own worktree: that is
+    // exactly the shape the brief tells a teammate to run, and the shape an implementation
+    // inheriting the CLI's shared default would file inside the worktree itself.
+    const code = await runCli(['locate', '--run', 'r1', '--task', 'T1', '--root', wt], io)
+    assert.equal(code, 0, lines.join('\n'))
+    assert.match(lines.join('\n'), /recorded T1 at /)
+
+    // The path writeLocation returns, derived from the store's own helpers rather than from
+    // the superseded `.teammates/<run>/worktrees/<task>.json` layout, which nothing writes.
+    await stat(path.join(indexDir(root), `${worktreeKey(wt)}.json`))
+
+    // And the half that actually matters: the hook resolves the MAIN root and looks the cwd up
+    // there. A record filed in the teammate's own worktree would leave this null and every stop
+    // allowed, which is indistinguishable from a clean pass.
+    const found = await findTaskByWorktree(root, wt)
+    assert.deepEqual(
+      { runId: found?.runId, taskId: found?.taskId, branch: found?.branch },
+      { runId: 'r1', taskId: 'T1', branch: 'teammates/r1/T1' },
+    )
+    await assert.rejects(() => stat(path.join(wt, '.teammates')), 'nothing may be filed inside the teammate worktree')
+    g(['worktree', 'remove', '--force', wt])
+  })
+})
+
+test('locate takes an explicit worktree and branch over the ones it would derive', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const { findTaskByWorktree, indexDir, worktreeKey } = await stateModule()
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const wt = path.join(root, 'wt-T1')
+    g(['worktree', 'add', '--quiet', '-b', 'teammates/r1/T1', wt])
+    const elsewhere = path.join(root, 'elsewhere')
+    await mkdir(elsewhere, { recursive: true })
+    lines.length = 0
+
+    const code = await runCli(
+      ['locate', '--run', 'r1', '--task', 'T2', '--worktree', elsewhere, '--branch', 'some/other', '--root', wt],
+      io,
+    )
+    assert.equal(code, 0, lines.join('\n'))
+    const found = await findTaskByWorktree(root, elsewhere)
+    assert.deepEqual({ runId: found?.runId, taskId: found?.taskId }, { runId: 'r1', taskId: 'T2' })
+    // The record carries the branch it was given verbatim. The READER then reports null for it,
+    // because a branch that is not this task's canonical name is exactly the do-nothing case
+    // the hook exists to catch and must not be handed back as if it were the task's branch.
+    // Asserted on the stored record, so this test is about what `locate` wrote rather than
+    // about the reader's policy, which state.mjs owns and pins for itself.
+    const record = JSON.parse(await readFile(path.join(indexDir(root), `${worktreeKey(elsewhere)}.json`), 'utf8'))
+    assert.equal(record.branch, 'some/other')
+    assert.equal(found?.branch, null)
+    // The derived worktree was not also recorded: an override replaces, it does not add.
+    assert.equal(await findTaskByWorktree(root, wt), null)
+    g(['worktree', 'remove', '--force', wt])
+  })
+})
+
+test('locate refuses a worktree the store could never record rather than exiting 0', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    // Relative, so `isLocalAbsolute` refuses it. Reported, never swallowed: a `locate` that
+    // exits 0 having written nothing is the silent-no-enforcement case in another guise.
+    const code = await runCli(['locate', '--run', 'r1', '--task', 'T1', '--worktree', 'not/absolute', '--root', root], io)
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /not\/absolute/)
+    assert.doesNotMatch(lines.join('\n'), /^recorded /m)
+  })
+})
+
+// The two guarantees KNOWN_FLAGS and the spelling refusal exist to provide, on the two commands
+// this change adds — a new command is exactly where an unregistered flag goes unnoticed.
+test('locate --worktree with no value is refused, and brief refuses a flag it does not read', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    // Last on the argv, so parseFlags reads it as the boolean `true` — the shape an unset
+    // shell variable templated unquoted produces.
+    assert.equal(await runCli(['locate', '--run', 'r1', '--task', 'T1', '--root', root, '--worktree'], io), 2)
+    assert.match(lines.join('\n'), /--worktree <value>/)
+
+    lines.length = 0
+    assert.equal(await runCli(['brief', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--commits', '5', '--root', root], io), 2)
+    assert.match(lines.join('\n'), /brief does not take --commits/)
+  })
+})
+
+test('brief prints the checkout, the locate and complete commands, the plan path and the file set', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const code = await runCli(['brief', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    assert.equal(code, 0, lines.join('\n'))
+    const out = lines.join('\n')
+    // The branch name is enforce.mjs's, not a restatement: a brief naming a branch the gate
+    // does not look for sends the teammate to a ref nothing resolves.
+    assert.match(out, /git checkout -B teammates\/r1\/T1 main/)
+    assert.match(out, /cli\.mjs" locate --run r1 --task T1/)
+    assert.match(out, /cli\.mjs" complete \\/)
+    assert.match(out, /--run r1 --task T1 --plan plan\.md/)
+    assert.match(out, /ONLY these files: a\.mjs/)
+  })
+})
+
+test('brief exits 4 naming an unknown task and refuses a plan that is not committed', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    assert.equal(await runCli(['brief', '--run', 'r1', '--task', 'T9', '--plan', 'plan.md', '--base', 'main', '--root', root], io), 4)
+    assert.match(lines.join('\n'), /no task T9 in run r1/)
+
+    // An uncommitted plan must fail rather than render a constraint-free brief: the gate reads
+    // the plan out of git at the anchor, so a brief built from the working tree would carry
+    // rules the run cannot show a reader.
+    const loose = path.join(root, 'uncommitted.md')
+    await writeFile(loose, `${PLAN}\n## Global Constraints\n\n- never\n`, 'utf8')
+    lines.length = 0
+    const code = await runCli(['brief', '--run', 'r1', '--task', 'T1', '--plan', loose, '--base', 'main', '--root', root], io)
+    assert.notEqual(code, 0)
+    assert.doesNotMatch(lines.join('\n'), /GLOBAL CONSTRAINTS/)
+  })
+})
+
+test('brief carries the constraints committed at the anchor, not the ones in the working tree', async () => {
+  await withRepo(async ({ root, io, lines, git: g }) => {
+    // Committed on `main` and fast-forwarded in, so the plan is part of the ANCHOR commit —
+    // committing it on `run-branch` alone leaves the anchor (main's tip) predating it, which is
+    // the uncommitted-plan case the test below this one covers.
+    const committed = path.join(root, 'plan2.md')
+    g(['checkout', '--quiet', 'main'])
+    await writeFile(committed, `${PLAN}\n## Global Constraints\n\n- committed rule\n`, 'utf8')
+    g(['add', 'plan2.md'])
+    g(['commit', '--quiet', '-m', 'plan2'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--quiet', '--ff-only', 'main'])
+    await runCli(['init-run', committed, '--run', 'r1', '--root', root], io)
+    // The working-tree copy is widened after the commit. A brief built from disk would carry
+    // this line, which is the edit a teammate could make to widen its own rules.
+    await writeFile(committed, `${PLAN}\n## Global Constraints\n\n- forged rule\n`, 'utf8')
+    lines.length = 0
+    const code = await runCli(['brief', '--run', 'r1', '--task', 'T1', '--plan', 'plan2.md', '--base', 'main', '--root', root], io)
+    assert.equal(code, 0, lines.join('\n'))
+    assert.match(lines.join('\n'), /- committed rule/)
+    assert.doesNotMatch(lines.join('\n'), /forged rule/)
+  })
+})
+
+test('complete --enforcement-only refuses a phase whose manifest declares no enforcement check', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(
+      path.join(root, 'teammates.gate.json'),
+      JSON.stringify({ phases: { default: { checks: [{ name: 'noop', kind: 'command', run: 'node -e ""' }] } } }),
+      'utf8',
+    )
+    lines.length = 0
+    const code = await runCli(
+      ['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--enforcement-only', '--root', root],
+      io,
+    )
+    // 2, matching `finish` and `prune-run`: the flag is the wrong tool for this manifest, and
+    // that is a configuration answer, never a verdict about the task.
+    assert.equal(code, 2)
+    assert.match(lines.join('\n'), /--enforcement-only cannot answer for phase default/)
+    assert.doesNotMatch(lines.join('\n'), /gate does not pass for phase/)
+  })
+})
+
+test('complete --enforcement-only runs no command check and says so by name', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(
+      path.join(root, 'teammates.gate.json'),
+      JSON.stringify({
+        phases: {
+          default: {
+            checks: [
+              // Fails outright if it ever runs, so "it was skipped" cannot be confused with
+              // "it ran and passed".
+              { name: 'slow', kind: 'command', run: 'node -e "process.exit(1)"' },
+              { name: 'fileset', kind: 'fileset' },
+              { name: 'ownership', kind: 'ownership' },
+            ],
+          },
+        },
+      }),
+      'utf8',
+    )
+    lines.length = 0
+    const code = await runCli(
+      ['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--enforcement-only', '--root', root],
+      io,
+    )
+    const out = lines.join('\n')
+    // A check that did not run is reported by name every time, whatever the verdict: a cheap
+    // answer that hides which checks it skipped is worse than a slow one.
+    assert.match(out, /skipped: slow: skipped by --enforcement-only/)
+    // 3, because the enforcement checks themselves reject: no task branch exists.
+    assert.equal(code, 3)
+    assert.doesNotMatch(out, /gate does not pass for phase 1: [^\n]*slow/)
+  })
+})
+
+test('init-run records the plan path repo-relative with forward slashes', async () => {
+  await withRepo(async ({ root, planPath, io }) => {
+    assert.equal(path.isAbsolute(planPath), true, 'the fixture hands init-run an absolute path')
+    assert.equal(await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io), 0)
+    const plan = JSON.parse(await readFile(path.join(root, '.teammates', 'r1', 'plan.json'), 'utf8'))
+    // The gate reads this out of git at the anchor, and git paths are always `/`-separated.
+    // An absolute path from one machine means nothing on another.
+    assert.equal(plan.planPath, 'plan.md')
+  })
+})
+
+test('init-run records a nested plan path with forward slashes on every platform', async () => {
+  await withRepo(async ({ root, io, git: g }) => {
+    await mkdir(path.join(root, 'docs', 'plans'), { recursive: true })
+    const nested = path.join(root, 'docs', 'plans', 'p.md')
+    await writeFile(nested, PLAN, 'utf8')
+    g(['add', 'docs'])
+    g(['commit', '--quiet', '-m', 'nested plan'])
+    assert.equal(await runCli(['init-run', nested, '--run', 'r1', '--root', root], io), 0)
+    const plan = JSON.parse(await readFile(path.join(root, '.teammates', 'r1', 'plan.json'), 'utf8'))
+    assert.equal(plan.planPath, 'docs/plans/p.md')
+  })
+})
+
+// The ids `init-run` accepts and the ids the location record accepts have to be the same set.
+// Where they diverged, a run initialised with such an id parsed, phased and dispatched normally
+// while every teammate's `locate` failed at its first act — enforcement silently off for the
+// whole run, indistinguishable from a clean pass.
+//
+// This is a CROSS-FILE check on purpose. Restating the rule in cli.mjs is unavoidable (the
+// store keeps its predicate private), and a restatement pinned only by tests written against
+// the same restatement pins nothing. Every id below is put to BOTH implementations and their
+// answers compared, so a drift in either direction fails here.
+const ID_CORPUS = [
+  'r1', 'ok.id', 'a-b', '2026/substop', 'T1',
+  // Written as escapes, not as literals: two of these render as nothing, and a corpus whose
+  // members cannot be told apart by reading the source is not a corpus.
+  'r;1', 'r 1', 'r:1', 'r*1', '-r1', 'r\u{1f642}', 'r\u200c1', 'r\t1', 'a..b', 'r_1',
+]
+
+test('init-run accepts exactly the run ids the location record can hold', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    const { writeLocation } = await stateModule()
+    for (const id of ID_CORPUS) {
+      let storeAccepts = true
+      try {
+        await writeLocation(root, id, 'T1', { worktree: root, branch: 'b' })
+      } catch {
+        storeAccepts = false
+      }
+      lines.length = 0
+      const code = await runCli(['init-run', planPath, '--run', id, '--root', root], io)
+      assert.equal(
+        code === 0,
+        storeAccepts,
+        `init-run and writeLocation disagree about ${JSON.stringify(id)}: init-run exit ${code}, store accepts ${storeAccepts}\n${lines.join('\n')}`,
+      )
+    }
+  })
+})
+
+test('init-run names the offending id and character rather than failing later at locate', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    lines.length = 0
+    const code = await runCli(['init-run', planPath, '--run', 'r;1', '--root', root], io)
+    assert.equal(code, 2)
+    const out = lines.join('\n')
+    assert.match(out, /r;1/)
+    assert.doesNotMatch(out, /^phase 1:/m, 'a rejected run must not also report its phases')
+  })
+})
+
+// The id refusal is a print site like any other, and it prints a value straight off argv while
+// exiting 2 — a refusal is the line most worth forging. Not folded into SANITISED_SITES because
+// those rows all assert a verdict the CLI still reaches; this one is about a command that stops
+// before doing anything, which is a different shape.
+test('the init-run id refusal cannot be made to draw a forged terminal write', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    lines.length = 0
+    const code = await runCli(['init-run', planPath, '--run', CLI_C1_FORGERY, '--root', root], io)
+    assert.equal(code, 2)
+    assertNoForgedTerminalWrite(lines.join('\n'))
+    // And it really is the id rule refusing, not some earlier guard: the message names the id.
+    assert.match(lines.join('\n'), /--run/)
+  })
+})
+
+test('init-run refuses an invisible character in a run id and still shows it', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    lines.length = 0
+    const code = await runCli(['init-run', planPath, '--run', 'r\u200c1', '--root', root], io)
+    assert.equal(code, 2)
+    // Printed as an escape: a refusal that drops the character it complains about cannot be
+    // acted on, and this one renders as nothing at all.
+    assert.match(lines.join('\n'), /200c/i)
   })
 })

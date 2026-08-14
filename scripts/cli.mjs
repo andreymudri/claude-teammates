@@ -4,7 +4,8 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parsePlan } from './plan-parser.mjs'
 import { assignPhases } from './phases.mjs'
-import { readState, writeState, claimTask, releaseClaim, readFixRounds, recordFixRound, runDir } from './state.mjs'
+import { readState, writeState, claimTask, releaseClaim, readFixRounds, recordFixRound, runDir, writeLocation } from './state.mjs'
+import { composeBrief } from './brief.mjs'
 import { inferGateConfig, checksForPhase, fixRoundsForPhase, previewLinks } from './gate-config.mjs'
 import {
   loadConfig, readLayer, writeLayer, validateKey, validateLocal, isEnforcementKey, assertSafeKey,
@@ -65,7 +66,7 @@ function resolvedTempRoot() {
   }
 }
 
-const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclaim|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|config> [options]
+const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclaim|locate|brief|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|config> [options]
 
   init-run <planPath> --run <id> [--root <path>]
   doctor   --run <id> --plan <path> [--base <branch>] [--run-branch <name>] [--root <path>]
@@ -83,8 +84,10 @@ const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclai
   digest   --run <id> [--root <path>]
   claim    --run <id> --task <id> --by <teammate> [--root <path>]
   unclaim  --run <id> --task <id> [--root <path>]
+  locate   --run <id> --task <id> [--worktree <path>] [--branch <name>] [--root <path>]
+  brief    --run <id> --task <id> --plan <path> [--base <branch>] [--root <path>]
   workflow --run <id> --phase <n> [--root <path>] [--models <json>] [--plan <path>] [--base <branch>]
-  complete --run <id> --task <id> --plan <path> [--base <branch>] [--root <path>]
+  complete --run <id> --task <id> --plan <path> [--base <branch>] [--root <path>] [--enforcement-only]
   fix      --run <id> --phase <n> --verdict <path> [--root <path>]
   record-fix-round --run <id> --phase <n> --task <id> [--root <path>]
   config   list [--root <path>]
@@ -210,6 +213,10 @@ export const REQUIRED = {
   digest: ['run'],
   claim: ['run', 'task', 'by'],
   unclaim: ['run', 'task'],
+  // Both paths are derived from where the command runs, so neither is required: the brief
+  // carries one bare invocation rather than a shell dance a teammate can get wrong.
+  locate: ['run', 'task'],
+  brief: ['run', 'task', 'plan'],
   workflow: ['run', 'phase'],
   complete: ['run', 'task', 'plan'],
   fix: ['run', 'phase', 'verdict'],
@@ -238,8 +245,10 @@ export const KNOWN_FLAGS = {
   digest: ['run'],
   claim: ['run', 'task', 'by'],
   unclaim: ['run', 'task'],
+  locate: ['run', 'task', 'worktree', 'branch'],
+  brief: ['run', 'task', 'plan', 'base'],
+  complete: ['run', 'task', 'plan', 'base', 'phase', 'enforcement-only'],
   workflow: ['run', 'phase', 'models', 'plan', 'base'],
-  complete: ['run', 'task', 'plan', 'base', 'phase'],
   fix: ['run', 'phase', 'verdict'],
   'record-fix-round': ['run', 'phase', 'task'],
   'review-dispatch': ['run', 'phase', 'models'],
@@ -596,6 +605,156 @@ function assertContained(baseDir, segment, flagName) {
     throw new Error(`${flagName} ${segment} escapes the run directory`)
   }
 }
+
+// THE LOCATION RECORD'S ID RULE, restated here because `init-run` is what creates ids and the
+// store is what has to be able to hold them. `scripts/state.mjs` keeps its predicate private,
+// so this is a restatement, and a restatement pinned only by tests written against itself pins
+// nothing — the test `init-run accepts exactly the run ids the location record can hold` puts
+// every id in a corpus to BOTH implementations and compares their answers, which is what makes
+// this safe to have twice.
+//
+// THE STORE IS AUTHORITATIVE. Do not relax anything below to admit an id `writeLocation` would
+// refuse: `init-run` accepting one the record cannot hold is not a cosmetic mismatch. Such a run
+// parses, phases and dispatches normally, every teammate's `locate` fails at its first act after
+// the checkout, the stop-time hook then resolves nothing for any worktree, and enforcement is off
+// for the whole run — a state indistinguishable from a clean pass.
+//
+// The reasoning behind the shape of the rule (why an allowlist rather than a blocklist, why a
+// non-NFC id is refused rather than folded, why ZWJ/ZWNJ are excluded per UAX #31's restricted
+// profile, and the accepted cross-script-confusable limit) is recorded above `ID_COMPONENT` in
+// scripts/state.mjs. It is not repeated here; read it there.
+const ID_COMPONENT_RE = /^[\p{L}\p{M}\p{N}._-]+$/u
+const ID_INVISIBLE_RE = new RegExp('\\p{Default_Ignorable_Code_Point}', 'u')
+// The store's own caps, in bytes, matching how it measures them.
+const MAX_RUN_ID_BYTES = 255
+const MAX_TASK_ID_BYTES = 128
+
+// Returns the character to name in a refusal, or '' when the whole VALUE is what is wrong (a
+// byte cap, a non-NFC spelling, an empty id) and no single character can be pointed at. A
+// refusal that cannot say which character it tripped on cannot be acted on, which is why this
+// returns the character rather than a boolean.
+function offendingIdChar(component) {
+  for (const ch of component) {
+    if (ID_INVISIBLE_RE.test(ch)) return ch
+    if (!ID_COMPONENT_RE.test(ch)) return ch
+  }
+  return ''
+}
+
+// null when the id is usable, otherwise a sentence naming the id and what is wrong with it.
+// `nested` is true for a runId, which may descend (`init-run --run 2026/substop` really does
+// create `.teammates/2026/substop/`), and false for a taskId, which names exactly one component.
+function idRefusal(flagName, value, { nested, maxBytes }) {
+  // The repository's convention for quoting an attacker-controlled value into a sentence:
+  // `printable` neutralises the control bytes (including the C1 range, which JSON.stringify
+  // leaves raw), and `JSON.stringify` then supplies the quoting that makes an empty or
+  // whitespace-only id readable. A refusal is the line most worth forging — this one is printed
+  // while the command exits 2 — and an id is argv, so it is exactly such a value.
+  const show = (v) => JSON.stringify(printable(v))
+  if (typeof value !== 'string' || value === '') return `${flagName} must be a non-empty id`
+  const bytes = Buffer.byteLength(value, 'utf8')
+  if (bytes > maxBytes) return `${flagName} ${show(value.slice(0, 40))}... is ${bytes} bytes, over the ${maxBytes} a location record can hold`
+  if (value.normalize('NFC') !== value) {
+    return `${flagName} ${show(value)} is not in Unicode NFC — nothing in this repository normalises ids, so pick the composed spelling`
+  }
+  // Checked over the WHOLE value, not per component: `a..b` is revision-range syntax wherever
+  // it appears, exactly as the store checks it.
+  if (value.includes('..')) return `${flagName} ${show(value)} contains '..', which no id may`
+  const components = value.split('/')
+  if (!nested && components.length > 1) return `${flagName} ${show(value)} must name one component, not a path`
+  for (const component of components) {
+    if (component === '' || component === '.') return `${flagName} ${show(value)} has an empty or '.' component`
+    // The id is spent as argv, so no component may look like an option.
+    if (component.startsWith('-')) return `${flagName} ${show(value)} has a component starting with '-', which would read as an option`
+    const bad = offendingIdChar(component)
+    if (bad !== '') {
+      // Escaped, always: this rule refuses several characters that render as nothing, and a
+      // refusal that silently drops the character it is complaining about names nothing.
+      const escaped = `\\u{${bad.codePointAt(0).toString(16)}}`
+      return `${flagName} ${show(value)} contains ${escaped}, which a location record cannot hold`
+        + ' — ids allow letters, marks, digits, and only . - and /'
+    }
+  }
+  return null
+}
+
+// The MAIN worktree's root, which is where a run's `.teammates/` lives. `--git-common-dir` is
+// `<main>/.git` for a linked worktree and the repository's own `.git` otherwise, so its parent
+// is the main worktree in both cases. `locate` runs from inside a teammate's worktree, so its
+// `--root` is that worktree and cannot be the store's root.
+//
+// Here rather than in scripts/git.mjs for the same reason `repoPrefix` above is: it composes an
+// existing git primitive for one command, and is not a new primitive of the git layer.
+async function mainWorktreeRoot(root) {
+  const { code, stdout, stderr } = await defaultGitExec(['rev-parse', '--path-format=absolute', '--git-common-dir'], root)
+  if (code !== 0) {
+    throw new GitError(`git rev-parse --git-common-dir failed: ${stderr.trim() || `exit ${code}`}`)
+  }
+  // Exactly the framing newline; a directory name may legally end in other whitespace. Trailing
+  // separators are stripped so `dirname` steps out of `.git` rather than out of an empty tail.
+  const commonDir = stdout.replace(/\n$/, '').replace(/[\\/]+$/, '')
+  if (commonDir === '') throw new GitError('git rev-parse --git-common-dir printed nothing')
+  return path.dirname(commonDir)
+}
+
+// Read from git at the anchor, never from the working tree. `gate` and `complete` both read the
+// plan with `git show <anchor>:<planPath>` precisely so a teammate cannot widen its own file set
+// by editing the checked-out copy. Reading it from disk left the two disagreeing: the constraints
+// injected into every brief came from mutable, uncommitted markdown while the gate enforced the
+// committed plan, so a working-tree edit between phases would hand every teammate instruction
+// text with no record in git.
+//
+// The consequence is that an uncommitted plan fails rather than generating. That is the honest
+// outcome: a brief must not carry rules the run cannot show a reader.
+//
+// A --plan pointing at nothing is a mistake worth an exit code. Swallowing the read error and
+// generating a constraint-free brief would hand every teammate in the phase a dispatch missing
+// the very rules the caller asked to carry, with exit 0 and nothing on stdout.
+//
+// Shared by `workflow` and `brief` rather than copied into the second one: two composers reading
+// the plan from two places is precisely the divergence above, and a copy is how it comes back.
+const PLAN_READ_REJECTED = Symbol('the plan could not be read at the run anchor')
+
+async function planAtAnchor(root, planPath, flags, io) {
+  if (!planPath) return ''
+  const git = createGit({ cwd: root })
+  let anchorSha
+  try {
+    const runBranch = await git.currentBranch()
+    const baseBranch = await resolveBaseBranch(git, flags.base)
+    const runSha = await git.resolveRef(`refs/heads/${runBranch}`)
+    const baseSha = await git.resolveRef(`refs/heads/${baseBranch}`)
+    anchorSha = await git.mergeBase(baseSha, runSha)
+    // `git show <sha>:<path>` takes a repo-relative path and rejects an absolute one, but
+    // --plan is commonly given as absolute (every caller that builds it from a root does).
+    // Normalising here keeps both spellings working; the brief still points at the path the
+    // caller wrote, since that is what a reader of the dispatch will recognise.
+    const relPath = path.isAbsolute(planPath)
+      ? path.relative(root, planPath).split(path.sep).join('/')
+      : planPath
+    return await git.fileAtCommit(anchorSha, relPath)
+  } catch (err) {
+    const where = anchorSha ? ` at anchor ${anchorSha}` : ''
+    io.out(
+      `--plan ${planPath} could not be read from git${where}: ${err instanceof GitError ? err.message : err.message}`
+      + ' — the plan must be committed on the base branch, which is where the gate reads it from',
+    )
+    return PLAN_READ_REJECTED
+  }
+}
+
+// `complete`'s one code that means "the recomputed enforcement checks REJECTED this task", and
+// nothing else. It is read programmatically: the SubagentStop handler blocks a teammate's stop on
+// this code and allows on every other, so what it may cover is not a style question.
+//
+// It exists because neither code already in use can carry that decision. `complete` returns 2 for
+// a malformed manifest OR a rejected invocation, and 4 for four different cannot-verify
+// situations — no gate manifest, an underivable context, a task the plan does not contain, and
+// (before this) the rejection. Blocking on 2 would cost a teammate a turn for the orchestrator's
+// typo; allowing on 4 would wave through the very rejection the hook exists to catch. Anything
+// added to this code later must be a verdict about the caller's own work, or the handler starts
+// blocking on facts about the run's configuration.
+const COMPLETE_REJECTED = 3
 
 // Preferring `main` when both `main` and `master` exist is the same ref-creation primitive
 // as the tag-shadowing bypass the design closed elsewhere: a teammate creates a branch
@@ -1291,7 +1450,21 @@ export async function runCli(argv, io = { out: console.log }) {
   }
 
   if (command === 'init-run') {
+    // Before the plan is even read: an id the location record cannot hold must never reach
+    // dispatch, because the failure it causes surfaces one agent later, in every teammate at
+    // once, as enforcement that is simply off.
+    const runRefusal = idRefusal('--run', runId, { nested: true, maxBytes: MAX_RUN_ID_BYTES })
+    if (runRefusal) { io.out(runRefusal); return 2 }
+
     const tasks = assignPhases(parsePlan(await readFile(positional[0], 'utf8')))
+
+    // Task ids come from the plan rather than from argv, and they are recorded and branched on
+    // exactly as written. The same rule applies for the same reason: `locate --task <id>` is the
+    // command each teammate runs first.
+    for (const task of tasks) {
+      const taskRefusal = idRefusal('--task', task.id, { nested: false, maxBytes: MAX_TASK_ID_BYTES })
+      if (taskRefusal) { io.out(taskRefusal); return 2 }
+    }
 
     // Every task carries a tier from here on, so no consumer has to re-derive one.
     // `plan-parser.mjs` records a declared tier verbatim and validates nothing; the
@@ -1340,7 +1513,12 @@ export async function runCli(argv, io = { out: console.log }) {
       }
     }
 
-    await writeState(root, runId, 'plan', { runId, totalPhases, tasks })
+    // Recorded so a stop-time hook can run `complete` without being told the plan path.
+    // Repo-relative on purpose: the gate reads this path out of git at the run anchor, git
+    // paths are always `/`-separated, and an absolute path from one machine means nothing on
+    // another.
+    const planPath = path.relative(root, path.resolve(positional[0])).split(path.sep).join('/')
+    await writeState(root, runId, 'plan', { runId, totalPhases, tasks, planPath })
     // Recorded for reporting only. The gate derives the anchor, the phase, and every
     // verdict from git; nothing here decides anything.
     //
@@ -1395,6 +1573,76 @@ export async function runCli(argv, io = { out: console.log }) {
     return 0
   }
 
+  if (command === 'locate') {
+    // A bare `--worktree`/`--branch` parses as the boolean `true` — the shape an unset shell
+    // variable templated unquoted produces. Falling back to the derived value there would file
+    // a record for the wrong directory and exit 0, which is exactly the silent outcome this
+    // command exists to remove. Refused with the same advice a misspelling gets.
+    for (const name of ['worktree', 'branch']) {
+      if (typeof flags[name] !== 'undefined' && (typeof flags[name] !== 'string' || flags[name].trim() === '')) {
+        io.out(`unsupported flag spelling: \`--${name}\` — ${spellingAdvice(name)}`)
+        return 2
+      }
+    }
+    try {
+      // Run from inside a teammate's worktree, so `root` here is that worktree. The record
+      // belongs to the run, which lives in the MAIN worktree — and the hook resolves the main
+      // root the same way before looking a cwd up, so a record filed anywhere else is a record
+      // no reader ever finds. The WORKTREE recorded still comes from where this ran: the two
+      // paths are deliberately different, and collapsing them breaks the lookup in one
+      // direction or the other.
+      const mainRoot = await mainWorktreeRoot(root)
+      const git = createGit({ cwd: root })
+      const worktree = typeof flags.worktree === 'string' ? flags.worktree : root
+      // The harness checks out `worktree-agent-<hash>`, and a teammate that never created its
+      // task branch legitimately records that. The store constrains only the type and length —
+      // what a branch name MEANS is the hook's to decide, and "not the expected branch" is the
+      // case it exists to catch.
+      const branch = typeof flags.branch === 'string' ? flags.branch : await git.currentBranch()
+      await writeLocation(mainRoot, runId, flags.task, { worktree, branch })
+      io.out(`recorded ${printable(flags.task)} at ${printable(worktree)} on ${printable(branch)}`)
+      return 0
+    } catch (err) {
+      // Never swallowed. A `locate` that exits 0 having written nothing leaves the teammate
+      // believing it is identified and the hook finding no record for its cwd.
+      io.out(`cannot record this worktree: ${printable(err.message)}`)
+      return 2
+    }
+  }
+
+  if (command === 'brief') {
+    const resolved = await resolveConfig(root, io)
+    if (!resolved) return 2
+    // The same coercion `workflow` applies: a bare `--plan`/`--base` is the value MISSING, not
+    // a value, and coercing `true` through would render the literal `true` as a plan path.
+    const planPath = flags.plan === true ? '' : (flags.plan ?? '')
+    const baseBranch = flags.base === true ? '' : (flags.base ?? '')
+    if (planPath === '') {
+      io.out(`--plan must not be empty\n\n${USAGE}`)
+      return 2
+    }
+    const plan = await readState(root, runId, 'plan')
+    if (!plan) { io.out(`no run ${runId} — run init-run first`); return 4 }
+    const task = (plan.tasks ?? []).find((t) => t.id === flags.task)
+    if (!task) { io.out(`no task ${printable(flags.task)} in run ${runId}`); return 4 }
+
+    const planMarkdown = await planAtAnchor(root, planPath, flags, io)
+    if (planMarkdown === PLAN_READ_REJECTED) return 2
+
+    io.out(composeBrief({
+      // `taskBranchName` is the single definition of `teammates/${runId}/${taskId}`, and the
+      // gate resolves the branch through it. A brief restating the shape could name a ref
+      // nothing looks for.
+      task: { ...task, branch: taskBranchName(runId, task.id) },
+      runId,
+      planPath,
+      baseBranch,
+      constraints: parseConstraints(planMarkdown),
+      caveman: resolved.caveman,
+    }))
+    return 0
+  }
+
   if (command === 'workflow') {
     const plan = await readState(root, runId, 'plan')
     if (!plan) { io.out(`no plan for run ${runId}`); return 1 }
@@ -1415,46 +1663,8 @@ export async function runCli(argv, io = { out: console.log }) {
     const planPath = flags.plan === true ? '' : (flags.plan ?? '')
     const baseBranch = flags.base === true ? '' : (flags.base ?? '')
 
-    // Read from git at the anchor, never from the working tree. `gate` and `complete` both
-    // read the plan with `git show <anchor>:<planPath>` precisely so a teammate cannot widen
-    // its own file set by editing the checked-out copy. Reading it here from disk left the two
-    // disagreeing: the constraints injected into every brief came from mutable, uncommitted
-    // markdown while the gate enforced the committed plan, so a working-tree edit between
-    // phases would hand every teammate instruction text with no record in git.
-    //
-    // The consequence is that an uncommitted plan now fails rather than generating. That is
-    // the honest outcome: a brief must not carry rules the run cannot show a reader.
-    //
-    // A --plan pointing at nothing is a mistake worth an exit code. Swallowing the read error
-    // and generating a constraint-free brief would hand every teammate in the phase a dispatch
-    // missing the very rules the caller asked to carry, with exit 0 and nothing on stdout.
-    let planMarkdown = ''
-    if (planPath) {
-      const git = createGit({ cwd: root })
-      let anchorSha
-      try {
-        const runBranch = await git.currentBranch()
-        const baseBranch = await resolveBaseBranch(git, flags.base)
-        const runSha = await git.resolveRef(`refs/heads/${runBranch}`)
-        const baseSha = await git.resolveRef(`refs/heads/${baseBranch}`)
-        anchorSha = await git.mergeBase(baseSha, runSha)
-        // `git show <sha>:<path>` takes a repo-relative path and rejects an absolute one, but
-        // --plan is commonly given as absolute (every caller that builds it from a root does).
-        // Normalising here keeps both spellings working; the brief still points at the path the
-        // caller wrote, since that is what a reader of the dispatch will recognise.
-        const relPath = path.isAbsolute(planPath)
-          ? path.relative(root, planPath).split(path.sep).join('/')
-          : planPath
-        planMarkdown = await git.fileAtCommit(anchorSha, relPath)
-      } catch (err) {
-        const where = anchorSha ? ` at anchor ${anchorSha}` : ''
-        io.out(
-          `--plan ${planPath} could not be read from git${where}: ${err instanceof GitError ? err.message : err.message}`
-          + ' — the plan must be committed on the base branch, which is where the gate reads it from',
-        )
-        return 2
-      }
-    }
+    const planMarkdown = await planAtAnchor(root, planPath, flags, io)
+    if (planMarkdown === PLAN_READ_REJECTED) return 2
 
     // `init-run` already applied any configured implementer tier, so this normally changes
     // nothing. It stays because the config can change between the two commands, and a per-task
@@ -2760,6 +2970,16 @@ export async function runCli(argv, io = { out: console.log }) {
     if (config === GATE_CONFIG_REJECTED) return 2
     if (!config) { io.out('no gate manifest — cannot verify completion'); return 4 }
 
+    // Checked before a single check runs and before the context is derived, exactly as `finish`
+    // and `prune-run` check it: the caller learns the flag is the wrong tool for this manifest
+    // rather than reading a verdict that was never grounded in anything. 2, not the rejection
+    // code — this is an answer about the manifest, never about the task.
+    const enforcementOnly = flags['enforcement-only'] === true
+    if (enforcementOnly) {
+      const refusal = enforcementOnlyRefusal(config, [flags.phase ?? 'default'])
+      if (refusal) { io.out(refusal); return 2 }
+    }
+
     let ctx
     try {
       ctx = { cwd: root, previewLink: previewLinks(config), ...(await derive(root, runId, flags)) }
@@ -2793,8 +3013,18 @@ export async function runCli(argv, io = { out: console.log }) {
 
     // The gate is recomputed. A PASS recorded in status.json is never consulted, so a
     // stale or forged one buys nothing.
-    const results = await runChecks(allChecks, taskCtx)
+    const results = await runPhaseChecks(allChecks, taskCtx, enforcementOnly)
     const verdict = aggregateVerdict(results)
+
+    // A check that did not run is reported by name and by reason, every time and whatever the
+    // verdict — `--enforcement-only` here, and the merge-conflict skip `runChecks` produces on
+    // its own. This is the only thing that says a cheap answer was cheap, and a verdict that
+    // hides which checks it dropped is worse than a slow one. Both the name and the note come
+    // out of an agent-written manifest, so both go through the escaping the failure lines use.
+    for (const r of results) {
+      if (r.status === 'skip' && r.output) io.out(`skipped: ${printable(r.name)}: ${printableBlock(r.output)}`)
+    }
+
     if (verdict.verdict !== 'PASS') {
       const names = [...verdict.failed, ...verdict.pending]
       // The names come from the gate manifest, which is a file in the worktree this command is
@@ -2808,7 +3038,7 @@ export async function runCli(argv, io = { out: console.log }) {
       for (const r of results) {
         if (names.includes(r.name) && r.output) io.out(`${printable(r.name)}: ${printableBlock(r.output)}`)
       }
-      return 4
+      return COMPLETE_REJECTED
     }
 
     const status = await readState(root, runId, 'status')
