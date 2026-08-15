@@ -9498,6 +9498,63 @@ test('a lifecycle command never overwrites a run branch that is already recorded
   })
 })
 
+// THE STRUCTURAL PIN. Fill-if-absent was asserted as a universal in four consecutive rounds and
+// was false in three of them, each time through an inline writer nobody had listed —
+// `rebuild-state`, then `init-run`, which had been one the whole time. Prose enumeration is how
+// that kept happening, so the enumeration is now the code: exactly one function writes plan.json,
+// and this counts the call sites. A second one fails here rather than in a review three rounds later.
+test('exactly one function in cli.mjs writes plan.json', () => {
+  const sites = [...CLI_SOURCE.matchAll(/await writeState\([^,]+,\s*[^,]+,\s*'plan'/g)]
+  assert.equal(
+    sites.length,
+    1,
+    `plan.json is written from ${sites.length} places; route every write through writePlan so`
+    + ' fill-if-absent cannot be forgotten',
+  )
+  // ...and that one site is inside `writePlan`, not somewhere that merely looks like it.
+  const writePlanStart = CLI_SOURCE.indexOf('async function writePlan(')
+  assert.notEqual(writePlanStart, -1, 'writePlan is gone — this pin is reading the wrong thing')
+  const nextFunction = CLI_SOURCE.indexOf('\nasync function ', writePlanStart + 1)
+  assert.ok(
+    sites[0].index > writePlanStart && sites[0].index < nextFunction,
+    'the single plan write is not inside writePlan',
+  )
+})
+
+// A re-init is a NORMAL mid-run event — the plan is amended and `init-run` re-run, which is why
+// this command preserves `gates` and `fixRounds`. It used to re-record `runBranch` from the
+// checkout, so a re-init from an unrelated branch re-pointed the run at it, permanently.
+test('re-running init-run from another branch keeps the recorded run branch', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const planFile = path.join(root, '.teammates', 'r1', 'plan.json')
+    assert.equal(JSON.parse(await readFile(planFile, 'utf8')).runBranch, 'run-branch')
+    await writeEnforcementManifest(root)
+
+    g(['checkout', '--quiet', '-b', 'feature/foo'])
+    lines.length = 0
+    assert.equal(await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io), 0)
+    assert.equal(
+      JSON.parse(await readFile(planFile, 'utf8')).runBranch,
+      'run-branch',
+      'a re-init from an unrelated branch re-pointed the run at that branch',
+    )
+    // A recorded branch that is not the checkout announces itself, because nothing repairs it
+    // automatically and it would otherwise be found later by its effects.
+    assert.match(lines.join('\n'), /keeps its recorded run branch run-branch/)
+    assert.match(lines.join('\n'), /remove `runBranch` from/)
+
+    // The consequence that would have followed: on the real run branch the guard still matches.
+    g(['checkout', '--quiet', 'run-branch'])
+    lines.length = 0
+    assert.equal(
+      await runCli(['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--enforcement-only', '--root', root], io),
+      3,
+      lines.join('\n'),
+    )
+  })
+})
+
 // The base-branch early return in `rememberRunBranch`, which was unpinned. It is reachable, and
 // only through `workflow`: the other callers get their branches from `derive`, which refuses
 // outright when the checkout IS the base, but `workflow` reads `currentBranch` and
@@ -9782,6 +9839,48 @@ test('rebuild-state keeps the recorded run branch rather than adopting the check
   })
 })
 
+// The read that carries a value forward is wrapped, and the wrapper is load-bearing: recovering
+// from a corrupt plan.json is squarely this command's job, so an unreadable one must carry nothing
+// forward rather than throwing a SyntaxError out of the CLI. Nothing drove that path.
+test('rebuild-state recovers from a corrupt plan.json instead of throwing', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, '.teammates', 'r1', 'plan.json'), '{ not json', 'utf8')
+
+    lines.length = 0
+    const code = await runCli(
+      ['rebuild-state', '--run', 'r1', '--plan', 'plan.md', '--force', '--root', root],
+      io,
+    )
+    assert.equal(code, 0, lines.join('\n'))
+    const plan = JSON.parse(await readFile(path.join(root, '.teammates', 'r1', 'plan.json'), 'utf8'))
+    // Nothing to carry, so the branch is derived — which is the recovery case this command exists
+    // for, reached here through a corrupt file rather than a missing one.
+    assert.equal(plan.runBranch, 'run-branch')
+    assert.equal(plan.planPath, 'plan.md')
+    // ...and it must NOT claim to have kept anything, since there was nothing to keep. Only the
+    // positive arm of this line was pinned, so making the suffix unconditional survived.
+    assert.doesNotMatch(lines.join('\n'), /kept from the previous plan\.json/)
+  })
+})
+
+// The same negative arm on the ordinary recovery path, where the run directory is simply gone.
+test('rebuild-state does not claim to have kept a run branch it derived', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await rm(path.join(root, '.teammates', 'r1'), { recursive: true, force: true })
+
+    lines.length = 0
+    assert.equal(await runCli(['rebuild-state', '--run', 'r1', '--plan', 'plan.md', '--root', root], io), 0, lines.join('\n'))
+    assert.equal(
+      JSON.parse(await readFile(path.join(root, '.teammates', 'r1', 'plan.json'), 'utf8')).runBranch,
+      'run-branch',
+    )
+    assert.match(lines.join('\n'), /run branch run-branch/)
+    assert.doesNotMatch(lines.join('\n'), /kept from the previous plan\.json/)
+  })
+})
+
 // End to end, on the exact reproduction: a hook payload that blocks, a rebuild, and the same
 // payload afterwards. Before the fix the second answer was a permanent 4.
 test('a rebuild does not disarm the enforcement guard', async () => {
@@ -9877,11 +9976,19 @@ test('init-run records a nested plan path with forward slashes on every platform
 //   LOWERED — caught by the AT-CAP member (128 and 255). `idRefusal` follows down and refuses;
 //             the store still accepts; they disagree. Any lowering at all crosses these.
 //
-// What it does NOT catch, stated rather than left to be discovered a fourth time:
-//   - a change made CONSISTENTLY in both `cli.mjs` and `state.mjs`. The corpus pins agreement
-//     between two implementations, not the correctness of the value they agree on. Raising both
-//     to 4096 stays green here, and nothing in this file could see it.
-//   - anything about ids between the caps: the members are boundary probes, not a range sweep.
+// What this file does NOT do, and what covers it instead. An earlier version of this comment said
+// a change made CONSISTENTLY in both `cli.mjs` and `state.mjs` would stay green. That was wrong,
+// and wrong in a way worth recording, because it understated the coverage rather than overstating
+// it: the STORE's caps are pinned independently, with absolute literals, in both directions, by
+// `tests/state.test.mjs` — `:343` rejects a 256-byte run id, `:355` rejects a 129-byte task id, and
+// `:405` accepts a 255/128 pair. So the corpus here pins cli-vs-store AGREEMENT, that file pins the
+// store's own values, and moving both together fails there.
+//
+// The genuine limits, stated small:
+//   - the members are boundary probes, not a range sweep: nothing here says anything about ids
+//     strictly between the short members and the caps.
+//   - `tests/state.test.mjs` is not in this task's file set, so this note is a claim about a
+//     neighbouring file — re-read it before relying on it rather than trusting this sentence.
 //
 // The cap members are kept apart from ID_CORPUS because ID_CORPUS is also driven through
 // `init-run`, where a run id becomes a directory name — a 255-byte one makes a ~327-character

@@ -910,55 +910,77 @@ const TASK_SCOPED_KINDS = new Set(['fileset', 'merge'])
 //     blocked over a sibling's landed file — which violates the invariant this guard is built
 //     around, that it may only ever turn a block into a non-block.
 //
-// Filling only an absent value keeps every repair — `workflow`, `gate`, `finish`, `prune-run` and
-// `rebuild-state` all still populate a field `init-run` could not — while making both failures
-// unreachable, because no command changes a value that is already there.
+// Filling only an absent value keeps every repair — `workflow`, `gate`, `finish` and `prune-run`
+// all still populate a field `init-run` could not — while making both failures unreachable.
 //
-// That claim covers `rebuild-state` too, and it did not always: that command writes the field
-// inline rather than through this function, and it used to write the DERIVED branch
-// unconditionally — so a rebuild from an unrelated branch reproduced exactly the failure above,
-// permanently, from the command an operator reaches for when things are already broken. It now
-// carries an existing value forward and derives only when there is none. There is no exception to
-// the rule anywhere; if a second inline writer is ever added, it needs the same treatment.
+// THE RULE IS NOT ENFORCED BY THIS COMMENT. It is enforced by `writePlan`, which is the only
+// function in this file that writes plan.json, and by a source test that counts those call sites.
+// This paragraph used to end "there is no exception anywhere", and that sentence was false in
+// three consecutive rounds — `rebuild-state`, then `init-run`, each an inline writer nobody had
+// listed. Enumerating writers in prose is how that kept happening; the enumeration is now the code.
 //
-// The commands that call this are named deliberately and are NOT "everything that derives":
-// `workflow` (before dispatch), `gate`, `finish` and `prune-run` (after a successful derive), and
-// `rebuild-state` (which writes the field inline, as part of rebuilding the plan). They are the
-// orchestrator's lifecycle commands, run from the main worktree on the run branch. `doctor`,
-// `liveness` and `plan-drift` derive too and deliberately do not write: they are diagnostics, and
-// a diagnostic that mutates run state is a surprise. `complete` derives and must never write —
-// it is the CONSUMER, and a consumer that records what it is about to compare against approves
-// itself.
+// Which commands call THIS function is still a real decision and is deliberately not "everything
+// that derives": `workflow` (before dispatch), `gate`, `finish` and `prune-run` (after a successful
+// derive). `init-run` and `rebuild-state` write plans of their own and get the same rule by going
+// through `writePlan`. `doctor`, `liveness` and `plan-drift` derive too and deliberately do not
+// write: they are diagnostics, and a diagnostic that mutates run state is a surprise. `complete`
+// derives and must never write — it is the CONSUMER, and a consumer that records what it is about
+// to compare against approves itself.
 //
-// Never throws. `plan.json` is teammate-writable, and a corrupt one must not crash the command
-// that happened to refresh a diagnostic field; each caller has its own fail-closed handling for
-// state it actually depends on.
-async function rememberRunBranch(root, runId, runBranch, baseBranch) {
-  if (typeof runBranch !== 'string' || runBranch === '') return false
-  if (typeof baseBranch !== 'string' || baseBranch === '') return false
-  if (runBranch === baseBranch) return false
+// Never throws. `plan.json` is teammate-writable, and a corrupt one must not crash the command that
+// happened to refresh a diagnostic field; each caller has its own fail-closed handling for state it
+// actually depends on.
+// THE ONLY WRITER OF plan.json IN THIS FILE. Every command that writes a plan goes through here,
+// and fill-if-absent for `runBranch` is enforced HERE rather than at each call site.
+//
+// That structure is the point. This rule has now been stated as a universal in four consecutive
+// rounds and been false in three of them, each time through a writer the comment did not know
+// about — first `rebuild-state`, then `init-run`, which had been an inline writer the whole time.
+// A rule that depends on every future author noticing a comment is not a rule, so there is exactly
+// one `writeState(root, runId, 'plan', …)` call in this file and a source-level test that counts
+// them. Add a second and that test fails; route it through here and the rule is inherited.
+//
+// `planFields === null` means "keep whatever is on disk and only reconsider the run branch", which
+// is what `rememberRunBranch` wants; anything else replaces the plan's own fields.
+//
+// REPAIRING A POISONED RECORD: nothing here does, deliberately. Every automatic writer fills only
+// an absent value precisely so that no automatic writer can be talked into replacing a good one —
+// which means a wrong value, once written, is the operator's to remove: delete
+// `.teammates/<runId>/plan.json` (or just its `runBranch`) and re-run `init-run`, or delete the run
+// directory and `rebuild-state`. `init-run` prints the recorded branch whenever it differs from the
+// checkout, so a poisoned record announces itself rather than being found later by its effects.
+async function writePlan(root, runId, planFields, { candidateRunBranch = null, baseBranch = null } = {}) {
+  let previous = null
   try {
-    const plan = await readState(root, runId, 'plan')
-    if (!plan) return false
-    // ABSENT MEANS ABSENT. Any value already on the field — of any type, including one that looks
-    // like the base branch — is left exactly as it is.
-    //
-    // An earlier version made one exception, for a value equal to the base branch, on the
-    // reasoning that no run branch can equal the base so overwriting could only improve it. That
-    // reasoning is wrong, because it decides "usable" against the base of the invocation doing the
-    // overwriting rather than the base the value was recorded under. `--base` naming the run
-    // branch — the stacked-run configuration this repository itself uses — makes a CORRECT,
-    // in-use run branch classify as base-valued, and the exception then replaced it with whatever
-    // branch the operator happened to be standing on. That value is non-base, so the fill-if-absent
-    // rule immediately protects it, and no later command can repair it: the damage is permanent,
-    // and it drives both failures at once — the true run branch no longer matches (every stop
-    // allowed) while the wrong checkout does (a compliant teammate blocked).
-    //
-    // Nothing is lost by dropping it. A base-valued record is read as absent by the consumer,
-    // which fails open — pinned — and `rebuild-state` still rewrites the field outright.
-    if (plan.runBranch !== undefined) return false
-    await writeState(root, runId, 'plan', { ...plan, runBranch })
-    return true
+    previous = await readState(root, runId, 'plan')
+  } catch {
+    // An unreadable plan.json carries nothing forward. Recovering from one is `rebuild-state`'s
+    // job, and for every other caller a corrupt file is handled by its own fail-closed path.
+    previous = null
+  }
+  const carried = typeof previous?.runBranch === 'string' ? previous.runBranch : null
+  // The base branch can never be a run branch, and `workflow` is the one caller whose branches do
+  // not come from `derive` — which refuses that case itself — so the test lives here.
+  const usable = typeof candidateRunBranch === 'string'
+    && candidateRunBranch !== ''
+    && candidateRunBranch !== baseBranch
+    ? candidateRunBranch
+    : null
+  const runBranch = carried ?? usable
+
+  const base = planFields ?? previous
+  if (!base) return { runBranch: null, carried: null, wrote: false }
+  // Whatever the caller supplied for this field is discarded: it is decided here or not at all.
+  const { runBranch: _decidedHere, ...rest } = base
+  if (planFields === null && runBranch === carried) return { runBranch, carried, wrote: false }
+  await writeState(root, runId, 'plan', { ...rest, ...(runBranch ? { runBranch } : {}) })
+  return { runBranch, carried, wrote: true }
+}
+
+async function rememberRunBranch(root, runId, runBranch, baseBranch) {
+  try {
+    const { wrote } = await writePlan(root, runId, null, { candidateRunBranch: runBranch, baseBranch })
+    return wrote
   } catch {
     return false
   }
@@ -1813,7 +1835,17 @@ export async function runCli(argv, io = { out: console.log }) {
     } catch {
       runBranch = null
     }
-    if (runBranch === null) {
+    // Through `writePlan` like every other plan write, which is what makes fill-if-absent apply
+    // here too. It matters most on a RE-INIT: amending a plan mid-run is normal (the comment below
+    // says so, and preserves `gates` and `fixRounds` for exactly that reason), and this command
+    // used to re-record `runBranch` from whatever was checked out — so a re-init from an unrelated
+    // branch re-pointed the run at it, permanently.
+    const recorded = await writePlan(
+      root, runId,
+      { runId, totalPhases, tasks, planPath },
+      { candidateRunBranch: runBranch, baseBranch: baseHere },
+    )
+    if (recorded.runBranch === null) {
       io.out(
         `note: run ${printable(runId)} recorded no run branch`
         + (baseHere ? `, because ${printable(baseHere)} is checked out and that is the base branch` : '')
@@ -1821,10 +1853,18 @@ export async function runCli(argv, io = { out: console.log }) {
         + ' and until some command derives a context from the run branch, stop-time enforcement'
         + ' cannot confirm the checkout and will allow every stop rather than risk blocking on the wrong ref.',
       )
+    } else if (recorded.carried !== null && recorded.carried !== runBranch) {
+      // The one thing that makes a wrong recorded branch findable. Nothing repairs such a record
+      // automatically — that is the price of never letting an automatic writer replace a good one —
+      // so it has to announce itself instead of being discovered later by its effects.
+      io.out(
+        `note: run ${printable(runId)} keeps its recorded run branch ${printable(recorded.carried)}`
+        + `, which is not the branch checked out here (${printable(runBranch ?? 'none')}).`
+        + ' If that recorded branch is wrong, remove `runBranch` from .teammates/'
+        + `${printable(runId)}/plan.json and run this command again — no command overwrites it,`
+        + ' so that a wrong checkout can never re-point a run.',
+      )
     }
-    await writeState(root, runId, 'plan', {
-      runId, totalPhases, tasks, planPath, ...(runBranch ? { runBranch } : {}),
-    })
     // Recorded for reporting only. The gate derives the anchor, the phase, and every
     // verdict from git; nothing here decides anything.
     //
@@ -2065,7 +2105,9 @@ export async function runCli(argv, io = { out: console.log }) {
         retier = true
       }
     }
-    if (retier) await writeState(root, runId, 'plan', plan)
+    // Through `writePlan` as well: `plan` here was read from disk and so happens to carry the
+    // recorded branch, but "happens to" is exactly the property that stopped holding twice.
+    if (retier) await writePlan(root, runId, plan)
 
     // AFTER the retier write, and that ordering is the whole point. `plan` was read into memory
     // above; refreshing before this line wrote the run branch to disk and then this line wrote the
@@ -2429,22 +2471,15 @@ export async function runCli(argv, io = { out: console.log }) {
     // exception anywhere, and recovery still works: the case this command exists for is a run
     // whose directory is GONE, where the field is absent and gets derived.
     //
-    // Read through its own try: recovering from a corrupt plan.json is squarely this command's
-    // job, and an unreadable one simply carries nothing forward.
-    let carriedRunBranch = null
-    try {
-      const previousPlan = await readState(root, runId, 'plan')
-      if (typeof previousPlan?.runBranch === 'string') carriedRunBranch = previousPlan.runBranch
-    } catch { carriedRunBranch = null }
-    const derivedRunBranch = ctx.runBranch && ctx.runBranch !== ctx.baseBranch ? ctx.runBranch : null
-    const recordedRunBranch = carriedRunBranch ?? derivedRunBranch
-
+    // Carrying the existing value forward and deriving only when there is none is `writePlan`'s
+    // rule, shared with every other plan write rather than restated here — this command had its
+    // own copy of it, which is how it became the writer that could still overwrite a good value.
     const rebuiltPlanPath = path.relative(root, path.resolve(root, flags.plan)).split(path.sep).join('/')
-    await writeState(root, runId, 'plan', {
-      ...plan,
-      planPath: rebuiltPlanPath,
-      ...(recordedRunBranch ? { runBranch: recordedRunBranch } : {}),
-    })
+    const rebuiltRecord = await writePlan(
+      root, runId,
+      { ...plan, planPath: rebuiltPlanPath },
+      { candidateRunBranch: ctx.runBranch, baseBranch: ctx.baseBranch },
+    )
     await writeState(root, runId, 'status', status)
 
     // Task ids come from the plan file a planning agent wrote; `printable` keeps a crafted id
@@ -2457,8 +2492,8 @@ export async function runCli(argv, io = { out: console.log }) {
     // would be the same class of lie this whole guard exists to remove.
     io.out(
       `rebuilt plan.json with planPath ${printable(rebuiltPlanPath)} and run branch `
-      + `${recordedRunBranch === null ? '(none)' : printable(recordedRunBranch)}`
-      + `${carriedRunBranch === null ? '' : ' (kept from the previous plan.json)'}`,
+      + `${rebuiltRecord.runBranch === null ? '(none)' : printable(rebuiltRecord.runBranch)}`
+      + `${rebuiltRecord.carried === null ? '' : ' (kept from the previous plan.json)'}`,
     )
     io.out('rebuilt from git: no gate history, so every phase must be gated again before anything is reported done')
     return 0

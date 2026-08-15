@@ -1074,6 +1074,99 @@ test('runChecks yields pending for prototype-shadowing kinds', async () => {
   assert.deepEqual(results.map((r) => r.status), ['pending', 'pending', 'pending', 'pending'])
 })
 
+// --- a check kind must be a STRING before a runner is selected -------------------------------
+//
+// The test above pins prototype-shadowing kinds, and every one of them is a STRING. The spelling
+// nothing covered is the one JSON can express: an ARRAY. JavaScript coerces on property lookup and
+// does not coerce in a Set, so `["command"]` lands on the wrong side of every guard at once — it
+// survives cli.mjs's `--enforcement-only` filter (`!== 'command'`), satisfies
+// `Object.hasOwn(RUNNERS, kind)`, resolves `RUNNERS[kind]` to a real runner, and is absent from
+// `ALWAYS_ENFORCED_KINDS`, so `optional: true` is honoured.
+//
+// `teammates.gate.json` lives in the main worktree and is writable by any teammate, so this needs
+// no other foothold.
+
+// Every kind the manifest accepts, in the array spelling. `command` is the execution path;
+// `fileset`/`ownership` are the real enforcement runners; `agent`/`mcp` have no runner and would
+// otherwise land as pendings; `merge` is gate-computed and a manifest must not be able to supply
+// it at all.
+const MANIFEST_KINDS = ['command', 'fileset', 'ownership', 'agent', 'mcp', 'merge']
+
+test('an array-spelled kind never reaches a runner, for any kind the manifest accepts', async () => {
+  for (const kind of MANIFEST_KINDS) {
+    // `run` is present so that if the command runner were ever reached, it would have something
+    // to execute — the test must not pass merely because the payload was empty.
+    const results = await runChecks([{ name: `k-${kind}`, kind: [kind], run: 'node -e ""' }], {})
+    assert.equal(results.length, 1, `unexpected extra results for ${kind}`)
+    const [result] = results
+    assert.equal(result.status, 'fail', `an array-spelled ${kind} did not fail`)
+    assert.equal(result.optional, false, `an array-spelled ${kind} was optional`)
+    assert.match(result.output, /kind must be a string/)
+    // Named in the diagnosis, so an operator can find the entry in the manifest.
+    assert.match(result.output, /teammates\.gate\.json/)
+  }
+})
+
+// The false-PASS half, which the execution fix alone would not have closed: the real `fileset`
+// runner executes and then declines to block, because `ALWAYS_ENFORCED_KINDS.has` does not coerce
+// while the runner lookup does. Measured against the merged tree as
+// `{"verdict":"PASS","failed":[],"optionalFailed":["fileset"]}` — a forged manifest reaching a
+// false gate PASS, which is the bound this design has claimed since phase 1.
+test('an array-spelled enforcement kind cannot buy itself out with optional', async () => {
+  const results = await runChecks([{ name: 'fileset', kind: ['fileset'], optional: true }], {})
+  const verdict = aggregateVerdict(results)
+  assert.equal(verdict.verdict, 'FAIL')
+  assert.deepEqual(verdict.failed, ['fileset'])
+  assert.deepEqual(verdict.optionalFailed, [])
+})
+
+// Every non-string shape, not only the array. The rule is a type test, so it is asserted as one:
+// nothing that is not a string may reach a runner by any route.
+test('no non-string kind reaches a runner by any route', async () => {
+  const shapes = [
+    ['array', ['command']],
+    ['nested array', [['command']]],
+    ['object with toString', { toString: () => 'command' }],
+    ['number', 1],
+    ['boolean', true],
+    ['null', null],
+    ['undefined', undefined],
+    ['String object', new String('command')], // eslint-disable-line no-new-wrappers
+  ]
+  for (const [label, kind] of shapes) {
+    const results = await runChecks([{ name: label, kind, run: 'node -e ""' }], {})
+    assert.equal(results[0].status, 'fail', `${label} did not fail`)
+    assert.equal(results[0].optional, false, `${label} was optional`)
+    assert.match(results[0].output, /kind must be a string/, label)
+  }
+})
+
+// The control, so none of the above passes by breaking ordinary manifests: string kinds behave
+// exactly as before, including the pendings for kinds with no runner and the honoured `optional`
+// on an advisory command check.
+test('string kinds are unaffected by the type test', async () => {
+  const results = await runChecks([
+    { name: 'ok', kind: 'command', run: 'node -e ""' },
+    { name: 'advisory', kind: 'command', run: 'node -e "process.exit(1)"', optional: true },
+    { name: 'review', kind: 'agent' },
+  ], { cwd: process.cwd() })
+  const byName = Object.fromEntries(results.map((r) => [r.name, r]))
+  assert.equal(byName.ok.status, 'pass')
+  assert.equal(byName.advisory.status, 'fail')
+  assert.equal(byName.advisory.optional, true, 'an advisory command check lost its optional flag')
+  assert.equal(byName.review.status, 'pending')
+  assert.equal(aggregateVerdict(results).optionalFailed.includes('advisory'), true)
+})
+
+// `describePendingCheck` is exported and reachable independently of `runChecks`, and it computes
+// `optional` from the same non-coercing Set. A non-string kind must be non-optional there too.
+test('describePendingCheck forces a non-string kind non-optional', () => {
+  assert.equal(describePendingCheck({ name: 'a', kind: ['fileset'], optional: true }).optional, false)
+  assert.equal(describePendingCheck({ name: 'b', kind: ['command'], optional: true }).optional, false)
+  // ...while a genuine advisory command check keeps its flag.
+  assert.equal(describePendingCheck({ name: 'c', kind: 'command', optional: true }).optional, true)
+})
+
 test('runChecks records a fail when a runner throws', async () => {
   const git = fakeGit({ branchExists: async () => { throw new Error('unexpected boom') } })
   const ctx = { git, runId: RUN_ID, anchorSha: 'anchorSha1', tasks: [T1_TASK], currentPhase: 1, phaseError: null }

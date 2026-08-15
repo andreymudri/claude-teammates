@@ -41,6 +41,54 @@ export async function runCommandCheck(check, { cwd = process.cwd(), exec = defau
 // appearing to record it.
 const ALWAYS_ENFORCED_KINDS = new Set(['fileset', 'ownership', 'merge'])
 
+// A CHECK KIND MUST BE A STRING BEFORE ANYTHING IS DECIDED FROM IT.
+//
+// JavaScript coerces on property lookup and does not coerce in a Set, and a manifest is JSON, so
+// `"kind": ["command"]` is expressible and lands on the wrong side of every guard at once:
+//
+//     ['command'] !== 'command'              true     survives cli.mjs's --enforcement-only filter
+//     Object.hasOwn(RUNNERS, ['command'])    true     the guard that looks like a type check
+//     RUNNERS[['command']]                   runner   executes
+//     ALWAYS_ENFORCED_KINDS.has(['fileset']) false    so `optional: true` is honoured
+//
+// The consequences were both reached end to end against the merged tree. `["command"]` runs an
+// arbitrary shell command through the stop hook — which fires for every subagent on the machine —
+// with cwd at the main worktree. `["fileset"] + optional: true` runs the REAL fileset check and
+// then declines to block it, producing `{"verdict":"PASS","failed":[],"optionalFailed":["fileset"]}`
+// — a forged manifest reaching a false gate PASS, which is a bound this design has claimed since
+// phase 1. `teammates.gate.json` is writable by any teammate, so neither needs a further foothold.
+//
+// The type test lives HERE, at the runner lookup and at the two places `optional` is computed,
+// rather than in the callers' filters: `cli.mjs`'s `--enforcement-only` filter is one call site of
+// several, and fixing it would close the execution path while leaving the false PASS. The earlier
+// prototype-key guard on the line below is a different defect — `'toString'` is a string and was
+// always handled; an array is the spelling JSON can express and nothing covered it.
+const hasUsableKind = (check) => typeof check?.kind === 'string'
+
+// A FAIL rather than a pending or a skip: a manifest this file cannot understand is a
+// configuration fault, so it must not run and must not be capable of passing.
+//
+// Built through `checkResult` rather than as its own object literal, so that `optional` is decided
+// in exactly ONE place. Hardcoding `optional: false` here worked and left the same clause in
+// `checkResult` unreachable — an unpinned guard that reads as load-bearing, which is the shape
+// this review has rejected repeatedly. Now the array-spelled tests exercise that clause directly.
+function malformedKindResult(check) {
+  let shown
+  try {
+    shown = JSON.stringify(check?.kind)
+  } catch {
+    // A getter that throws, or a BigInt: the value still has to be reportable.
+    shown = String(check?.kind)
+  }
+  return checkResult(
+    check ?? {},
+    'fail',
+    `check kind must be a string, got ${shown === undefined ? 'undefined' : shown}`
+    + ' — a manifest entry this gate cannot understand is a configuration fault, not a check.'
+    + ' Fix the `kind` in teammates.gate.json.',
+  )
+}
+
 export function describePendingCheck(check) {
   return {
     name: check.name,
@@ -50,13 +98,17 @@ export function describePendingCheck(check) {
     // it is non-optional, so a manifest entry of an enforced kind that found no runner —
     // `{ "kind": "merge", "optional": true }`, the computed check a manifest must not be able
     // to supply or suppress — would otherwise land as a pending that waves the phase through.
-    optional: ALWAYS_ENFORCED_KINDS.has(check.kind) ? false : check.optional === true,
+    // A non-string kind is forced non-optional here too. `Set.has` does not coerce, so without
+    // this an unusable kind would slip past the always-enforced forcing and honour `optional`.
+    optional: !hasUsableKind(check) || ALWAYS_ENFORCED_KINDS.has(check.kind) ? false : check.optional === true,
     check,
   }
 }
 
 function checkResult(check, status, output) {
-  const optional = ALWAYS_ENFORCED_KINDS.has(check.kind) ? false : check.optional === true
+  const optional = !hasUsableKind(check) || ALWAYS_ENFORCED_KINDS.has(check.kind)
+    ? false
+    : check.optional === true
   return { name: check.name, kind: check.kind, status, output, optional }
 }
 
@@ -927,6 +979,13 @@ async function runCheckList(checks, ctx, commandCwd, mergeConflicted) {
     // tree there is no honest answer, and running it against the run branch's own tree would
     // answer a different question while looking like the one that was asked. Skipped, with
     // the reason — the block comes from the `merge` check, which fails.
+    // FIRST, before any decision is taken from `kind` — including the merge-conflict skip below,
+    // which a non-string kind slips past on a strict comparison and which would otherwise let an
+    // unusable entry be reported as a benign skip.
+    if (!hasUsableKind(check)) {
+      results.push(malformedKindResult(check))
+      continue
+    }
     if (check.kind === 'command' && mergeConflicted) {
       results.push(checkResult(check, 'skip', CONFLICT_SKIP))
       continue
