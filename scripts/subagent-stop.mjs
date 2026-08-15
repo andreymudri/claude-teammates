@@ -88,8 +88,11 @@ async function main() {
   // — a reviewer, a helper — which have no task, no brief, and no business being handed a
   // branch name to commit to. Without this, a record aimed at a directory in the main worktree
   // (writable directly, which no guard on `locate` can prevent) makes the next unrelated
-  // subagent to stop there the victim: it is blocked and told to commit to a ref the record
-  // chose, and `fileset` and `ownership` then read those commits as that task's work.
+  // subagent to stop there the victim: it is blocked and told about a task that is not its own.
+  //
+  // This closes records aimed at THIS repository's directories. It does not close the case
+  // where the directory is made to belong to a DIFFERENT, fabricated repository — see the
+  // residual documented at the location check below, which is open.
   //
   // The test is the pair of directories git just printed, not a path comparison. Measured at
   // four depths: in the main worktree, and in ANY subdirectory of it, `--git-common-dir` and
@@ -124,14 +127,12 @@ async function main() {
   // `git status --untracked-files=all` reports none of it, because git excludes a subtree
   // once it sees a `.git` file there.
   //
-  // So the discriminator is WHERE the git dir sits, not what it says about itself. A real
-  // linked worktree's git dir is always two levels under the common dir
+  // So the discriminator is WHERE the git dir sits relative to the common dir git reported
+  // alongside it. A real linked worktree's git dir is two levels under its common dir
   // (`<common>/worktrees/<name>`, the middle component observed to be `worktrees` in every
-  // shape measured), and that is a location only a writer who already owns `.git` can occupy.
-  // The plant's git dir is wherever the planter could write, which is by definition somewhere
-  // else. Measured across all four shapes: equal for the main worktree at any depth,
-  // contained for a real linked worktree and any subdirectory of one, and neither for the
-  // plant — which is why the two checks together are total and neither alone is.
+  // shape measured). Measured: equal for the main worktree at any depth, contained for a real
+  // linked worktree and any subdirectory of one, and neither for the plant above, which is
+  // answered by falling through to ALLOW.
   //
   // An earlier version asked the git dir to point back at this toplevel and called that
   // unforgeable. It is not: the pointer file lives in the directory the planted `.git` names,
@@ -139,10 +140,48 @@ async function main() {
   // than weakened, and with it the file read — there is no longer any file whose contents
   // this decision trusts.
   //
-  // What containment establishes, stated as narrowly as it is true: this directory is a
-  // linked worktree of THIS repository rather than a directory dressed up as one. It does
-  // not defend against a writer who already owns `.git`; nobody at that level needs to bother
-  // with this handler, and no stop-time check could stop them.
+  // WHAT THIS ESTABLISHES, and it is narrower than "the directory is genuine": that this is a
+  // linked worktree of the repository THE CWD RESOLVES TO. It does not establish that that
+  // repository is the one this run belongs to, or that it was created by git at all.
+  //
+  // OPEN RESIDUAL, measured and left open deliberately. A plant that supplies its own
+  // repository satisfies this check honestly: `git init` a second repo anywhere the attacker
+  // can write — the victim's own gitignored `.teammates/` will do — hand-write
+  // `<evil>/.git/worktrees/fake/commondir` naming `<evil>/.git`, and point
+  // `<victim-dir>/.git` at that metadata directory. `rev-parse` then reports a common dir and
+  // a git dir that are genuinely two levels apart, so the pair is contained, and
+  // `root = dirname(commonDir)` makes the ATTACKER's directory the store this handler reads.
+  // A subagent stopping there is blocked over a task from a store that has nothing to do with
+  // this repository. `git status --porcelain --untracked-files=all` prints nothing, because
+  // `.teammates/` is gitignored and git excludes a subtree once it sees a `.git` file in it.
+  //
+  // Two discriminators were built and measured against it, and neither is worth taking:
+  //
+  //   - Ask the PARENT of the toplevel which repository encloses it, and refuse when that
+  //     differs from the resolved common dir. It does catch the plant — measured, the parent
+  //     resolves to the victim's real `.git`. It is then defeated by ONE more file: planting
+  //     a second `.git` at that parent makes the enclosing answer the attacker's repo too,
+  //     also measured. Walking further up costs a git process per ancestor and still ends at
+  //     "the attacker plants one level higher than we look" until the walk reaches a `.git`
+  //     the attacker cannot replace.
+  //   - Walk all the way to the real repository root. That does catch it, but it refuses a
+  //     configuration two reviewers verified as legitimate and working — a real linked
+  //     worktree of repository B living inside repository A's tree — turning enforcement off
+  //     there to close an attack whose ceiling is one forced retry.
+  //
+  // A global stop hook has no expected repository to compare against: it legitimately adopts
+  // whatever repository the stopping cwd resolves to, and a plant fabricates exactly that.
+  // So this is accepted rather than closed, and the ceiling is what bounds it: one forced
+  // retry per stop, since `stop_hook_active` allows the next one; no gate verdict is
+  // influenced, because the gate recomputes everything from git and reads nothing here; the
+  // named branch is the conventional `teammates/<runId>/<taskId>`, because the record's own
+  // `branch` field is clamped to that or dropped by `findTaskByWorktree`; and the remediation
+  // names no command and sends the teammate to its brief. What is genuinely new against the
+  // residual disclosed further up is that the victim need not be a teammate and the store
+  // need not belong to this repository. Pinned by a case that asserts those bounds.
+  //
+  // It does not defend against a writer who already owns `.git` either; nobody at that level
+  // needs to bother with this handler, and no stop-time check could stop them.
   if (normaliseWorktree(path.dirname(path.dirname(gitDir))) !== normaliseWorktree(commonDir)) {
     return ALLOW
   }

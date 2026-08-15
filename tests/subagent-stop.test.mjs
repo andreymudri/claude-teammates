@@ -263,6 +263,64 @@ test('a hand-built fake worktree in the main tree is not treated as a teammate',
   })
 })
 
+// THE OPEN RESIDUAL, pinned by its ceiling rather than by its verdict.
+//
+// A plant that brings its own repository satisfies the location check honestly: the second
+// repo is real, so its common dir and the fabricated worktree's git dir are genuinely two
+// levels apart. The handler then reads the ATTACKER's `.teammates/` as the store. The
+// handler's comment says why this is accepted rather than closed.
+//
+// This case deliberately does NOT assert the exit status. Asserting 2 would cement the hole —
+// a later change that closes it would have to edit this test, which is how a security fix gets
+// argued down to keep a suite green. What it asserts is what bounds the damage either way, and
+// each of those IS a property of this handler: the record's chosen branch name never reaches
+// the teammate, the text names no command, and a second stop is allowed so the cost is one
+// forced retry.
+test('the fabricated-repository residual stays within its stated ceiling', async () => {
+  await withRepo(async ({ dir }) => {
+    const victim = path.join(dir, 'packages', 'app')
+    const evil = path.join(dir, '.teammates', 'evil')
+    mkdirSync(victim, { recursive: true })
+    mkdirSync(evil, { recursive: true })
+    const fwd = (p) => p.replace(/\\/g, '/')
+    // The realistic ground the invisibility depends on, and it is this project's own layout:
+    // `.teammates/` is gitignored, and the planted directory holds TRACKED content — committed
+    // before the plant, because git stops looking inside a subtree once it sees a `.git` file.
+    writeFileSync(path.join(dir, '.gitignore'), '.teammates/\n')
+    writeFileSync(path.join(victim, 'app.mjs'), 'export const x = 1\n')
+    git(['add', '.'], dir)
+    git(['commit', '-m', 'tracked content'], dir)
+    // A REAL second repository, which is what makes the pair genuinely contained.
+    git(['init', '--initial-branch=master'], evil)
+    const fake = path.join(evil, '.git', 'worktrees', 'fake')
+    mkdirSync(fake, { recursive: true })
+    writeFileSync(path.join(fake, 'commondir'), `${fwd(path.join(evil, '.git'))}\n`)
+    writeFileSync(path.join(fake, 'gitdir'), `${fwd(path.join(victim, '.git'))}\n`)
+    writeFileSync(path.join(fake, 'HEAD'), 'ref: refs/heads/master\n')
+    writeFileSync(path.join(victim, '.git'), `gitdir: ${fwd(fake)}\n`)
+    // The store the handler will read is the attacker's, so the record goes there.
+    await writeLocation(evil, 'r9', 'T7', { worktree: victim, branch: 'attacker-chosen-branch' })
+    await writeState(evil, 'r9', 'plan', { runId: 'r9', planPath: 'docs/plan.md' })
+
+    // The plant is invisible to the repository it sits in — the reason it cannot be found by
+    // asking git about the victim's own tree.
+    assert.equal(git(['status', '--porcelain', '--untracked-files=all'], dir), '')
+
+    const result = run({ cwd: victim })
+    assert.ok(result.status === 0 || result.status === 2, `unexpected exit ${result.status}`)
+    // The record's own branch field never reaches the teammate: state.mjs clamps it to the
+    // conventional name or drops it, so an arbitrary ref cannot be suggested to anyone.
+    assert.doesNotMatch(result.stderr, /attacker-chosen-branch/)
+    assert.doesNotMatch(result.stderr, /git checkout/)
+    assert.doesNotMatch(result.stderr, /git commit/)
+    if (result.status === 2) {
+      assert.match(result.stderr, /teammates\/r9\/T7/)
+      // Bounded at one forced retry: the next stop is allowed whatever the teammate did.
+      assert.equal(run({ cwd: victim, stop_hook_active: true }).status, 0)
+    }
+  })
+})
+
 // The four shapes `rev-parse` can report, asserted as one table so the discriminator is
 // visible in one place rather than inferred from scattered cases. `equal` answers the main
 // worktree at any depth; `contained` answers a real linked worktree at any depth; the plant is
