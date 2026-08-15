@@ -3,17 +3,37 @@
 Written 2026-08-15. Supersedes `2026-08-14-substop-phase2-handoff.md`; read that one only for
 phase-1 history. Phase 1 is merged and done. **Phase 2 is in review, round 7 → 8.**
 
-## FIRST ACTION — a fix is in flight
+## FIRST ACTION — round 8
 
-`tm-substop-T5` was dispatched with round 7's fixes and **may have landed after this was written**.
+Round 7's fixes have **landed and been verified**. T5 is at , T4 at . The gate
+was re-run at those tips: **merge, test, fileset, ownership all pass; review pending.** Fix rounds
+recorded. Nothing is outstanding.
 
-    git log --oneline -1 teammates/substop/T5
+Start by dispatching **round 8** — four unnamed  lenses at /opus
+(, , , ), stamps from . What round 7
+fixed, and therefore what round 8 must judge:
 
-- If it is **`f3f786e`**, the fix has not landed. Resume the teammate by name (`tm-substop-T5`) and
-  ask for its report; the full brief is in its transcript.
-- If it is **anything newer**, the fix landed. Verify it (below), then gate and run round 8.
+- **** —  () now gates every
+  decision taken from , including the merge-conflict skip. A malformed kind is a
+  **non-optional fail**, never a pending or a skip. Both exploits measured dead: the command no
+  longer executes, and the forged optional  now yields  rather than .
+  The  filter in  is **deliberately unchanged**.
+- ** is the only writer of ** — the universal that failed four rounds running
+  is now structural, with a source test counting call sites and asserting the one is inside
+  . Verified: one real call at , the other match is a comment.
+  **A poisoned record is deliberately unrepairable by any automatic writer** — that is the price of
+  never replacing a good value.  now prints the recorded branch when it differs from the
+  checkout, so it announces itself.
+- **The corpus claim was corrected downward** —  already pin
+  both caps with absolute literals in both directions, so the previously-stated gap was false.
 
-Everything else is settled and verified.
+Merged suite at these tips: **1701 on T5's branch alone**; re-measure the merged tree (expect ~1740).
+
+**Two items T5 handed back, both outside its file set:**
+
+1. The false-PASS bound in  was falsified for
+   the manifest. That spec is T1's, merged and frozen. Decide whether to correct it.
+2. The skill-order residual — assigned to phase 3's T8.
 
 ## State
 
