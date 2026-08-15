@@ -237,19 +237,24 @@ test('a teammate stopping in a subdirectory of its own worktree is still enforce
   })
 })
 
-// A `.git` FILE turns any directory into something that reports a foreign git dir, which is
-// enough to get past "are these two directories equal" on its own. The plant points at an
-// ALREADY EXISTING teammate worktree's metadata, so it writes nothing inside `.git`, and in a
-// directory with tracked content git does not report it as a nested repo at all — `git status`
-// and `ownership` both stay silent. Without the pointer check this exits 2 and hands an
-// unrelated subagent a branch to commit to, which is the whole of round 2's fix undone.
-test('a planted .git file in the main worktree does not make a subdirectory a teammate', async () => {
-  await withRepo(async ({ dir, root, addNestedWorktree }) => {
+// A `.git` FILE turns any directory into something that reports a foreign git dir, and the
+// directory it names is the planter's to build — so a fake worktree is four hand-written text
+// files, none of them inside `.git`, and `git status --untracked-files=all` reports none of it
+// because git excludes a subtree once it sees a `.git` file there. This is the shape that
+// defeated the earlier pointer round trip: the planter writes both ends of it, so it closed.
+// What it cannot forge is the git dir's LOCATION, two levels under the common dir.
+test('a hand-built fake worktree in the main tree is not treated as a teammate', async () => {
+  await withRepo(async ({ dir, root }) => {
     const victim = path.join(dir, 'packages', 'app')
+    const fake = path.join(dir, '.teammates', 'fakewt')
     mkdirSync(victim, { recursive: true })
-    addNestedWorktree('agent-1')
-    writeFileSync(path.join(victim, '.git'),
-      `gitdir: ${path.join(dir, '.git', 'worktrees', 'agent-1').replace(/\\/g, '/')}\n`)
+    mkdirSync(fake, { recursive: true })
+    const fwd = (p) => p.replace(/\\/g, '/')
+    writeFileSync(path.join(victim, '.git'), `gitdir: ${fwd(fake)}\n`)
+    writeFileSync(path.join(fake, 'commondir'), `${fwd(path.join(dir, '.git'))}\n`)
+    // The pointer the old check trusted, aimed back at the victim so that round trip closes.
+    writeFileSync(path.join(fake, 'gitdir'), `${fwd(path.join(victim, '.git'))}\n`)
+    writeFileSync(path.join(fake, 'HEAD'), 'ref: refs/heads/master\n')
     await writeLocation(root, 'r1', 'T7', { worktree: victim, branch: null })
     await writeState(root, 'r1', 'plan', { runId: 'r1', planPath: 'docs/plan.md' })
     const result = run({ cwd: victim })
@@ -258,20 +263,66 @@ test('a planted .git file in the main worktree does not make a subdirectory a te
   })
 })
 
-// The other direction of the same trick, and the case that makes the main-worktree check
-// load-bearing rather than a fast path: plant `gitdir` INSIDE the main repository's own `.git`
-// naming that worktree's `.git`, and the pointer round trip closes honestly for the MAIN
-// worktree. Measured — with the equality check removed, this record is obeyed and the stop is
-// blocked. It is why both tests are here and neither replaces the other.
-test('a gitdir file planted inside .git does not make the main worktree a teammate', async () => {
-  await withRepo(async ({ dir, root }) => {
-    writeFileSync(path.join(dir, '.git', 'gitdir'), `${path.join(dir, '.git').replace(/\\/g, '/')}\n`)
-    await writeLocation(root, 'r1', 'T7', { worktree: dir, branch: null })
-    await writeState(root, 'r1', 'plan', { runId: 'r1', planPath: 'docs/plan.md' })
-    const result = run({ cwd: dir })
-    assert.equal(result.status, 0)
-    assert.equal(result.stderr, '')
+// The four shapes `rev-parse` can report, asserted as one table so the discriminator is
+// visible in one place rather than inferred from scattered cases. `equal` answers the main
+// worktree at any depth; `contained` answers a real linked worktree at any depth; the plant is
+// neither, and neither-means-allow is the whole of why it is safe.
+test('the four worktree shapes are classified as measured', async () => {
+  await withRepo(async ({ dir, addNestedWorktree }) => {
+    const real = addNestedWorktree('agent-1')
+    const victim = path.join(dir, 'packages', 'app')
+    const fake = path.join(dir, '.teammates', 'fakewt')
+    mkdirSync(victim, { recursive: true })
+    mkdirSync(fake, { recursive: true })
+    mkdirSync(path.join(real, 'nested'), { recursive: true })
+    const fwd = (p) => p.replace(/\\/g, '/')
+    writeFileSync(path.join(victim, '.git'), `gitdir: ${fwd(fake)}\n`)
+    writeFileSync(path.join(fake, 'commondir'), `${fwd(path.join(dir, '.git'))}\n`)
+    writeFileSync(path.join(fake, 'gitdir'), `${fwd(path.join(victim, '.git'))}\n`)
+    writeFileSync(path.join(fake, 'HEAD'), 'ref: refs/heads/master\n')
+    const norm = (p) => path.resolve(p).replace(/[\\/]+$/, '').replace(/\\/g, '/').toLowerCase()
+    const classify = (cwd) => {
+      const [commonDir, gitDir] = git(
+        ['rev-parse', '--path-format=absolute', '--git-common-dir', '--git-dir'], cwd,
+      ).split('\n').map((l) => l.trim())
+      return {
+        equal: commonDir === gitDir,
+        contained: norm(path.dirname(path.dirname(gitDir))) === norm(commonDir),
+      }
+    }
+    assert.deepEqual(classify(dir), { equal: true, contained: false }, 'main worktree root')
+    assert.deepEqual(classify(victim), { equal: false, contained: false }, 'hand-built fake')
+    assert.deepEqual(classify(real), { equal: false, contained: true }, 'real linked worktree')
+    assert.deepEqual(classify(path.join(real, 'nested')), { equal: false, contained: true },
+      'subdirectory of a real linked worktree')
   })
+})
+
+// The cross-file pin. Every other exit-code case here drives a stub CLI, so all of them pin
+// literal 3 against literal 3 and would stay green if `complete` started returning something
+// else — the handler would then block on a code nothing returns and allow every real
+// rejection. `scripts/cli.mjs` is not in this task's file set, so it is read as text.
+//
+// Two arms, because the constant is added by a task that is not merged into this branch: if
+// it is there, its value must match. If it is NOT there, then `complete` must also not accept
+// `--enforcement-only` yet — the moment it does, an absent constant means this pin has gone
+// blind and this case fails loudly rather than skipping forever.
+test('the code this handler blocks on is the one cli.mjs returns for a rejection', () => {
+  const cliSource = readFileSync(path.join(repoRoot, 'scripts', 'cli.mjs'), 'utf8')
+  const handlerSource = readFileSync(handler, 'utf8')
+  const mine = handlerSource.match(/^const REJECTED = (\d+)$/m)
+  assert.ok(mine, 'the handler no longer declares a REJECTED constant this test can read')
+  const theirs = cliSource.match(/COMPLETE_REJECTED\s*=\s*(\d+)/)
+  if (theirs) {
+    assert.equal(Number(theirs[1]), Number(mine[1]),
+      `handler blocks on ${mine[1]} but cli.mjs returns ${theirs[1]} for a rejection`)
+    return
+  }
+  const completeTakesFlag = /^\s*complete:\s*\[[^\]]*'enforcement-only'[^\]]*\]/m.test(cliSource)
+  assert.equal(completeTakesFlag, false,
+    'cli.mjs registers complete --enforcement-only but declares no COMPLETE_REJECTED: this '
+    + 'cross-file pin can no longer find the constant, so update it to the new name rather '
+    + 'than leaving the handler blocking on an unverified literal')
 })
 
 // The payload shape guard, which JSON makes reachable in three ways that are not "unparseable":

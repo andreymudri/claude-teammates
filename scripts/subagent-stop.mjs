@@ -94,13 +94,19 @@ async function main() {
   // The test is the pair of directories git just printed, not a path comparison. Measured at
   // four depths: in the main worktree, and in ANY subdirectory of it, `--git-common-dir` and
   // `--git-dir` are the same path; in a linked worktree, and in any subdirectory of one, the
-  // second is `<common>/worktrees/<name>`. Comparing `cwd` to the root instead — which is what
+  // second is `<common>/worktrees/<name>`. Comparing CWD to the root instead — which is what
   // this line did first — closes the root and nothing below it, so a session started with
-  // `cd packages/app && claude`, which is ordinary use, was still a victim.
+  // `cd packages/app && claude`, which is ordinary use, was still a victim. Note that "cwd
+  // under root" is a different and always-wrong test: this plugin puts teammate worktrees at
+  // `<main>/.claude/worktrees/agent-*`, inside the main worktree, so it would answer yes for
+  // every teammate and switch enforcement off everywhere.
   //
-  // Containment is NOT the test and must not be substituted for it: this plugin puts teammate
-  // worktrees at `<main>/.claude/worktrees/agent-*`, inside the main worktree, so "cwd under
-  // root" would answer yes for every teammate and switch enforcement off everywhere.
+  // REDUNDANT with the git-dir location check below, and kept as the explicit statement of the
+  // main-worktree case rather than as a barrier: no path can satisfy both, since a git dir
+  // equal to the common dir cannot also sit two levels under it, and deleting this line was
+  // measured to change no verdict in the suite. It is stated here because a reader who finds
+  // the main worktree answered only by "not a linked worktree" would reasonably wonder whether
+  // that was intended.
   //
   // The trade-off, stated rather than hidden: in a run dispatched WITHOUT worktree isolation
   // every teammate shares the main worktree, and this makes enforcement inert for that run.
@@ -110,38 +116,36 @@ async function main() {
   if (commonDir === gitDir) return ALLOW
 
   // The pair being unequal is necessary and NOT sufficient, because a `.git` FILE makes any
-  // directory report a foreign git dir. Measured: writing `<main>/packages/app/.git`
-  // containing `gitdir: <main>/.git/worktrees/agent-1` — an ALREADY EXISTING teammate's
-  // metadata, so nothing inside `.git` is written — makes that subdirectory of the main
-  // worktree answer like a linked worktree, and a record aimed there brings back exactly the
-  // block round 2 was meant to close. Planted under a directory with tracked content it is
-  // also invisible: git does not treat it as a nested repo, so `git status` and `ownership`
-  // report nothing.
+  // directory report a foreign git dir, and the directory it names is the planter's to build.
+  // Measured end to end: four hand-written text files — `<main>/packages/app/.git` naming
+  // `<main>/.teammates/fakewt`, and `commondir`, `gitdir` and `HEAD` inside that directory —
+  // make a tracked subdirectory of the MAIN worktree answer `rev-parse` like a linked
+  // worktree of this repository. None of it is inside `.git`, and
+  // `git status --untracked-files=all` reports none of it, because git excludes a subtree
+  // once it sees a `.git` file there.
   //
-  // The confirmation is the link git itself maintains in the other direction. A real linked
-  // worktree's metadata holds a `gitdir` file naming the `.git` of the worktree it belongs
-  // to, so requiring it to name THIS toplevel's `.git` is a round trip the planter cannot
-  // complete without writing inside `.git`. Measured true for a sibling worktree, a worktree
-  // nested under the main one, and any subdirectory of either; false for the plant, whose
-  // pointer names the real teammate's `.git` while its toplevel is the planted directory.
-  // `git worktree add` refuses a path that already exists, so the plant cannot be legitimised
-  // by creating the worktree properly either — also measured.
+  // So the discriminator is WHERE the git dir sits, not what it says about itself. A real
+  // linked worktree's git dir is always two levels under the common dir
+  // (`<common>/worktrees/<name>`, the middle component observed to be `worktrees` in every
+  // shape measured), and that is a location only a writer who already owns `.git` can occupy.
+  // The plant's git dir is wherever the planter could write, which is by definition somewhere
+  // else. Measured across all four shapes: equal for the main worktree at any depth,
+  // contained for a real linked worktree and any subdirectory of one, and neither for the
+  // plant — which is why the two checks together are total and neither alone is.
   //
-  // What it buys, stated as narrowly as it is true: the plant must move from a tracked
-  // directory, where nothing in git reports it, to INSIDE `.git`, where the same writer could
-  // instead edit refs or drop a hook and stop bothering with this handler at all. It raises
-  // the floor; it is not a barrier against a writer who already owns the repository, and no
-  // stop-time check could be. The check above is what answers the main worktree, and it is
-  // load-bearing for exactly this reason: `<main>/.git/gitdir` naming `<main>/.git` closes
-  // this round trip honestly, so without that earlier line the main worktree itself would
-  // pass here. Measured, and pinned by a case.
-  let pointer
-  try {
-    pointer = readFileSync(path.join(gitDir, 'gitdir'), 'utf8').trim()
-  } catch {
+  // An earlier version asked the git dir to point back at this toplevel and called that
+  // unforgeable. It is not: the pointer file lives in the directory the planted `.git` names,
+  // so the planter writes both ends and the round trip closes. That claim is deleted rather
+  // than weakened, and with it the file read — there is no longer any file whose contents
+  // this decision trusts.
+  //
+  // What containment establishes, stated as narrowly as it is true: this directory is a
+  // linked worktree of THIS repository rather than a directory dressed up as one. It does
+  // not defend against a writer who already owns `.git`; nobody at that level needs to bother
+  // with this handler, and no stop-time check could stop them.
+  if (normaliseWorktree(path.dirname(path.dirname(gitDir))) !== normaliseWorktree(commonDir)) {
     return ALLOW
   }
-  if (normaliseWorktree(pointer) !== normaliseWorktree(path.join(toplevel, '.git'))) return ALLOW
 
   // Looked up by the worktree's TOP LEVEL, not by the raw payload cwd. `locate` records the
   // top level, so a teammate that stops with its cwd in a subdirectory of its own worktree
