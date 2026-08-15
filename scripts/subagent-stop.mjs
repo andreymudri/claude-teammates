@@ -171,14 +171,26 @@ async function main() {
   //
   // A global stop hook has no expected repository to compare against: it legitimately adopts
   // whatever repository the stopping cwd resolves to, and a plant fabricates exactly that.
-  // So this is accepted rather than closed, and the ceiling is what bounds it: one forced
-  // retry per stop, since `stop_hook_active` allows the next one; no gate verdict is
-  // influenced, because the gate recomputes everything from git and reads nothing here; the
-  // named branch is the conventional `teammates/<runId>/<taskId>`, because the record's own
-  // `branch` field is clamped to that or dropped by `findTaskByWorktree`; and the remediation
-  // names no command and sends the teammate to its brief. What is genuinely new against the
-  // residual disclosed further up is that the victim need not be a teammate and the store
-  // need not belong to this repository. Pinned by a case that asserts those bounds.
+  // So this is accepted rather than closed, and the ceiling is stated below PER PATH, because
+  // twice now a bound true of one path has been written as a property of the handler — first
+  // "the plant must move inside `.git`", then "the text names no command", which held only on
+  // the missing-branch path while the rejection path forwarded whatever it was given.
+  //
+  // Both blocking paths: the cost is one forced retry per stop, since `stop_hook_active`
+  // allows the next one; no gate verdict is influenced, because the gate recomputes everything
+  // from git and reads nothing here; and every variable interpolated into either message is an
+  // id constrained by the allowlist described at the rejection path below.
+  //
+  // Missing-branch path: the branch named is the conventional `teammates/<runId>/<taskId>`,
+  // because the record's own `branch` field is clamped to that or dropped by
+  // `findTaskByWorktree`; the text names no command and sends the teammate to its brief.
+  //
+  // Rejection path: nothing from `complete`'s output reaches the agent at all — see the fixed
+  // form at the bottom of this function, and the `--enforcement-only` coupling noted with it.
+  //
+  // What is genuinely new against the residual disclosed further up is that the victim need
+  // not be a teammate and the store need not belong to this repository. Pinned by cases that
+  // assert these bounds on BOTH paths, each reaching the path it claims to describe.
   //
   // It does not defend against a writer who already owns `.git` either; nobody at that level
   // needs to bother with this handler, and no stop-time check could stop them.
@@ -241,6 +253,15 @@ async function main() {
   // hook means the usual outcome is a timeout — which is a non-blocking error, i.e.
   // enforcement that looks installed and does nothing. The phase gate still runs it all.
   //
+  // SECOND REASON, load-bearing and not about cost at all: the manifest this reads is the MAIN
+  // worktree's `teammates.gate.json`, which any teammate can write, and a `command` check in it
+  // is a shell command. `--enforcement-only` is what keeps those from RUNNING here. Dropping
+  // the flag would turn an attacker-writable file into attacker-chosen execution inside a hook
+  // that fires for every subagent on this machine — a strictly worse failure than the text
+  // problem the fixed-form message below exists to close, and reached by deleting one argument.
+  // A test asserts the flag is present in the spawned argv; that test is the guard on this
+  // paragraph, and it should be read as a security check rather than an argument-shape check.
+  //
   // Block on REJECTED and on nothing else, because a stop may only be refused over something
   // this teammate did and can fix from its own worktree. The contract `complete` is being
   // built to, which this file consumes and does not implement:
@@ -283,7 +304,40 @@ async function main() {
   ], { encoding: 'utf8', timeout: 60_000 })
 
   if (result.status === REJECTED) {
-    process.stderr.write(`${(result.stdout || '').trim()}\n`)
+    // FIXED FORM. `complete`'s stdout is NOT forwarded, and the reason is not verbosity: under
+    // `--enforcement-only` that output carries gate-manifest CHECK NAMES, which are arbitrary
+    // strings from `teammates.gate.json`. This handler spawns `complete` with `--root <main
+    // worktree>`, so the manifest read is the main worktree's — a file any teammate can write —
+    // and forwarding it would put chosen text into the context of every sibling blocked at stop
+    // time, in a hook that runs for every subagent on this machine. Reproduced before this was
+    // changed: a check named to look like an orchestrator instruction, carrying a shell command,
+    // arrived at the agent verbatim. `printable` strips control characters and is documented as
+    // not constraining content, so it does not help here.
+    //
+    // Sanitising is the weaker answer and was not taken: any delimiter or escape scheme is
+    // itself content an attacker can imitate, and the agent reading this has no way to tell a
+    // quoted region from a real one. What removes the vector is re-derivation — name the task
+    // and let the teammate run the check itself, reading the output as command output rather
+    // than as something this hook said.
+    //
+    // The two ids ARE interpolated, and the bound on them is exact rather than assumed: both
+    // are validated by `findTaskByWorktree` against an allowlist of letters, marks, numbers,
+    // `.`, `_` and `-`, with invisible code points refused and no leading `-`. So neither can
+    // contain whitespace, quotes, newlines or control characters — no id can forge a sentence
+    // or a second line. An id can still BE a chosen word, which is why the surrounding text
+    // never presents them as instructions.
+    //
+    // No command is spelled here for the same reason as the missing-branch path above: the
+    // brief carries the verification step for this task, and the brief comes from the dispatch
+    // rather than from any file a teammate can write. `planPath` in particular is a plain
+    // string out of the run's `plan.json` and is deliberately not printed.
+    process.stderr.write(
+      `Task ${found.taskId} in run ${found.runId} did not pass the enforcement checks that the `
+      + `phase gate will recompute. The reasons are deliberately not repeated here, because they `
+      + `come from a file in the repository and would reach you as if this hook had said them. `
+      + `Your brief names the verification command for this task: run it yourself, in the `
+      + `foreground, and read its output directly. Fix what it reports, then finish.\n`,
+    )
     return BLOCK
   }
   return ALLOW
