@@ -9503,12 +9503,109 @@ test('a lifecycle command never overwrites a run branch that is already recorded
 // `rebuild-state`, then `init-run`, which had been one the whole time. Prose enumeration is how
 // that kept happening, so the enumeration is now the code: exactly one function writes plan.json,
 // and this counts the call sites. A second one fails here rather than in a review three rounds later.
+//
+// WHAT THIS PIN DOES AND DOES NOT CATCH. It is a source scan, not a type system, and the previous
+// version — a `/await writeState\([^,]+,\s*[^,]+,\s*'plan'/` regex — was defeated three separate
+// ways in one review, each measured green: a `"plan"` double-quoted third argument, a first
+// argument containing a nested comma (`path.resolve(root, '.')`, which `[^,]+` cannot cross), and
+// a non-awaited `return writeState(...)`. All three are closed below by parsing the argument list
+// instead of matching it, and by requiring the third argument to be a STRING LITERAL — which is
+// what closes the fourth defeat, `const planKind = 'plan'` followed by `writeState(root, runId,
+// planKind, …)`, a spelling no regex over the call itself could ever have seen.
+//
+// Still not caught, and named here rather than papered over: a write that reaches plan.json
+// through a helper in ANOTHER module, a path assembled at runtime, or a callee named by
+// computation (`state['write' + 'State']`). Aliasing is caught only in one direction — replacing
+// the import with `writeState as ws` drops the count to zero and fails, but ADDING an aliased
+// second import would not be seen, so the no-rename assertion below exists to make that spelling
+// unavailable. The honest summary is that the structural pin is narrower than the behavioural
+// coverage above it: those tests exercise the actual fill-if-absent rule through the CLI, and this
+// one only makes the specific mistake that caused three regressions — an inline second writer —
+// hard to make by accident.
+
+// The top-level arguments of the call whose `(` sits at `open`, as trimmed source text. Nesting of
+// `()`/`[]`/`{}` and the three quote characters is tracked, so an argument that itself contains a
+// comma counts as one argument. Nested template-literal interpolation is not tracked; no call site
+// this pin reads uses one.
+function callArguments(source, open) {
+  const args = []
+  let depth = 0
+  let start = open + 1
+  let quote = null
+  for (let i = open; i < source.length; i += 1) {
+    const ch = source[i]
+    if (quote) {
+      if (ch === '\\') { i += 1; continue }
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === "'" || ch === '"' || ch === '`') { quote = ch; continue }
+    if (ch === '(' || ch === '[' || ch === '{') { depth += 1; continue }
+    if (ch === ')' || ch === ']' || ch === '}') {
+      depth -= 1
+      if (depth === 0) { args.push(source.slice(start, i).trim()); return args }
+      continue
+    }
+    if (ch === ',' && depth === 1) { args.push(source.slice(start, i).trim()); start = i + 1 }
+  }
+  throw new Error('unbalanced call arguments in cli.mjs — this pin is reading the wrong thing')
+}
+
+// Every call of `name` in `source`, with its arguments. Occurrences with a `//` earlier on the same
+// line are skipped, because cli.mjs quotes `writeState(root, runId, 'plan', …)` in its own prose and
+// a comment writes nothing. An occurrence preceded by an identifier character is skipped too, so
+// `myWriteState(` is a different callee — while `state.writeState(` is deliberately still counted,
+// a namespace import being a real second writer.
+function callSites(source, name) {
+  const needle = `${name}(`
+  const sites = []
+  for (let i = source.indexOf(needle); i !== -1; i = source.indexOf(needle, i + 1)) {
+    if (i > 0 && /[A-Za-z0-9_$]/.test(source[i - 1])) continue
+    if (source.slice(source.lastIndexOf('\n', i) + 1, i).includes('//')) continue
+    sites.push({ index: i, args: callArguments(source, i + needle.length - 1) })
+  }
+  return sites
+}
+
+const STRING_LITERAL = /^'[^'\\]*'$|^"[^"\\]*"$/
+
 test('exactly one function in cli.mjs writes plan.json', () => {
-  const sites = [...CLI_SOURCE.matchAll(/await writeState\([^,]+,\s*[^,]+,\s*'plan'/g)]
+  const sites = callSites(CLI_SOURCE, 'writeState')
+  assert.ok(sites.length > 0, 'no writeState call sites found — this pin is reading the wrong thing')
+
+  // The state file being written must be decidable from the source. A variable third argument is
+  // the one defeat a regex over the call can never see (`const planKind = 'plan'`), so it is
+  // refused outright rather than counted wrong.
+  for (const site of sites) {
+    assert.match(
+      site.args[2] ?? '',
+      STRING_LITERAL,
+      `a writeState call names its state file with the expression \`${site.args[2]}\` rather than a`
+      + ' string literal, which puts it beyond what this pin can count; spell the name inline',
+    )
+  }
+
+  // ...and the name is never aliased, so `writeState(` is the only spelling a second writer in this
+  // file can use. Replacing the import with `writeState as ws` would drop the count to zero and
+  // fail below anyway; what this refuses is an aliased import ADDED alongside the plain one, which
+  // would leave the count at one. (A namespace import needs no clause here: `st.writeState(` still
+  // contains `writeState(` and is counted.)
+  const stateImport = CLI_SOURCE.match(/^import \{([^}]*)\} from '\.\/state\.mjs'$/m)
+  assert.ok(stateImport, "cli.mjs no longer has a named import from './state.mjs'")
+  assert.ok(
+    stateImport[1].split(',').some((spec) => spec.trim() === 'writeState'),
+    'writeState is imported under another name; this pin counts the spelling `writeState(` only',
+  )
+  assert.ok(
+    !/writeState\s+as\s+/.test(CLI_SOURCE),
+    'writeState is aliased somewhere in cli.mjs; a call through the alias is invisible to this pin',
+  )
+
+  const planSites = sites.filter((site) => site.args[2].slice(1, -1) === 'plan')
   assert.equal(
-    sites.length,
+    planSites.length,
     1,
-    `plan.json is written from ${sites.length} places; route every write through writePlan so`
+    `plan.json is written from ${planSites.length} places; route every write through writePlan so`
     + ' fill-if-absent cannot be forgotten',
   )
   // ...and that one site is inside `writePlan`, not somewhere that merely looks like it.
@@ -9516,9 +9613,25 @@ test('exactly one function in cli.mjs writes plan.json', () => {
   assert.notEqual(writePlanStart, -1, 'writePlan is gone — this pin is reading the wrong thing')
   const nextFunction = CLI_SOURCE.indexOf('\nasync function ', writePlanStart + 1)
   assert.ok(
-    sites[0].index > writePlanStart && sites[0].index < nextFunction,
+    planSites[0].index > writePlanStart && planSites[0].index < nextFunction,
     'the single plan write is not inside writePlan',
   )
+})
+
+// `writeState` is not the only way to put bytes in plan.json — cli.mjs imports `writeFile` and
+// `rename` directly, and `tests/cli.test.mjs` itself writes the file by path, so the spelling is
+// demonstrably at hand. A by-path writer would bypass `writePlan` entirely and reinstate exactly
+// the defect the pin above exists to prevent, while leaving that pin's count at one.
+test('nothing in cli.mjs writes plan.json by path', () => {
+  for (const name of ['writeFile', 'rename']) {
+    for (const site of callSites(CLI_SOURCE, name)) {
+      assert.ok(
+        !site.args.join(',').includes('plan.json'),
+        `a ${name} call in cli.mjs targets plan.json directly; every plan write must go through`
+        + ' writePlan so fill-if-absent applies',
+      )
+    }
+  }
 })
 
 // A re-init is a NORMAL mid-run event — the plan is amended and `init-run` re-run, which is why

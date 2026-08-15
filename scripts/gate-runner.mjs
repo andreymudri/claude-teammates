@@ -72,7 +72,20 @@ const hasUsableKind = (check) => typeof check?.kind === 'string'
 // in exactly ONE place. Hardcoding `optional: false` here worked and left the same clause in
 // `checkResult` unreachable — an unpinned guard that reads as load-bearing, which is the shape
 // this review has rejected repeatedly. Now the array-spelled tests exercise that clause directly.
-function malformedKindResult(check) {
+//
+// `index` is the entry's position in the phase's own check list, and it is the whole point of this
+// function's diagnosis. A malformed entry frequently has no `name` — `null` and `"just a string"`
+// are both reachable from a hand-written manifest — and `name` is the only field
+// `aggregateVerdict` reports, so two such entries both surfaced as `{"failed":[null]}` while the
+// text told the operator to fix a `kind` on an entry they could not identify. The position is put
+// in BOTH the message and the fallback `name`, so the verdict line alone locates the entry.
+//
+// The `try` is not reachable from a manifest: that file is `JSON.parse`-only, so the kinds it can
+// express are exactly the JSON value shapes and `JSON.stringify` serialises all of them. It guards
+// the EXPORTED api instead — `runChecks` is called directly from `cli.mjs` and from tests, and a
+// programmatic caller can pass a `10n` or a throwing getter, which is what the bigint test pins.
+function malformedKindResult(check, index) {
+  const position = `entry #${index} in this phase's check list`
   let shown
   try {
     shown = JSON.stringify(check?.kind)
@@ -80,10 +93,13 @@ function malformedKindResult(check) {
     // A getter that throws, or a BigInt: the value still has to be reportable.
     shown = String(check?.kind)
   }
+  // Only `name`, `kind` and `optional` are read out of this; `kind` is passed through unchanged so
+  // that `checkResult`'s own `hasUsableKind` clause — not a second copy of the rule here — is what
+  // forces `optional: false`.
   return checkResult(
-    check ?? {},
+    { name: typeof check?.name === 'string' ? check.name : position, kind: check?.kind },
     'fail',
-    `check kind must be a string, got ${shown === undefined ? 'undefined' : shown}`
+    `check kind must be a string, got ${shown} (${position})`
     + ' — a manifest entry this gate cannot understand is a configuration fault, not a check.'
     + ' Fix the `kind` in teammates.gate.json.',
   )
@@ -974,12 +990,26 @@ const CONFLICT_SKIP = 'the phase does not merge cleanly; no merged tree exists t
 
 async function runCheckList(checks, ctx, commandCwd, mergeConflicted) {
   const results = []
+  // Counted rather than `checks.entries()`, which would narrow this loop from any iterable to an
+  // array and yield `[value, value]` for a Set.
+  let index = -1
   for (const check of checks) {
-    // FIRST, before any decision is taken from `kind` — including the merge-conflict skip below,
-    // which a non-string kind slips past on its strict comparison and which would otherwise let
-    // an unusable entry be reported as a benign skip. See `hasUsableKind`.
+    index += 1
+    // BEFORE THE RUNNER LOOKUP at the bottom of this loop, which is the ordering that carries the
+    // security property: that lookup coerces (`RUNNERS[['command']]` resolves to a real runner),
+    // so an unusable kind reaching it executes. That ordering is pinned: delete this block and the
+    // array-spelled execution and false-PASS tests in tests/gate-runner.test.mjs both fail.
+    //
+    // Its order relative to the merge-conflict skip below matters too, but NOT for the reason a
+    // previous version of this comment gave. That version said a non-string kind "slips past" the
+    // skip and could be reported as a benign skip; it cannot, because the skip compares
+    // `kind === 'command'` strictly and no non-string value satisfies a strict comparison. What
+    // the skip actually does is dereference `check.kind` UNGUARDED, so a `null` or `undefined`
+    // entry — both of which `teammates.gate.json` can express — throws a TypeError out of this
+    // loop and out of `runChecks`, recording no verdict at all. Pinned: move this block below the
+    // skip and the nameless-entry test fails on that throw. See `hasUsableKind`.
     if (!hasUsableKind(check)) {
-      results.push(malformedKindResult(check))
+      results.push(malformedKindResult(check, index))
       continue
     }
     // A `command` check exists to answer "does the integrated tree work". Without a merged

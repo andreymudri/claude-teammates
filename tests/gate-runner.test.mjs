@@ -1158,6 +1158,45 @@ test('string kinds are unaffected by the type test', async () => {
   assert.equal(aggregateVerdict(results).optionalFailed.includes('advisory'), true)
 })
 
+// The diagnosis has to name the entry the operator must go and fix. A malformed entry frequently
+// carries no `name` — `null` and a bare string are both reachable from a hand-written manifest —
+// and `name` is the only field `aggregateVerdict` reports, so two such entries both surfaced as
+// `{"failed":[null]}` under a message telling the operator to fix a `kind` on an entry they had
+// no way to identify. Position in the phase's check list is what distinguishes them.
+test('a nameless malformed entry is reported by its position in the check list', async () => {
+  const results = await runChecks([null, { name: 'ok', kind: 'command', run: 'node -e ""' }, 'just a string'], {
+    cwd: process.cwd(),
+  })
+  assert.equal(results[0].status, 'fail')
+  assert.equal(results[2].status, 'fail')
+  // Distinct, and each one points at the entry it came from — index 0 and index 2, not 0 and 1.
+  assert.match(results[0].output, /entry #0 in this phase's check list/)
+  assert.match(results[2].output, /entry #2 in this phase's check list/)
+  // ...and the verdict line alone locates them, which is where `[null, null]` was printed.
+  const { failed } = aggregateVerdict(results)
+  assert.deepEqual(failed, ["entry #0 in this phase's check list", "entry #2 in this phase's check list"])
+})
+
+// An entry that DOES have a name keeps it — the position is added to the message, not substituted
+// for the name, so an operator reading a named failure is not sent hunting by index instead.
+test('a named malformed entry keeps its name and still reports its position', async () => {
+  const [result] = await runChecks([{ name: 'lint', kind: ['command'], run: 'node -e ""' }], {})
+  assert.equal(result.name, 'lint')
+  assert.match(result.output, /entry #0 in this phase's check list/)
+})
+
+// The `JSON.stringify` fallback in `malformedKindResult`. Unreachable from `teammates.gate.json`,
+// which is `JSON.parse`-only — every shape that file can express serialises. It guards the
+// EXPORTED api, which `cli.mjs` and these tests call with real JavaScript values, so it is pinned
+// through that door: without the `catch`, this throws out of `runChecks` and no verdict is
+// recorded at all, which is the failure mode the per-check `try` further down exists to prevent.
+test('a kind JSON cannot serialise is still reported rather than thrown', async () => {
+  const results = await runChecks([{ name: 'bigint', kind: 10n }], {})
+  assert.equal(results[0].status, 'fail')
+  assert.equal(results[0].optional, false)
+  assert.match(results[0].output, /kind must be a string, got 10/)
+})
+
 // `describePendingCheck` is exported and reachable independently of `runChecks`, and it computes
 // `optional` from the same non-coercing Set. A non-string kind must be non-optional there too.
 test('describePendingCheck forces a non-string kind non-optional', () => {

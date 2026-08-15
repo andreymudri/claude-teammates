@@ -914,7 +914,9 @@ const TASK_SCOPED_KINDS = new Set(['fileset', 'merge'])
 // all still populate a field `init-run` could not — while making both failures unreachable.
 //
 // THE RULE IS NOT ENFORCED BY THIS COMMENT. It is enforced by `writePlan`, which is the only
-// function in this file that writes plan.json, and by a source test that counts those call sites.
+// function in this file that writes plan.json, and — for the specific mistake that caused those
+// regressions, a second writer added inline — by the source scan in tests/cli.test.mjs. That scan
+// has limits, stated at the pin itself; read them there before relying on it.
 // This paragraph used to end "there is no exception anywhere", and that sentence was false in
 // three consecutive rounds — `rebuild-state`, then `init-run`, each an inline writer nobody had
 // listed. Enumerating writers in prose is how that kept happening; the enumeration is now the code.
@@ -937,8 +939,22 @@ const TASK_SCOPED_KINDS = new Set(['fileset', 'merge'])
 // rounds and been false in three of them, each time through a writer the comment did not know
 // about — first `rebuild-state`, then `init-run`, which had been an inline writer the whole time.
 // A rule that depends on every future author noticing a comment is not a rule, so there is exactly
-// one `writeState(root, runId, 'plan', …)` call in this file and a source-level test that counts
-// them. Add a second and that test fails; route it through here and the rule is inherited.
+// one `writeState(root, runId, 'plan', …)` call in this file, and a source-level test parses this
+// file's `writeState`, `writeFile` and `rename` calls and requires that to stay true.
+//
+// WHAT THAT TEST IS WORTH, stated precisely, because an earlier version of this paragraph promised
+// more than it delivered and a reviewer defeated it three ways in an afternoon. It reads source
+// text. It refuses a second `writeState(…, 'plan', …)` in either quoting, with nested commas in
+// earlier arguments, awaited or not, through a namespace import, and it refuses a `writeFile` or
+// `rename` naming plan.json — every one of those verified by applying the mutation and watching it
+// fail. It also refuses a `writeState` call whose state-file argument is a variable rather than a
+// literal, which is the only reason `const planKind = 'plan'` cannot walk past it.
+//
+// It does NOT see a plan write routed through another module, a path built at runtime, or a callee
+// resolved by computation. It is a tripwire against the accident that actually happened three
+// times, not a proof. The real coverage of fill-if-absent is behavioural and lives in the tests
+// above the pin, which drive the CLI and assert the recorded branch survives; if you are changing
+// this function, those are the ones to trust.
 //
 // `planFields === null` means "keep whatever is on disk and only reconsider the run branch", which
 // is what `rememberRunBranch` wants; anything else replaces the plan's own fields.
