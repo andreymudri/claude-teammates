@@ -96,6 +96,11 @@ const locateStep = (task, runId) => (runId ? [
 //   0  the task passes. The brief's own invocation carries no `--enforcement-only`, so it is
 //      also marked done in status.json; the hook's invocation does carry it and deliberately
 //      does not mark anything, because a stopping teammate may be mid-work.
+//
+//      UNREACHABLE on some manifests, including this repository's own: it declares
+//      `{"name":"review","kind":"agent"}`, no runner answers to `agent`, so that check is a
+//      non-optional `pending` on every invocation and the verdict is never PASS. The exit-4 row
+//      says so rather than leaving a teammate to conclude its compliant work was rejected.
 //   1  the gate passed but status.json is missing or does not list the task — bookkeeping
 //   2  TWO unrelated things: teammates.gate.json is present and MALFORMED (configuration), or
 //      the invocation itself was rejected — a missing required argument, an unknown flag, a
@@ -142,28 +147,37 @@ const verifyStep = (task, runId, planPath) => (runId && planPath ? [
   'ROOT must be the MAIN worktree, which is what that command computes — run from inside your',
   'own worktree the CLI would resolve the run branch to your task branch and answer the wrong',
   'question. Read the exit code first: 3 is the only one that is a verdict about YOUR work.',
-  '  exit 0 — your task passes. Return "done".',
+  '  exit 0 — your task passes. Return "done". Note that a manifest declaring a check this CLI',
+  '           has no runner for can never reach 0; see exit 4.',
   '  exit 3 — a check scoped to your task REJECTED it: your branch changed files outside your',
   '           declared set, your branch does not exist or is empty, or your work does not merge.',
   '           That is your work, not a configuration problem. Fix exactly the checks it names,',
   '           then run the command again. Returning "done" on this wastes the phase: the phase',
   '           gate recomputes the same thing and will reject it.',
   '  exit 4 — no check scoped to your task rejected you. Read the names it printed; they are not',
-  '           all the same kind of problem:',
+  '           all the same kind of problem, and only the last one is yours:',
   '             "ownership" — every commit on the run branch, and whether the MAIN worktree is',
   '                clean. Neither is yours. Do NOT clean the main worktree, and do NOT',
   '                cherry-pick another task\'s commit onto your branch to make it go away —',
   '                that lands their files on your branch and fails your own file set.',
+  // A check with no runner is reported under this exact marker by `complete`. It needed its own
+  // row: routed in with "any other check", a teammate is told to fix a review check it cannot
+  // run, and this repository's own manifest declares one, so that is the DEFAULT outcome.
+  '             "could not run:" — a check whose kind this CLI has no runner for, such as an',
+  '                "agent" review check, or a mistyped kind in the manifest. It never executed.',
+  '                Nothing on your branch can change it, so do not try to make it pass.',
   // Each quoted marker stays whole on its own line. Wrapped mid-phrase, the very string a
   // teammate would search its own output for does not appear in the brief that told it to.
   '             "no gate manifest", "cannot verify completion",',
   '             "no task ' + task.id + ' in the plan", or a merge preview that could not be',
   '                built — the run cannot be verified from here. That is the run',
   '                configuration, not your work.',
-  '             any other check, including this project\'s test command — the MERGED tree failed',
-  '                it. That one you do fix: correct it and run the command again.',
-  '           For the first two, quote what it printed in your summary and proceed.',
-  '           Do not loop on it, and do not report "blocked" for it when the work is finished.',
+  '             a check that RAN and failed, including this project\'s test command — the MERGED',
+  '                tree failed it. That one you do fix: correct it and run the command again.',
+  '           For everything except that last one, quote what it printed in your summary and',
+  '           proceed. Do not loop on it, and do not report "blocked" when the work is finished.',
+  '           A fully compliant task can legitimately exit 4 and never 0 — on a manifest that',
+  '           declares a check this CLI cannot run, 4 with no other complaint IS your pass.',
   '  exit 2 — read the printed line here too: two unrelated things share this code.',
   '           Output naming an argument means YOUR INVOCATION was wrong, not the configuration:',
   '             "missing required argument:"   "unsupported flag spelling:"',

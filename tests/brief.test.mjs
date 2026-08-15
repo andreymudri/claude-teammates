@@ -507,6 +507,13 @@ test('the brief documents the exit codes scripts/cli.mjs actually returns', asyn
   assert.match(rows.get(rejected), /REJECTED it/)
   assert.match(rows.get(rejected), /not a configuration problem/)
   assert.match(rows.get(cannotVerify), /no check scoped to your task rejected you/)
+
+  // Exit 0 is UNREACHABLE on a manifest that declares a check this CLI has no runner for — such a
+  // check is a non-optional pending on every invocation, so the verdict is never PASS. This
+  // repository's own manifest is one, so a teammate following the brief here will never see 0 and
+  // must not read its absence as a rejection. Both rows have to say so or the table is a trap.
+  assert.match(rows.get(0), /never reach 0/)
+  assert.match(rows.get(cannotVerify), /4 with no other complaint IS your pass/)
 })
 
 test('the brief attributes a run-wide check to the code that does not block', async () => {
@@ -537,6 +544,14 @@ test('the brief attributes a run-wide check to the code that does not block', as
   // tests the merged tree. A teammate told "not your work" here returns done on a red suite.
   assert.match(rows.get(cannotVerify), /this project's test command/)
   assert.match(rows.get(cannotVerify), /That one you do fix/)
+  // ...and equally must not sweep a check that NEVER RAN into that same "you do fix" bucket.
+  // `complete` reports one under this exact marker, and this repository's own manifest declares
+  // an `agent` review check, so it is the default outcome rather than an edge case.
+  assert.match(rows.get(cannotVerify), /"could not run:"/)
+  assert.match(rows.get(cannotVerify), /do not try to make it pass/i)
+  // The distinction is load-bearing, so the row must say the two are different things: a check
+  // that ran and failed is qualified as such, not left as a bare "any other check".
+  assert.match(rows.get(cannotVerify), /a check that RAN and failed/)
   // Every quoted marker the row tells a teammate to look for must appear WHOLE on one line —
   // wrapped across two, the string it would search its own output for is not in the brief.
   for (const marker of ['"no gate manifest"', '"cannot verify completion"', `"no task ${TASK.id} in the plan"`]) {
