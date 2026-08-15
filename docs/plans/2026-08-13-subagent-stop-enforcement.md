@@ -628,8 +628,46 @@ with this plugin installed, so the no-op path must be cheap.
 - Test: `tests/adversarial.test.mjs`
 - Modify: `scripts/brief.mjs`
 - Test: `tests/brief.test.mjs`
+- Modify: `scripts/gate-runner.mjs`
+- Test: `tests/gate-runner.test.mjs`
 
 **Depends:** T2, T3
+
+### Step 3d: a check `kind` must be a string before it selects a runner
+
+Added in phase 2 review, after a reviewer executed it end to end. `--enforcement-only` is **not** the
+barrier the handler's comment claims, because a manifest can spell a kind as a JSON **array**:
+
+```
+['command'] !== 'command'              → true    survives the enforcement-only filter
+RUNNERS[['command']]                   → runner  executes; JS coerces on property lookup
+Object.hasOwn(RUNNERS, ['command'])    → true    the guard that looks like a type check is not one
+new Set(['fileset']).has(['fileset'])  → false   ALWAYS_ENFORCED_KINDS does not coerce
+```
+
+Two reachable consequences, both measured against the merged tree:
+
+- `{"kind": ["command"], ...}` runs an arbitrary shell command through the stop hook — which fires
+  for **every subagent on the machine** — with `cwd` set to the main worktree, and returns exit 3,
+  the one code the handler blocks on. The manifest is `teammates.gate.json` under the main
+  worktree, writable by any teammate, so this needs no other foothold.
+- `{"kind": ["fileset"], "optional": true}` runs the **real** fileset check and then does not block,
+  because `ALWAYS_ENFORCED_KINDS.has` does not coerce while the runner lookup does. Measured verdict:
+  `{"verdict":"PASS","failed":[],"optionalFailed":["fileset"]}` — **a forged manifest producing a
+  false gate PASS.** That falsifies the bound stated in
+  `docs/specs/2026-08-10-agent-teams-adoption-design.md`, which says no forgery under `.teammates/`
+  reaches a false PASS; the manifest is a different file with the same writability.
+
+**Fix at the runner lookup, not at the filter.** `scripts/cli.mjs`'s `--enforcement-only` filter is
+one of several call sites; a filter-only fix leaves the false-PASS path open. Require
+`typeof check.kind === 'string'` where the runner is selected, and refuse a non-string kind loudly
+rather than skipping it silently — a manifest that cannot be understood is a configuration fault,
+not a pass.
+
+`tests/gate-runner.test.mjs:1067` shows this class was considered: it pins `'toString'`,
+`'constructor'`, `'valueOf'` and `'__proto__'` — all **strings**. The array spelling is the one JSON
+can express and the one nothing covered. Pin the array spelling for every kind the manifest accepts,
+and pin that a non-string kind cannot reach a runner by any route.
 
 `tests/adversarial.test.mjs` is in the set because **step 3b changes an exit code**, and an exit
 code is pinned by every test that asserts it. `tests/adversarial.test.mjs:195` asserts
