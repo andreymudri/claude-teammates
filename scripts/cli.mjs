@@ -4,7 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parsePlan } from './plan-parser.mjs'
 import { assignPhases } from './phases.mjs'
-import { readState, writeState, claimTask, releaseClaim, readFixRounds, recordFixRound, runDir, writeLocation, worktreeKey } from './state.mjs'
+import { readState, writeState, claimTask, releaseClaim, readFixRounds, recordFixRound, runDir, writeLocation, worktreeKey, isLocalAbsolute } from './state.mjs'
 import { composeBrief } from './brief.mjs'
 import { inferGateConfig, checksForPhase, fixRoundsForPhase, previewLinks } from './gate-config.mjs'
 import {
@@ -711,7 +711,60 @@ async function worktreeTopLevel(root) {
   return topLevel
 }
 
-async function mainWorktreeRoot(root) {
+// WHAT KIND OF WORKTREE IS THIS, decided structurally rather than by asking git to list them.
+//
+// A `.git` FILE is plain text a teammate can write, and four hand-written files — none of them
+// inside `.git` — are enough to make `rev-parse` report a `--show-toplevel` and a `--git-common-dir`
+// that both look like this repository's:
+//
+//     <main>/packages/app/.git            "gitdir: <main>/.teammates/fakewt"
+//     <main>/.teammates/fakewt/commondir  "<main>/.git"
+//     <main>/.teammates/fakewt/gitdir     "<main>/packages/app/.git"
+//     <main>/.teammates/fakewt/HEAD       "ref: refs/heads/master"
+//
+// `.teammates/` is gitignored, so `git status --untracked-files=all` shows nothing. A record filed
+// for that path then blocks every unrelated agent whose cwd is inside it.
+//
+// The discriminator is CONTAINMENT of the git dir, measured on all four shapes in a real
+// repository before it was written here:
+//
+//     cwd                          commonDir === gitDir   dirname(dirname(gitDir)) === commonDir
+//     main worktree root           true                   false
+//     the plant                    false                  false
+//     real linked worktree         false                  true
+//     linked worktree subdirectory false                  true
+//
+// A genuine linked worktree's git dir is `<commonDir>/worktrees/<name>`; the plant's is wherever
+// its author put it, and no amount of writing files outside `.git` moves it inside `<commonDir>`.
+//
+// KEEP THIS EXPRESSION AND THIS NORMALISATION IDENTICAL to the SubagentStop handler's. The two
+// files decide the same question about the same paths, and every divergence between them in this
+// phase has produced a defect. `path.resolve` is the normalisation: it is what makes the win32
+// separator forms comparable, and git's `--path-format=absolute` output forward-slashed.
+const CLASSIFY_MAIN = 'main'
+const CLASSIFY_LINKED = 'linked'
+const CLASSIFY_FOREIGN_REPO = 'foreign-repo'
+const CLASSIFY_NOT_A_WORKTREE = 'not-a-worktree'
+
+async function classifyWorktree(candidate, expectedCommonDir) {
+  const at = async (arg) => {
+    const { code, stdout, stderr } = await defaultGitExec(['rev-parse', '--path-format=absolute', arg], candidate)
+    if (code !== 0) throw new GitError(`git rev-parse ${arg} failed: ${stderr.trim() || `exit ${code}`}`)
+    const value = stdout.replace(/\n$/, '').replace(/[\\/]+$/, '')
+    if (value === '') throw new GitError(`git rev-parse ${arg} printed nothing`)
+    return path.resolve(value)
+  }
+  const commonDir = await at('--git-common-dir')
+  const gitDir = await at('--git-dir')
+  if (commonDir !== path.resolve(expectedCommonDir)) return CLASSIFY_FOREIGN_REPO
+  if (commonDir === gitDir) return CLASSIFY_MAIN
+  if (path.resolve(path.dirname(path.dirname(gitDir))) === commonDir) return CLASSIFY_LINKED
+  return CLASSIFY_NOT_A_WORKTREE
+}
+
+// The repository's shared git directory, normalised the same way `classifyWorktree` normalises,
+// so the two can be compared without either one re-deriving it.
+async function gitCommonDir(root) {
   const { code, stdout, stderr } = await defaultGitExec(['rev-parse', '--path-format=absolute', '--git-common-dir'], root)
   if (code !== 0) {
     throw new GitError(`git rev-parse --git-common-dir failed: ${stderr.trim() || `exit ${code}`}`)
@@ -720,7 +773,11 @@ async function mainWorktreeRoot(root) {
   // separators are stripped so `dirname` steps out of `.git` rather than out of an empty tail.
   const commonDir = stdout.replace(/\n$/, '').replace(/[\\/]+$/, '')
   if (commonDir === '') throw new GitError('git rev-parse --git-common-dir printed nothing')
-  return path.dirname(commonDir)
+  return path.resolve(commonDir)
+}
+
+async function mainWorktreeRoot(root) {
+  return path.dirname(await gitCommonDir(root))
 }
 
 // Read from git at the anchor, never from the working tree. `gate` and `complete` both read the
@@ -811,24 +868,52 @@ const TASK_SCOPED_KINDS = new Set(['fileset', 'merge'])
 // going to a stdout the handler discards. A guard whose input is wrong by default is worse than
 // no guard: it looks like enforcement and is not.
 //
-// So the value is refreshed from every LIFECYCLE command that successfully derives a context.
-// `derive` already refuses when the checked-out branch IS the base branch, so any branch reaching
-// here has passed that test — which is what makes a derived context trustworthy enough to record
-// from, and why `baseBranch` is re-checked here rather than assumed.
+// FILL-IF-ABSENT, NEVER OVERWRITE. This is the whole safety property and it is easy to get wrong,
+// because `derive` proves less than it looks like it proves: it establishes that the checked-out
+// branch is not the BASE branch, and nothing more. It does not establish that it is THIS RUN's
+// branch. An operator who runs `gate` from `feature/foo` gets a failing gate — and, if this
+// overwrote, a plan.json now naming `feature/foo`. Both directions then break:
 //
-// `complete` deliberately does NOT call this. It is the consumer, and a consumer that records
-// what it is about to compare against approves itself: running it from the wrong branch would
-// write that branch in and then match it.
+//   - back on the real run branch the guard no longer matches, so `complete --enforcement-only`
+//     goes 3 -> 4 and the hook allows every stop for the rest of the dispatch window (`complete`
+//     never refreshes, so nothing repairs it until a lifecycle command runs again);
+//   - and while the wrong checkout persists, the guard MATCHES it, so a compliant teammate is
+//     blocked over a sibling's landed file — which violates the invariant this guard is built
+//     around, that it may only ever turn a block into a non-block.
 //
-// Idempotent, and writes only on a real change, so the ordinary case adds one read.
+// Filling only an absent value keeps every repair — `workflow`, `gate`, `finish`, `prune-run` and
+// `rebuild-state` all still populate a field `init-run` could not — while making both failures
+// unreachable, because no command can ever change a value that is already there.
+//
+// The commands that call this are named deliberately and are NOT "everything that derives":
+// `workflow` (before dispatch), `gate`, `finish` and `prune-run` (after a successful derive), and
+// `rebuild-state` (which writes the field inline, as part of rebuilding the plan). They are the
+// orchestrator's lifecycle commands, run from the main worktree on the run branch. `doctor`,
+// `liveness` and `plan-drift` derive too and deliberately do not write: they are diagnostics, and
+// a diagnostic that mutates run state is a surprise. `complete` derives and must never write —
+// it is the CONSUMER, and a consumer that records what it is about to compare against approves
+// itself.
+//
+// Never throws. `plan.json` is teammate-writable, and a corrupt one must not crash the command
+// that happened to refresh a diagnostic field; each caller has its own fail-closed handling for
+// state it actually depends on.
 async function rememberRunBranch(root, runId, runBranch, baseBranch) {
   if (typeof runBranch !== 'string' || runBranch === '') return false
   if (typeof baseBranch !== 'string' || baseBranch === '') return false
   if (runBranch === baseBranch) return false
-  const plan = await readState(root, runId, 'plan')
-  if (!plan || plan.runBranch === runBranch) return false
-  await writeState(root, runId, 'plan', { ...plan, runBranch })
-  return true
+  try {
+    const plan = await readState(root, runId, 'plan')
+    if (!plan) return false
+    // Present and usable: leave it alone. A value equal to the base branch is not usable — no run
+    // branch can equal it, and every consumer already reads it as absent — so that one is the
+    // single case where a write replaces an existing value, and it can only improve it.
+    if (typeof plan.runBranch === 'string' && plan.runBranch !== baseBranch) return false
+    if (plan.runBranch === runBranch) return false
+    await writeState(root, runId, 'plan', { ...plan, runBranch })
+    return true
+  } catch {
+    return false
+  }
 }
 
 // A failing `merge` means two opposite things and they are told apart by ONE field.
@@ -1778,37 +1863,50 @@ export async function runCli(argv, io = { out: console.log }) {
         ? flags.worktree
         : await worktreeTopLevel(root)
 
-      // Compared through `worktreeKey`, which is the store's own normalisation and the same
-      // function the reader will hash the hook's cwd with — comparing raw strings would accept a
-      // spelling that then addresses a different record.
-      const key = worktreeKey(worktree)
+      // The path is checked for being nameable BEFORE git is asked about it. `classifyWorktree`
+      // spawns git with the candidate as its cwd, so a relative or non-existent path fails as
+      // `spawn git ENOENT` — a message that names neither the path nor what was wrong with it.
+      // The store applies the same predicate when it writes; this only moves the diagnosis
+      // earlier, to where the value can still be quoted back.
+      if (!isLocalAbsolute(worktree)) {
+        throw new Error(`${JSON.stringify(printable(worktree))} is not a path a record can name`)
+      }
 
-      // NO RECORD MAY NAME THE MAIN WORKTREE, however the path was arrived at. It belongs to no
-      // task, and it is where everything that is not a teammate runs — reviewers, helpers, the
-      // orchestrator's own agents. A record filed for it blocks all of them and hands each an
-      // implementer's remediation naming a ref that is not theirs.
+      // A RECORD MAY NAME ONLY A LINKED WORKTREE OF THIS REPOSITORY, however the path was arrived
+      // at — explicit `--worktree` or derived. The main worktree belongs to no task and is where
+      // everything that is not a teammate runs; anything else is not this run's to name.
       //
-      // Applied to the DERIVED path too, not only to an explicit --worktree. Guarding the flag
-      // alone left the invocation the brief actually renders — `locate --run X --task Y`, run in
-      // the main worktree — filing the identical record and exiting 0, so the check refused the
-      // spelling nobody uses and allowed the one everybody does.
-      if (key === worktreeKey(mainRoot)) {
+      // Classified from the CANDIDATE's own git dirs, not from `git worktree list`. The listing
+      // was the previous check and it only ever ran for an explicit flag, so the derived path —
+      // the invocation the brief actually renders — went unchecked; and a `.git` FILE is plain
+      // text, so a planted one produces a `--show-toplevel` inside the main worktree that the
+      // listing never mentions and no `git status` reveals. See `classifyWorktree`.
+      let shape
+      try {
+        shape = await classifyWorktree(worktree, await gitCommonDir(root))
+      } catch (err) {
+        // git's own failure, re-thrown with the path it was asked about — otherwise a directory
+        // outside any repository reports only that some rev-parse exited non-zero.
+        throw new Error(`${JSON.stringify(printable(worktree))} could not be identified as a worktree: ${err.message}`)
+      }
+      if (shape === CLASSIFY_MAIN) {
         throw new Error(
           `${JSON.stringify(printable(worktree))} is the main worktree, which belongs to no task`
           + ' — run this from inside your own worktree',
         )
       }
-
-      // The rest is about an explicit --worktree only, which is an AIMED WRITE: unvalidated it
-      // takes any path at all. A derived path cannot fail this — `rev-parse --show-toplevel`
-      // returns a worktree of this repository by construction — so asking git for the list again
-      // would be a wasted subprocess on the common path.
-      if (typeof flags.worktree === 'string') {
-        const known = (await git.worktrees()).some((w) => worktreeKey(w.path) === key)
-        if (!known) {
-          throw new Error(`--worktree ${JSON.stringify(printable(worktree))} is not a worktree of this repository`)
-        }
+      if (shape !== CLASSIFY_LINKED) {
+        throw new Error(
+          `${JSON.stringify(printable(worktree))} is not a linked worktree of this repository`
+          + ' — its git directory is not contained in this repository\'s',
+        )
       }
+
+      // Compared through `worktreeKey`, which is the store's own normalisation and the same
+      // function the reader will hash the hook's cwd with — comparing raw strings would accept a
+      // spelling that then addresses a different record.
+      const key = worktreeKey(worktree)
+      if (key === '') throw new Error(`${JSON.stringify(printable(worktree))} is not a path a record can name`)
 
       // The harness checks out `worktree-agent-<hash>`, and a teammate that never created its
       // task branch legitimately records that. The store constrains only the type and length —
@@ -1882,21 +1980,6 @@ export async function runCli(argv, io = { out: console.log }) {
     const planMarkdown = await planAtAnchor(root, planPath, flags, io)
     if (planMarkdown === PLAN_READ_REJECTED) return 2
 
-    // The EARLIEST repair, and the one that matters most: this runs on the run branch immediately
-    // before a phase is dispatched, so it can fix the guard's input before the teammates it is
-    // about to dispatch ever stop. `gate` only reaches it after they have finished.
-    //
-    // Wrapped and discarded on failure: dispatching a phase must not fail because a diagnostic
-    // field could not be refreshed.
-    try {
-      const branchGit = createGit({ cwd: root })
-      await rememberRunBranch(
-        root, runId,
-        await branchGit.currentBranch(),
-        await resolveBaseBranch(branchGit, flags.base),
-      )
-    } catch { /* the field stays as it was; every consumer treats it as cannot-confirm */ }
-
     // `init-run` already applied any configured implementer tier, so this normally changes
     // nothing. It stays because the config can change between the two commands, and a per-task
     // `**Model:**` stays authoritative over both — it names a specific task the operator
@@ -1927,6 +2010,27 @@ export async function runCli(argv, io = { out: console.log }) {
       }
     }
     if (retier) await writeState(root, runId, 'plan', plan)
+
+    // AFTER the retier write, and that ordering is the whole point. `plan` was read into memory
+    // above; refreshing before this line wrote the run branch to disk and then this line wrote the
+    // stale in-memory object back over it — so with a tier configured, the field this command
+    // exists to populate came out `undefined`, and only in that configuration. `rememberRunBranch`
+    // re-reads the file, so running it last picks up the retier and cannot be clobbered.
+    //
+    // This is the EARLIEST repair: it runs on the run branch immediately before a phase is
+    // dispatched, so the guard's input is right before the teammates it dispatches can stop.
+    // `gate` only reaches it after they have finished.
+    //
+    // Wrapped and discarded on failure: dispatching a phase must not fail because a diagnostic
+    // field could not be refreshed.
+    try {
+      const branchGit = createGit({ cwd: root })
+      await rememberRunBranch(
+        root, runId,
+        await branchGit.currentBranch(),
+        await resolveBaseBranch(branchGit, flags.base),
+      )
+    } catch { /* the field stays as it was; every consumer treats it as cannot-confirm */ }
 
     // Coupling is recomputed here rather than read from anywhere: it is a statistic about the
     // repository as it stands, and a stored one would be a second source of truth about a number
@@ -3184,6 +3288,13 @@ export async function runCli(argv, io = { out: console.log }) {
     if (typeof runId === 'string') {
       try {
         status = await readState(root, runId, 'status')
+        // plan.json is read here too, and only to be VALIDATED. It is as agent-writable as
+        // status.json, and the run-branch refresh above reads it — a refresh that must never be
+        // what decides anything, so it swallows its own errors. Without this line a corrupt
+        // plan.json therefore produced no diagnosis at all from `gate`: the refresh ignored it and
+        // nothing else looked. Routed through the same fail-closed path as status.json, so
+        // unreadable run state is a gate failure with parseable JSON on stdout, not a footnote.
+        await readState(root, runId, 'plan')
       } catch (err) {
         stateError = err.message
       }

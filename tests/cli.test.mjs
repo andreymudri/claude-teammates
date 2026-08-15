@@ -8917,18 +8917,133 @@ test('locate refuses a --worktree that is the main worktree or not a worktree at
     assert.match(lines.join('\n'), /main worktree/)
     assert.equal(await findTaskByWorktree(root, root), null, 'nothing may be filed for the main worktree')
 
-    // An ordinary directory that is inside the repository but is not a worktree of it.
-    const notAWorktree = path.join(root, 'just-a-dir')
-    await mkdir(notAWorktree, { recursive: true })
+    // An ordinary directory INSIDE the main worktree. git resolves it to the main worktree, and
+    // that is the honest diagnosis — a subdirectory of the main worktree is part of it — so this
+    // is the main-worktree refusal, not a separate "not a worktree" one.
+    const insideMain = path.join(root, 'just-a-dir')
+    await mkdir(insideMain, { recursive: true })
     lines.length = 0
-    assert.equal(await runCli(['locate', '--run', 'r1', '--task', 'T1', '--worktree', notAWorktree, '--root', wt], io), 2)
-    assert.match(lines.join('\n'), /not a worktree of this repository/)
-    assert.equal(await findTaskByWorktree(root, notAWorktree), null)
+    assert.equal(await runCli(['locate', '--run', 'r1', '--task', 'T1', '--worktree', insideMain, '--root', wt], io), 2)
+    assert.match(lines.join('\n'), /main worktree/)
+    assert.equal(await findTaskByWorktree(root, insideMain), null)
+
+    // A directory in no repository at all. git cannot answer, and the refusal must still name the
+    // path rather than surfacing a bare spawn or rev-parse error.
+    const outside = await mkdtemp(path.join(tmpdir(), 'tm-outside-'))
+    try {
+      lines.length = 0
+      assert.equal(await runCli(['locate', '--run', 'r1', '--task', 'T1', '--worktree', outside, '--root', wt], io), 2)
+      assert.match(lines.join('\n'), /could not be identified as a worktree|not a linked worktree/)
+      assert.ok(lines.join('\n').includes(path.basename(outside)), 'the refusal does not name the path')
+      assert.equal(await findTaskByWorktree(root, outside), null)
+    } finally {
+      await rm(outside, { recursive: true, force: true })
+    }
 
     // The honest use is unaffected: a real linked worktree of this repository still records.
     lines.length = 0
     assert.equal(await runCli(['locate', '--run', 'r1', '--task', 'T1', '--worktree', wt, '--root', wt], io), 0, lines.join('\n'))
     assert.equal((await findTaskByWorktree(root, wt))?.taskId, 'T1')
+    g(['worktree', 'remove', '--force', wt])
+  })
+})
+
+// A `.git` FILE is plain text a teammate can write. Four hand-written files — NONE of them inside
+// `.git` — make `rev-parse` report a `--show-toplevel` inside the main worktree and this
+// repository's own `--git-common-dir`, while `git worktree list` never mentions it and
+// `git status` shows nothing (`.teammates/` is gitignored). A record filed for that path blocks
+// every unrelated agent whose cwd is inside it.
+//
+// The discriminator is containment of the GIT DIR, measured on all four shapes before being
+// written: a genuine linked worktree's git dir is `<commonDir>/worktrees/<name>`; a plant's is
+// wherever its author put it.
+async function plantFakeWorktree(root) {
+  const planted = path.join(root, 'packages', 'app')
+  const fake = path.join(root, '.teammates', 'fakewt')
+  await mkdir(planted, { recursive: true })
+  await mkdir(fake, { recursive: true })
+  const posix = (p) => p.split(path.sep).join('/')
+  await writeFile(path.join(planted, '.git'), `gitdir: ${posix(fake)}\n`, 'utf8')
+  await writeFile(path.join(fake, 'commondir'), `${posix(path.join(root, '.git'))}\n`, 'utf8')
+  await writeFile(path.join(fake, 'gitdir'), `${posix(path.join(planted, '.git'))}\n`, 'utf8')
+  await writeFile(path.join(fake, 'HEAD'), 'ref: refs/heads/main\n', 'utf8')
+  return planted
+}
+
+test('locate refuses a planted .git file that mimics a worktree of this repository', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const { findTaskByWorktree } = await stateModule()
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const planted = await plantFakeWorktree(root)
+
+    // The plant really does look like this repository to git — otherwise this test would pass
+    // for the wrong reason.
+    assert.match(
+      g(['-C', planted, 'rev-parse', '--path-format=absolute', '--git-common-dir']).trim().toLowerCase(),
+      /\.git$/,
+    )
+    assert.equal(
+      g(['worktree', 'list', '--porcelain']).includes('packages'),
+      false,
+      'the plant is registered as a worktree, so this is not the case being tested',
+    )
+
+    // Derived path: run inside the plant, no --worktree at all.
+    lines.length = 0
+    assert.equal(await runCli(['locate', '--run', 'r1', '--task', 'T1', '--root', planted], io), 2, lines.join('\n'))
+    assert.match(lines.join('\n'), /not a linked worktree of this repository/)
+    assert.equal(await findTaskByWorktree(root, planted), null)
+
+    // ...and aimed explicitly at it from a real worktree, which is the other way in.
+    const wt = path.join(root, 'wt-T1')
+    g(['worktree', 'add', '--quiet', '-b', 'teammates/r1/T1', wt])
+    lines.length = 0
+    assert.equal(
+      await runCli(['locate', '--run', 'r1', '--task', 'T1', '--worktree', planted, '--root', wt], io),
+      2,
+      lines.join('\n'),
+    )
+    assert.equal(await findTaskByWorktree(root, planted), null)
+    g(['worktree', 'remove', '--force', wt])
+  })
+})
+
+// A linked worktree of a DIFFERENT repository passes the containment test on its own terms — its
+// git dir really is inside its own repository's — so containment alone is not enough. The record
+// must belong to THIS repository, or one run's teammate can be made to answer for another's
+// directory. Nothing exercised that until this test, and the check was deletable with the suite
+// green.
+test('locate refuses a real linked worktree that belongs to another repository', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const { findTaskByWorktree } = await stateModule()
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const wt = path.join(root, 'wt-T1')
+    g(['worktree', 'add', '--quiet', '-b', 'teammates/r1/T1', wt])
+
+    // A second, entirely separate repository, with a genuine linked worktree of its own.
+    const other = await mkdtemp(path.join(tmpdir(), 'tm-other-'))
+    try {
+      const og = (args) => execFileSync('git', args, { cwd: other, encoding: 'utf8' })
+      og(['init', '--quiet', '--initial-branch=main'])
+      og(['config', 'user.email', 'o@example.com'])
+      og(['config', 'user.name', 'O'])
+      await writeFile(path.join(other, 'x.txt'), 'x\n', 'utf8')
+      og(['add', '.'])
+      og(['commit', '--quiet', '-m', 'initial'])
+      const otherWt = path.join(other, 'wt')
+      og(['worktree', 'add', '--quiet', '-b', 'other-branch', otherWt])
+
+      lines.length = 0
+      const code = await runCli(
+        ['locate', '--run', 'r1', '--task', 'T1', '--worktree', otherWt, '--root', wt],
+        io,
+      )
+      assert.equal(code, 2, lines.join('\n'))
+      assert.match(lines.join('\n'), /not a linked worktree of this repository/)
+      assert.equal(await findTaskByWorktree(root, otherWt), null)
+    } finally {
+      await rm(other, { recursive: true, force: true })
+    }
     g(['worktree', 'remove', '--force', wt])
   })
 })
@@ -8960,6 +9075,11 @@ test('locate refuses a worktree the store could never record rather than exiting
     const code = await runCli(['locate', '--run', 'r1', '--task', 'T1', '--worktree', 'not/absolute', '--root', root], io)
     assert.equal(code, 2)
     assert.match(lines.join('\n'), /not\/absolute/)
+    // Refused as a PATH, before git is asked about it. Without that early check the value reaches
+    // `classifyWorktree`, which spawns git with it as the cwd — so a relative path would be
+    // resolved against the process's own directory, and if that happened to sit inside some
+    // repository git would answer about a directory the caller never named.
+    assert.match(lines.join('\n'), /is not a path a record can name/)
     assert.doesNotMatch(lines.join('\n'), /^recorded /m)
   })
 })
@@ -9160,6 +9280,21 @@ test('complete --enforcement-only fails open for a run that recorded no run bran
     // Without the guard this is a 3 (no task branch exists), so the fail-open is doing the work.
     assert.equal(code, 4, lines.join('\n'))
     assert.match(lines.join('\n'), /recorded no run branch/)
+
+    // A stored value equal to the BASE branch means the same thing and must SAY the same thing.
+    // Both spellings fail open, so the exit code cannot tell them apart — the message is the only
+    // observable, and "not run r1's branch main" would accuse a checkout that is in fact correct.
+    const withBase = JSON.parse(await readFile(planFile, 'utf8'))
+    withBase.runBranch = 'main'
+    await writeFile(planFile, `${JSON.stringify(withBase, null, 2)}\n`, 'utf8')
+    lines.length = 0
+    assert.equal(
+      await runCli(['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--enforcement-only', '--root', root], io),
+      4,
+      lines.join('\n'),
+    )
+    assert.match(lines.join('\n'), /recorded no run branch/)
+    assert.doesNotMatch(lines.join('\n'), /branch main/, 'a base-branch record was reported as a mismatch')
   })
 })
 
@@ -9285,6 +9420,68 @@ test('init-run refuses to record the base branch as a run branch, and says so', 
   })
 })
 
+// FILL-IF-ABSENT is the safety property, and both directions of losing it were reproducible.
+// `derive` proves the checked-out branch is not the BASE branch; it does not prove it is THIS
+// RUN's. So an operator gating from an unrelated branch must not be able to rewrite the record.
+test('a lifecycle command never overwrites a run branch that is already recorded', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const planFile = path.join(root, '.teammates', 'r1', 'plan.json')
+    assert.equal(JSON.parse(await readFile(planFile, 'utf8')).runBranch, 'run-branch')
+    await writeEnforcementManifest(root)
+
+    // A gate run from a third branch. It fails — but the write, if it happened, would already
+    // have poisoned the record.
+    g(['checkout', '--quiet', '-b', 'feature/foo'])
+    lines.length = 0
+    await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--root', root], io)
+    assert.equal(
+      JSON.parse(await readFile(planFile, 'utf8')).runBranch,
+      'run-branch',
+      'a gate from an unrelated branch overwrote the recorded run branch',
+    )
+
+    // Direction 1 — should-block stays a block. Back on the real run branch the guard must still
+    // match, or the hook allows every stop for the rest of the dispatch window.
+    g(['checkout', '--quiet', 'run-branch'])
+    lines.length = 0
+    assert.equal(
+      await runCli(['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--enforcement-only', '--root', root], io),
+      3,
+      lines.join('\n'),
+    )
+
+    // Direction 2 — a compliant teammate is never blocked by the wrong checkout. With a poisoned
+    // record this returned 3 over a sibling's landed file, violating the guard's own invariant
+    // that it may only ever turn a block into a non-block.
+    g(['checkout', '--quiet', 'feature/foo'])
+    lines.length = 0
+    assert.equal(
+      await runCli(['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--enforcement-only', '--root', root], io),
+      4,
+      lines.join('\n'),
+    )
+    assert.match(lines.join('\n'), /cannot verify completion/)
+  })
+})
+
+// The one case where a write may replace an existing value: a stored base branch is not a usable
+// run branch, every consumer already reads it as absent, so filling over it can only improve it.
+test('a recorded base branch is repaired rather than treated as a value to protect', async () => {
+  await withRepo(async ({ root, planPath, io, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const planFile = path.join(root, '.teammates', 'r1', 'plan.json')
+    const plan = JSON.parse(await readFile(planFile, 'utf8'))
+    // The shape an older CLI could leave behind.
+    plan.runBranch = 'main'
+    await writeFile(planFile, `${JSON.stringify(plan, null, 2)}\n`, 'utf8')
+
+    await writeEnforcementManifest(root)
+    await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--root', root], io)
+    assert.equal(JSON.parse(await readFile(planFile, 'utf8')).runBranch, 'run-branch')
+  })
+})
+
 // The repair. `gate` runs on the run branch once per phase for the life of the run, so a value
 // `init-run` could not know is fixed by the first gate — this is what keeps the guard from being
 // permanently blind on a run that followed the documented order.
@@ -9306,16 +9503,80 @@ test('gate records the run branch when init-run could not', async () => {
 
 // The earliest repair, and the one that matters for a phase's own teammates: `workflow` runs
 // immediately before dispatch, so the guard's input is right before anything it governs can stop.
-test('workflow records the run branch before the phase it dispatches', async () => {
-  await withRepo(async ({ root, planPath, io, git: g }) => {
-    g(['checkout', '--quiet', 'main'])
-    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
-    const planFile = path.join(root, '.teammates', 'r1', 'plan.json')
-    assert.equal(JSON.parse(await readFile(planFile, 'utf8')).runBranch, undefined)
+//
+// Run with AND without a configured implementer tier, because those are two different code paths
+// through this command and only one of them was ever exercised. `workflow` reads plan.json into
+// memory near its top and writes that object back when a tier changes — so a refresh performed
+// before that write was silently reverted, and only when a tier was configured. The control case
+// is what makes the difference visible rather than assumed.
+for (const withTier of [false, true]) {
+  test(`workflow records the run branch before the phase it dispatches (tier configured: ${withTier})`, async () => {
+    await withRepo(async ({ root, planPath, io, git: g }) => {
+      if (withTier) {
+        await writeFile(
+          path.join(root, 'teammates.gate.json'),
+          JSON.stringify({ agents: { implementer: { tier: 'capable' } }, phases: { default: { checks: [] } } }),
+          'utf8',
+        )
+      }
+      g(['checkout', '--quiet', 'main'])
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      const planFile = path.join(root, '.teammates', 'r1', 'plan.json')
+      assert.equal(JSON.parse(await readFile(planFile, 'utf8')).runBranch, undefined)
 
-    g(['checkout', '--quiet', 'run-branch'])
-    await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root], io)
-    assert.equal(JSON.parse(await readFile(planFile, 'utf8')).runBranch, 'run-branch')
+      g(['checkout', '--quiet', 'run-branch'])
+      await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root], io)
+      const plan = JSON.parse(await readFile(planFile, 'utf8'))
+      assert.equal(plan.runBranch, 'run-branch', 'the refresh was written and then clobbered')
+      // The retier write really did happen in the configured case, so the two writes genuinely
+      // raced and this is not a vacuous pass.
+      if (withTier) {
+        assert.equal(plan.tasks.find((t) => t.id === 'T1').tierSource, 'configured')
+      }
+    })
+  })
+}
+
+// The other two refresh sites, which had no test at all and were both deletable with the suite
+// green. Each is a real repair opportunity on a run whose `init-run` could not know the branch.
+for (const [command, extra] of [['finish', []], ['prune-run', []]]) {
+  test(`${command} records the run branch when init-run could not`, async () => {
+    await withRepo(async ({ root, planPath, io, git: g }) => {
+      g(['checkout', '--quiet', 'main'])
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      const planFile = path.join(root, '.teammates', 'r1', 'plan.json')
+      assert.equal(JSON.parse(await readFile(planFile, 'utf8')).runBranch, undefined)
+
+      g(['checkout', '--quiet', 'run-branch'])
+      await writeEnforcementManifest(root)
+      await runCli([command, '--run', 'r1', '--plan', 'plan.md', '--root', root, ...extra], io)
+      assert.equal(
+        JSON.parse(await readFile(planFile, 'utf8')).runBranch,
+        'run-branch',
+        `${command} did not record the run branch`,
+      )
+    })
+  })
+}
+
+// The refresh reads plan.json, which is teammate-writable. It must never be the thing that
+// crashes a command — and a corrupt file must still reach `gate`'s fail-closed path, which
+// produces parseable JSON on stdout rather than a raw stack with unescaped bytes.
+test('gate fails closed with parseable JSON when plan.json is corrupt', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeEnforcementManifest(root)
+    await writeFile(path.join(root, '.teammates', 'r1', 'plan.json'), '{ not json', 'utf8')
+
+    lines.length = 0
+    const code = await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--root', root], io)
+    const out = lines.join('\n')
+    assert.equal(code, 1, out)
+    // Parseable, which is the whole contract of this command's stdout.
+    const parsed = JSON.parse(out)
+    assert.equal(parsed.verdict, 'FAIL')
+    assert.ok(parsed.failed.includes('run-state'), `run-state not among ${JSON.stringify(parsed.failed)}`)
+    assert.match(parsed.error, /could not read run state/)
   })
 })
 
@@ -9456,6 +9717,11 @@ const ID_CORPUS = [
   // An empty component. `//` is neither `.` nor `..` and passes the character allowlist on both
   // sides of itself, so only the empty-component clause refuses it.
   'a//b',
+  // The OTHER half of the same clause. `.` is in the character allowlist, so a `.` component
+  // passes every other check — with `|| component === '.'` deleted, `init-run --run .` exits 0
+  // while every `locate --run .` the run then issues exits 2. `a//b` alone left that half
+  // unreached, which is the same shape of hole the invisible-character clause had.
+  'a/./b',
   // THE INVISIBLE CLASS, and the reason this corpus is not just a list of obvious junk. Only
   // these reach the `Default_Ignorable_Code_Point` clause: every other rejected member above is
   // already refused by the character allowlist, so with only those the clause could be deleted
