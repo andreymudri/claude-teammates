@@ -274,7 +274,10 @@ async function main() {
   // place that chooses between handing a check to a runner and refusing it, and rejecting a
   // non-string kind belongs there rather than in a filter — a filter-only fix would narrow one
   // path and leave every other one open, including a forged
-  // `{"kind":["fileset"],"optional":true}` aimed at a gate-computed kind. This file can neither
+  // `{"kind":["fileset"],"optional":true}` aimed at an always-enforced kind — one a manifest
+  // may legitimately declare, which is what makes the `optional: true` spelling worth a
+  // forger's while (see `ALWAYS_ENFORCED_KINDS` there, and note it is a wider set than
+  // `GATE_COMPUTED_KINDS`, which holds `merge` alone). This file can neither
   // see nor constrain what that lookup does with a non-string kind, so no sentence here asserts
   // an outcome for it in either direction; treat the lookup, not this filter, as the record of
   // what a non-string kind gets. Nothing here depends on that answer: the fixed-form message
