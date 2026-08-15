@@ -53,7 +53,15 @@ async function withRepo(fn) {
       git(['worktree', 'add', '--detach', at], dir)
       return at
     }
-    return await fn({ dir, root, parent, addWorktree })
+    // The layout this plugin actually dispatches into: the teammate's worktree lives INSIDE
+    // the main worktree. Kept alongside the sibling helper because the two shapes falsify
+    // different wrong answers, and only this one falsifies containment.
+    const addNestedWorktree = (name) => {
+      const at = path.join(dir, '.claude', 'worktrees', name)
+      git(['worktree', 'add', '--detach', at], dir)
+      return at
+    }
+    return await fn({ dir, root, parent, addWorktree, addNestedWorktree })
   } finally {
     rmSync(parent, { recursive: true, force: true, maxRetries: 5 })
   }
@@ -168,18 +176,59 @@ test('the remediation names no command and sends the teammate to its brief', asy
   })
 })
 
-// A record naming the MAIN worktree is bogus under this project's own rule that no teammate
-// works there, and honouring one turns the next unrelated subagent that stops into the victim:
-// blocked, and told to commit to a ref the record chose. The record here is otherwise perfect —
-// it names the directory it is filed under, and the task branch genuinely does not exist — so
-// the guard is the only thing standing between this and a block.
-test('a record naming the main worktree is ignored rather than obeyed', async () => {
-  await withRepo(async ({ dir, root }) => {
-    await writeLocation(root, 'r1', 'T1', { worktree: dir, branch: null })
+// A record naming a directory in the MAIN worktree is bogus under this project's own rule that
+// no teammate works there, and honouring one turns the next unrelated subagent that stops into
+// the victim: blocked, and told to commit to a ref the record chose. Each record here is
+// otherwise perfect — it names the directory it is filed under, and the task branch genuinely
+// does not exist — so the guard is the only thing standing between this and a block.
+//
+// The SUBDIRECTORY case is the one that matters most, and it is ordinary use rather than a
+// contrivance: a session started with `cd packages/app && claude` stops in a subdirectory, and
+// an earlier version of this guard compared cwd to the main root, which closed the root and
+// left every directory beneath it open.
+for (const depth of ['root', 'subdirectory']) {
+  test(`a record naming the main worktree ${depth} is ignored rather than obeyed`, async () => {
+    await withRepo(async ({ dir, root }) => {
+      const at = depth === 'root' ? dir : path.join(dir, 'packages', 'app')
+      mkdirSync(at, { recursive: true })
+      await writeLocation(root, 'r1', 'T9', { worktree: at, branch: null })
+      await writeState(root, 'r1', 'plan', { runId: 'r1', planPath: 'docs/plan.md' })
+      const result = run({ cwd: at })
+      assert.equal(result.status, 0)
+      assert.equal(result.stderr, '')
+    })
+  })
+}
+
+// Containment is the wrong answer to the same question, and this is the case that says so:
+// `.claude/worktrees/agent-*` is under the main worktree by path, so a guard reading "is cwd
+// inside the main root" would answer yes here and switch enforcement off for every teammate
+// this plugin dispatches. The sibling-worktree cases cannot catch that — under containment
+// they keep passing — which is why this layout is tested even though it is harder to build.
+test('a teammate worktree nested under the main worktree is still enforced', async () => {
+  await withRepo(async ({ root, addNestedWorktree }) => {
+    const wt = addNestedWorktree('agent-1')
+    await writeLocation(root, 'r1', 'T1', { worktree: wt, branch: null })
     await writeState(root, 'r1', 'plan', { runId: 'r1', planPath: 'docs/plan.md' })
-    const result = run({ cwd: dir })
-    assert.equal(result.status, 0)
-    assert.equal(result.stderr, '')
+    const result = run({ cwd: wt })
+    assert.equal(result.status, 2)
+    assert.match(result.stderr, /teammates\/r1\/T1/)
+  })
+})
+
+// The other half of the same comparison: a subdirectory of a LINKED worktree is still a
+// teammate, so the guard must not swallow it. Without this, "ignore the main worktree" could be
+// satisfied by ignoring everything, and every case above would still pass.
+test('a teammate stopping in a subdirectory of its own worktree is still enforced', async () => {
+  await withRepo(async ({ root, addWorktree }) => {
+    const wt = addWorktree('agent-1')
+    const nested = path.join(wt, 'packages', 'app')
+    mkdirSync(nested, { recursive: true })
+    await writeLocation(root, 'r1', 'T1', { worktree: nested, branch: null })
+    await writeState(root, 'r1', 'plan', { runId: 'r1', planPath: 'docs/plan.md' })
+    const result = run({ cwd: nested })
+    assert.equal(result.status, 2)
+    assert.match(result.stderr, /teammates\/r1\/T1/)
   })
 })
 
@@ -323,8 +372,13 @@ test('the no-op path starts exactly one git process and spawns no bash', async (
   assert.doesNotMatch(source, /\bsh -c\b/)
   await withRepo(async ({ dir, parent, addWorktree }) => {
     const wt = addWorktree('agent-1')
-    for (const [name, cwd] of [['main worktree', dir], ['linked worktree', wt]]) {
-      const trace = path.join(parent, `trace-${name.split(' ')[0]}.json`)
+    const nested = path.join(dir, 'packages', 'app')
+    mkdirSync(nested, { recursive: true })
+    // Both flags are answered by ONE process, so widening the question cost nothing here.
+    for (const [name, cwd] of [['main worktree', dir], ['main subdirectory', nested], ['linked worktree', wt]]) {
+      // One file per case, named from the WHOLE label: the trace is append-only, so two cases
+      // sharing a file count each other's git processes and the second one fails.
+      const trace = path.join(parent, `trace-${name.replace(/ /g, '-')}.json`)
       const result = run({ cwd }, { env: { GIT_TRACE2_EVENT: trace } })
       assert.equal(result.status, 0)
       const starts = readFileSync(trace, 'utf8').split('\n').filter((l) => l.includes('"event":"start"'))

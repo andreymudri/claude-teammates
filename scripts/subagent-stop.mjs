@@ -12,7 +12,7 @@ import { readFileSync } from 'node:fs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { findTaskByWorktree, normaliseWorktree, readState } from './state.mjs'
+import { findTaskByWorktree, readState } from './state.mjs'
 
 // This handler's own exit statuses, which the harness reads.
 const ALLOW = 0
@@ -59,9 +59,14 @@ async function main() {
   const cwd = typeof input.cwd === 'string' ? input.cwd : ''
   if (cwd === '') return ALLOW
 
-  // One git call in the common case. A cwd outside any repository stops here.
-  const commonDir = git(['rev-parse', '--path-format=absolute', '--git-common-dir'], cwd)
-  if (!commonDir) return ALLOW
+  // One git call in the common case, answering two questions at once. A cwd outside any
+  // repository stops here.
+  const dirs = git(['rev-parse', '--path-format=absolute', '--git-common-dir', '--git-dir'], cwd)
+  if (!dirs) return ALLOW
+  const [commonDir, gitDir] = dirs.split('\n').map((line) => line.trim())
+  // An unexpected output shape means this git does not answer the question the way the checks
+  // below read it, and a guess either way is worse than not enforcing.
+  if (!commonDir || !gitDir) return ALLOW
   // `--git-common-dir` is `<main>/.git` for a linked worktree and the repository's own `.git`
   // otherwise, so its parent is the MAIN worktree in both cases — which is where the run's
   // state lives, and the only root at which a teammate's record can be found. Both halves are
@@ -71,24 +76,31 @@ async function main() {
   // ever found and every teammate in the run would stop unchallenged.
   const root = path.dirname(commonDir)
 
-  // A stop in the MAIN worktree is never a teammate's. Teammates are dispatched into their own
-  // worktrees, so the only things that stop here are the orchestrator's own subagents — a
-  // reviewer, a helper — which have no task, no brief, and no business being handed a branch
-  // name to commit to. Without this, a record aimed at the main root (writable directly, which
-  // no guard on `locate` can prevent) makes the next unrelated subagent to stop the victim: it
-  // is blocked and told to commit to a ref the record chose, and `fileset` and `ownership`
-  // then read those commits as that task's work.
+  // A stop ANYWHERE IN the MAIN worktree is never a teammate's. Teammates are dispatched into
+  // their own worktrees, so the only things that stop here are the orchestrator's own subagents
+  // — a reviewer, a helper — which have no task, no brief, and no business being handed a
+  // branch name to commit to. Without this, a record aimed at a directory in the main worktree
+  // (writable directly, which no guard on `locate` can prevent) makes the next unrelated
+  // subagent to stop there the victim: it is blocked and told to commit to a ref the record
+  // chose, and `fileset` and `ownership` then read those commits as that task's work.
   //
-  // Checked on `cwd` rather than on the record because the two are the same question: the
-  // store is keyed by the normalised worktree and the reader requires the record to name the
-  // directory it is filed under, so a record found for this `cwd` necessarily names it.
+  // The test is the pair of directories git just printed, not a path comparison. Measured at
+  // four depths: in the main worktree, and in ANY subdirectory of it, `--git-common-dir` and
+  // `--git-dir` are the same path; in a linked worktree, and in any subdirectory of one, the
+  // second is `<common>/worktrees/<name>`. Comparing `cwd` to the root instead — which is what
+  // this line did first — closes the root and nothing below it, so a session started with
+  // `cd packages/app && claude`, which is ordinary use, was still a victim.
+  //
+  // Containment is NOT the test and must not be substituted for it: this plugin puts teammate
+  // worktrees at `<main>/.claude/worktrees/agent-*`, inside the main worktree, so "cwd under
+  // root" would answer yes for every teammate and switch enforcement off everywhere.
   //
   // The trade-off, stated rather than hidden: in a run dispatched WITHOUT worktree isolation
   // every teammate shares the main worktree, and this makes enforcement inert for that run.
   // That configuration already misresolves — one record per directory means the last teammate
   // to run `locate` answers for all of them — so this turns "enforced against the wrong task"
   // into "not enforced", which is the safer of the two. It is not free, and it is not nothing.
-  if (normaliseWorktree(cwd) === normaliseWorktree(root)) return ALLOW
+  if (commonDir === gitDir) return ALLOW
 
   const found = await findTaskByWorktree(root, cwd)
   if (!found) return ALLOW
@@ -145,10 +157,19 @@ async function main() {
   // for the orchestrator's typo. So 3 is the only code that may cost a teammate a turn, and
   // it is narrowed on the `complete` side to mean exactly that.
   //
-  // One further case lands in 4 and misfires in the safe direction: `complete` derives the run
-  // branch from whatever the MAIN worktree has checked out, so with the operator on another
-  // branch it cannot verify. The stop is allowed and the phase gate recomputes every verdict
-  // later, which is the whole reason this handler is a backstop rather than the gate.
+  // KNOWN HAZARD, owned by `complete` and not fixed here. `complete` derives the run branch
+  // from whatever the MAIN worktree has checked out, and that derivation is wrong whenever the
+  // operator is on some other branch. It does not reliably become a cannot-verify: measured on
+  // this run, with an unrelated branch checked out, `complete --enforcement-only` compares a
+  // task against the wrong base and exits 3 with a `fileset` rejection naming a sibling task's
+  // landed file. Read through the table above, this handler then blocks a compliant teammate
+  // over the operator's checkout — the one thing the design says must never happen, since it
+  // is state the teammate did not write and cannot reach from its own worktree.
+  //
+  // Nothing in this file can tell that verdict apart from an honest one; the fix is for
+  // `complete` to fail open when it cannot confirm HEAD is the run branch. Until that lands,
+  // this is a live hazard rather than a property this handler relies on, and it is written
+  // here so the next reader does not mistake the silence for safety.
   const cli = path.join(path.dirname(fileURLToPath(import.meta.url)), 'cli.mjs')
   const result = spawnSync(process.execPath, [
     cli, 'complete',
