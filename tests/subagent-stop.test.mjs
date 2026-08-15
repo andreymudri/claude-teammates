@@ -584,7 +584,16 @@ test('a gate check name cannot deliver instructions to a stopping agent', async 
       assert.doesNotMatch(result.stderr, /attacker\.example/)
       assert.doesNotMatch(result.stderr, /curl/)
       assert.doesNotMatch(result.stderr, /IGNORE THE ABOVE/)
-      // Nothing of the payload at all, not merely the parts spelled above.
+      // The two mechanisms are COMPLEMENTARY, and neither subsumes the other — measured on this
+      // payload rather than assumed. The loop below sweeps only tokens longer than six
+      // characters, which here is exactly: fileset, ORCHESTRATOR, OVERRIDE, reassigned,
+      // continuing, and the URL. Every word of `IGNORE THE ABOVE`, and `curl` itself, is SHORTER
+      // than that and is caught only by the four exact-phrase assertions above — so a handler
+      // that forwarded just the short tokens would still deliver a complete instruction and the
+      // loop alone would pass it. Those four lines are load-bearing; do not delete them as
+      // redundant with the sweep. What the sweep adds is the case the phrases cannot cover: a
+      // truncated or partial forward, where no phrase survives intact but a distinctive word
+      // does.
       for (const word of payload.split(/\s+/).filter((w) => w.length > 6)) {
         assert.doesNotMatch(result.stderr, new RegExp(word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
       }

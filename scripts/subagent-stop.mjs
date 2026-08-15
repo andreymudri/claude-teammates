@@ -253,14 +253,29 @@ async function main() {
   // hook means the usual outcome is a timeout — which is a non-blocking error, i.e.
   // enforcement that looks installed and does nothing. The phase gate still runs it all.
   //
-  // SECOND REASON, load-bearing and not about cost at all: the manifest this reads is the MAIN
-  // worktree's `teammates.gate.json`, which any teammate can write, and a `command` check in it
-  // is a shell command. `--enforcement-only` is what keeps those from RUNNING here. Dropping
-  // the flag would turn an attacker-writable file into attacker-chosen execution inside a hook
-  // that fires for every subagent on this machine — a strictly worse failure than the text
-  // problem the fixed-form message below exists to close, and reached by deleting one argument.
-  // A test asserts the flag is present in the spawned argv; that test is the guard on this
-  // paragraph, and it should be read as a security check rather than an argument-shape check.
+  // SECOND REASON, and stated as exactly what it is rather than as a barrier: the manifest this
+  // reads is the MAIN worktree's `teammates.gate.json`, which any teammate can write, and a
+  // `command` check in it is a shell command. `--enforcement-only` filters with
+  // `c.kind !== 'command'`, so it excludes checks whose kind IS THE STRING `command`, and that
+  // much is real — dropping the flag runs those, inside a hook that fires for every subagent on
+  // this machine. So the flag still belongs in the argv below and the test that asserts it is
+  // there should be read as a security check rather than an argument-shape check.
+  //
+  // It is NOT the barrier an earlier version of this comment called it, and the difference is
+  // one JSON spelling. Verified by running the chain rather than reading it: `['command']` is
+  // not equal to `'command'`, so an array-valued kind survives the filter; `Object.hasOwn` and
+  // the property lookup that selects the runner both coerce the array back to `'command'`, so
+  // it is then found and executed; and `Set.has` does not coerce, so the always-enforced set
+  // does not catch it either. A manifest can therefore express a command check that this flag
+  // does not exclude.
+  //
+  // The fix belongs at the runner lookup in `scripts/gate-runner.mjs`, which is not in this
+  // task's file set — a filter-only fix would leave a second path open, where a forged
+  // `{"kind":["fileset"],"optional":true}` produces a false gate PASS. T5 owns that change. If
+  // it has landed, this paragraph is stale in the direction of understating the protection; it
+  // is written this way deliberately, because that is the safe direction and because this file
+  // cannot see that change. Nothing here depends on it: the fixed-form message below holds
+  // whatever the spawned process printed or did.
   //
   // Block on REJECTED and on nothing else, because a stop may only be refused over something
   // this teammate did and can fix from its own worktree. The contract `complete` is being
