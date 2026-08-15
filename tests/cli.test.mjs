@@ -9008,6 +9008,39 @@ test('locate refuses a planted .git file that mimics a worktree of this reposito
   })
 })
 
+// A worktree and every directory beneath it share ONE git dir, so the containment test cannot
+// tell them apart — the `git worktree list` membership check it replaced could, because that
+// listing names only top levels. Both spellings are pinned here: the derived one must still work
+// from a subdirectory (it resolves the top level first), and the explicit one must be refused.
+//
+// The consequence of getting this wrong is a record nobody can find: the handler resolves a
+// stopping agent's cwd through `--show-toplevel`, so a record filed at `<wt>/src` is never looked
+// up, and a do-nothing teammate is allowed instead of blocked.
+test('locate records a worktree from its subdirectory but refuses to name the subdirectory', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const { findTaskByWorktree } = await stateModule()
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const wt = path.join(root, 'wt-T1')
+    g(['worktree', 'add', '--quiet', '-b', 'teammates/r1/T1', wt])
+    const sub = path.join(wt, 'src')
+    await mkdir(sub, { recursive: true })
+
+    // Explicit: refused, and refused as what it is rather than as "not a worktree".
+    lines.length = 0
+    assert.equal(await runCli(['locate', '--run', 'r1', '--task', 'T1', '--worktree', sub, '--root', wt], io), 2, lines.join('\n'))
+    assert.match(lines.join('\n'), /is not its top level/)
+    assert.equal(await findTaskByWorktree(root, sub), null)
+
+    // Derived from the same directory: accepted, and recorded against the TOP LEVEL, which is the
+    // path the handler will ask about.
+    lines.length = 0
+    assert.equal(await runCli(['locate', '--run', 'r1', '--task', 'T1', '--root', sub], io), 0, lines.join('\n'))
+    assert.equal((await findTaskByWorktree(root, wt))?.taskId, 'T1')
+    assert.equal(await findTaskByWorktree(root, sub), null)
+    g(['worktree', 'remove', '--force', wt])
+  })
+})
+
 // A linked worktree of a DIFFERENT repository passes the containment test on its own terms — its
 // git dir really is inside its own repository's — so containment alone is not enough. The record
 // must belong to THIS repository, or one run's teammate can be made to answer for another's
@@ -9465,20 +9498,80 @@ test('a lifecycle command never overwrites a run branch that is already recorded
   })
 })
 
-// The one case where a write may replace an existing value: a stored base branch is not a usable
-// run branch, every consumer already reads it as absent, so filling over it can only improve it.
-test('a recorded base branch is repaired rather than treated as a value to protect', async () => {
-  await withRepo(async ({ root, planPath, io, git: g }) => {
+// FILL-IF-ABSENT IS ABSOLUTE — there is no base-branch exception, and this is the reproduction
+// that removed it. "Usable" was being decided against the base of the invocation doing the
+// overwriting, not the base the value was recorded under, so a CORRECT in-use run branch could be
+// classified base-valued and replaced.
+//
+// `--base` naming the run branch is the stacked-run configuration this repository itself uses, so
+// this is not a contrived shape.
+test('a correct run branch survives a gate whose --base names it', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const planFile = path.join(root, '.teammates', 'r1', 'plan.json')
+    assert.equal(JSON.parse(await readFile(planFile, 'utf8')).runBranch, 'run-branch')
+    await writeEnforcementManifest(root)
+
+    // A stacked run: `run-branch` is this invocation's BASE, and the operator is on a third
+    // branch. The stored value equals that base, which is exactly the shape the deleted exception
+    // treated as free to overwrite.
+    g(['checkout', '--quiet', '-b', 'feature/foo'])
+    lines.length = 0
+    await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--base', 'run-branch', '--root', root], io)
+    assert.equal(
+      JSON.parse(await readFile(planFile, 'utf8')).runBranch,
+      'run-branch',
+      'a correct run branch was overwritten because it matched this invocation\'s --base',
+    )
+
+    // Permanence was the worst part: the replacement is non-base, so fill-if-absent would then
+    // protect it and no later command could repair it. A gate from the real run branch confirms
+    // the value is still the right one.
+    g(['checkout', '--quiet', 'run-branch'])
+    await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--root', root], io)
+    assert.equal(JSON.parse(await readFile(planFile, 'utf8')).runBranch, 'run-branch')
+  })
+})
+
+// The second reproduction, and the two arms it drives. Seeded with the base-branch shape the
+// consumer comment says an earlier CLI leaves behind, then a plain gate from a third branch.
+test('a base-valued record is left alone rather than replaced by the current checkout', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     const planFile = path.join(root, '.teammates', 'r1', 'plan.json')
     const plan = JSON.parse(await readFile(planFile, 'utf8'))
-    // The shape an older CLI could leave behind.
     plan.runBranch = 'main'
     await writeFile(planFile, `${JSON.stringify(plan, null, 2)}\n`, 'utf8')
-
     await writeEnforcementManifest(root)
+
+    g(['checkout', '--quiet', '-b', 'feature/foo'])
     await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--root', root], io)
-    assert.equal(JSON.parse(await readFile(planFile, 'utf8')).runBranch, 'run-branch')
+    assert.equal(
+      JSON.parse(await readFile(planFile, 'utf8')).runBranch,
+      'main',
+      'the record was overwritten with the branch that happened to be checked out',
+    )
+
+    // Arm 1 — a compliant teammate is not blocked by the wrong checkout. With the overwrite the
+    // stored value matched `feature/foo`, the guard passed, and checks ran against the wrong ref.
+    lines.length = 0
+    assert.equal(
+      await runCli(['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--enforcement-only', '--root', root], io),
+      4,
+      lines.join('\n'),
+    )
+    assert.match(lines.join('\n'), /recorded no run branch/)
+
+    // Arm 2 — back on the real run branch the answer is still a verdict about the task, reached
+    // through the fail-open path because a base-valued record reads as absent.
+    g(['checkout', '--quiet', 'run-branch'])
+    lines.length = 0
+    assert.equal(
+      await runCli(['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--enforcement-only', '--root', root], io),
+      4,
+      lines.join('\n'),
+    )
+    assert.match(lines.join('\n'), /recorded no run branch/)
   })
 })
 
@@ -9512,26 +9605,35 @@ test('gate records the run branch when init-run could not', async () => {
 for (const withTier of [false, true]) {
   test(`workflow records the run branch before the phase it dispatches (tier configured: ${withTier})`, async () => {
     await withRepo(async ({ root, planPath, io, git: g }) => {
+      g(['checkout', '--quiet', 'main'])
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      const planFile = path.join(root, '.teammates', 'r1', 'plan.json')
+      const afterInit = JSON.parse(await readFile(planFile, 'utf8'))
+      assert.equal(afterInit.runBranch, undefined)
+
+      // The tier is configured AFTER init-run, and that ordering is what makes the probe below
+      // mean anything. Written before it, `init-run` stamps `tierSource: 'configured'` itself and
+      // workflow's loop takes its `continue` — so `retier` stays FALSE, the retier write never
+      // happens, and a test asserting `tierSource === 'configured'` is satisfied by init-run's own
+      // write while proving nothing about the two writes racing.
       if (withTier) {
+        assert.equal(afterInit.tasks.find((t) => t.id === 'T1').tierSource, 'inferred')
         await writeFile(
           path.join(root, 'teammates.gate.json'),
           JSON.stringify({ agents: { implementer: { tier: 'capable' } }, phases: { default: { checks: [] } } }),
           'utf8',
         )
       }
-      g(['checkout', '--quiet', 'main'])
-      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
-      const planFile = path.join(root, '.teammates', 'r1', 'plan.json')
-      assert.equal(JSON.parse(await readFile(planFile, 'utf8')).runBranch, undefined)
 
       g(['checkout', '--quiet', 'run-branch'])
       await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root], io)
       const plan = JSON.parse(await readFile(planFile, 'utf8'))
       assert.equal(plan.runBranch, 'run-branch', 'the refresh was written and then clobbered')
-      // The retier write really did happen in the configured case, so the two writes genuinely
-      // raced and this is not a vacuous pass.
       if (withTier) {
+        // Changed BY THIS `workflow` INVOCATION, from the `inferred` asserted above — so `retier`
+        // was true, the retier write really happened, and the two writes genuinely raced.
         assert.equal(plan.tasks.find((t) => t.id === 'T1').tierSource, 'configured')
+        assert.equal(plan.tasks.find((t) => t.id === 'T1').tier, 'capable')
       }
     })
   })
@@ -9689,15 +9791,18 @@ test('init-run records a nested plan path with forward slashes on every platform
 //   reached — NFC (`r` + combining acute), `..`, the empty component (`a//b`), the leading `-`,
 //             the character allowlist, the invisibility clause, and BOTH byte caps.
 //
-// The byte caps are worth stating exactly, because an earlier version of this comment got them
-// wrong in both directions. They are pinned SEPARATELY, not jointly:
-//   - the runId cap is reached by the test below, which drives `'r'.repeat(300)` through
-//     `init-run`; raising `MAX_RUN_ID_BYTES` alone fails there.
-//   - the taskId cap is reached by the task-id test after it, which passes the CLI's own
-//     `MAX_TASK_ID_BYTES`. It used to pass a literal `128`, which pinned the literal and not the
-//     constant: raising `MAX_TASK_ID_BYTES` alone kept the whole suite green while a plan headed
-//     `### Task <200 digits>:` would make `init-run` accept an id `writeLocation` refuses.
-// Neither cap needs the other to move to be caught, and neither is a "joint drift" case.
+// The byte caps have now been got wrong twice in this comment, so state exactly what holds them.
+//
+// The assertions pass the CLI's own exported constants, which is what stops a literal in this file
+// drifting from the CLI. On its own that makes the test TRACK the constant instead of checking it:
+// raise `MAX_TASK_ID_BYTES` and `idRefusal` follows, while `writeLocation` keeps the store's
+// hard-coded 128 — the two disagree and the suite stays green, which is the failure this whole
+// corpus exists to catch.
+//
+// What actually pins them is a member whose length is ABSOLUTE and one byte past each cap:
+// `'r'.repeat(129)` for the taskId cap and `'r'.repeat(256)` for the runId cap. Those cannot
+// follow a constant anywhere, so each cap fails independently the moment it moves, in whichever
+// direction. The store's own limits are the fixed points both sides are measured against.
 // The single-component clause is unreachable through `init-run` (a plan's ids are always
 // `T<digits>`); it is cross-checked directly against `idRefusal` in the test below this one.
 // `_` is in the allowlist and `/` is a component separator rather than a member of one, so both
@@ -9707,10 +9812,14 @@ const ID_CORPUS = [
   // Written as escapes, not as literals: several of these render as nothing, and a corpus whose
   // members cannot be told apart by reading the source is not a corpus.
   'r;1', 'r 1', 'r:1', 'r*1', '-r1', 'r\u{1f642}', 'r\u{200c}1', 'r\t1', 'a..b',
-  // Over BOTH byte caps at once (255 for a runId, 128 for a taskId), which is what makes a joint
-  // drift of the two visible — moving either one alone changes no answer, so a single-mutation
-  // probe structurally cannot see it.
-  'r'.repeat(300),
+  // THE CAPS, in ABSOLUTE lengths rather than relative to the constants. Substituting the exported
+  // constant into the assertion stopped the literal drifting and introduced a worse problem: both
+  // sides then moved together, so raising a cap made `idRefusal` follow it while `writeLocation`
+  // kept the store's hard-coded limit — 460 green, and the exact init-run/store divergence this
+  // corpus exists to catch. A member one byte past each cap cannot follow anything.
+  'r'.repeat(129), // one past MAX_TASK_ID_BYTES (128)
+  'r'.repeat(256), // one past MAX_RUN_ID_BYTES (255)
+  'r'.repeat(300), // past both, kept as the original over-cap case
   // Not in NFC: `e` + U+0301 COMBINING ACUTE. Refused rather than folded, because nothing else in
   // the repository normalises, so a folded id would name a directory that does not exist.
   'r\u0065\u0301x',

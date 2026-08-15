@@ -737,12 +737,24 @@ async function worktreeTopLevel(root) {
 // A genuine linked worktree's git dir is `<commonDir>/worktrees/<name>`; the plant's is wherever
 // its author put it, and no amount of writing files outside `.git` moves it inside `<commonDir>`.
 //
-// KEEP THIS EXPRESSION AND THIS NORMALISATION IDENTICAL to the SubagentStop handler's. The two
-// files decide the same question about the same paths, and every divergence between them in this
-// phase has produced a defect. `path.resolve` is the normalisation: it is what makes the win32
-// separator forms comparable, and git's `--path-format=absolute` output forward-slashed.
+// KEEP THE CLASSIFICATION EXPRESSION IDENTICAL to the SubagentStop handler's — the three lines
+// deciding main / contained / neither. Every divergence between the two files in this phase has
+// produced a defect.
+//
+// The NORMALISATION is deliberately NOT the same on both sides, and an earlier version of this
+// comment claimed it was. Here the operands are git's own `--path-format=absolute` output, which
+// git has already canonicalised, so `path.resolve` is enough to make the win32 separator forms
+// comparable. The handler normalises with `normaliseWorktree` (realpath, case and separator
+// folding) because its operand is a hook payload's `cwd`, which nothing has canonicalised.
+// Obeying a "make them the same" instruction would be actively harmful in either direction:
+// dropping realpath in the handler breaks the lookup it exists to do, and importing realpath here
+// puts a UNC stall on a caller-supplied `locate --worktree`. Same decision, different inputs.
+//
+// `worktreeKey` below is the one place this function does use the store's normalisation, because
+// there the question really is "do these two paths address the same record".
 const CLASSIFY_MAIN = 'main'
 const CLASSIFY_LINKED = 'linked'
+const CLASSIFY_SUBDIRECTORY = 'subdirectory'
 const CLASSIFY_FOREIGN_REPO = 'foreign-repo'
 const CLASSIFY_NOT_A_WORKTREE = 'not-a-worktree'
 
@@ -758,8 +770,20 @@ async function classifyWorktree(candidate, expectedCommonDir) {
   const gitDir = await at('--git-dir')
   if (commonDir !== path.resolve(expectedCommonDir)) return CLASSIFY_FOREIGN_REPO
   if (commonDir === gitDir) return CLASSIFY_MAIN
-  if (path.resolve(path.dirname(path.dirname(gitDir))) === commonDir) return CLASSIFY_LINKED
-  return CLASSIFY_NOT_A_WORKTREE
+  if (path.resolve(path.dirname(path.dirname(gitDir))) !== commonDir) return CLASSIFY_NOT_A_WORKTREE
+  // A worktree and every directory beneath it share one git dir, so the containment test above
+  // cannot tell them apart — the `git worktree list` membership check this replaced could, because
+  // that listing names only top levels. Losing the distinction meant `--worktree <wt>/src` was
+  // recorded at exit 0, and the record was then unfindable: the handler resolves a stopping
+  // agent's cwd through `--show-toplevel`, so it looks up `<wt>` and finds nothing. A do-nothing
+  // teammate that recorded from a subdirectory got allowed instead of blocked, which is precisely
+  // the case the record exists for.
+  //
+  // Compared through `worktreeKey`, the store's own addressing function, because "is this the
+  // worktree" and "does this address the worktree's record" have to be the same question.
+  return worktreeKey(candidate) === worktreeKey(await at('--show-toplevel'))
+    ? CLASSIFY_LINKED
+    : CLASSIFY_SUBDIRECTORY
 }
 
 // The repository's shared git directory, normalised the same way `classifyWorktree` normalises,
@@ -904,11 +928,23 @@ async function rememberRunBranch(root, runId, runBranch, baseBranch) {
   try {
     const plan = await readState(root, runId, 'plan')
     if (!plan) return false
-    // Present and usable: leave it alone. A value equal to the base branch is not usable — no run
-    // branch can equal it, and every consumer already reads it as absent — so that one is the
-    // single case where a write replaces an existing value, and it can only improve it.
-    if (typeof plan.runBranch === 'string' && plan.runBranch !== baseBranch) return false
-    if (plan.runBranch === runBranch) return false
+    // ABSENT MEANS ABSENT. Any value already on the field — of any type, including one that looks
+    // like the base branch — is left exactly as it is.
+    //
+    // An earlier version made one exception, for a value equal to the base branch, on the
+    // reasoning that no run branch can equal the base so overwriting could only improve it. That
+    // reasoning is wrong, because it decides "usable" against the base of the invocation doing the
+    // overwriting rather than the base the value was recorded under. `--base` naming the run
+    // branch — the stacked-run configuration this repository itself uses — makes a CORRECT,
+    // in-use run branch classify as base-valued, and the exception then replaced it with whatever
+    // branch the operator happened to be standing on. That value is non-base, so the fill-if-absent
+    // rule immediately protects it, and no later command can repair it: the damage is permanent,
+    // and it drives both failures at once — the true run branch no longer matches (every stop
+    // allowed) while the wrong checkout does (a compliant teammate blocked).
+    //
+    // Nothing is lost by dropping it. A base-valued record is read as absent by the consumer,
+    // which fails open — pinned — and `rebuild-state` still rewrites the field outright.
+    if (plan.runBranch !== undefined) return false
     await writeState(root, runId, 'plan', { ...plan, runBranch })
     return true
   } catch {
@@ -1863,11 +1899,12 @@ export async function runCli(argv, io = { out: console.log }) {
         ? flags.worktree
         : await worktreeTopLevel(root)
 
-      // The path is checked for being nameable BEFORE git is asked about it. `classifyWorktree`
-      // spawns git with the candidate as its cwd, so a relative or non-existent path fails as
-      // `spawn git ENOENT` — a message that names neither the path nor what was wrong with it.
-      // The store applies the same predicate when it writes; this only moves the diagnosis
-      // earlier, to where the value can still be quoted back.
+      // RELATIVE paths are refused before git is asked about anything. `classifyWorktree` spawns
+      // git with the candidate as its cwd, so a relative one would be resolved against the
+      // PROCESS's directory — and if that happens to sit inside a repository, git answers about a
+      // directory the caller never named. `isLocalAbsolute` covers exactly that: a non-existent
+      // ABSOLUTE path still reaches git and surfaces as `spawn git ENOENT`, which the catch below
+      // re-throws with the path quoted, so it is diagnosable and needs no separate check here.
       if (!isLocalAbsolute(worktree)) {
         throw new Error(`${JSON.stringify(printable(worktree))} is not a path a record can name`)
       }
@@ -1893,6 +1930,13 @@ export async function runCli(argv, io = { out: console.log }) {
         throw new Error(
           `${JSON.stringify(printable(worktree))} is the main worktree, which belongs to no task`
           + ' — run this from inside your own worktree',
+        )
+      }
+      if (shape === CLASSIFY_SUBDIRECTORY) {
+        throw new Error(
+          `${JSON.stringify(printable(worktree))} is inside a worktree but is not its top level`
+          + ' — a record must name the worktree itself, because that is the path a stopping agent'
+          + ' is looked up by; omit --worktree to have it derived',
         )
       }
       if (shape !== CLASSIFY_LINKED) {
