@@ -562,6 +562,30 @@ test('the brief attributes a run-wide check to the code that does not block', as
   }
 })
 
+// The exit codes were cross-checked against cli.mjs from the start; the MARKERS were not, and a
+// marker the brief tells a teammate to look for is worth exactly as much as a code — it is how
+// the teammate routes itself to the right row. `could not run:` is emitted by `complete` as a
+// literal, so the brief must quote the literal `complete` actually prints.
+test('the brief quotes the could-not-run marker that scripts/cli.mjs actually prints', async () => {
+  const cli = await readFile(new URL('../scripts/cli.mjs', import.meta.url), 'utf8')
+  // The emitting template literal, read out of the source rather than restated here.
+  const emitted = /`(could not run: )\$\{printable\(r\.name\)\}/.exec(cli)
+  assert.ok(emitted, 'scripts/cli.mjs no longer emits a could-not-run line — this pin is stale')
+  // Trailing space trimmed: it is the separator before the check name, not part of the phrase a
+  // teammate would search its own output for. The phrase is what has to match.
+  const marker = emitted[1].trimEnd()
+
+  const rows = exitRows(composeBrief(FULL))
+  const cannotVerify = cliExitCode(cli, 'COMPLETE_CANNOT_VERIFY')
+  assert.ok(
+    rows.get(cannotVerify).includes(`"${marker}"`),
+    `the brief does not quote the marker complete prints (${JSON.stringify(marker)})`,
+  )
+  // And it belongs to that row alone: quoted under the rejection row it would tell a teammate to
+  // fix a check that never ran.
+  assert.ok(!rows.get(cliExitCode(cli, 'COMPLETE_REJECTED')).includes(marker))
+})
+
 // The specific regression, stated as itself: no row may describe a gate rejection as the code
 // that the handler ALLOWS on.
 test('no brief row calls a gate rejection the cannot-verify code', async () => {

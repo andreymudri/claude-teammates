@@ -18,6 +18,8 @@ import {
   UNIVERSAL_FLAGS,
   completeExitCode,
   idRefusal,
+  MAX_RUN_ID_BYTES,
+  MAX_TASK_ID_BYTES,
 } from '../scripts/cli.mjs'
 import { previewOwnerMarkerPath } from '../scripts/merge-preview.mjs'
 import { renderRunSummary } from '../scripts/finish.mjs'
@@ -3244,6 +3246,16 @@ test('completeExitCode separates a built conflict from a preview that never buil
       failed(['merge', 'fileset']),
     ),
     4,
+  )
+  // The unbuildable predicate itself, reached only when the merge result carries NO output. With
+  // an output, the "same reason stamped on everything" exclusion below already covers it, which
+  // is why deleting `!previewUnbuildable(r)` passed the whole suite: nothing drove the one shape
+  // that needs it. This is the direction that turns an unbuildable preview from allow into BLOCK,
+  // handing a teammate `Committer identity unknown` as its reason to keep working.
+  assert.equal(
+    completeExitCode([{ name: 'merge', kind: 'merge', status: 'fail' }], failed(['merge'])),
+    4,
+    'a merge that failed to build with no reason attached must not block',
   )
   // An OPTIONAL failing fileset never blocked the gate, so it must not block a stop either.
   assert.equal(
@@ -9154,15 +9166,41 @@ test('complete --enforcement-only fails open for a run that recorded no run bran
 // The guard is scoped to the hook's invocation. A human running `complete` by hand from another
 // branch still gets the derived answer, unchanged — this must not become a way to make the plain
 // command stop answering.
+// The scoping is asserted by the CODE the plain command returns on the very scenario the guard
+// intercepts, because that is the only thing that changes when the scoping is removed. The
+// previous version asserted `doesNotMatch(/recorded no run branch/)` — a message this scenario
+// never produces either way, since a run branch IS recorded — and `notEqual(code, 0)`, which
+// accepts 3 and 4 alike. Changing `if (enforcementOnly)` to `if (true)` left it green.
 test('the run-branch guard applies only to --enforcement-only', async () => {
   await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     await writeEnforcementManifest(root)
+    // A recorded run branch that the checkout no longer matches: exactly what the guard fires on.
+    assert.equal(
+      JSON.parse(await readFile(path.join(root, '.teammates', 'r1', 'plan.json'), 'utf8')).runBranch,
+      'run-branch',
+    )
     g(['checkout', '--quiet', '-b', 'hotfix'])
+
     lines.length = 0
-    const code = await runCli(['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--root', root], io)
-    assert.doesNotMatch(lines.join('\n'), /recorded no run branch/)
-    assert.notEqual(code, 0)
+    const plain = await runCli(['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--root', root], io)
+    const plainOut = lines.join('\n')
+    // 3: no task branch exists, so `fileset` rejects, and the plain command still computes and
+    // reports that. Unscoping the guard turns this into a 4 that verified nothing.
+    assert.equal(plain, 3, plainOut)
+    assert.match(plainOut, /gate does not pass for phase/)
+    assert.doesNotMatch(plainOut, /cannot verify completion/)
+
+    // ...while the same invocation WITH the flag is intercepted, which is what makes the two
+    // halves a scoping test rather than two restatements of one behaviour.
+    lines.length = 0
+    const cheap = await runCli(
+      ['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--enforcement-only', '--root', root],
+      io,
+    )
+    assert.equal(cheap, 4, lines.join('\n'))
+    assert.match(lines.join('\n'), /cannot verify completion/)
+    assert.notEqual(plain, cheap, 'the flag must change the answer here or the guard is unscoped')
   })
 })
 
@@ -9194,6 +9232,138 @@ test('complete explains a check that could not run instead of listing it bare', 
     // It is reported, but it is not what decides the code: `fileset` is, because no task branch
     // exists here.
     assert.equal(code, 3, out)
+    // ...and `fileset` DID run and reject. Labelling it "never executed" would tell a teammate
+    // its own stray file was nothing it could act on — the exact inversion of the row this
+    // marker routes to in the brief. The `pending` half of the condition is what stops that.
+    assert.doesNotMatch(out, /could not run: fileset/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The recorded run branch: where it comes from, what repairs it, and what it
+// must never do, which is turn a non-block into a block.
+// ---------------------------------------------------------------------------
+
+// Recording it is BEST EFFORT. `init-run` must still work in a directory git knows nothing about
+// — the field is simply absent, and absent fails open. Without the try/catch this is an uncaught
+// GitError out of the CLI, which is a new way to lose a run for a question nothing used to ask.
+test('init-run works outside a git repository and records no run branch', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-nogit-'))
+  try {
+    const planPath = path.join(root, 'plan.md')
+    await writeFile(planPath, PLAN, 'utf8')
+    const lines = []
+    const io = { out: (t) => lines.push(t), err: () => {} }
+    const code = await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    assert.equal(code, 0, lines.join('\n'))
+    const plan = JSON.parse(await readFile(path.join(root, '.teammates', 'r1', 'plan.json'), 'utf8'))
+    assert.equal(plan.runBranch, undefined, 'a run branch was recorded from a directory with no git')
+    assert.equal(plan.planPath, 'plan.md')
+    assert.match(lines.join('\n'), /recorded no run branch/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+// The documented workflow opens with `init-run` and never checks out a run branch first, so the
+// checked-out branch here is routinely the BASE. Recording that would record a value no real run
+// branch can equal, and the run would look enforced while never being enforceable. It is refused
+// and SAID, because the whole defect was that it happened in silence.
+test('init-run refuses to record the base branch as a run branch, and says so', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    g(['checkout', '--quiet', 'main'])
+    lines.length = 0
+    const code = await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    assert.equal(code, 0, lines.join('\n'))
+    const plan = JSON.parse(await readFile(path.join(root, '.teammates', 'r1', 'plan.json'), 'utf8'))
+    assert.equal(plan.runBranch, undefined)
+    const out = lines.join('\n')
+    assert.match(out, /recorded no run branch/)
+    assert.match(out, /main is checked out and that is the base branch/)
+    // The consequence, named where the operator can act on it.
+    assert.match(out, /stop-time enforcement/)
+  })
+})
+
+// The repair. `gate` runs on the run branch once per phase for the life of the run, so a value
+// `init-run` could not know is fixed by the first gate — this is what keeps the guard from being
+// permanently blind on a run that followed the documented order.
+test('gate records the run branch when init-run could not', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    g(['checkout', '--quiet', 'main'])
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const planFile = path.join(root, '.teammates', 'r1', 'plan.json')
+    assert.equal(JSON.parse(await readFile(planFile, 'utf8')).runBranch, undefined)
+
+    // The operator checks out the run branch, as the gate requires anyway.
+    g(['checkout', '--quiet', 'run-branch'])
+    await writeEnforcementManifest(root)
+    lines.length = 0
+    await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--root', root], io)
+    assert.equal(JSON.parse(await readFile(planFile, 'utf8')).runBranch, 'run-branch')
+  })
+})
+
+// The earliest repair, and the one that matters for a phase's own teammates: `workflow` runs
+// immediately before dispatch, so the guard's input is right before anything it governs can stop.
+test('workflow records the run branch before the phase it dispatches', async () => {
+  await withRepo(async ({ root, planPath, io, git: g }) => {
+    g(['checkout', '--quiet', 'main'])
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const planFile = path.join(root, '.teammates', 'r1', 'plan.json')
+    assert.equal(JSON.parse(await readFile(planFile, 'utf8')).runBranch, undefined)
+
+    g(['checkout', '--quiet', 'run-branch'])
+    await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(JSON.parse(await readFile(planFile, 'utf8')).runBranch, 'run-branch')
+  })
+})
+
+// `rebuild-state` is the documented FIRST recovery step, reached exactly when things are already
+// wrong. Writing `rebuildRunState`'s output verbatim dropped both fields, so recovery silently
+// disarmed the hook: the same payload that blocked before a rebuild allowed after it. Both are
+// re-derivable here, so a rebuild now REPAIRS a run that never had them.
+test('rebuild-state restores the plan path and the run branch instead of dropping them', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    g(['checkout', '--quiet', 'main'])
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    g(['checkout', '--quiet', 'run-branch'])
+    const planFile = path.join(root, '.teammates', 'r1', 'plan.json')
+    // Initialised on the base branch, so there is nothing recorded to preserve — which makes
+    // this a repair rather than a preservation, and is the state recovery actually finds.
+    assert.equal(JSON.parse(await readFile(planFile, 'utf8')).runBranch, undefined)
+
+    lines.length = 0
+    const code = await runCli(
+      ['rebuild-state', '--run', 'r1', '--plan', 'plan.md', '--force', '--root', root],
+      io,
+    )
+    assert.equal(code, 0, lines.join('\n'))
+    const plan = JSON.parse(await readFile(planFile, 'utf8'))
+    assert.equal(plan.planPath, 'plan.md')
+    assert.equal(plan.runBranch, 'run-branch')
+    // And it says what it wrote: a rebuild that quietly changed what the hook can confirm is
+    // the failure being fixed.
+    assert.match(lines.join('\n'), /rebuilt plan\.json with planPath plan\.md and run branch run-branch/)
+  })
+})
+
+// End to end, on the exact reproduction: a hook payload that blocks, a rebuild, and the same
+// payload afterwards. Before the fix the second answer was a permanent 4.
+test('a rebuild does not disarm the enforcement guard', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await writeEnforcementManifest(root)
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const argv = ['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--enforcement-only', '--root', root]
+
+    lines.length = 0
+    assert.equal(await runCli(argv, io), 3, lines.join('\n'))
+
+    lines.length = 0
+    assert.equal(await runCli(['rebuild-state', '--run', 'r1', '--plan', 'plan.md', '--force', '--root', root], io), 0)
+
+    lines.length = 0
+    assert.equal(await runCli(argv, io), 3, `the rebuild disarmed the guard: ${lines.join('\n')}`)
   })
 })
 
@@ -9205,6 +9375,27 @@ test('init-run records the plan path repo-relative with forward slashes', async 
     // The gate reads this out of git at the anchor, and git paths are always `/`-separated.
     // An absolute path from one machine means nothing on another.
     assert.equal(plan.planPath, 'plan.md')
+  })
+})
+
+// Both spellings reach `init-run`: callers that build the path from a root pass it absolute, a
+// hand-typed invocation passes it relative. Resolving a relative one against the process cwd
+// instead of `--root` recorded a path climbing out of the repository, which `git show
+// <anchor>:<path>` can never read.
+test('init-run records the same plan path whether it is given relative or absolute', async () => {
+  await withRepo(async ({ root, planPath, io }) => {
+    const planFile = path.join(root, '.teammates', 'r1', 'plan.json')
+
+    assert.equal(await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io), 0)
+    assert.equal(JSON.parse(await readFile(planFile, 'utf8')).planPath, 'plan.md')
+
+    // Relative, with the process cwd somewhere else entirely — which it always is here, since
+    // the suite runs from the repository being tested, not from the temp fixture.
+    assert.notEqual(path.resolve('plan.md'), planPath, 'the fixture must not sit in the cwd')
+    assert.equal(await runCli(['init-run', 'plan.md', '--run', 'r2', '--root', root], io), 0)
+    const relPlan = JSON.parse(await readFile(path.join(root, '.teammates', 'r2', 'plan.json'), 'utf8'))
+    assert.equal(relPlan.planPath, 'plan.md')
+    assert.doesNotMatch(relPlan.planPath, /\.\./, 'the recorded path climbs out of the repository')
   })
 })
 
@@ -9234,12 +9425,18 @@ test('init-run records a nested plan path with forward slashes on every platform
 // WHICH CLAUSES THIS REACHES, stated rather than assumed — an earlier version of this comment
 // claimed "a drift in either direction fails here" while the corpus reached fewer than half of
 // them, and two of the misses shipped green:
-//   reached — the byte cap (`r` x300), NFC (`réx` in NFD), `..`, the empty component (`a//b`),
-//             the leading `-`, the character allowlist, and the invisibility clause.
-//   NOT reached by a single-mutation probe — the two byte caps have to drift TOGETHER to make
-//             `init-run` and the store disagree, so mutating either alone changes no answer.
-//             `'r'.repeat(300)` closes that: at 300 bytes it is over the 255 runId cap and the
-//             128 taskId cap at once, so raising both to 4096 flips it and fails here.
+//   reached — NFC (`r` + combining acute), `..`, the empty component (`a//b`), the leading `-`,
+//             the character allowlist, the invisibility clause, and BOTH byte caps.
+//
+// The byte caps are worth stating exactly, because an earlier version of this comment got them
+// wrong in both directions. They are pinned SEPARATELY, not jointly:
+//   - the runId cap is reached by the test below, which drives `'r'.repeat(300)` through
+//     `init-run`; raising `MAX_RUN_ID_BYTES` alone fails there.
+//   - the taskId cap is reached by the task-id test after it, which passes the CLI's own
+//     `MAX_TASK_ID_BYTES`. It used to pass a literal `128`, which pinned the literal and not the
+//     constant: raising `MAX_TASK_ID_BYTES` alone kept the whole suite green while a plan headed
+//     `### Task <200 digits>:` would make `init-run` accept an id `writeLocation` refuses.
+// Neither cap needs the other to move to be caught, and neither is a "joint drift" case.
 // The single-component clause is unreachable through `init-run` (a plan's ids are always
 // `T<digits>`); it is cross-checked directly against `idRefusal` in the test below this one.
 // `_` is in the allowlist and `/` is a component separator rather than a member of one, so both
@@ -9307,7 +9504,7 @@ test('the task-id rule accepts exactly the task ids the location record can hold
       } catch {
         storeAccepts = false
       }
-      const refusal = idRefusal('--task', id, { nested: false, maxBytes: 128 })
+      const refusal = idRefusal('--task', id, { nested: false, maxBytes: MAX_TASK_ID_BYTES })
       assert.equal(
         refusal === null,
         storeAccepts,
@@ -9320,8 +9517,8 @@ test('the task-id rule accepts exactly the task ids the location record can hold
 // The one place the two positions genuinely differ, which a corpus applied to only one of them
 // could never show: a run id may nest, a task id may not.
 test('a nested id is a usable run id and never a usable task id', () => {
-  assert.equal(idRefusal('--run', '2026/substop', { nested: true, maxBytes: 255 }), null)
-  const refusal = idRefusal('--task', '2026/substop', { nested: false, maxBytes: 128 })
+  assert.equal(idRefusal('--run', '2026/substop', { nested: true, maxBytes: MAX_RUN_ID_BYTES }), null)
+  const refusal = idRefusal('--task', '2026/substop', { nested: false, maxBytes: MAX_TASK_ID_BYTES })
   assert.notEqual(refusal, null, 'a task id naming a path was accepted')
   assert.match(refusal, /must name one component/)
 })

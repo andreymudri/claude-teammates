@@ -626,8 +626,11 @@ function assertContained(baseDir, segment, flagName) {
 const ID_COMPONENT_RE = /^[\p{L}\p{M}\p{N}._-]+$/u
 const ID_INVISIBLE_RE = new RegExp('\\p{Default_Ignorable_Code_Point}', 'u')
 // The store's own caps, in bytes, matching how it measures them.
-const MAX_RUN_ID_BYTES = 255
-const MAX_TASK_ID_BYTES = 128
+// Exported so the corpus can pass the SAME constant the CLI uses. Passing a literal `128` instead
+// left the task cap unpinned outright: raising it alone kept the whole suite green while
+// `init-run` would accept an id `writeLocation` refuses.
+export const MAX_RUN_ID_BYTES = 255
+export const MAX_TASK_ID_BYTES = 128
 
 // Returns the character to name in a refusal, or '' when the whole VALUE is what is wrong (a
 // byte cap, a non-NFC spelling, an empty id) and no single character can be pointed at. A
@@ -797,6 +800,36 @@ const COMPLETE_CANNOT_VERIFY = 4
 // the question a stopping teammate owns — did you stray outside your file set, is your branch
 // empty, will your work merge.
 const TASK_SCOPED_KINDS = new Set(['fileset', 'merge'])
+
+// SELF-HEALING for the one input `complete --enforcement-only`'s fail-open guard depends on.
+//
+// Recording the run branch at `init-run` alone was not enough, and the reason is in the
+// documented workflow: `skills/parallel-execution/SKILL.md` opens with `init-run`, and nothing
+// before it creates or checks out the run branch. So `init-run` recorded whatever the operator
+// happened to be on — usually the base branch — every later comparison failed, and because absent
+// and wrong both fail OPEN, stop-time enforcement was off for the whole run with the explanation
+// going to a stdout the handler discards. A guard whose input is wrong by default is worse than
+// no guard: it looks like enforcement and is not.
+//
+// So the value is refreshed from every LIFECYCLE command that successfully derives a context.
+// `derive` already refuses when the checked-out branch IS the base branch, so any branch reaching
+// here has passed that test — which is what makes a derived context trustworthy enough to record
+// from, and why `baseBranch` is re-checked here rather than assumed.
+//
+// `complete` deliberately does NOT call this. It is the consumer, and a consumer that records
+// what it is about to compare against approves itself: running it from the wrong branch would
+// write that branch in and then match it.
+//
+// Idempotent, and writes only on a real change, so the ordinary case adds one read.
+async function rememberRunBranch(root, runId, runBranch, baseBranch) {
+  if (typeof runBranch !== 'string' || runBranch === '') return false
+  if (typeof baseBranch !== 'string' || baseBranch === '') return false
+  if (runBranch === baseBranch) return false
+  const plan = await readState(root, runId, 'plan')
+  if (!plan || plan.runBranch === runBranch) return false
+  await writeState(root, runId, 'plan', { ...plan, runBranch })
+  return true
+}
 
 // A failing `merge` means two opposite things and they are told apart by ONE field.
 //
@@ -1543,7 +1576,17 @@ export async function runCli(argv, io = { out: console.log }) {
     const runRefusal = idRefusal('--run', runId, { nested: true, maxBytes: MAX_RUN_ID_BYTES })
     if (runRefusal) { io.out(runRefusal); return 2 }
 
-    const tasks = assignPhases(parsePlan(await readFile(positional[0], 'utf8')))
+    // Resolved against `--root`, which is what `--plan` means everywhere else in this CLI: `gate`,
+    // `complete` and `rebuild-state` all hand it to `git show <anchor>:<planPath>`, and a git path
+    // is repo-relative by definition. This command alone read it with a bare `readFile`, so a
+    // relative argument was read from the process cwd — masked until now because every caller
+    // builds the path from a root and passes it absolute, which resolves identically either way.
+    //
+    // The two spellings have to agree because this command now RECORDS the path as well as reads
+    // it: reading from the cwd while recording relative to the root would write a pointer to a
+    // file the recorded path does not name.
+    const planFile = path.resolve(root, positional[0])
+    const tasks = assignPhases(parsePlan(await readFile(planFile, 'utf8')))
 
     // DEFENCE IN DEPTH, and stated as such rather than as a validation that earns its keep:
     // `plan-parser.mjs` builds every id as `T${digits}` from `/^###\s+Task\s+(\d+)\s*:/`, so no
@@ -1607,7 +1650,9 @@ export async function runCli(argv, io = { out: console.log }) {
     // Repo-relative on purpose: the gate reads this path out of git at the run anchor, git
     // paths are always `/`-separated, and an absolute path from one machine means nothing on
     // another.
-    const planPath = path.relative(root, path.resolve(positional[0])).split(path.sep).join('/')
+    // The same resolved file the plan was READ from, expressed relative to the root — so the
+    // recorded pointer and the file this command parsed are the same file by construction.
+    const planPath = path.relative(root, planFile).split(path.sep).join('/')
 
     // Recorded for the SAME reason as planPath, and it is the only durable record of which
     // branch this run belongs to. `complete` otherwise derives the run branch from whatever the
@@ -1618,11 +1663,31 @@ export async function runCli(argv, io = { out: console.log }) {
     // Best effort. A repository this cannot be read from still gets a run — the field is simply
     // absent, and every consumer treats absent as "cannot confirm" and fails OPEN. Failing the
     // whole `init-run` here would be a new way to lose a run for a question nothing asked before.
+    //
+    // The BASE branch is never recorded as a run branch. `skills/parallel-execution/SKILL.md`
+    // opens with this command and nothing before it checks out a run branch, so the checked-out
+    // branch here is very often the base — and recording that would be recording a value no real
+    // run branch can ever equal. That state is already broken for everything else: `derive`
+    // refuses outright when the checked-out branch is the base, so `gate` cannot run from here
+    // either. It was simply never said out loud, which is what made the consequence invisible.
     let runBranch = null
+    let baseHere = null
     try {
-      runBranch = await createGit({ cwd: root }).currentBranch()
+      const git = createGit({ cwd: root })
+      const head = await git.currentBranch()
+      baseHere = await resolveBaseBranch(git, flags.base)
+      runBranch = head === baseHere ? null : head
     } catch {
       runBranch = null
+    }
+    if (runBranch === null) {
+      io.out(
+        `note: run ${printable(runId)} recorded no run branch`
+        + (baseHere ? `, because ${printable(baseHere)} is checked out and that is the base branch` : '')
+        + '. Check out this run\'s branch before gating — `gate` refuses to run from the base branch,'
+        + ' and until some command derives a context from the run branch, stop-time enforcement'
+        + ' cannot confirm the checkout and will allow every stop rather than risk blocking on the wrong ref.',
+      )
     }
     await writeState(root, runId, 'plan', {
       runId, totalPhases, tasks, planPath, ...(runBranch ? { runBranch } : {}),
@@ -1816,6 +1881,21 @@ export async function runCli(argv, io = { out: console.log }) {
 
     const planMarkdown = await planAtAnchor(root, planPath, flags, io)
     if (planMarkdown === PLAN_READ_REJECTED) return 2
+
+    // The EARLIEST repair, and the one that matters most: this runs on the run branch immediately
+    // before a phase is dispatched, so it can fix the guard's input before the teammates it is
+    // about to dispatch ever stop. `gate` only reaches it after they have finished.
+    //
+    // Wrapped and discarded on failure: dispatching a phase must not fail because a diagnostic
+    // field could not be refreshed.
+    try {
+      const branchGit = createGit({ cwd: root })
+      await rememberRunBranch(
+        root, runId,
+        await branchGit.currentBranch(),
+        await resolveBaseBranch(branchGit, flags.base),
+      )
+    } catch { /* the field stays as it was; every consumer treats it as cannot-confirm */ }
 
     // `init-run` already applied any configured implementer tier, so this normally changes
     // nothing. It stays because the config can change between the two commands, and a per-task
@@ -2169,12 +2249,30 @@ export async function runCli(argv, io = { out: console.log }) {
       maxParallel: resolved.maxParallel,
       currentPhase: ctx.currentPhase,
     })
-    await writeState(root, runId, 'plan', plan)
+    // `rebuildRunState` reconstructs what git can vouch for, and git carries neither of these:
+    // they are the run's own bookkeeping. Writing its output verbatim DROPPED both, so the
+    // documented first recovery step — the one reached precisely when things are already wrong —
+    // silently disarmed the stop-time hook: the same payload that blocked before a rebuild
+    // allowed after it, and `complete --enforcement-only` went from 3 to a permanent 4.
+    //
+    // Both are re-derivable right here, which is what makes this a repair rather than a
+    // preservation: `--plan` is a required argument of this command, and `derive` above already
+    // established a run branch and refused if it were the base. So a rebuild now FIXES a run
+    // whose plan.json never had them, rather than merely not making it worse.
+    const rebuiltPlanPath = path.relative(root, path.resolve(root, flags.plan)).split(path.sep).join('/')
+    await writeState(root, runId, 'plan', {
+      ...plan,
+      planPath: rebuiltPlanPath,
+      ...(ctx.runBranch && ctx.runBranch !== ctx.baseBranch ? { runBranch: ctx.runBranch } : {}),
+    })
     await writeState(root, runId, 'status', status)
 
     // Task ids come from the plan file a planning agent wrote; `printable` keeps a crafted id
     // from redrawing this listing.
     for (const t of status.tasks) io.out(`${printable(t.id)}  ${printable(t.state)}`)
+    // Said out loud, because a rebuild that quietly changed what the hook can confirm is exactly
+    // the failure being fixed here.
+    io.out(`rebuilt plan.json with planPath ${printable(rebuiltPlanPath)} and run branch ${printable(ctx.runBranch)}`)
     io.out('rebuilt from git: no gate history, so every phase must be gated again before anything is reported done')
     return 0
   }
@@ -2197,6 +2295,7 @@ export async function runCli(argv, io = { out: console.log }) {
       io.out(`cannot decide what is prunable: ${err.message}`)
       return 4
     }
+    await rememberRunBranch(root, runId, ctx.runBranch, ctx.baseBranch)
 
     // Which phases hold a passing gate is RECOMPUTED, never read from `status.gates`. That file
     // is written by the agents whose worktrees are about to be removed, and a phase marked PASS
@@ -2397,6 +2496,7 @@ export async function runCli(argv, io = { out: console.log }) {
       io.out(`cannot verify the run: ${err.message}`)
       return 4
     }
+    await rememberRunBranch(root, runId, ctx.runBranch, ctx.baseBranch)
 
     // Phases come from the plan at the anchor, not from `status.gates`. The recorded keys are
     // written by the agents being enforced, so a phase deleted from that file would simply not
@@ -3040,6 +3140,9 @@ export async function runCli(argv, io = { out: console.log }) {
         io.out(JSON.stringify({ verdict: 'FAIL', failed: ['derive'], error: err.message }, null, 2))
         return 1
       }
+      // The gate runs on the run branch, once per phase, for the life of the run — so this is the
+      // repair that makes the stop-time guard's input right even when `init-run` could not know it.
+      await rememberRunBranch(root, runId, ctx.runBranch, ctx.baseBranch)
     }
 
     const rawResults = await runChecks(checks, ctx)
@@ -3162,7 +3265,12 @@ export async function runCli(argv, io = { out: console.log }) {
     // guard may only ever turn a block into a non-block.
     if (enforcementOnly) {
       const planState = await readState(root, runId, 'plan')
-      const recorded = typeof planState?.runBranch === 'string' ? planState.runBranch : null
+      const stored = typeof planState?.runBranch === 'string' ? planState.runBranch : null
+      // A recorded value equal to the BASE branch is not a run branch and never matches one, so
+      // it is treated as absent rather than as a mismatch. `init-run` no longer writes that, but
+      // a plan.json written by an earlier CLI can carry it, and the difference matters: absent
+      // says "nothing to compare against", while a mismatch would accuse a correct checkout.
+      const recorded = stored === ctx.baseBranch ? null : stored
       if (recorded === null || recorded !== ctx.runBranch) {
         io.out(
           `cannot verify completion: this repository has ${printable(ctx.runBranch)} checked out`
