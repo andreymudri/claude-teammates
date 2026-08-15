@@ -9498,6 +9498,37 @@ test('a lifecycle command never overwrites a run branch that is already recorded
   })
 })
 
+// The base-branch early return in `rememberRunBranch`, which was unpinned. It is reachable, and
+// only through `workflow`: the other callers get their branches from `derive`, which refuses
+// outright when the checkout IS the base, but `workflow` reads `currentBranch` and
+// `resolveBaseBranch` directly and has no such guard.
+//
+// Recording the base there would be permanent now that fill-if-absent is absolute — the consumer
+// reads a base-valued record as absent and fails open, and nothing would ever replace it. So this
+// is the one place the run could be silently un-enforceable for its whole life.
+test('workflow run from the base branch records nothing rather than recording the base', async () => {
+  await withRepo(async ({ root, planPath, io, git: g }) => {
+    g(['checkout', '--quiet', 'main'])
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const planFile = path.join(root, '.teammates', 'r1', 'plan.json')
+    assert.equal(JSON.parse(await readFile(planFile, 'utf8')).runBranch, undefined)
+
+    // Still on `main`, which resolveBaseBranch also resolves to. `workflow` does not derive, so
+    // nothing upstream of `rememberRunBranch` rejects this.
+    await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(
+      JSON.parse(await readFile(planFile, 'utf8')).runBranch,
+      undefined,
+      'the base branch was recorded as this run\'s run branch',
+    )
+
+    // And the consequence that would follow: it must stay repairable from the real run branch.
+    g(['checkout', '--quiet', 'run-branch'])
+    await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(JSON.parse(await readFile(planFile, 'utf8')).runBranch, 'run-branch')
+  })
+})
+
 // FILL-IF-ABSENT IS ABSOLUTE — there is no base-branch exception, and this is the reproduction
 // that removed it. "Usable" was being decided against the base of the invocation doing the
 // overwriting, not the base the value was recorded under, so a CORRECT in-use run branch could be
@@ -9711,6 +9742,46 @@ test('rebuild-state restores the plan path and the run branch instead of droppin
   })
 })
 
+// `rebuild-state` was the last writer that could still overwrite a good value — it writes the
+// field inline rather than through `rememberRunBranch`, so fill-if-absent did not apply to it.
+// Run from an unrelated branch it replaced a correct `run-branch` with the checkout, and because
+// fill-if-absent then protects the new value, nothing could repair it: enforcement permanently
+// off, from the command an operator reaches for when things are already broken.
+test('rebuild-state keeps the recorded run branch rather than adopting the checkout', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const planFile = path.join(root, '.teammates', 'r1', 'plan.json')
+    assert.equal(JSON.parse(await readFile(planFile, 'utf8')).runBranch, 'run-branch')
+    await writeEnforcementManifest(root)
+
+    g(['checkout', '--quiet', '-b', 'feature/foo'])
+    lines.length = 0
+    assert.equal(
+      await runCli(['rebuild-state', '--run', 'r1', '--plan', 'plan.md', '--force', '--root', root], io),
+      0,
+      lines.join('\n'),
+    )
+    assert.equal(
+      JSON.parse(await readFile(planFile, 'utf8')).runBranch,
+      'run-branch',
+      'a rebuild from an unrelated branch re-pointed the run at that branch',
+    )
+    // It says what it kept, rather than naming the branch it happened to be standing on.
+    assert.match(lines.join('\n'), /kept from the previous plan\.json/)
+
+    // The harm, asserted directly: on the real run branch the guard must still match, so the
+    // recomputed checks still produce a verdict about the task.
+    g(['checkout', '--quiet', 'run-branch'])
+    lines.length = 0
+    assert.equal(
+      await runCli(['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--enforcement-only', '--root', root], io),
+      3,
+      lines.join('\n'),
+    )
+    assert.doesNotMatch(lines.join('\n'), /cannot verify completion/)
+  })
+})
+
 // End to end, on the exact reproduction: a hook payload that blocks, a rebuild, and the same
 // payload afterwards. Before the fix the second answer was a permanent 4.
 test('a rebuild does not disarm the enforcement guard', async () => {
@@ -9791,18 +9862,41 @@ test('init-run records a nested plan path with forward slashes on every platform
 //   reached — NFC (`r` + combining acute), `..`, the empty component (`a//b`), the leading `-`,
 //             the character allowlist, the invisibility clause, and BOTH byte caps.
 //
-// The byte caps have now been got wrong twice in this comment, so state exactly what holds them.
+// THE BYTE CAPS. This comment has been wrong three times, each time by claiming a generality the
+// members did not have, so it now ENUMERATES instead of asserting.
 //
-// The assertions pass the CLI's own exported constants, which is what stops a literal in this file
-// drifting from the CLI. On its own that makes the test TRACK the constant instead of checking it:
-// raise `MAX_TASK_ID_BYTES` and `idRefusal` follows, while `writeLocation` keeps the store's
-// hard-coded 128 — the two disagree and the suite stays green, which is the failure this whole
-// corpus exists to catch.
+// The mechanism: every assertion compares `cli.mjs`'s answer against `state.mjs`'s for the same
+// id. What that catches is DISAGREEMENT between the two, and nothing else. The exported constants
+// keep a literal in this file from drifting; they cannot check the constant, because both sides of
+// an assertion that uses them move together.
 //
-// What actually pins them is a member whose length is ABSOLUTE and one byte past each cap:
-// `'r'.repeat(129)` for the taskId cap and `'r'.repeat(256)` for the runId cap. Those cannot
-// follow a constant anywhere, so each cap fails independently the moment it moves, in whichever
-// direction. The store's own limits are the fixed points both sides are measured against.
+// What the members below actually catch, per cap, verified by mutation:
+//   RAISED  — caught by the one-byte-past member (129 for the task cap, 256 for the run cap).
+//             `idRefusal` follows the constant and accepts; the store keeps its own limit and
+//             refuses; they disagree.
+//   LOWERED — caught by the AT-CAP member (128 and 255). `idRefusal` follows down and refuses;
+//             the store still accepts; they disagree. Any lowering at all crosses these.
+//
+// What it does NOT catch, stated rather than left to be discovered a fourth time:
+//   - a change made CONSISTENTLY in both `cli.mjs` and `state.mjs`. The corpus pins agreement
+//     between two implementations, not the correctness of the value they agree on. Raising both
+//     to 4096 stays green here, and nothing in this file could see it.
+//   - anything about ids between the caps: the members are boundary probes, not a range sweep.
+//
+// The cap members are kept apart from ID_CORPUS because ID_CORPUS is also driven through
+// `init-run`, where a run id becomes a directory name — a 255-byte one makes a ~327-character
+// path, which works on this host but is a filesystem question, not a rule question. These are
+// applied only to the two direct comparisons, where an id never reaches a path.
+// LITERAL LENGTHS, never `MAX_TASK_ID_BYTES + 1`. Building a member from the constant is the
+// round-5 mistake in a new place: the member would follow the constant, land back on the same side
+// of the boundary, and agree with the store again. These numbers are the STORE's limits, which are
+// the fixed points both implementations are measured against.
+const ID_CAP_CORPUS = [
+  'r'.repeat(128), // at the task cap: both accept, so LOWERING MAX_TASK_ID_BYTES is caught
+  'r'.repeat(129), // one past it: both refuse, so RAISING it is caught
+  'r'.repeat(255), // at the run cap
+  'r'.repeat(256), // one past it
+]
 // The single-component clause is unreachable through `init-run` (a plan's ids are always
 // `T<digits>`); it is cross-checked directly against `idRefusal` in the test below this one.
 // `_` is in the allowlist and `/` is a component separator rather than a member of one, so both
@@ -9812,14 +9906,9 @@ const ID_CORPUS = [
   // Written as escapes, not as literals: several of these render as nothing, and a corpus whose
   // members cannot be told apart by reading the source is not a corpus.
   'r;1', 'r 1', 'r:1', 'r*1', '-r1', 'r\u{1f642}', 'r\u{200c}1', 'r\t1', 'a..b',
-  // THE CAPS, in ABSOLUTE lengths rather than relative to the constants. Substituting the exported
-  // constant into the assertion stopped the literal drifting and introduced a worse problem: both
-  // sides then moved together, so raising a cap made `idRefusal` follow it while `writeLocation`
-  // kept the store's hard-coded limit — 460 green, and the exact init-run/store divergence this
-  // corpus exists to catch. A member one byte past each cap cannot follow anything.
-  'r'.repeat(129), // one past MAX_TASK_ID_BYTES (128)
-  'r'.repeat(256), // one past MAX_RUN_ID_BYTES (255)
-  'r'.repeat(300), // past both, kept as the original over-cap case
+  // Over both caps. The boundary members live in ID_CAP_CORPUS below, which is applied only where
+  // an id never becomes a path component.
+  'r'.repeat(300),
   // Not in NFC: `e` + U+0301 COMBINING ACUTE. Refused rather than folded, because nothing else in
   // the repository normalises, so a folded id would name a directory that does not exist.
   'r\u0065\u0301x',
@@ -9872,7 +9961,7 @@ test('init-run accepts exactly the run ids the location record can hold', async 
 test('the task-id rule accepts exactly the task ids the location record can hold', async () => {
   await withRepo(async ({ root }) => {
     const { writeLocation } = await stateModule()
-    for (const id of ID_CORPUS) {
+    for (const id of [...ID_CORPUS, ...ID_CAP_CORPUS]) {
       let storeAccepts = true
       try {
         await writeLocation(root, 'r1', id, { worktree: root, branch: 'b' })
@@ -9884,6 +9973,31 @@ test('the task-id rule accepts exactly the task ids the location record can hold
         refusal === null,
         storeAccepts,
         `idRefusal and writeLocation disagree about task id ${JSON.stringify(id)}: refusal ${JSON.stringify(refusal)}, store accepts ${storeAccepts}`,
+      )
+    }
+  })
+})
+
+// The RUN position of the same direct comparison. It exists for the cap members: driving a
+// 255-byte id through `init-run` would make it a directory component, and that is a filesystem
+// question (path length limits) rather than a rule question. Here the id never becomes a path —
+// `writeLocation` stores a runId inside the record's JSON, and addresses the file by the hash of
+// the worktree — so the caps can be probed at their exact boundaries on any platform.
+test('the run-id rule accepts exactly the run ids the location record can hold', async () => {
+  await withRepo(async ({ root }) => {
+    const { writeLocation } = await stateModule()
+    for (const id of [...ID_CORPUS, ...ID_CAP_CORPUS]) {
+      let storeAccepts = true
+      try {
+        await writeLocation(root, id, 'T1', { worktree: root, branch: 'b' })
+      } catch {
+        storeAccepts = false
+      }
+      const refusal = idRefusal('--run', id, { nested: true, maxBytes: MAX_RUN_ID_BYTES })
+      assert.equal(
+        refusal === null,
+        storeAccepts,
+        `idRefusal and writeLocation disagree about run id ${JSON.stringify(id)}: refusal ${JSON.stringify(refusal)}, store accepts ${storeAccepts}`,
       )
     }
   })

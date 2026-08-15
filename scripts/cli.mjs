@@ -741,17 +741,22 @@ async function worktreeTopLevel(root) {
 // deciding main / contained / neither. Every divergence between the two files in this phase has
 // produced a defect.
 //
-// The NORMALISATION is deliberately NOT the same on both sides, and an earlier version of this
-// comment claimed it was. Here the operands are git's own `--path-format=absolute` output, which
-// git has already canonicalised, so `path.resolve` is enough to make the win32 separator forms
-// comparable. The handler normalises with `normaliseWorktree` (realpath, case and separator
-// folding) because its operand is a hook payload's `cwd`, which nothing has canonicalised.
-// Obeying a "make them the same" instruction would be actively harmful in either direction:
-// dropping realpath in the handler breaks the lookup it exists to do, and importing realpath here
-// puts a UNC stall on a caller-supplied `locate --worktree`. Same decision, different inputs.
+// The NORMALISATION differs between the two files and the difference is INCIDENTAL. Both sides
+// compare two values that came out of the same `git rev-parse --path-format=absolute` call — here
+// `commonDir` against `dirname(dirname(gitDir))`, and the handler does the identical comparison
+// with `normaliseWorktree` — and git has already canonicalised both operands, so neither choice
+// can change the answer. Measured: swapping the handler's `normaliseWorktree` for `path.resolve`
+// leaves its suite green, so neither spelling is load-bearing for THIS comparison.
 //
-// `worktreeKey` below is the one place this function does use the store's normalisation, because
-// there the question really is "do these two paths address the same record".
+// Two earlier versions of this comment asserted otherwise — first that the two files used the same
+// normalisation, then that the difference was required because the handler consumes a payload
+// `cwd`. Both were wrong; the handler's operands here are its own rev-parse output. Recorded so
+// the next reader neither "fixes" a divergence that costs nothing nor invents a reason for it.
+//
+// `worktreeKey` below is different, and there the choice IS load-bearing: one of its operands is
+// the caller-supplied candidate path, which nothing has canonicalised, and the question asked of
+// it is "do these two paths address the same record" — the store's own question, so the store's
+// own function.
 const CLASSIFY_MAIN = 'main'
 const CLASSIFY_LINKED = 'linked'
 const CLASSIFY_SUBDIRECTORY = 'subdirectory'
@@ -907,7 +912,14 @@ const TASK_SCOPED_KINDS = new Set(['fileset', 'merge'])
 //
 // Filling only an absent value keeps every repair — `workflow`, `gate`, `finish`, `prune-run` and
 // `rebuild-state` all still populate a field `init-run` could not — while making both failures
-// unreachable, because no command can ever change a value that is already there.
+// unreachable, because no command changes a value that is already there.
+//
+// That claim covers `rebuild-state` too, and it did not always: that command writes the field
+// inline rather than through this function, and it used to write the DERIVED branch
+// unconditionally — so a rebuild from an unrelated branch reproduced exactly the failure above,
+// permanently, from the command an operator reaches for when things are already broken. It now
+// carries an existing value forward and derives only when there is none. There is no exception to
+// the rule anywhere; if a second inline writer is ever added, it needs the same treatment.
 //
 // The commands that call this are named deliberately and are NOT "everything that derives":
 // `workflow` (before dispatch), `gate`, `finish` and `prune-run` (after a successful derive), and
@@ -2403,15 +2415,35 @@ export async function runCli(argv, io = { out: console.log }) {
     // silently disarmed the stop-time hook: the same payload that blocked before a rebuild
     // allowed after it, and `complete --enforcement-only` went from 3 to a permanent 4.
     //
-    // Both are re-derivable right here, which is what makes this a repair rather than a
-    // preservation: `--plan` is a required argument of this command, and `derive` above already
-    // established a run branch and refused if it were the base. So a rebuild now FIXES a run
-    // whose plan.json never had them, rather than merely not making it worse.
+    // `planPath` is re-derived, because `--plan` is a required argument of this command and the
+    // operator naming it is an explicit statement of which plan this run follows.
+    //
+    // `runBranch` is CARRIED FORWARD when the old plan.json had one, and derived only when it did
+    // not. This command is the last writer that could still overwrite a good value, and it does
+    // real harm: run from an unrelated branch it replaced a correct `run-branch` with whatever was
+    // checked out, and because fill-if-absent then protects the new value, no later command could
+    // repair it — enforcement permanently off, from the command an operator reaches for when
+    // things are already broken. "The operator asked for a rebuild" is not consent to re-point the
+    // run at a different branch; they asked to rebuild task states from git, and git cannot tell
+    // anyone which branch a run belongs to. So the fill-if-absent rule holds here too, with no
+    // exception anywhere, and recovery still works: the case this command exists for is a run
+    // whose directory is GONE, where the field is absent and gets derived.
+    //
+    // Read through its own try: recovering from a corrupt plan.json is squarely this command's
+    // job, and an unreadable one simply carries nothing forward.
+    let carriedRunBranch = null
+    try {
+      const previousPlan = await readState(root, runId, 'plan')
+      if (typeof previousPlan?.runBranch === 'string') carriedRunBranch = previousPlan.runBranch
+    } catch { carriedRunBranch = null }
+    const derivedRunBranch = ctx.runBranch && ctx.runBranch !== ctx.baseBranch ? ctx.runBranch : null
+    const recordedRunBranch = carriedRunBranch ?? derivedRunBranch
+
     const rebuiltPlanPath = path.relative(root, path.resolve(root, flags.plan)).split(path.sep).join('/')
     await writeState(root, runId, 'plan', {
       ...plan,
       planPath: rebuiltPlanPath,
-      ...(ctx.runBranch && ctx.runBranch !== ctx.baseBranch ? { runBranch: ctx.runBranch } : {}),
+      ...(recordedRunBranch ? { runBranch: recordedRunBranch } : {}),
     })
     await writeState(root, runId, 'status', status)
 
@@ -2420,7 +2452,14 @@ export async function runCli(argv, io = { out: console.log }) {
     for (const t of status.tasks) io.out(`${printable(t.id)}  ${printable(t.state)}`)
     // Said out loud, because a rebuild that quietly changed what the hook can confirm is exactly
     // the failure being fixed here.
-    io.out(`rebuilt plan.json with planPath ${printable(rebuiltPlanPath)} and run branch ${printable(ctx.runBranch)}`)
+    // Reports what was WRITTEN, not what was derived — those differ now that an existing value is
+    // carried forward, and a line naming the checked-out branch while the file kept another one
+    // would be the same class of lie this whole guard exists to remove.
+    io.out(
+      `rebuilt plan.json with planPath ${printable(rebuiltPlanPath)} and run branch `
+      + `${recordedRunBranch === null ? '(none)' : printable(recordedRunBranch)}`
+      + `${carriedRunBranch === null ? '' : ' (kept from the previous plan.json)'}`,
+    )
     io.out('rebuilt from git: no gate history, so every phase must be gated again before anything is reported done')
     return 0
   }
