@@ -1004,10 +1004,14 @@ async function runCheckList(checks, ctx, commandCwd, mergeConflicted) {
     // previous version of this comment gave. That version said a non-string kind "slips past" the
     // skip and could be reported as a benign skip; it cannot, because the skip compares
     // `kind === 'command'` strictly and no non-string value satisfies a strict comparison. What
-    // the skip actually does is dereference `check.kind` UNGUARDED, so a `null` or `undefined`
-    // entry — both of which `teammates.gate.json` can express — throws a TypeError out of this
-    // loop and out of `runChecks`, recording no verdict at all. Pinned: move this block below the
-    // skip and the nameless-entry test fails on that throw. See `hasUsableKind`.
+    // the skip actually does is dereference `check.kind` UNGUARDED. Of the entry shapes
+    // `teammates.gate.json` can express, exactly one throws there: `null`. A string, number, array
+    // or boolean entry evaluates `check.kind` to `undefined` harmlessly and is caught below for the
+    // ordinary reason, and `undefined` itself throws but JSON has no literal for it, so it can only
+    // arrive from a programmatic caller. That one shape is enough — a `null` entry throws a
+    // TypeError out of this loop and out of `runChecks`, recording no verdict at all. Pinned: move
+    // this block below the skip and the nameless-entry test fails on that throw.
+    // See `hasUsableKind`.
     if (!hasUsableKind(check)) {
       results.push(malformedKindResult(check, index))
       continue
