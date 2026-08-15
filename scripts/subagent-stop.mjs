@@ -261,21 +261,24 @@ async function main() {
   // this machine. So the flag still belongs in the argv below and the test that asserts it is
   // there should be read as a security check rather than an argument-shape check.
   //
-  // It is NOT the barrier an earlier version of this comment called it, and the difference is
-  // one JSON spelling. Verified by running the chain rather than reading it: `['command']` is
-  // not equal to `'command'`, so an array-valued kind survives the filter; `Object.hasOwn` and
-  // the property lookup that selects the runner both coerce the array back to `'command'`, so
-  // it is then found and executed; and `Set.has` does not coerce, so the always-enforced set
-  // does not catch it either. A manifest can therefore express a command check that this flag
-  // does not exclude.
+  // What it is NOT is a barrier against everything that could run a shell command, and the
+  // reason is that the filter compares strings. `['command'] !== 'command'`, so a manifest
+  // entry spelling its kind as an array rather than a string is not among the entries this
+  // flag removes — the flag is scoped to the string, and that is the whole of what it claims.
+  // The spelling is worth naming because nothing else in the argv narrows by name either: the
+  // enforced-kind sets are `Set`s, and `Set` membership does not coerce, so an array-spelled
+  // kind matches no set entry by that route.
   //
-  // The fix belongs at the runner lookup in `scripts/gate-runner.mjs`, which is not in this
-  // task's file set — a filter-only fix would leave a second path open, where a forged
-  // `{"kind":["fileset"],"optional":true}` produces a false gate PASS. T5 owns that change. If
-  // it has landed, this paragraph is stale in the direction of understating the protection; it
-  // is written this way deliberately, because that is the safe direction and because this file
-  // cannot see that change. Nothing here depends on it: the fixed-form message below holds
-  // whatever the spawned process printed or did.
+  // What becomes of such an entry is not decided in this file and not decided by this flag. It
+  // is decided at the runner lookup in `scripts/gate-runner.mjs` (`runCheckList`), the single
+  // place that chooses between handing a check to a runner and refusing it, and rejecting a
+  // non-string kind belongs there rather than in a filter — a filter-only fix would narrow one
+  // path and leave every other one open, including a forged
+  // `{"kind":["fileset"],"optional":true}` aimed at a gate-computed kind. This file can neither
+  // see nor constrain what that lookup does with a non-string kind, so no sentence here asserts
+  // an outcome for it in either direction; treat the lookup, not this filter, as the record of
+  // what a non-string kind gets. Nothing here depends on that answer: the fixed-form message
+  // below holds whatever the spawned process printed or did.
   //
   // Block on REJECTED and on nothing else, because a stop may only be refused over something
   // this teammate did and can fix from its own worktree. The contract `complete` is being
