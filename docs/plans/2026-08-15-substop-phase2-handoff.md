@@ -5,33 +5,34 @@ phase-1 history. Phase 1 is merged and done. **Phase 2 is in review, round 7 →
 
 ## FIRST ACTION — round 8
 
-Round 7's fixes have **landed and been verified**. T5 is at , T4 at . The gate
-was re-run at those tips: **merge, test, fileset, ownership all pass; review pending.** Fix rounds
+Round 7's fixes have **landed and been verified**. T5 is at `dc14104`, T4 at `ba630e3`. The gate was
+re-run at those tips: **merge, test, fileset, ownership all pass; review pending.** Fix rounds
 recorded. Nothing is outstanding.
 
-Start by dispatching **round 8** — four unnamed  lenses at /opus
-(, , , ), stamps from . What round 7
-fixed, and therefore what round 8 must judge:
+Start by dispatching **round 8** — four unnamed `tm-reviewer` lenses at `capable`/opus
+(`correctness`, `security`, `tests`, `claims`), stamps from `review-dispatch`. What round 7 fixed,
+and therefore what round 8 must judge:
 
-- **** —  () now gates every
-  decision taken from , including the merge-conflict skip. A malformed kind is a
+- **`scripts/gate-runner.mjs`** — `hasUsableKind`, i.e. `typeof check?.kind === 'string'`, now gates
+  every decision taken from `kind`, including the merge-conflict skip. A malformed kind is a
   **non-optional fail**, never a pending or a skip. Both exploits measured dead: the command no
-  longer executes, and the forged optional  now yields  rather than .
-  The  filter in  is **deliberately unchanged**.
-- ** is the only writer of ** — the universal that failed four rounds running
+  longer executes, and the forged optional `fileset` now yields `FAIL` rather than `PASS`. The
+  `--enforcement-only` filter in `scripts/cli.mjs` is **deliberately unchanged** — fixing it there
+  would close execution and leave the false PASS.
+- **`writePlan` is the only writer of `plan.json`** — the universal that failed four rounds running
   is now structural, with a source test counting call sites and asserting the one is inside
-  . Verified: one real call at , the other match is a comment.
-  **A poisoned record is deliberately unrepairable by any automatic writer** — that is the price of
-  never replacing a good value.  now prints the recorded branch when it differs from the
-  checkout, so it announces itself.
-- **The corpus claim was corrected downward** —  already pin
-  both caps with absolute literals in both directions, so the previously-stated gap was false.
+  `writePlan`. Verified independently: one real call at `scripts/cli.mjs:976`; the only other match
+  is a comment. **A poisoned record is deliberately unrepairable by any automatic writer** — that is
+  the price of never replacing a good value. `init-run` now prints the recorded branch whenever it
+  differs from the checkout, so a poisoned record announces itself.
+- **The corpus claim was corrected downward** — `tests/state.test.mjs:343`, `:355` and `:405` already
+  pin both caps with absolute literals in both directions, so the previously-stated gap was false.
 
-Merged suite at these tips: **1701 on T5's branch alone**; re-measure the merged tree (expect ~1740).
+Suite on T5's branch alone: **1701 / 1699 pass / 2 skip**. Re-measure the merged tree.
 
 **Two items T5 handed back, both outside its file set:**
 
-1. The false-PASS bound in  was falsified for
+1. The false-PASS bound in `docs/specs/2026-08-10-agent-teams-adoption-design.md` was falsified for
    the manifest. That spec is T1's, merged and frozen. Decide whether to correct it.
 2. The skill-order residual — assigned to phase 3's T8.
 
