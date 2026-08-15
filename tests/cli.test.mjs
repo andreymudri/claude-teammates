@@ -9515,11 +9515,11 @@ test('a lifecycle command never overwrites a run branch that is already recorded
 //
 // Still not caught, and named here rather than papered over: a write that reaches plan.json
 // through a helper in ANOTHER module, a path assembled at runtime, or a callee named by
-// computation (`state['write' + 'State']`). Aliasing is caught only in one direction — replacing
-// the import with `writeState as ws` drops the count to zero and fails, but ADDING an aliased
-// second import would not be seen, so the no-rename assertion below exists to make that spelling
-// unavailable. The honest summary is that the structural pin is narrower than the behavioural
-// coverage above it: those tests exercise the actual fill-if-absent rule through the CLI, and this
+// computation (`state['write' + 'State']`). Aliasing is closed by two assertions rather than by
+// the count: replacing the import with `writeState as ws` drops the count to zero and fails there,
+// while an aliased import ADDED alongside the plain one would leave the count at one and is
+// refused by the no-alias assertion. The honest summary is that the structural pin is narrower
+// than the behavioural coverage above it: those tests exercise the actual fill-if-absent rule through the CLI, and this
 // one only makes the specific mistake that caused three regressions — an inline second writer —
 // hard to make by accident.
 
