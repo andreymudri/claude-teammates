@@ -219,18 +219,68 @@ test('a teammate worktree nested under the main worktree is still enforced', asy
 // The other half of the same comparison: a subdirectory of a LINKED worktree is still a
 // teammate, so the guard must not swallow it. Without this, "ignore the main worktree" could be
 // satisfied by ignoring everything, and every case above would still pass.
+//
+// The record names the worktree TOP LEVEL, which is what `locate` writes, while the stop
+// happens in a subdirectory. An earlier version of this case recorded the subdirectory itself,
+// which made it pass without the handler ever having to reconcile the two — it looked like
+// coverage of the cwd-to-toplevel resolution and was not.
 test('a teammate stopping in a subdirectory of its own worktree is still enforced', async () => {
   await withRepo(async ({ root, addWorktree }) => {
     const wt = addWorktree('agent-1')
     const nested = path.join(wt, 'packages', 'app')
     mkdirSync(nested, { recursive: true })
-    await writeLocation(root, 'r1', 'T1', { worktree: nested, branch: null })
+    await writeLocation(root, 'r1', 'T1', { worktree: wt, branch: null })
     await writeState(root, 'r1', 'plan', { runId: 'r1', planPath: 'docs/plan.md' })
     const result = run({ cwd: nested })
     assert.equal(result.status, 2)
     assert.match(result.stderr, /teammates\/r1\/T1/)
   })
 })
+
+// A `.git` FILE turns any directory into something that reports a foreign git dir, which is
+// enough to get past "are these two directories equal" on its own. The plant points at an
+// ALREADY EXISTING teammate worktree's metadata, so it writes nothing inside `.git`, and in a
+// directory with tracked content git does not report it as a nested repo at all — `git status`
+// and `ownership` both stay silent. Without the pointer check this exits 2 and hands an
+// unrelated subagent a branch to commit to, which is the whole of round 2's fix undone.
+test('a planted .git file in the main worktree does not make a subdirectory a teammate', async () => {
+  await withRepo(async ({ dir, root, addNestedWorktree }) => {
+    const victim = path.join(dir, 'packages', 'app')
+    mkdirSync(victim, { recursive: true })
+    addNestedWorktree('agent-1')
+    writeFileSync(path.join(victim, '.git'),
+      `gitdir: ${path.join(dir, '.git', 'worktrees', 'agent-1').replace(/\\/g, '/')}\n`)
+    await writeLocation(root, 'r1', 'T7', { worktree: victim, branch: null })
+    await writeState(root, 'r1', 'plan', { runId: 'r1', planPath: 'docs/plan.md' })
+    const result = run({ cwd: victim })
+    assert.equal(result.status, 0)
+    assert.equal(result.stderr, '')
+  })
+})
+
+// The other direction of the same trick, and the case that makes the main-worktree check
+// load-bearing rather than a fast path: plant `gitdir` INSIDE the main repository's own `.git`
+// naming that worktree's `.git`, and the pointer round trip closes honestly for the MAIN
+// worktree. Measured — with the equality check removed, this record is obeyed and the stop is
+// blocked. It is why both tests are here and neither replaces the other.
+test('a gitdir file planted inside .git does not make the main worktree a teammate', async () => {
+  await withRepo(async ({ dir, root }) => {
+    writeFileSync(path.join(dir, '.git', 'gitdir'), `${path.join(dir, '.git').replace(/\\/g, '/')}\n`)
+    await writeLocation(root, 'r1', 'T7', { worktree: dir, branch: null })
+    await writeState(root, 'r1', 'plan', { runId: 'r1', planPath: 'docs/plan.md' })
+    const result = run({ cwd: dir })
+    assert.equal(result.status, 0)
+    assert.equal(result.stderr, '')
+  })
+})
+
+// The payload shape guard, which JSON makes reachable in three ways that are not "unparseable":
+// a bare number, a bare string and a literal null all parse and are not objects.
+for (const [label, body] of [['a number', '5'], ['a string', '"hello"'], ['null', 'null']]) {
+  test(`a payload that is ${label} allows the stop`, () => {
+    assert.equal(run(body).status, 0)
+  })
+}
 
 // The planPath guard, with a ran/never-ran discriminator rather than exit 0 alone. This is the
 // case that kills its deletion: an empty planPath is a string, so without the guard the spawn

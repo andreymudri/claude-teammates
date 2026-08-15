@@ -12,7 +12,7 @@ import { readFileSync } from 'node:fs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { findTaskByWorktree, readState } from './state.mjs'
+import { findTaskByWorktree, normaliseWorktree, readState } from './state.mjs'
 
 // This handler's own exit statuses, which the harness reads.
 const ALLOW = 0
@@ -47,6 +47,11 @@ function git(args, cwd) {
 
 async function main() {
   const input = payload()
+  // `!input` carries this line; the type half is defence in depth and is NOT load-bearing
+  // today — measured, by weakening it to `!input` alone and finding the suite still green.
+  // A bare number or string parses fine and reaches here, but it has no `cwd` property, so
+  // the guard below already answers it. Kept because every later line reads properties off
+  // this object, and cheap; described exactly so nobody reads the cases below as pinning it.
   if (!input || typeof input !== 'object') return ALLOW
 
   // The harness caps consecutive blocks at 8 and asks Stop/SubagentStop handlers to return
@@ -59,14 +64,16 @@ async function main() {
   const cwd = typeof input.cwd === 'string' ? input.cwd : ''
   if (cwd === '') return ALLOW
 
-  // One git call in the common case, answering two questions at once. A cwd outside any
+  // One git call in the common case, answering three questions at once. A cwd outside any
   // repository stops here.
-  const dirs = git(['rev-parse', '--path-format=absolute', '--git-common-dir', '--git-dir'], cwd)
+  const dirs = git([
+    'rev-parse', '--path-format=absolute', '--git-common-dir', '--git-dir', '--show-toplevel',
+  ], cwd)
   if (!dirs) return ALLOW
-  const [commonDir, gitDir] = dirs.split('\n').map((line) => line.trim())
+  const [commonDir, gitDir, toplevel] = dirs.split('\n').map((line) => line.trim())
   // An unexpected output shape means this git does not answer the question the way the checks
   // below read it, and a guess either way is worse than not enforcing.
-  if (!commonDir || !gitDir) return ALLOW
+  if (!commonDir || !gitDir || !toplevel) return ALLOW
   // `--git-common-dir` is `<main>/.git` for a linked worktree and the repository's own `.git`
   // otherwise, so its parent is the MAIN worktree in both cases — which is where the run's
   // state lives, and the only root at which a teammate's record can be found. Both halves are
@@ -102,7 +109,47 @@ async function main() {
   // into "not enforced", which is the safer of the two. It is not free, and it is not nothing.
   if (commonDir === gitDir) return ALLOW
 
-  const found = await findTaskByWorktree(root, cwd)
+  // The pair being unequal is necessary and NOT sufficient, because a `.git` FILE makes any
+  // directory report a foreign git dir. Measured: writing `<main>/packages/app/.git`
+  // containing `gitdir: <main>/.git/worktrees/agent-1` — an ALREADY EXISTING teammate's
+  // metadata, so nothing inside `.git` is written — makes that subdirectory of the main
+  // worktree answer like a linked worktree, and a record aimed there brings back exactly the
+  // block round 2 was meant to close. Planted under a directory with tracked content it is
+  // also invisible: git does not treat it as a nested repo, so `git status` and `ownership`
+  // report nothing.
+  //
+  // The confirmation is the link git itself maintains in the other direction. A real linked
+  // worktree's metadata holds a `gitdir` file naming the `.git` of the worktree it belongs
+  // to, so requiring it to name THIS toplevel's `.git` is a round trip the planter cannot
+  // complete without writing inside `.git`. Measured true for a sibling worktree, a worktree
+  // nested under the main one, and any subdirectory of either; false for the plant, whose
+  // pointer names the real teammate's `.git` while its toplevel is the planted directory.
+  // `git worktree add` refuses a path that already exists, so the plant cannot be legitimised
+  // by creating the worktree properly either — also measured.
+  //
+  // What it buys, stated as narrowly as it is true: the plant must move from a tracked
+  // directory, where nothing in git reports it, to INSIDE `.git`, where the same writer could
+  // instead edit refs or drop a hook and stop bothering with this handler at all. It raises
+  // the floor; it is not a barrier against a writer who already owns the repository, and no
+  // stop-time check could be. The check above is what answers the main worktree, and it is
+  // load-bearing for exactly this reason: `<main>/.git/gitdir` naming `<main>/.git` closes
+  // this round trip honestly, so without that earlier line the main worktree itself would
+  // pass here. Measured, and pinned by a case.
+  let pointer
+  try {
+    pointer = readFileSync(path.join(gitDir, 'gitdir'), 'utf8').trim()
+  } catch {
+    return ALLOW
+  }
+  if (normaliseWorktree(pointer) !== normaliseWorktree(path.join(toplevel, '.git'))) return ALLOW
+
+  // Looked up by the worktree's TOP LEVEL, not by the raw payload cwd. `locate` records the
+  // top level, so a teammate that stops with its cwd in a subdirectory of its own worktree
+  // would otherwise resolve to nothing and be waved through — enforcement silently off for
+  // that stop. Whether the harness can deliver such a cwd is not something this file can
+  // observe; using the top level removes the dependence rather than betting on it, and it is
+  // free here because git printed the value in the same call.
+  const found = await findTaskByWorktree(root, toplevel)
   if (!found) return ALLOW
 
   // Recorded by `init-run`. Without it `complete` cannot run, and a teammate must never be
@@ -126,11 +173,21 @@ async function main() {
     // branch. A teammate that obeyed a create-and-commit instruction would put its commits
     // there, where `fileset` and `ownership` read them as that task's work. The brief carries
     // the branch name from the dispatch, which is the source that cannot be planted.
+    //
+    // A teammate that is legitimately `blocked` before creating its branch reaches this too,
+    // and that is correct as designed rather than a case to exclude: this handler cannot tell
+    // "did nothing" from "could not proceed", the two are indistinguishable from outside, and
+    // the cost is bounded at one forced retry because `stop_hook_active` allows the next stop.
+    // What it must not do is tell that teammate to commit work it does not have, so the text
+    // names the other way out. Saying so costs nothing that is not already available — the
+    // second stop is allowed whatever the teammate does — and a message that fits only one of
+    // the two readers is how a truthful "blocked" gets turned into a fabricated commit.
     process.stderr.write(
       `Task ${found.taskId} has no branch ${branch}. Your work is not on a branch this run can `
       + `merge, so nothing you did is visible to the gate. Your brief names the branch for this `
       + `task and the step that creates it; follow that step, commit your work there, then `
-      + `finish.\n`,
+      + `finish. If you have no work to commit because you are blocked, report status "blocked" `
+      + `with the reason and stop again — this check does not run twice for one stop.\n`,
     )
     return BLOCK
   }
@@ -157,19 +214,21 @@ async function main() {
   // for the orchestrator's typo. So 3 is the only code that may cost a teammate a turn, and
   // it is narrowed on the `complete` side to mean exactly that.
   //
-  // KNOWN HAZARD, owned by `complete` and not fixed here. `complete` derives the run branch
-  // from whatever the MAIN worktree has checked out, and that derivation is wrong whenever the
-  // operator is on some other branch. It does not reliably become a cannot-verify: measured on
-  // this run, with an unrelated branch checked out, `complete --enforcement-only` compares a
-  // task against the wrong base and exits 3 with a `fileset` rejection naming a sibling task's
-  // landed file. Read through the table above, this handler then blocks a compliant teammate
-  // over the operator's checkout — the one thing the design says must never happen, since it
-  // is state the teammate did not write and cannot reach from its own worktree.
+  // What this handler does is the whole of what it promises: read one integer, block on 3.
+  // It has no way to tell an honest rejection from a rejection produced by the wrong base, so
+  // the meaning of these codes is `complete`'s to keep, and the note below is an observation
+  // about a neighbour rather than a property relied on here.
   //
-  // Nothing in this file can tell that verdict apart from an honest one; the fix is for
-  // `complete` to fail open when it cannot confirm HEAD is the run branch. Until that lands,
-  // this is a live hazard rather than a property this handler relies on, and it is written
-  // here so the next reader does not mistake the silence for safety.
+  // OBSERVED IN THE MERGE, not guaranteed by this file: `complete` derives the run branch from
+  // whatever the MAIN worktree has checked out, which is wrong whenever the operator is on
+  // another branch. Run against a tree parked on an unrelated branch it exits 4 —
+  // "cannot verify completion: this repository has hotfix checked out, not run r1's branch" —
+  // and this handler allows the stop. The mechanism is `complete`'s: `init-run` records the
+  // run branch, `--enforcement-only` compares it to HEAD, and an absent record counts as
+  // cannot-confirm. An earlier version of this comment claimed the opposite outcome and named
+  // it a live hazard; that was measured against a tree where the fix had not yet landed, and
+  // restating it after the merge would have left the only in-repo record of a residual that
+  // no longer exists.
   const cli = path.join(path.dirname(fileURLToPath(import.meta.url)), 'cli.mjs')
   const result = spawnSync(process.execPath, [
     cli, 'complete',
