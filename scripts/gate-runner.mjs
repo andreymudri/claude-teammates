@@ -975,17 +975,17 @@ const CONFLICT_SKIP = 'the phase does not merge cleanly; no merged tree exists t
 async function runCheckList(checks, ctx, commandCwd, mergeConflicted) {
   const results = []
   for (const check of checks) {
-    // A `command` check exists to answer "does the integrated tree work". Without a merged
-    // tree there is no honest answer, and running it against the run branch's own tree would
-    // answer a different question while looking like the one that was asked. Skipped, with
-    // the reason — the block comes from the `merge` check, which fails.
     // FIRST, before any decision is taken from `kind` — including the merge-conflict skip below,
-    // which a non-string kind slips past on a strict comparison and which would otherwise let an
-    // unusable entry be reported as a benign skip.
+    // which a non-string kind slips past on its strict comparison and which would otherwise let
+    // an unusable entry be reported as a benign skip. See `hasUsableKind`.
     if (!hasUsableKind(check)) {
       results.push(malformedKindResult(check))
       continue
     }
+    // A `command` check exists to answer "does the integrated tree work". Without a merged
+    // tree there is no honest answer, and running it against the run branch's own tree would
+    // answer a different question while looking like the one that was asked. Skipped, with
+    // the reason — the block comes from the `merge` check, which fails.
     if (check.kind === 'command' && mergeConflicted) {
       results.push(checkResult(check, 'skip', CONFLICT_SKIP))
       continue
