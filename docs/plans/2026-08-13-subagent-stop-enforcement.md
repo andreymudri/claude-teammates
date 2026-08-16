@@ -902,8 +902,15 @@ entry makes a new flag silently unknown.
 - Modify: `scripts/workflow-gen.mjs`
 - Modify: `templates/phase-workflow.js`
 - Test: `tests/workflow-gen.test.mjs`
+- Test: `tests/cli.test.mjs`
 
 **Depends:** T2, T5
+
+Amended 2026-08-16: `tests/cli.test.mjs` added to the set. Deleting the `PLAN_PATH`,
+`BASE_BRANCH` and `CAVEMAN` template constants (Step 6) obsoletes three assertions in
+`tests/cli.test.mjs` that pin the old scalar-constant contract via a `captureWorkflowConstants`
+helper — a file this task did not originally declare and therefore could not fix. Step 10 rewrites
+them to the new contract.
 
 `T5` was added after phasing was first computed. This task composes briefs that carry the `locate`
 step, and `locate` is the command Task 5 builds — generating a brief for a command that does not
@@ -962,6 +969,27 @@ phase 1 `T1 T2 T3` · phase 2 `T4 T5` · phase 3 `T6 T7 T8`.
 
 - [ ] **Step 9:** Add a cross-file test that for one task, `composeBrief` called directly and the
       brief embedded in the generated script are byte-identical.
+
+- [ ] **Step 10:** In `tests/cli.test.mjs`, three tests pin the removed scalar constants and now
+      fail. Rewrite each to assert the **composed brief text** carries the same guarantee the old
+      constant did, not that the constant exists. The generator no longer emits `PLAN_PATH`,
+      `BASE_BRANCH` or `CAVEMAN` — it emits a `BRIEFS` object mapping task id to already-composed
+      brief text, so `captureWorkflowConstants` (which evaluates `return { PLAN_PATH, BASE_BRANCH }`
+      out of the generated source) has nothing to capture and must be replaced or removed.
+
+      - `workflow with a valueless --base renders the no-base brief rather than the word true`:
+        assert the brief text for the task renders the **no-base variant** (the "No base branch was
+        supplied" wording), not that `BASE_BRANCH` equals `''`.
+      - `workflow with a valueless --plan renders the no-plan brief rather than failing to read "true"`:
+        assert the brief text reflects the empty plan path in the same way `composeBrief` renders it,
+        not that `PLAN_PATH` equals `''`.
+      - `workflow renders a caveman brief when the local layer configures one`: assert the brief text
+        is the **caveman-compressed** form (and keep the existing `assert.match(src, /MANDATORY FIRST
+        STEP/)` check — the safety instructions survive compression), not that `CAVEMAN = 'full'`
+        appears.
+
+      Do not change any behaviour, threshold, or other test. This step only realigns three
+      assertions with the contract Steps 4 and 6 establish.
 
 ---
 
