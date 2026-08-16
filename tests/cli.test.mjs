@@ -9651,12 +9651,11 @@ test('a lifecycle command never overwrites a run branch that is already recorded
 // and this counts the call sites. A second one fails here rather than in a review three rounds later.
 //
 // WHAT THIS PIN IS WORTH. It is a source scan, not a type system: a tripwire for the literal
-// `writeState(root, runId, 'plan', …)` spelling, which any other spelling defeats. Three rounds of
-// prose enumerating which spellings it refuses and which it misses were each found incomplete by
-// the next reviewer, so there is no enumeration here — a comment with none cannot have a wrong
-// one. The behavioural tests above are the real coverage of fill-if-absent: they drive the CLI and
-// assert the recorded branch survives. This pin only makes the specific mistake that caused three
-// regressions — an inline second writer — hard to make by accident.
+// `writeState(root, runId, 'plan', …)` spelling. Three rounds of prose enumerating which spellings
+// it refuses and which it misses were each found incomplete by the next reviewer, so there is no
+// enumeration here. The behavioural tests above are the real coverage of fill-if-absent: they drive
+// the CLI and assert the recorded branch survives. This pin only makes the specific mistake that
+// caused three regressions — an inline second writer — hard to make by accident.
 
 // The top-level arguments of the call whose `(` sits at `open`, as trimmed source text. Nesting of
 // `()`/`[]`/`{}` and the three quote characters is tracked, so an argument that itself contains a

@@ -364,9 +364,9 @@ function commandChecks(checks) {
 // malformed entry by its POSITION — that is all an entry with no `name` can be found by, and the
 // message sends the operator to that position in `teammates.gate.json` — and it counts the list it
 // is handed. A plain `.filter` therefore renumbers the entries and the diagnosis names a different
-// one: measured, `[test, lint, <malformed>]` filtered down to the enforcement checks reported
-// "entry #0", which is `test`. Returned together so the positions cannot be left behind by a
-// caller that only wanted the shorter list; hand the result straight to `runChecks`.
+// one. Returning the positions alongside the narrowed list is what keeps the numbering true — but
+// that is a convention, not a guarantee: a caller that destructures only `checks` drops them
+// silently and nothing here can detect it. Hand the result straight to `runChecks`.
 function narrowChecks(checks, keep) {
   const kept = []
   const checkPositions = []
@@ -977,11 +977,11 @@ const TASK_SCOPED_KINDS = new Set(['fileset', 'merge'])
 // file's `writeState`, `writeFile` and `rename` calls and requires that to stay true.
 //
 // WHAT THAT TEST IS WORTH. It reads source text: a tripwire for the literal
-// `writeState(root, runId, 'plan', …)` spelling, which any other spelling defeats. Every prose
-// enumeration of what it does and does not catch has itself been found incomplete, so there is
-// none here. It is not a proof. The real coverage of fill-if-absent is behavioural and lives in
-// the tests above the pin, which drive the CLI and assert the recorded branch survives; if you are
-// changing this function, those are the ones to trust.
+// `writeState(root, runId, 'plan', …)` spelling. Every prose enumeration of what it does and does
+// not catch has itself been found incomplete, so there is none here. It is not a proof. The real
+// coverage of fill-if-absent is behavioural and lives in the tests above the pin, which drive the
+// CLI and assert the recorded branch survives; if you are changing this function, those are the
+// ones to trust.
 //
 // `planFields === null` means "keep whatever is on disk and only reconsider the run branch", which
 // is what `rememberRunBranch` wants; anything else replaces the plan's own fields.
