@@ -194,7 +194,7 @@ function relativeInside(baseDir, value) {
 }
 
 // Containment only — nesting allowed. This is `assertContained`'s semantics from
-// scripts/cli.mjs:591, and it has to be, because `init-run --run 2026/substop` is accepted
+// scripts/cli.mjs:633, and it has to be, because `init-run --run 2026/substop` is accepted
 // there and creates `.teammates/2026/substop/`. A stricter rule here would throw for a run the
 // CLI legitimately made, `locate` would abort, and enforcement would be off for that whole run.
 function isContained(baseDir, value) {
@@ -512,8 +512,8 @@ export async function releaseClaim(root, runId, taskId) {
 // tokens; it cannot produce a false PASS, because every verdict is recomputed from git.
 //
 // State the bound precisely, because the obvious phrasing is wrong: the gate does NOT read
-// nothing under .teammates/ — `gate` and `complete` both read status.json (scripts/cli.mjs:2722
-// and :2814). What holds is the half that matters: no forgery here manufactures a PASS. The
+// nothing under .teammates/ — `gate` and `complete` both read status.json (scripts/cli.mjs:3463
+// and :3652). What holds is the half that matters: no forgery here manufactures a PASS. The
 // files under .teammates/ are read for bookkeeping, and a corrupt one fails the run CLOSED —
 // non-JSON in status.json makes readState rethrow, and gate then reports FAIL with `run-state`
 // among the failures and exits 1 even with every check passing. Denial, not escalation.
