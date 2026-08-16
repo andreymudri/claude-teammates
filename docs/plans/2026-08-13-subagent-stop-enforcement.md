@@ -1106,19 +1106,19 @@ phase 1 `T1 T2 T3` · phase 2 `T4 T5` · phase 3 `T6 T7 T8`.
       catches a stalled or parked teammate: any sentence containing `SubagentStop` and `stall` must
       also contain `liveness`.
 
-- [ ] **Step 13:** Close the live enforcement window (added 2026-08-16 per the phase-3 handoff). A
-      phase dispatched directly — fewer than three tasks, no `Workflow` — before any lifecycle command
-      has run on the run branch leaves `runBranch` unrecorded, so the `SubagentStop` guard **fails
-      open**: with no recorded run branch it cannot resolve a teammate's worktree to a task and allows
-      the stop unconditionally. In `skills/parallel-execution/SKILL.md`, before the direct-`Agent`
-      dispatch step, instruct the orchestrator to check out the run branch once
-      (`git checkout <run branch>`) so the branch is recorded before the first teammate stops. State
-      why in one sentence: the record is written on the run branch, and a direct dispatch is the only
-      path that can reach a teammate stop before any command has written it. The `Workflow` path is
-      unaffected — it always runs on the run branch — so scope the instruction to the direct path.
-      Add a matching assertion in `tests/skill-contracts.test.mjs` that
-      `skills/parallel-execution/SKILL.md` contains the literal `git checkout` in its direct-dispatch
-      section, so the instruction cannot be dropped silently.
+- [x] **Step 13 (DEFERRED 2026-08-16):** The live enforcement window is real — a phase dispatched
+      directly (fewer than three tasks, no `Workflow`) leaves `runBranch` unrecorded, so the
+      `SubagentStop` guard **fails open**. The originally prescribed fix — have
+      `skills/parallel-execution/SKILL.md` instruct a `git checkout <run branch>` before dispatch —
+      was found false in review: a checkout writes **no** record. `rememberRunBranch` is called only
+      by `gate`, `finish`, `prune-run` and `workflow` (`scripts/cli.mjs`); neither `git checkout` nor
+      `cli.mjs brief` records `runBranch`, so the checkout closes nothing. What Task 8 shipped instead
+      is the honest disclosure: `skills/parallel-execution/SKILL.md` now states the guard is fail-open
+      on the direct path and that the phase gate is the enforcement there, pinned by a
+      `tests/skill-contracts.test.mjs` assertion on the literal `fail-open` (and a negative assertion
+      that the false closure claim cannot return). **Actually closing the window is a follow-up**: make
+      `locate` or `init-run` call `rememberRunBranch`, which lives in `scripts/cli.mjs` — outside any
+      phase-3 task's file set, so it could not be done here.
 
 ---
 
