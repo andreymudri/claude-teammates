@@ -2568,6 +2568,32 @@ test('a null manifest entry is diagnosed on the --no-fleet gate path', async () 
   })
 })
 
+// `--enforcement-only` is not the only filter between the manifest and `runChecks`: `--no-fleet`
+// drops the enforcement checks, which renumbers everything after them the same way. The manifest
+// here puts the malformed entry at position 2 behind a `fileset` the solo filter removes, so a
+// recounted index reports 1 — the `noop` command check, which is fine and which the message would
+// send the operator to edit.
+test('the --no-fleet filter does not renumber the entry the diagnosis names', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [
+        { name: 'fileset', kind: 'fileset' },
+        { name: 'noop', kind: 'command', run: 'node -e ""' },
+        null,
+      ] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    const code = await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--no-fleet', '--root', root], io)
+    const out = lines.join('\n')
+    assert.equal(code, 1, out)
+    assert.match(out, /entry #2 in this phase's check list/)
+    assert.doesNotMatch(out, /entry #1 in this phase's check list/)
+  })
+})
+
 test('a null manifest entry is diagnosed on the --enforcement-only path', async () => {
   await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)

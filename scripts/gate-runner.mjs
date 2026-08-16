@@ -66,12 +66,15 @@ const ALWAYS_ENFORCED_KINDS = new Set(['fileset', 'ownership', 'merge'])
 const hasUsableKind = (check) => typeof check?.kind === 'string'
 
 // The position `malformedKindResult` reports must locate the entry in `teammates.gate.json`, and
-// the list this module is handed is not always that file's list: `cli.mjs` filters the command
-// checks out for `--enforcement-only`, which `complete`, `finish` and `prune-run` all accept, so
-// counting the surviving entries names a different entry than the message tells the operator to
-// fix. A filtering caller passes `ctx.checkPositions`, the manifest
-// position of each surviving entry in list order; a caller that did not filter passes nothing,
-// because then the list's own index already IS the manifest position.
+// the list this module is handed is not always that file's list — `cli.mjs` narrows it in more
+// than one place, and counting the surviving entries then names a different entry than the message
+// tells the operator to fix.
+//
+// `ctx.checkPositions[i]` is the manifest position of the i-th entry of the list as handed over.
+// Where it is absent this falls back to the list's own index, which is correct only if nothing was
+// filtered out — so the fallback is a default, not a guarantee, and this cannot detect a caller
+// that filtered and stayed silent. What keeps callers right is on the cli.mjs side: narrowing goes
+// through `narrowChecks`, which returns the list and its positions together.
 function manifestPosition(ctx, index) {
   const positions = ctx?.checkPositions
   return Array.isArray(positions) && Number.isInteger(positions[index]) ? positions[index] : index

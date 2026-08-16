@@ -360,22 +360,29 @@ function commandChecks(checks) {
   return checks.filter((c) => kindOf(c) === 'command')
 }
 
-async function runPhaseChecks(checks, ctx, enforcementOnly) {
-  if (!enforcementOnly) return runChecks(checks, ctx)
-  // The surviving entries' MANIFEST positions travel with them. `gate-runner` reports a malformed
-  // entry by position — that is all an entry with no `name` can be found by — and it counts the
-  // list it is handed, so after this filter the number named a different entry than the message
-  // tells the operator to fix. Measured: with `[test, lint, <malformed>]` the unfiltered gate said
-  // "entry #2" and this path said "entry #0", which is `test`.
-  const enforcement = []
+// THE ONLY WAY TO NARROW A MANIFEST CHECK LIST BEFORE `runChecks`. `gate-runner` reports a
+// malformed entry by its POSITION — that is all an entry with no `name` can be found by, and the
+// message sends the operator to that position in `teammates.gate.json` — and it counts the list it
+// is handed. A plain `.filter` therefore renumbers the entries and the diagnosis names a different
+// one: measured, `[test, lint, <malformed>]` filtered down to the enforcement checks reported
+// "entry #0", which is `test`. Returned together so the positions cannot be left behind by a
+// caller that only wanted the shorter list; hand the result straight to `runChecks`.
+function narrowChecks(checks, keep) {
+  const kept = []
   const checkPositions = []
   let position = -1
   for (const check of checks) {
     position += 1
-    if (kindOf(check) === 'command') continue
-    enforcement.push(check)
+    if (!keep(check)) continue
+    kept.push(check)
     checkPositions.push(position)
   }
+  return { checks: kept, checkPositions }
+}
+
+async function runPhaseChecks(checks, ctx, enforcementOnly) {
+  if (!enforcementOnly) return runChecks(checks, ctx)
+  const { checks: enforcement, checkPositions } = narrowChecks(checks, (c) => kindOf(c) !== 'command')
   const results = await runChecks(enforcement, { ...ctx, checkPositions })
   return [
     ...results,
@@ -3374,7 +3381,14 @@ export async function runCli(argv, io = { out: console.log }) {
 
     // --no-fleet is the only way the enforcement checks are skipped, and the caller must
     // say it. Inferring "solo" from missing state let deleting one file record a PASS.
-    const checks = solo ? all.filter((c) => kindOf(c) !== 'fileset' && kindOf(c) !== 'ownership') : all
+    //
+    // Through `narrowChecks`, because this narrows the manifest's list exactly as
+    // `--enforcement-only` does: a plain `.filter` here renumbered the entries and `gate --no-fleet`
+    // named the wrong entry of `teammates.gate.json` in the malformed-entry diagnosis.
+    const { checks, checkPositions } = narrowChecks(
+      all,
+      (c) => !solo || (kindOf(c) !== 'fileset' && kindOf(c) !== 'ownership'),
+    )
     if (solo) io.out('--no-fleet: enforcement checks are not running')
 
     // Read once, at the moment of the run. The file is never persisted and never read back
@@ -3408,7 +3422,7 @@ export async function runCli(argv, io = { out: console.log }) {
       await rememberRunBranch(root, runId, ctx.runBranch, ctx.baseBranch)
     }
 
-    const rawResults = await runChecks(checks, ctx)
+    const rawResults = await runChecks(checks, { ...ctx, checkPositions })
     const invalid = validateSuppliedResults(supplied, checks)
     if (invalid) { io.out(`${invalid}\n`); return 2 }
     const results = mergeSuppliedResults(rawResults, supplied)
