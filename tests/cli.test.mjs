@@ -5185,33 +5185,6 @@ async function captureAgentPrompts(src) {
   return captured
 }
 
-// The values cli.mjs decides and hands the generator, read by running the generated module
-// rather than by matching its text. Asserting on the rendered declaration would couple these
-// tests to the template's spacing and to jsString's choice of quote character — both owned by
-// tests/workflow-gen.test.mjs — so a pure reformat of templates/phase-workflow.js would fail
-// a test about cli.mjs. Evaluating the module reads the argument that actually arrived.
-async function captureWorkflowConstants(src) {
-  const body = src.replace(/^export const meta = /m, 'const meta = ')
-  // The module ends in a top-level `return`, so anything appended after it is unreachable.
-  // Discarding that one value is what lets the constants be read; it couples this helper to
-  // the workflow contract that a phase module returns its results, not to how any
-  // declaration inside it is spelled.
-  const at = body.lastIndexOf('\nreturn ')
-  assert.ok(at !== -1, 'a generated phase module must end in a top-level return')
-  const readable = `${body.slice(0, at)}\nvoid ${body.slice(at + '\nreturn '.length)}`
-  const phaseFn = () => {}
-  const parallel = (fns) => Promise.all(fns.map((f) => f()))
-  const agent = () =>
-    Promise.resolve({ status: 'done', branch: 'b', filesChanged: [], summary: 's', blockers: [] })
-  const run = new Function(
-    'phase',
-    'parallel',
-    'agent',
-    `return (async () => { ${readable}\n;return { PLAN_PATH, BASE_BRANCH } })`,
-  )(phaseFn, parallel, agent)
-  return run()
-}
-
 test('workflow --plan and --base put the base branch in a checkout line and name the plan', async () => {
   await withRepo(async ({ root, planPath, io, lines }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
@@ -5330,12 +5303,14 @@ test('workflow with a valueless --base renders the no-base brief rather than the
     const code = await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root, '--base'], io)
     assert.equal(code, 0, lines.join('\n'))
     const src = lines.join('\n')
-    // The value, not its rendering: what cli.mjs decides here is the empty string, and that
-    // is what the generated module must hold however the template spells the declaration.
-    const { BASE_BRANCH } = await captureWorkflowConstants(src)
-    assert.equal(BASE_BRANCH, '', 'a valueless --base must reach the generator as the empty string')
     const [prompt] = await captureAgentPrompts(src)
     assert.ok(!prompt.includes('git checkout -B teammates/r1/T1 true'), 'a valueless --base must not become a branch')
+    // The value, not its rendering: what cli.mjs decides here is the empty string, so the
+    // brief must be composeBrief's no-base variant, not a checkout with "true" for a start point.
+    assert.ok(
+      prompt.includes('No base branch was supplied for this phase'),
+      'a valueless --base must render the no-base brief rather than a checkout line',
+    )
   })
 })
 
@@ -5352,10 +5327,11 @@ test('workflow with a valueless --plan renders the no-plan brief rather than fai
     )
     assert.equal(code, 0, lines.join('\n'))
     const src = lines.join('\n')
-    const { PLAN_PATH } = await captureWorkflowConstants(src)
-    assert.equal(PLAN_PATH, '', 'a valueless --plan must reach the generator as the empty string')
     const [prompt] = await captureAgentPrompts(src)
     assert.ok(!prompt.includes('PLAN. Read true'), 'a valueless --plan must not become a plan path')
+    // The value, not its rendering: what cli.mjs decides here is the empty string, so
+    // composeBrief drops the PLAN section entirely rather than rendering one with no path.
+    assert.ok(!prompt.includes('PLAN. Read'), 'a valueless --plan must omit the PLAN section entirely')
   })
 })
 
@@ -5885,7 +5861,9 @@ test('workflow renders a caveman brief when the local layer configures one', asy
     lines.length = 0
     assert.equal(await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root], io), 0)
     const src = lines.join('\n')
-    assert.match(src, /CAVEMAN = 'full'/)
+    const [prompt] = await captureAgentPrompts(src)
+    // The configured level reaches the terse brief's STYLE section rather than being dropped.
+    assert.match(prompt, /use it at level full/)
     // Compressed or not, the instructions that make a brief safe are still there verbatim.
     assert.match(src, /MANDATORY FIRST STEP/)
   })
