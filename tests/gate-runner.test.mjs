@@ -1185,6 +1185,28 @@ test('a named malformed entry keeps its name and still reports its position', as
   assert.match(result.output, /entry #0 in this phase's check list/)
 })
 
+// The number in that message tells the operator which entry of `teammates.gate.json` to go and
+// fix, so it has to survive a caller that hands `runChecks` a SUBSET of the manifest's list.
+// `cli.mjs` does exactly that for `--enforcement-only`, which `complete`, `finish` and `prune-run`
+// all accept, by filtering the command checks out first — after which a recounted index names a different
+// entry than the message points at. The surviving entries' manifest positions travel on the
+// context instead of being recounted here.
+test('a filtered check list still reports the manifest position of a malformed entry', async () => {
+  // Manifest = [tests(command), lint(command), <malformed>, fileset]; the two command checks are
+  // filtered out, so the malformed entry is at list index 0 and manifest index 2.
+  const results = await runChecks(
+    [{ kind: ['fileset'] }, { name: 'fileset', kind: 'fileset' }],
+    { cwd: process.cwd(), checkPositions: [2, 3] },
+  )
+  assert.equal(results[0].status, 'fail')
+  assert.match(results[0].output, /entry #2 in this phase's check list/)
+  assert.doesNotMatch(results[0].output, /entry #0 in this phase's check list/)
+  // The fallback name carries the same position, so the verdict line alone locates the entry.
+  assert.equal(results[0].name, "entry #2 in this phase's check list")
+})
+// The no-positions fallback — an unfiltered list's own index IS the manifest position — needs no
+// test of its own here: the nameless-entry test above supplies no positions and asserts #0 and #2.
+
 // The `JSON.stringify` fallback in `malformedKindResult`. Unreachable from `teammates.gate.json`,
 // which is `JSON.parse`-only — every shape that file can express serialises. It guards the
 // EXPORTED api, which `cli.mjs` and these tests call with real JavaScript values, so it is pinned

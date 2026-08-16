@@ -333,11 +333,23 @@ const ENFORCEMENT_ONLY_SKIPPED = Symbol('skipped by --enforcement-only')
 // `merge` has declared no enforcement, and counting it here would reopen the hole this closes.
 const MANIFEST_ENFORCED_KINDS = new Set(['fileset', 'ownership'])
 
+// A MANIFEST ENTRY IS NOT KNOWN TO BE AN OBJECT. `teammates.gate.json` is `JSON.parse`-only and
+// `validateGate` in `scripts/config.mjs` checks only that `phases[*].checks` is an ARRAY, never
+// what is in it, so a hand-written `[null, …]` — or a bare string, or a number — arrives here
+// intact. `runChecks` diagnoses every one of those shapes and fails the phase on them, which is
+// the answer the operator needs; but a bare dereference in a site that runs FIRST throws a
+// TypeError instead and the command exits with no verdict at all. Measured on three paths, each
+// crashing at a different line: `gate` in `validateSuppliedResults`, `gate --no-fleet` in the solo
+// filter, `--enforcement-only` in `enforcementOnlyRefusal`. So a kind read off an entry straight
+// out of the manifest goes through here, and `validateSuppliedResults` skips a non-object entry
+// rather than indexing it. A null-entry test drives each of those paths; add one for any new site.
+const kindOf = (check) => check?.kind
+
 // Returns the refusal message when `--enforcement-only` cannot answer for some phase, or null.
 // Checked before a single check runs, so the caller learns the flag is the wrong tool for this
 // manifest rather than reading a verdict that was never grounded in anything.
 function enforcementOnlyRefusal(config, phases) {
-  const barren = phases.filter((p) => !checksForPhase(config, String(p)).some((c) => MANIFEST_ENFORCED_KINDS.has(c.kind)))
+  const barren = phases.filter((p) => !checksForPhase(config, String(p)).some((c) => MANIFEST_ENFORCED_KINDS.has(kindOf(c))))
   if (barren.length === 0) return null
   return `--enforcement-only cannot answer for phase ${barren.join(', ')}: `
     + `that phase's manifest declares no ${[...MANIFEST_ENFORCED_KINDS].join(' or ')} check, so dropping its command checks would leave nothing verified at all.`
@@ -345,12 +357,26 @@ function enforcementOnlyRefusal(config, phases) {
 }
 
 function commandChecks(checks) {
-  return checks.filter((c) => c.kind === 'command')
+  return checks.filter((c) => kindOf(c) === 'command')
 }
 
 async function runPhaseChecks(checks, ctx, enforcementOnly) {
   if (!enforcementOnly) return runChecks(checks, ctx)
-  const results = await runChecks(checks.filter((c) => c.kind !== 'command'), ctx)
+  // The surviving entries' MANIFEST positions travel with them. `gate-runner` reports a malformed
+  // entry by position — that is all an entry with no `name` can be found by — and it counts the
+  // list it is handed, so after this filter the number named a different entry than the message
+  // tells the operator to fix. Measured: with `[test, lint, <malformed>]` the unfiltered gate said
+  // "entry #2" and this path said "entry #0", which is `test`.
+  const enforcement = []
+  const checkPositions = []
+  let position = -1
+  for (const check of checks) {
+    position += 1
+    if (kindOf(check) === 'command') continue
+    enforcement.push(check)
+    checkPositions.push(position)
+  }
+  const results = await runChecks(enforcement, { ...ctx, checkPositions })
   return [
     ...results,
     // `optional` is read off the manifest exactly as gate-runner's own `checkResult` reads it, so
@@ -916,7 +942,8 @@ const TASK_SCOPED_KINDS = new Set(['fileset', 'merge'])
 // THE RULE IS NOT ENFORCED BY THIS COMMENT. It is enforced by `writePlan`, which is the only
 // function in this file that writes plan.json, and — for the specific mistake that caused those
 // regressions, a second writer added inline — by the source scan in tests/cli.test.mjs. That scan
-// has limits, stated at the pin itself; read them there before relying on it.
+// is a tripwire for one spelling, not a proof; read what it is worth at `writePlan` below before
+// relying on it.
 // This paragraph used to end "there is no exception anywhere", and that sentence was false in
 // three consecutive rounds — `rebuild-state`, then `init-run`, each an inline writer nobody had
 // listed. Enumerating writers in prose is how that kept happening; the enumeration is now the code.
@@ -942,19 +969,12 @@ const TASK_SCOPED_KINDS = new Set(['fileset', 'merge'])
 // one `writeState(root, runId, 'plan', …)` call in this file, and a source-level test parses this
 // file's `writeState`, `writeFile` and `rename` calls and requires that to stay true.
 //
-// WHAT THAT TEST IS WORTH, stated precisely, because an earlier version of this paragraph promised
-// more than it delivered and a reviewer defeated it three ways in an afternoon. It reads source
-// text. It refuses a second `writeState(…, 'plan', …)` in either quoting, with nested commas in
-// earlier arguments, awaited or not, through a namespace import, and it refuses a `writeFile` or
-// `rename` naming plan.json — every one of those verified by applying the mutation and watching it
-// fail. It also refuses a `writeState` call whose state-file argument is a variable rather than a
-// literal, which is the only reason `const planKind = 'plan'` cannot walk past it.
-//
-// It does NOT see a plan write routed through another module, a path built at runtime, or a callee
-// resolved by computation. It is a tripwire against the accident that actually happened three
-// times, not a proof. The real coverage of fill-if-absent is behavioural and lives in the tests
-// above the pin, which drive the CLI and assert the recorded branch survives; if you are changing
-// this function, those are the ones to trust.
+// WHAT THAT TEST IS WORTH. It reads source text: a tripwire for the literal
+// `writeState(root, runId, 'plan', …)` spelling, which any other spelling defeats. Every prose
+// enumeration of what it does and does not catch has itself been found incomplete, so there is
+// none here. It is not a proof. The real coverage of fill-if-absent is behavioural and lives in
+// the tests above the pin, which drive the CLI and assert the recorded branch survives; if you are
+// changing this function, those are the ones to trust.
 //
 // `planFields === null` means "keep whatever is on disk and only reconsider the run branch", which
 // is what `rememberRunBranch` wants; anything else replaces the plan's own fields.
@@ -1087,6 +1107,11 @@ function validateSuppliedResults(supplied, checks) {
   const byName = new Map()
   const duplicated = new Set()
   for (const c of checks) {
+    // A manifest entry that is not an object at all carries no name to index and no kind to
+    // validate against, and `runChecks` has already failed the phase on it. Skipped rather than
+    // indexed: `c.name` here threw a TypeError on a `null` entry — the shape a hand-written
+    // manifest reaches most easily — which killed `gate` before its own diagnosis was printed.
+    if (c === null || typeof c !== 'object') continue
     if (byName.has(c.name)) duplicated.add(c.name)
     byName.set(c.name, c)
   }
@@ -3073,7 +3098,7 @@ export async function runCli(argv, io = { out: console.log }) {
     if (!config) { io.out('no gate manifest — cannot tell which lenses to dispatch'); return 4 }
 
     const phaseName = flags.phase ?? 'default'
-    const agentChecks = checksForPhase(config, phaseName).filter((c) => c.kind === 'agent')
+    const agentChecks = checksForPhase(config, phaseName).filter((c) => kindOf(c) === 'agent')
     if (agentChecks.length !== 1) {
       io.out(`this phase declares ${agentChecks.length} agent checks; review-dispatch handles exactly one`)
       return 4
@@ -3112,7 +3137,7 @@ export async function runCli(argv, io = { out: console.log }) {
     // choice; it does not make the value trusted. Nothing screens the run string: containment is
     // structural, and `generateReviewDispatch` emits it as a JSON literal in a DATA block that
     // sits below every instruction, so no value of it can become one.
-    const commandChecks = checksForPhase(config, phaseName).filter((c) => c.kind === 'command')
+    const commandChecks = checksForPhase(config, phaseName).filter((c) => kindOf(c) === 'command')
     const namedTest = commandChecks.filter((c) => c.name === 'test')
     const commandCheck = namedTest.length === 1
       ? namedTest[0]
@@ -3194,7 +3219,7 @@ export async function runCli(argv, io = { out: console.log }) {
 
     const phaseName = flags.phase ?? 'default'
     const checks = checksForPhase(config, phaseName)
-    const agentChecks = checks.filter((c) => c.kind === 'agent')
+    const agentChecks = checks.filter((c) => kindOf(c) === 'agent')
     if (agentChecks.length !== 1) {
       io.out(`this phase declares ${agentChecks.length} agent checks; collect-reviews handles exactly one`)
       return 4
@@ -3349,7 +3374,7 @@ export async function runCli(argv, io = { out: console.log }) {
 
     // --no-fleet is the only way the enforcement checks are skipped, and the caller must
     // say it. Inferring "solo" from missing state let deleting one file record a PASS.
-    const checks = solo ? all.filter((c) => c.kind !== 'fileset' && c.kind !== 'ownership') : all
+    const checks = solo ? all.filter((c) => kindOf(c) !== 'fileset' && kindOf(c) !== 'ownership') : all
     if (solo) io.out('--no-fleet: enforcement checks are not running')
 
     // Read once, at the moment of the run. The file is never persisted and never read back

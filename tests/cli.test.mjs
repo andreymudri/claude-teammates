@@ -1665,6 +1665,33 @@ async function writeReviewManifest(root, extra = {}) {
   )
 }
 
+// The same manifest entry that is not an object at all, on the two commands that select checks by
+// kind without ever handing the list to `runChecks`. Neither can diagnose it — that is the gate's
+// job — but neither may die on it either: a `null` beside a perfectly good agent check used to
+// throw a TypeError out of the filter, so the operator got a stack trace instead of the dispatch.
+test('review-dispatch and collect-reviews survive a null manifest entry beside the agent check', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      lens: ['correctness'],
+      phases: { default: { checks: [null, { name: 'review', kind: 'agent', agent: 'tm-reviewer', blockOn: ['high'] }] } },
+    }), 'utf8')
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    lines.length = 0
+    assert.equal(await runCli(['review-dispatch', '--run', 'r1', '--phase', '1', '--root', root], io), 0, lines.join('\n'))
+    assert.equal(JSON.parse(lines.join('\n')).reviewers.length, 1)
+    lines.length = 0
+    // No findings files were written, so this refuses for that reason — exit 4 with a message,
+    // which is a decision about the reviews and not a crash in the manifest filter.
+    assert.equal(await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io), 4)
+    assert.match(lines.join('\n'), /correctness/)
+  })
+})
+
 test('review-dispatch emits one unnamed reviewer per lens over the phase branches', async () => {
   await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
@@ -2465,6 +2492,99 @@ test('--enforcement-only accepts an ownership-only manifest and runs the ownersh
     assert.match(out, /failed: ownership/)
     assert.doesNotMatch(out, /skipped: ownership/)
     assert.equal(code, 1)
+  })
+})
+
+// --- a manifest entry the gate cannot understand, on the paths that filter the list -----------
+//
+// `gate-runner` reports a malformed entry by its POSITION, because such an entry usually has no
+// name and the position is all the operator has to find it by. `--enforcement-only` filters the
+// command checks out before the list is handed over, so a position recounted after that filter
+// names a different entry than the message tells the operator to fix — and that filtered path is
+// the one `complete --enforcement-only`, `finish` and `prune-run` all take.
+test('--enforcement-only reports a malformed entry by its position in the manifest, not after the filter', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [
+        { name: 'test', kind: 'command', run: 'node -e ""' },
+        { name: 'lint', kind: 'command', run: 'node -e ""' },
+        // Malformed, and third. After the command checks are filtered out it is FIRST.
+        { kind: ['fileset'], optional: true },
+        { name: 'fileset', kind: 'fileset' },
+      ] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    const code = await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--enforcement-only'], io)
+    const out = lines.join('\n')
+    assert.equal(code, 1, out)
+    assert.match(out, /entry #2 in this phase's check list/)
+    // #0 is `test`, a perfectly good command check the operator would be sent to edit instead.
+    assert.doesNotMatch(out, /entry #0 in this phase's check list/)
+  })
+})
+
+// A `null` entry is JSON's own spelling of a slip in a hand-written manifest, and `runChecks`
+// diagnoses it. It never got there: cli.mjs dereferenced the raw entry first, so the command died
+// with a TypeError and recorded no verdict at all. One test per path below, because the three
+// crash at three different lines — `gate` on `c.name` in `validateSuppliedResults`,
+// `gate --no-fleet` on `c.kind` in the solo filter, `--enforcement-only` on `c.kind` in
+// `enforcementOnlyRefusal`. `validateGate` checks only that `checks` is an array, never what is in
+// it, so nothing upstream stops any of them.
+test('a null manifest entry is diagnosed rather than crashing the gate', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [null, { name: 'fileset', kind: 'fileset' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    const code = await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    // A verdict, not a stack trace — and a FAIL, because a manifest this gate cannot understand
+    // is a configuration fault and must not be capable of passing.
+    assert.equal(code, 1, out)
+    assert.match(out, /"verdict": "FAIL"/)
+    assert.match(out, /entry #0 in this phase's check list/)
+  })
+})
+
+test('a null manifest entry is diagnosed on the --no-fleet gate path', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'noop', kind: 'command', run: 'node -e ""' }, null] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    const code = await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--no-fleet', '--root', root], io)
+    const out = lines.join('\n')
+    assert.equal(code, 1, out)
+    assert.match(out, /entry #1 in this phase's check list/)
+  })
+})
+
+test('a null manifest entry is diagnosed on the --enforcement-only path', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [
+        { name: 'test', kind: 'command', run: 'node -e ""' },
+        null,
+        { name: 'fileset', kind: 'fileset' },
+      ] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    const code = await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--enforcement-only'], io)
+    const out = lines.join('\n')
+    assert.equal(code, 1, out)
+    assert.match(out, /entry #1 in this phase's check list/)
   })
 })
 
@@ -9504,29 +9624,17 @@ test('a lifecycle command never overwrites a run branch that is already recorded
 // that kept happening, so the enumeration is now the code: exactly one function writes plan.json,
 // and this counts the call sites. A second one fails here rather than in a review three rounds later.
 //
-// WHAT THIS PIN DOES AND DOES NOT CATCH. It is a source scan, not a type system, and the previous
-// version — a `/await writeState\([^,]+,\s*[^,]+,\s*'plan'/` regex — was defeated three separate
-// ways in one review, each measured green: a `"plan"` double-quoted third argument, a first
-// argument containing a nested comma (`path.resolve(root, '.')`, which `[^,]+` cannot cross), and
-// a non-awaited `return writeState(...)`. All three are closed below by parsing the argument list
-// instead of matching it, and by requiring the third argument to be a STRING LITERAL — which is
-// what closes the fourth defeat, `const planKind = 'plan'` followed by `writeState(root, runId,
-// planKind, …)`, a spelling no regex over the call itself could ever have seen.
-//
-// Still not caught, and named here rather than papered over: a write that reaches plan.json
-// through a helper in ANOTHER module, a path assembled at runtime, or a callee named by
-// computation (`state['write' + 'State']`). Aliasing is closed by two assertions rather than by
-// the count: replacing the import with `writeState as ws` drops the count to zero and fails there,
-// while an aliased import ADDED alongside the plain one would leave the count at one and is
-// refused by the no-alias assertion. The honest summary is that the structural pin is narrower
-// than the behavioural coverage above it: those tests exercise the actual fill-if-absent rule through the CLI, and this
-// one only makes the specific mistake that caused three regressions — an inline second writer —
-// hard to make by accident.
+// WHAT THIS PIN IS WORTH. It is a source scan, not a type system: a tripwire for the literal
+// `writeState(root, runId, 'plan', …)` spelling, which any other spelling defeats. Three rounds of
+// prose enumerating which spellings it refuses and which it misses were each found incomplete by
+// the next reviewer, so there is no enumeration here — a comment with none cannot have a wrong
+// one. The behavioural tests above are the real coverage of fill-if-absent: they drive the CLI and
+// assert the recorded branch survives. This pin only makes the specific mistake that caused three
+// regressions — an inline second writer — hard to make by accident.
 
 // The top-level arguments of the call whose `(` sits at `open`, as trimmed source text. Nesting of
 // `()`/`[]`/`{}` and the three quote characters is tracked, so an argument that itself contains a
-// comma counts as one argument. Nested template-literal interpolation is not tracked; no call site
-// this pin reads uses one.
+// comma counts as one argument. Nested template-literal interpolation is not tracked.
 function callArguments(source, open) {
   const args = []
   let depth = 0
@@ -9585,11 +9693,9 @@ test('exactly one function in cli.mjs writes plan.json', () => {
     )
   }
 
-  // ...and the name is never aliased, so `writeState(` is the only spelling a second writer in this
-  // file can use. Replacing the import with `writeState as ws` would drop the count to zero and
-  // fail below anyway; what this refuses is an aliased import ADDED alongside the plain one, which
-  // would leave the count at one. (A namespace import needs no clause here: `st.writeState(` still
-  // contains `writeState(` and is counted.)
+  // ...and the IMPORT is never aliased. What this refuses is an aliased import added alongside the
+  // plain one, which would leave the count at one. It says nothing about any other route to the
+  // same function; see what this pin is worth, above.
   const stateImport = CLI_SOURCE.match(/^import \{([^}]*)\} from '\.\/state\.mjs'$/m)
   assert.ok(stateImport, "cli.mjs no longer has a named import from './state.mjs'")
   assert.ok(

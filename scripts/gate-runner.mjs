@@ -65,39 +65,59 @@ const ALWAYS_ENFORCED_KINDS = new Set(['fileset', 'ownership', 'merge'])
 // always handled; an array is the spelling JSON can express and nothing covered it.
 const hasUsableKind = (check) => typeof check?.kind === 'string'
 
+// The position `malformedKindResult` reports must locate the entry in `teammates.gate.json`, and
+// the list this module is handed is not always that file's list: `cli.mjs` filters the command
+// checks out for `--enforcement-only`, which `complete`, `finish` and `prune-run` all accept, so
+// counting the surviving entries names a different entry than the message tells the operator to
+// fix. A filtering caller passes `ctx.checkPositions`, the manifest
+// position of each surviving entry in list order; a caller that did not filter passes nothing,
+// because then the list's own index already IS the manifest position.
+function manifestPosition(ctx, index) {
+  const positions = ctx?.checkPositions
+  return Array.isArray(positions) && Number.isInteger(positions[index]) ? positions[index] : index
+}
+
 // A FAIL rather than a pending or a skip: a manifest this file cannot understand is a
 // configuration fault, so it must not run and must not be capable of passing.
 //
 // Built through `checkResult` rather than as its own object literal, so that `optional` is decided
-// in exactly ONE place. Hardcoding `optional: false` here worked and left the same clause in
-// `checkResult` unreachable — an unpinned guard that reads as load-bearing, which is the shape
-// this review has rejected repeatedly. Now the array-spelled tests exercise that clause directly.
+// in exactly ONE place — and the entry's OWN `kind` and `optional` are handed over unchanged, so
+// the decision `checkResult` makes is a real one. An earlier version passed a synthesized literal
+// with no `optional` at all; `checkResult`'s `hasUsableKind` clause then had nothing to refuse, and
+// restoring that shape and deleting the clause leaves tests/gate-runner.test.mjs fully green
+// (measured) — the unpinned-guard-that-reads-as-load-bearing shape this review has rejected
+// repeatedly. Now `{"kind":["fileset"],"optional":true}` reaches that clause carrying
+// `optional: true`, and deleting the clause alone turns the false-PASS test red.
 //
-// `index` is the entry's position in the phase's own check list, and it is the whole point of this
-// function's diagnosis. A malformed entry frequently has no `name` — `null` and `"just a string"`
-// are both reachable from a hand-written manifest — and `name` is the only field
-// `aggregateVerdict` reports, so two such entries both surfaced as `{"failed":[null]}` while the
-// text told the operator to fix a `kind` on an entry they could not identify. The position is put
-// in BOTH the message and the fallback `name`, so the verdict line alone locates the entry.
+// `index` is the entry's position in the manifest's check list (see `manifestPosition`), and it is
+// the whole point of this function's diagnosis. A malformed entry frequently has no `name` —
+// `null` and `"just a string"` are both reachable from a hand-written manifest — and `name` is the
+// only field `aggregateVerdict` reports, so two such entries both surfaced as `{"failed":[null]}`
+// while the text told the operator to fix a `kind` on an entry they could not identify. The
+// position is put in BOTH the message and the fallback `name`, so the verdict line alone locates
+// the entry.
 //
 // The `try` is not reachable from a manifest: that file is `JSON.parse`-only, so the kinds it can
 // express are exactly the JSON value shapes and `JSON.stringify` serialises all of them. It guards
 // the EXPORTED api instead — `runChecks` is called directly from `cli.mjs` and from tests, and a
-// programmatic caller can pass a `10n` or a throwing getter, which is what the bigint test pins.
+// programmatic caller can pass a `10n`, which is what the bigint test pins. It does NOT rescue a
+// `kind` GETTER that throws: `hasUsableKind` dereferences `check.kind` before this function is
+// entered, so such a getter throws out of `runChecks` and no verdict is recorded. No manifest can
+// express one, and closing it would mean wrapping the type test itself.
 function malformedKindResult(check, index) {
   const position = `entry #${index} in this phase's check list`
   let shown
   try {
     shown = JSON.stringify(check?.kind)
   } catch {
-    // A getter that throws, or a BigInt: the value still has to be reportable.
+    // A BigInt, or any other value `JSON.stringify` refuses: it still has to be reportable.
     shown = String(check?.kind)
   }
-  // Only `name`, `kind` and `optional` are read out of this; `kind` is passed through unchanged so
-  // that `checkResult`'s own `hasUsableKind` clause — not a second copy of the rule here — is what
-  // forces `optional: false`.
+  // Only `name`, `kind` and `optional` are read out of this; `kind` and `optional` are passed
+  // through unchanged so that `checkResult`'s own `hasUsableKind` clause — not a second copy of
+  // the rule here — is what forces `optional: false`.
   return checkResult(
-    { name: typeof check?.name === 'string' ? check.name : position, kind: check?.kind },
+    { name: typeof check?.name === 'string' ? check.name : position, kind: check?.kind, optional: check?.optional },
     'fail',
     `check kind must be a string, got ${shown} (${position})`
     + ' — a manifest entry this gate cannot understand is a configuration fault, not a check.'
@@ -1013,7 +1033,7 @@ async function runCheckList(checks, ctx, commandCwd, mergeConflicted) {
     // this block below the skip and the nameless-entry test fails on that throw.
     // See `hasUsableKind`.
     if (!hasUsableKind(check)) {
-      results.push(malformedKindResult(check, index))
+      results.push(malformedKindResult(check, manifestPosition(ctx, index)))
       continue
     }
     // A `command` check exists to answer "does the integrated tree work". Without a merged
