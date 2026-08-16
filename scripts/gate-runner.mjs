@@ -103,11 +103,10 @@ function manifestPosition(ctx, index) {
 // The `try` is not reachable from a manifest: that file is `JSON.parse`-only, so the kinds it can
 // express are exactly the JSON value shapes and `JSON.stringify` serialises all of them. It guards
 // the EXPORTED api instead — `runChecks` is called directly from `cli.mjs` and from tests, and a
-// programmatic caller can pass a `10n`, which is what the bigint test pins. It rescues NEITHER of
-// the two dereferences around it: `hasUsableKind` reads `check.kind` before this function is
-// entered, and the pass-through below reads `check.optional`. A throwing GETTER on either field
-// therefore throws out of `runChecks` with no verdict recorded — measured on both. No manifest can
-// express a getter, and closing this would mean wrapping those reads themselves.
+// programmatic caller can pass a `10n`, which is what the bigint test pins. Its scope is that one
+// serialisation and nothing wider: the reads that reach the entry's own fields happen outside the
+// `try`, so a throwing GETTER on the entry throws out of `runChecks` with no verdict recorded. No
+// manifest can express a getter, so that is programmatic callers only.
 function malformedKindResult(check, index) {
   const position = `entry #${index} in this phase's check list`
   let shown
