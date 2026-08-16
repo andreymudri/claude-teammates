@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises'
+import { composeBrief } from './brief.mjs'
 
 const TEMPLATE = new URL('../templates/phase-workflow.js', import.meta.url)
 const IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/
@@ -16,7 +17,7 @@ function jsString(value) {
     .replace(/\r/g, '\\r')}'`
 }
 
-const MARKER = /__(?:META|TASKS|PLAN_PATH|BASE_BRANCH|CONSTRAINTS|CAVEMAN|EFFORT)__/g
+const MARKER = /__(?:META|TASKS|BRIEFS|EFFORT)__/g
 
 // Serializes a plain JS value (string/number/boolean/null/array/object) as a JS
 // literal with unquoted identifier keys and single-quoted strings, matching the
@@ -67,14 +68,17 @@ export async function generatePhaseWorkflow({
   const substitutions = {
     __META__: () => `export const meta = ${jsLiteral(meta)}`,
     __TASKS__: () => JSON.stringify(slim, null, 2),
-    __PLAN_PATH__: () => jsLiteral(planPath),
-    __BASE_BRANCH__: () => jsLiteral(baseBranch),
-    __CONSTRAINTS__: () => jsLiteral(constraints),
-    // A caveman level is a string when set and literally `false` when not, so the template's
-    // `CAVEMAN ? briefTerse : brief` selects on the flag without an empty string masquerading
-    // as a level. Both go through jsLiteral, so a caller-supplied value is quoted and escaped
-    // exactly like every other string that reaches the generated source.
-    __CAVEMAN__: () => (caveman ? jsLiteral(caveman) : 'false'),
+    // One brief per task, composed here rather than in the template: a generated workflow runs
+    // without module or filesystem access, so composeBrief cannot be called at workflow runtime.
+    // Embedding the finished text is the only way both dispatch paths (this generator and
+    // `cli.mjs brief`) can share one implementation.
+    __BRIEFS__: () => JSON.stringify(
+      Object.fromEntries(slim.map((task) => [task.id, composeBrief({
+        task, runId, planPath, baseBranch, constraints, caveman,
+      })])),
+      null,
+      2,
+    ),
     __EFFORT__: () => jsLiteral(effort),
   }
 
