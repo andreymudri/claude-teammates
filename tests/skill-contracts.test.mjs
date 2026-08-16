@@ -1100,16 +1100,22 @@ test('no skill or agent claims SubagentStop catches a stalled or parked teammate
   }
 })
 
-// The direct-`Agent` path is the only one that can reach a teammate's stop before any lifecycle
-// command has recorded the run branch, so the SubagentStop guard fails open there unless the run
-// branch is checked out first. The instruction lives in the Dispatch-the-phase section; bind the
-// literal so it cannot be dropped silently.
-test('parallel-execution checks out the run branch before the direct-Agent dispatch', async () => {
+// On a pure direct-`Agent` phase nothing records the run branch (only gate/finish/prune-run/
+// workflow do), so the SubagentStop guard is fail-open there until one of those runs. The skill
+// must state that honestly rather than claim a run-branch checkout closes the window — it does not,
+// because a checkout writes no record. Bind the honest disclosure so it cannot silently regress to
+// a false closure claim.
+test('parallel-execution states the SubagentStop guard is fail-open on the direct dispatch path', async () => {
   const { doc } = await skill('parallel-execution')
   const section = doc.section('Dispatch the phase')
   assert.match(
     section.text,
-    /git checkout/,
-    'the direct-dispatch section must instruct a run-branch checkout before dispatching',
+    /fail-open/,
+    'the direct-dispatch section must disclose the SubagentStop fail-open window, not claim it is closed',
+  )
+  assert.doesNotMatch(
+    section.text,
+    /checking the branch out writes that record/,
+    'the false claim that a checkout records the run branch must not return',
   )
 })

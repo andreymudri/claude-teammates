@@ -30,23 +30,20 @@ nothing downstream changes. Say which path you took.
 Phases with fewer than three tasks are dispatched as direct background `Agent` calls with
 `isolation: 'worktree'` and the `tm-implementer` persona. Same result contract either way.
 
-On either direct-`Agent` path — the fallback above and the fewer-than-three-task case — do two
-things before issuing the dispatches. First, check out the run branch once:
-
-    git checkout <run branch>
-
-A direct dispatch is the only path that can reach a teammate's stop before any lifecycle command
-has run on the run branch, and the `SubagentStop` guard resolves a stopping teammate to its task
-through the run branch recorded there; with no run branch recorded it fails open and allows the
-stop unconditionally, so checking the branch out writes that record first. The `Workflow` path
-never needs this — it always runs on the run branch.
-
-Second, build each teammate's brief with the CLI rather than composing it by hand:
+On either direct-`Agent` path — the fallback above and the fewer-than-three-task case — build each
+teammate's brief with the CLI rather than composing it by hand:
 
     node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" brief --run <id> --task <id> --plan <path> --base <branch> --root <project root>
 
 The Workflow path already renders each brief from the same composer, so a hand-written dispatch is
 only ever a way to drift from what the gate enforces.
+
+Note the `SubagentStop` guard is fail-open on a pure direct-`Agent` phase: nothing on that path
+records the run branch (only `gate`, `finish`, `prune-run` and `workflow` do), so until one of
+those runs the hook cannot resolve a stopping teammate to its task and allows the stop. The phase
+gate is the enforcement that catches skipped work there; do not rely on the stop hook. Closing this
+window would require `locate` or `init-run` to record the run branch, which is tracked as a
+follow-up.
 
 Wait on completion notifications. Do not poll in a loop.
 
