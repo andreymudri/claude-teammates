@@ -140,7 +140,7 @@ rejections as `--worktree …`. The **store** the record is filed in is `.teamma
 the **main** repository root, and `locate` must derive that root the way the handler derives its
 own — `git rev-parse --path-format=absolute --git-common-dir` and take the parent, as **Three
 arguments the hook is not given** sets out below. It must not inherit the CLI's shared default,
-`flags.root ?? process.cwd()` (`scripts/cli.mjs:1258`): run inside a teammate's worktree that
+`flags.root ?? process.cwd()` (`scripts/cli.mjs:1740`): run inside a teammate's worktree that
 files the record under *that* worktree's `.teammates/`, which is gitignored, so the directory
 appears and the command exits 0 with nothing to notice. The handler then computes the same key
 against the main root and finds no file. Every teammate, every run: the stop is allowed with no
@@ -155,16 +155,16 @@ is finished.
 
 **The exit codes it returns today cannot carry this decision.** As `scripts/cli.mjs` stands:
 
-- **0** — the task passes; the run's status file is written (`cli.mjs:2819`) and the command
-  returns at `cli.mjs:2821`.
+- **0** — the task passes; the run's status file is written (`cli.mjs:3666`) and the command
+  returns at `cli.mjs:3668`.
 - **1** — the checks passed but `status.json` is missing or does not list the task
-  (`cli.mjs:2815-2817`).
-- **2** — `teammates.gate.json` is present and malformed (`cli.mjs:2760`) — **or the invocation
+  (`cli.mjs:3653-3655`).
+- **2** — `teammates.gate.json` is present and malformed (`cli.mjs:3508`) — **or the invocation
   itself was bad.** Every argv failure exits 2 too: a missing required argument, a rejected flag
-  spelling (`cli.mjs:1242`), an unknown flag, an empty `--root`, a `--run` that escapes
+  spelling (`cli.mjs:1721`), an unknown flag, an empty `--root`, a `--run` that escapes
   `.teammates/`. So 2 means "broken manifest OR malformed invocation", and a reader taking it as a
   manifest diagnosis will misreport its own bad argv.
-- **4** — no gate manifest (`cli.mjs:2761`), an underivable context, a task absent from the plan,
+- **4** — no gate manifest (`cli.mjs:3509`), an underivable context, a task absent from the plan,
   **or the recomputed gate rejected this task** (`cli.mjs:2811`, printing the rejection at
   `cli.mjs:2803`, pinned by `tests/cli.test.mjs`, "complete exits 4 when the recomputed gate
   fails").
@@ -290,7 +290,7 @@ the phase gate remains the thing that decides.
   its own brief, which is fixed text already in its context rather than a file the handler consults
   at stop time. That contrast is about *when* the name was fixed, not about who could have written
   it: the brief's branch string is itself built from `.teammates/<runId>/plan.json` — `workflow`
-  reads that record (`scripts/cli.mjs:1399`), the branch is composed from its `id`
+  reads that record (`scripts/cli.mjs:2105`), the branch is composed from its `id`
   (`scripts/workflow-gen.mjs:60`), and it is rendered into the checkout line
   (`scripts/brief.mjs:37`) — and that file is writable by any teammate, like everything else in
   that directory. It fails closed, because the gate resolves the conventional name from the plan
@@ -319,11 +319,11 @@ the phase gate remains the thing that decides.
   `complete` marks a task done only after recomputing.
 
   Files under `.teammates/` *are* read — for bookkeeping, not for verdicts. `gate` reads
-  `status.json` at `cli.mjs:2722` and `complete` at `cli.mjs:2814`; earlier drafts of this
+  `status.json` at `cli.mjs:3463` and `complete` at `cli.mjs:3652`; earlier drafts of this
   paragraph said the gate "reads nothing under `.teammates/`", which was never true. What holds is
   that a corrupt one fails the run **closed**, not open: non-JSON in `status.json` makes `readState`
   rethrow, and `gate` reports `FAIL` with `run-state` among the failed checks and exits 1 even
-  though every check passed (`cli.mjs:2727-2735`). So the damage from forgery is a wrong or missing
+  though every check passed (`cli.mjs:3474-3482`). So the damage from forgery is a wrong or missing
   early catch, or a run that stops — never a failing task recorded as passing. Tamper-evident, not
   tamper-proof, on the same footing as everything else in that directory. `scripts/state.mjs`
   states the same shape at the reader itself; the two must not drift apart.
