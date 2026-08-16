@@ -1074,8 +1074,10 @@ test('parallel-execution names the brief command its direct dispatches are built
 
 // SubagentStop fires only when a teammate actually stops; a stalled or parked teammate never
 // reaches it, and `liveness` is the only check that sees an absence of progress with no stop. No
-// skill or agent may claim otherwise: any sentence that names both SubagentStop and a stall must
-// also name liveness, so a contract cannot quietly promote the backstop into a stall detector.
+// skill or agent may claim otherwise: any sentence that names both SubagentStop and a stall or a
+// parked teammate must also name liveness, so a contract cannot quietly promote the backstop into a
+// stall detector. The guard matches both `stall` and `park` because the property it protects covers
+// a teammate that never stops for either reason, and the test name asserts exactly that coverage.
 test('no skill or agent claims SubagentStop catches a stalled or parked teammate', async () => {
   const agentsDir = new URL('../agents/', import.meta.url)
   const docs = []
@@ -1087,11 +1089,11 @@ test('no skill or agent claims SubagentStop catches a stalled or parked teammate
   }
   for (const doc of docs) {
     for (const s of doc.statements) {
-      if (/SubagentStop/.test(s.text) && /\bstall/i.test(s.text)) {
+      if (/SubagentStop/.test(s.text) && /\b(?:stall|park)/i.test(s.text)) {
         assert.match(
           s.text,
           /liveness/i,
-          `a sentence naming SubagentStop and a stall must also name liveness (${doc.label}): ${s.text}`,
+          `a sentence naming SubagentStop and a stall or a parked teammate must also name liveness (${doc.label}): ${s.text}`,
         )
       }
     }
