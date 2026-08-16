@@ -30,6 +30,21 @@ nothing downstream changes. Say which path you took.
 Phases with fewer than three tasks are dispatched as direct background `Agent` calls with
 `isolation: 'worktree'` and the `tm-implementer` persona. Same result contract either way.
 
+On either direct-`Agent` path — the fallback above and the fewer-than-three-task case — build each
+teammate's brief with the CLI rather than composing it by hand:
+
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" brief --run <id> --task <id> --plan <path> --base <branch> --root <project root>
+
+The Workflow path already renders each brief from the same composer, so a hand-written dispatch is
+only ever a way to drift from what the gate enforces.
+
+Note the `SubagentStop` guard is fail-open on a pure direct-`Agent` phase: nothing on that path
+records the run branch (only `gate`, `finish`, `prune-run` and `workflow` do), so until one of
+those runs the hook cannot resolve a stopping teammate to its task and allows the stop. The phase
+gate is the enforcement that catches skipped work there; do not rely on the stop hook. Closing this
+window would require `locate` or `init-run` to record the run branch, which is tracked as a
+follow-up.
+
 Wait on completion notifications. Do not poll in a loop.
 
 ## 3. Record results
@@ -205,9 +220,13 @@ while the context to fix them is still cheap. The broad review at branch complet
 (`phase-gate`'s final pass) never substitutes for this — it catches cross-task drift, not
 per-task defects.
 
-If a teammate needs a fix round, resume the same teammate first — it still has the task's
-context. Only fall back to a fresh implementer on that task if resuming stalls; note in
-`status.json` that the task restarted.
+If a teammate needs a fix round, address the live teammate first: `SendMessage` the teammate that
+owns the failing task, by the id its dispatch returned, with the finding text. Its worktree still
+holds the context a cold respawn would have to rebuild. Respawn on that task only when that
+teammate is gone; a respawned teammate re-runs `locate`, which overwrites the record with its new
+worktree. Note in `status.json` that the task restarted. A teammate inside a running `Workflow`
+cannot receive `SendMessage`, so a phase dispatched through the `Workflow` tool has no live
+teammate to address and its fix round respawns.
 
 ## The map
 

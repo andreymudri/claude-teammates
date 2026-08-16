@@ -1061,3 +1061,61 @@ test('fleet-supervision states the stall recovery resumes that agent rather than
     then: /Do not respawn it: a respawn discards the task's whole context, and a returned teammate's worktree keeps its branch checked out, so a fresh dispatch fails with "already used by worktree" until that worktree is pruned/i,
   })
 })
+
+// The direct-dispatch instructions in parallel-execution build each teammate's brief from
+// `cli.mjs brief` rather than composing it by hand. The invocation carries the CLAUDE_PLUGIN_ROOT
+// prefix a skill CLI call must (see the relative-path test above), so the closing quote sits
+// between `cli.mjs` and `brief`; binding the literal keeps the dispatch instructions from drifting
+// away from the CLI they call.
+test('parallel-execution names the brief command its direct dispatches are built from', async () => {
+  const { body } = await skill('parallel-execution')
+  assert.ok(body.includes('cli.mjs" brief'), 'parallel-execution must name the cli.mjs brief command')
+})
+
+// SubagentStop fires only when a teammate actually stops; a stalled or parked teammate never
+// reaches it, and `liveness` is the only check that sees an absence of progress with no stop. No
+// skill or agent may claim otherwise: any sentence that names both SubagentStop and a stall or a
+// parked teammate must also name liveness, so a contract cannot quietly promote the backstop into a
+// stall detector. The guard matches both `stall` and `park` because the property it protects covers
+// a teammate that never stops for either reason, and the test name asserts exactly that coverage.
+test('no skill or agent claims SubagentStop catches a stalled or parked teammate', async () => {
+  const agentsDir = new URL('../agents/', import.meta.url)
+  const docs = []
+  for (const name of await allSkills()) docs.push((await skill(name)).doc)
+  for (const file of await readdir(agentsDir)) {
+    const text = await readFile(new URL(file, agentsDir), 'utf8')
+    const { body } = splitFrontmatter(text, file)
+    docs.push(parseDoc(body, file))
+  }
+  for (const doc of docs) {
+    for (const s of doc.statements) {
+      if (/SubagentStop/.test(s.text) && /\b(?:stall|park)/i.test(s.text)) {
+        assert.match(
+          s.text,
+          /liveness/i,
+          `a sentence naming SubagentStop and a stall or a parked teammate must also name liveness (${doc.label}): ${s.text}`,
+        )
+      }
+    }
+  }
+})
+
+// On a pure direct-`Agent` phase nothing records the run branch (only gate/finish/prune-run/
+// workflow do), so the SubagentStop guard is fail-open there until one of those runs. The skill
+// must state that honestly rather than claim a run-branch checkout closes the window — it does not,
+// because a checkout writes no record. Bind the honest disclosure so it cannot silently regress to
+// a false closure claim.
+test('parallel-execution states the SubagentStop guard is fail-open on the direct dispatch path', async () => {
+  const { doc } = await skill('parallel-execution')
+  const section = doc.section('Dispatch the phase')
+  assert.match(
+    section.text,
+    /fail-open/,
+    'the direct-dispatch section must disclose the SubagentStop fail-open window, not claim it is closed',
+  )
+  assert.doesNotMatch(
+    section.text,
+    /checking the branch out writes that record/,
+    'the false claim that a checkout records the run branch must not return',
+  )
+})

@@ -86,6 +86,14 @@ explicit longer timeout. Do not respawn it: a respawn discards the task's whole 
 returned teammate's worktree keeps its branch checked out, so a fresh dispatch fails with "already
 used by worktree" until that worktree is pruned.
 
+## The SubagentStop backstop
+
+A teammate's stop runs the `SubagentStop` hook, which re-runs the cheap enforcement checks and can
+refuse the stop; a refusal is handed back to that teammate and appears in its transcript with the
+failure text. But `SubagentStop` fires only when a teammate actually stops — a stalled or parked
+teammate never reaches it, so `liveness` remains the only thing that sees a teammate which never
+stops at all. No stop-path hook fires for a parked agent.
+
 ## Failure handling
 
 | Symptom | Response |

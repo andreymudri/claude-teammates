@@ -325,3 +325,13 @@ test('the integrator reports blocked when the run branch is held by another work
     subject: /checked out elsewhere/i,
   })
 })
+
+// The two commands the implementer contract tells a teammate to run — `locate` at start-up and
+// `complete` at the gate — are named with the CLAUDE_PLUGIN_ROOT invocation the brief renders,
+// so the closing quote sits between `cli.mjs` and the subcommand. Binding the literal keeps the
+// contract from drifting away from the commands it prescribes.
+test('the implementer names the locate and complete commands it must run', async () => {
+  const text = await readFile(new URL('tm-implementer.md', dir), 'utf8')
+  assert.ok(text.includes('cli.mjs" locate'), 'implementer must name the cli.mjs locate command')
+  assert.ok(text.includes('cli.mjs" complete'), 'implementer must name the cli.mjs complete command')
+})
