@@ -11,9 +11,9 @@
 // check that pins them byte-identical; until it lands, the template's copy is still live and
 // is what a `Workflow` dispatch actually renders.
 //
-// One command this module emits is also not built yet: `cli.mjs` has no `locate`. See the
-// note above `locateStep`. Nothing here can be dispatched for real until both that command
-// and the rewiring land, and in that order.
+// The command this module emits has since been built: `cli.mjs` now has `locate`, and `complete`
+// now takes `--enforcement-only`, both landed by the same task that corrected the exit-code table
+// below. So the remaining gap is the rewiring alone — Task 6's — not the CLI surface.
 //
 // Pure: no I/O, no filesystem, no process access. That is what lets the generator substitute
 // finished text into generated workflow scripts, which run without filesystem or module access
@@ -69,20 +69,20 @@ const blastRadius = (task) => (task.neighbours && task.neighbours.length ? [
 // never created its branch, which is the failure the hook exists to catch. With no run id
 // there is no record to write, so the section disappears rather than emitting `--run ` empty.
 //
-// PREREQUISITE: `cli.mjs` has no `locate` command yet — a later task adds it. Whoever wires a
-// dispatch path onto this module must land that command FIRST, or every brief it renders sends
-// its teammate to an invocation the CLI rejects. This is the same standard applied to
-// `--enforcement-only`, which the verify step deliberately does not emit because `complete`
-// does not accept it yet; the difference is that flag can simply be omitted, while the locate
-// step is the record the hook resolves through and has to be emitted. The rendered text below
-// states the requirement rather than describing the interface as though it already existed.
+// `cli.mjs locate` exists as of the same commit that corrected the exit-code table below, so the
+// text can now describe the interface rather than demand it. It takes no path arguments on
+// purpose: it reads the worktree TOP LEVEL from git, so running it from a subdirectory records
+// the same path the hook will later ask about. The "blocked" fallback stays — this module is
+// still dispatched by a generator that may run against an older CLI on a user's machine, and an
+// unrecognised command must be reported, never worked around.
 const locateStep = (task, runId) => (runId ? [
   'RECORD YOUR WORKTREE. Immediately after the checkout above, run:',
   '',
   '    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" locate --run ' + runId + ' --task ' + task.id,
   '',
-  'It is to take no path arguments: it must read your worktree and branch from where you run',
-  'it. This is how your work is identified if you stop before finishing, so do not skip it.',
+  'It takes no path arguments: it reads your worktree and branch from where you run it, so it',
+  'is safe to run from any directory inside your worktree. This is how your work is identified',
+  'if you stop before finishing, so do not skip it.',
   'If the CLI answers that it does not know the command, that command has not landed yet:',
   'report status "blocked" naming it rather than inventing a substitute or skipping the step.',
   '',
@@ -93,7 +93,14 @@ const locateStep = (task, runId) => (runId ? [
 // with an empty flag value.
 //
 // The exit codes below are read out of `complete` in scripts/cli.mjs, not inferred:
-//   0  the task passes and is marked done in status.json
+//   0  the task passes. The brief's own invocation carries no `--enforcement-only`, so it is
+//      also marked done in status.json; the hook's invocation does carry it and deliberately
+//      does not mark anything, because a stopping teammate may be mid-work.
+//
+//      UNREACHABLE on some manifests, including this repository's own: it declares
+//      `{"name":"review","kind":"agent"}`, no runner answers to `agent`, so that check is a
+//      non-optional `pending` on every invocation and the verdict is never PASS. The exit-4 row
+//      says so rather than leaving a teammate to conclude its compliant work was rejected.
 //   1  the gate passed but status.json is missing or does not list the task — bookkeeping
 //   2  TWO unrelated things: teammates.gate.json is present and MALFORMED (configuration), or
 //      the invocation itself was rejected — a missing required argument, an unknown flag, a
@@ -106,15 +113,30 @@ const locateStep = (task, runId) => (runId ? [
 //      rendered text because this comment claims it is, and an unlisted marker falls through
 //      to the malformed-manifest line: a false configuration diagnosis for a rejected
 //      invocation on which nothing was verified.
-//   4  FOUR different situations: no gate manifest, an underivable context, a task the plan
-//      does not contain, and — the case that matters most — the recomputed gate REJECTING
-//      this task, which prints a first line beginning `gate does not pass for phase`.
-// So the code alone cannot separate "your work is wrong" from "this run cannot be verified":
-// only that printed first line can. The brief therefore keys the teammate off what it can
-// actually observe. A teammate told that 4 means "proceed" would return done on a failing
-// fileset check. Reading a printed line is fine for an agent, which reads text anyway; what
-// must never be built on text is a programmatic decision, which is why the hook gets a
-// distinct exit code in a later phase and why that is not solved here.
+//   3  a check SCOPED TO THIS TASK rejected it — `fileset` or `merge`. This is the one code
+//      that is a verdict about the teammate's own work, and the only one the stop-time hook
+//      blocks on.
+//   4  everything else that is not a PASS: no gate manifest, an underivable context, a task the
+//      plan does not contain, a merge preview that could not be built at all, a RUN-WIDE check
+//      failing (`ownership`, which sees every commit on the run branch and the main worktree's
+//      cleanliness — neither of them this teammate's), and a `command` check failing. The last
+//      one is why the row below does not say "not your work": a command check tests the MERGED
+//      tree and a teammate told to ignore it would return done on a red suite. It earns 4 rather
+//      than 3 because the stop-time hook skips command checks entirely, so a code that could
+//      mean "your tests failed" would mean something the hook never measured.
+//
+// THIS TABLE IS PART OF THE CONTRACT, not commentary on it. It is the only place a teammate
+// learns what a code means, so a stale row here is worse than a stale test: when the rejection
+// moved from 4 to 3, a teammate hitting 3 found no row, and the nearest "gate does not pass" row
+// sat under exit 4 beside a sibling telling it exit 4 was a configuration problem to quote and
+// proceed past — an instruction to ignore its own rejection. `tests/brief.test.mjs` pins the
+// rendered rows against `scripts/cli.mjs`'s own constants for exactly that reason: if the mapping
+// moves again, the rows fail rather than quietly lying.
+//
+// The split is now by CODE, which is what changed. It used to be by printed line, because 4
+// conflated a rejection with a cannot-verify and only the text could separate them; 3 separates
+// them programmatically, which is what the hook needed and what makes this table simple enough
+// for a teammate to act on.
 const verifyStep = (task, runId, planPath) => (runId && planPath ? [
   'BEFORE YOU RETURN "done". Run the task gate on your own work, in the FOREGROUND:',
   '',
@@ -124,18 +146,38 @@ const verifyStep = (task, runId, planPath) => (runId && planPath ? [
   '',
   'ROOT must be the MAIN worktree, which is what that command computes — run from inside your',
   'own worktree the CLI would resolve the run branch to your task branch and answer the wrong',
-  'question. Read BOTH the exit code and the first line it printed — exit 4 covers four',
-  'different situations and only the printed line tells them apart:',
-  '  exit 0 — your task passes. Return "done".',
-  '  exit 4, output beginning "gate does not pass for phase" — the gate recomputed your task',
-  '           and REJECTED it. That is your work, not a configuration problem.',
-  '           Fix exactly the checks it names, then run the command again.',
-  '           Returning "done" on this wastes the phase: the phase gate recomputes the same',
-  '           thing and will reject it.',
-  '  exit 4, output "no gate manifest", "cannot verify completion" or "no task ' + task.id + ' in the',
-  '           plan" — the run cannot be verified from here. That is the run configuration, not',
-  '           your work. Quote what it printed in your summary and proceed; do not loop on it,',
-  '           and do not report "blocked" for it when the work itself is finished.',
+  'question. Read the exit code first: 3 is the only one that is a verdict about YOUR work.',
+  '  exit 0 — your task passes. Return "done". Note that a manifest declaring a check this CLI',
+  '           has no runner for can never reach 0; see exit 4.',
+  '  exit 3 — a check scoped to your task REJECTED it: your branch changed files outside your',
+  '           declared set, your branch does not exist or is empty, or your work does not merge.',
+  '           That is your work, not a configuration problem. Fix exactly the checks it names,',
+  '           then run the command again. Returning "done" on this wastes the phase: the phase',
+  '           gate recomputes the same thing and will reject it.',
+  '  exit 4 — no check scoped to your task rejected you. Read the names it printed; they are not',
+  '           all the same kind of problem, and only the last one is yours:',
+  '             "ownership" — every commit on the run branch, and whether the MAIN worktree is',
+  '                clean. Neither is yours. Do NOT clean the main worktree, and do NOT',
+  '                cherry-pick another task\'s commit onto your branch to make it go away —',
+  '                that lands their files on your branch and fails your own file set.',
+  // A check with no runner is reported under this exact marker by `complete`. It needed its own
+  // row: routed in with "any other check", a teammate is told to fix a review check it cannot
+  // run, and this repository's own manifest declares one, so that is the DEFAULT outcome.
+  '             "could not run:" — a check whose kind this CLI has no runner for, such as an',
+  '                "agent" review check, or a mistyped kind in the manifest. It never executed.',
+  '                Nothing on your branch can change it, so do not try to make it pass.',
+  // Each quoted marker stays whole on its own line. Wrapped mid-phrase, the very string a
+  // teammate would search its own output for does not appear in the brief that told it to.
+  '             "no gate manifest", "cannot verify completion",',
+  '             "no task ' + task.id + ' in the plan", or a merge preview that could not be',
+  '                built — the run cannot be verified from here. That is the run',
+  '                configuration, not your work.',
+  '             a check that RAN and failed, including this project\'s test command — the MERGED',
+  '                tree failed it. That one you do fix: correct it and run the command again.',
+  '           For everything except that last one, quote what it printed in your summary and',
+  '           proceed. Do not loop on it, and do not report "blocked" when the work is finished.',
+  '           A fully compliant task can legitimately exit 4 and never 0 — on a manifest that',
+  '           declares a check this CLI cannot run, 4 with no other complaint IS your pass.',
   '  exit 2 — read the printed line here too: two unrelated things share this code.',
   '           Output naming an argument means YOUR INVOCATION was wrong, not the configuration:',
   '             "missing required argument:"   "unsupported flag spelling:"',

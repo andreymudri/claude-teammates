@@ -1074,6 +1074,160 @@ test('runChecks yields pending for prototype-shadowing kinds', async () => {
   assert.deepEqual(results.map((r) => r.status), ['pending', 'pending', 'pending', 'pending'])
 })
 
+// --- a check kind must be a STRING before a runner is selected -------------------------------
+//
+// The test above pins prototype-shadowing kinds, and every one of them is a STRING. The spelling
+// nothing covered is the one JSON can express: an ARRAY. JavaScript coerces on property lookup and
+// does not coerce in a Set, so `["command"]` lands on the wrong side of every guard at once — it
+// survives cli.mjs's `--enforcement-only` filter (`!== 'command'`), satisfies
+// `Object.hasOwn(RUNNERS, kind)`, resolves `RUNNERS[kind]` to a real runner, and is absent from
+// `ALWAYS_ENFORCED_KINDS`, so `optional: true` is honoured.
+//
+// `teammates.gate.json` lives in the main worktree and is writable by any teammate, so this needs
+// no other foothold.
+
+// Every kind the manifest accepts, in the array spelling. `command` is the execution path;
+// `fileset`/`ownership` are the real enforcement runners; `agent`/`mcp` have no runner and would
+// otherwise land as pendings; `merge` is gate-computed and a manifest must not be able to supply
+// it at all.
+const MANIFEST_KINDS = ['command', 'fileset', 'ownership', 'agent', 'mcp', 'merge']
+
+test('an array-spelled kind never reaches a runner, for any kind the manifest accepts', async () => {
+  for (const kind of MANIFEST_KINDS) {
+    // `run` is present so that if the command runner were ever reached, it would have something
+    // to execute — the test must not pass merely because the payload was empty.
+    const results = await runChecks([{ name: `k-${kind}`, kind: [kind], run: 'node -e ""' }], {})
+    assert.equal(results.length, 1, `unexpected extra results for ${kind}`)
+    const [result] = results
+    assert.equal(result.status, 'fail', `an array-spelled ${kind} did not fail`)
+    assert.equal(result.optional, false, `an array-spelled ${kind} was optional`)
+    assert.match(result.output, /kind must be a string/)
+    // Named in the diagnosis, so an operator can find the entry in the manifest.
+    assert.match(result.output, /teammates\.gate\.json/)
+  }
+})
+
+// The false-PASS half, which the execution fix alone would not have closed: the real `fileset`
+// runner executes and then declines to block, because `ALWAYS_ENFORCED_KINDS.has` does not coerce
+// while the runner lookup does. Measured against the merged tree as
+// `{"verdict":"PASS","failed":[],"optionalFailed":["fileset"]}` — a forged manifest reaching a
+// false gate PASS, which is the bound this design has claimed since phase 1.
+test('an array-spelled enforcement kind cannot buy itself out with optional', async () => {
+  const results = await runChecks([{ name: 'fileset', kind: ['fileset'], optional: true }], {})
+  const verdict = aggregateVerdict(results)
+  assert.equal(verdict.verdict, 'FAIL')
+  assert.deepEqual(verdict.failed, ['fileset'])
+  assert.deepEqual(verdict.optionalFailed, [])
+})
+
+// Every non-string shape, not only the array. The rule is a type test, so it is asserted as one:
+// nothing that is not a string may reach a runner by any route.
+test('no non-string kind reaches a runner by any route', async () => {
+  const shapes = [
+    ['array', ['command']],
+    ['nested array', [['command']]],
+    ['object with toString', { toString: () => 'command' }],
+    ['number', 1],
+    ['boolean', true],
+    ['null', null],
+    ['undefined', undefined],
+    ['String object', new String('command')], // eslint-disable-line no-new-wrappers
+  ]
+  for (const [label, kind] of shapes) {
+    const results = await runChecks([{ name: label, kind, run: 'node -e ""' }], {})
+    assert.equal(results[0].status, 'fail', `${label} did not fail`)
+    assert.equal(results[0].optional, false, `${label} was optional`)
+    assert.match(results[0].output, /kind must be a string/, label)
+  }
+})
+
+// The control, so none of the above passes by breaking ordinary manifests: string kinds behave
+// exactly as before, including the pendings for kinds with no runner and the honoured `optional`
+// on an advisory command check.
+test('string kinds are unaffected by the type test', async () => {
+  const results = await runChecks([
+    { name: 'ok', kind: 'command', run: 'node -e ""' },
+    { name: 'advisory', kind: 'command', run: 'node -e "process.exit(1)"', optional: true },
+    { name: 'review', kind: 'agent' },
+  ], { cwd: process.cwd() })
+  const byName = Object.fromEntries(results.map((r) => [r.name, r]))
+  assert.equal(byName.ok.status, 'pass')
+  assert.equal(byName.advisory.status, 'fail')
+  assert.equal(byName.advisory.optional, true, 'an advisory command check lost its optional flag')
+  assert.equal(byName.review.status, 'pending')
+  assert.equal(aggregateVerdict(results).optionalFailed.includes('advisory'), true)
+})
+
+// The diagnosis has to name the entry the operator must go and fix. A malformed entry frequently
+// carries no `name` — `null` and a bare string are both reachable from a hand-written manifest —
+// and `name` is the only field `aggregateVerdict` reports, so two such entries both surfaced as
+// `{"failed":[null]}` under a message telling the operator to fix a `kind` on an entry they had
+// no way to identify. Position in the phase's check list is what distinguishes them.
+test('a nameless malformed entry is reported by its position in the check list', async () => {
+  const results = await runChecks([null, { name: 'ok', kind: 'command', run: 'node -e ""' }, 'just a string'], {
+    cwd: process.cwd(),
+  })
+  assert.equal(results[0].status, 'fail')
+  assert.equal(results[2].status, 'fail')
+  // Distinct, and each one points at the entry it came from — index 0 and index 2, not 0 and 1.
+  assert.match(results[0].output, /entry #0 in this phase's check list/)
+  assert.match(results[2].output, /entry #2 in this phase's check list/)
+  // ...and the verdict line alone locates them, which is where `[null, null]` was printed.
+  const { failed } = aggregateVerdict(results)
+  assert.deepEqual(failed, ["entry #0 in this phase's check list", "entry #2 in this phase's check list"])
+})
+
+// An entry that DOES have a name keeps it — the position is added to the message, not substituted
+// for the name, so an operator reading a named failure is not sent hunting by index instead.
+test('a named malformed entry keeps its name and still reports its position', async () => {
+  const [result] = await runChecks([{ name: 'lint', kind: ['command'], run: 'node -e ""' }], {})
+  assert.equal(result.name, 'lint')
+  assert.match(result.output, /entry #0 in this phase's check list/)
+})
+
+// The number in that message tells the operator which entry of `teammates.gate.json` to go and
+// fix, so it has to survive a caller that hands `runChecks` a SUBSET of the manifest's list.
+// `cli.mjs` does exactly that for `--enforcement-only`, which `complete`, `finish` and `prune-run`
+// all accept, by filtering the command checks out first — after which a recounted index names a different
+// entry than the message points at. The surviving entries' manifest positions travel on the
+// context instead of being recounted here.
+test('a filtered check list still reports the manifest position of a malformed entry', async () => {
+  // Manifest = [tests(command), lint(command), <malformed>, fileset]; the two command checks are
+  // filtered out, so the malformed entry is at list index 0 and manifest index 2.
+  const results = await runChecks(
+    [{ kind: ['fileset'] }, { name: 'fileset', kind: 'fileset' }],
+    { cwd: process.cwd(), checkPositions: [2, 3] },
+  )
+  assert.equal(results[0].status, 'fail')
+  assert.match(results[0].output, /entry #2 in this phase's check list/)
+  assert.doesNotMatch(results[0].output, /entry #0 in this phase's check list/)
+  // The fallback name carries the same position, so the verdict line alone locates the entry.
+  assert.equal(results[0].name, "entry #2 in this phase's check list")
+})
+// The no-positions fallback — an unfiltered list's own index IS the manifest position — needs no
+// test of its own here: the nameless-entry test above supplies no positions and asserts #0 and #2.
+
+// The `JSON.stringify` fallback in `malformedKindResult`. Unreachable from `teammates.gate.json`,
+// which is `JSON.parse`-only — every shape that file can express serialises. It guards the
+// EXPORTED api, which `cli.mjs` and these tests call with real JavaScript values, so it is pinned
+// through that door: without the `catch`, this throws out of `runChecks` and no verdict is
+// recorded at all, which is the failure mode the per-check `try` further down exists to prevent.
+test('a kind JSON cannot serialise is still reported rather than thrown', async () => {
+  const results = await runChecks([{ name: 'bigint', kind: 10n }], {})
+  assert.equal(results[0].status, 'fail')
+  assert.equal(results[0].optional, false)
+  assert.match(results[0].output, /kind must be a string, got 10/)
+})
+
+// `describePendingCheck` is exported and reachable independently of `runChecks`, and it computes
+// `optional` from the same non-coercing Set. A non-string kind must be non-optional there too.
+test('describePendingCheck forces a non-string kind non-optional', () => {
+  assert.equal(describePendingCheck({ name: 'a', kind: ['fileset'], optional: true }).optional, false)
+  assert.equal(describePendingCheck({ name: 'b', kind: ['command'], optional: true }).optional, false)
+  // ...while a genuine advisory command check keeps its flag.
+  assert.equal(describePendingCheck({ name: 'c', kind: 'command', optional: true }).optional, true)
+})
+
 test('runChecks records a fail when a runner throws', async () => {
   const git = fakeGit({ branchExists: async () => { throw new Error('unexpected boom') } })
   const ctx = { git, runId: RUN_ID, anchorSha: 'anchorSha1', tasks: [T1_TASK], currentPhase: 1, phaseError: null }

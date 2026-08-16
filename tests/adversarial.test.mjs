@@ -188,12 +188,17 @@ test('a forged status.json PASS changes neither the gate verdict nor complete', 
 
     // No task branches exist, so the recomputed gate fails naming T1's missing branch —
     // the forged PASS buys nothing because neither command ever reads status.gates.
+    //
+    // The two commands report that in their own vocabularies: `gate` exits 1 for a FAIL verdict,
+    // and `complete` exits 3, its one code meaning the recomputed checks REJECTED this task. 3
+    // rather than the 4 it used to return because 4 also covers four cannot-verify situations,
+    // and the stop-time hook has to be able to tell a rejection from a run it cannot verify.
     const gateResult = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
     assert.equal(gateResult.code, 1)
     assert.equal(JSON.parse(gateResult.out).verdict, 'FAIL')
 
     const completeResult = await runCliOn(root, ['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md'])
-    assert.equal(completeResult.code, 4)
+    assert.equal(completeResult.code, 3)
   })
 })
 
