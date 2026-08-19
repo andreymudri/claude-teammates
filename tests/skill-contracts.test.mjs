@@ -1120,12 +1120,32 @@ test('parallel-execution checks out the run branch before init-run to record it'
     /fill-if-absent|no `runBranch` recorded yet/,
     'the Initialize section must explain that init-run records the run branch only when none is recorded yet',
   )
+  // What the record actually does. The hook resolves a stopping teammate through the worktree
+  // location record (scripts/subagent-stop.mjs:207), never through the run branch; the run branch
+  // only decides whether `complete --enforcement-only` may treat its checks as a verdict
+  // (scripts/cli.mjs:3550-3565). Saying otherwise sends an operator diagnosing an unenforced stop
+  // to the wrong file, so assert the true attribution rather than only forbidding the false one.
+  assert.match(
+    section.text,
+    /does not resolve a stopping teammate to its task/,
+    'the Initialize section must not attribute task resolution to the recorded run branch',
+  )
+  assert.match(
+    section.text,
+    /worktree location record/,
+    'the Initialize section must name the worktree location record as what resolves the teammate',
+  )
   // The closure claim lives in §1, so the guard against overstating it has to live here too. It was
   // previously scoped to §2 alone, which let §1 acquire the false claim with both tests still green.
   assert.doesNotMatch(
     section.text,
     /checking the branch out writes that record|closes that window at the start of the run/,
     'the false claim that a checkout by itself records the run branch must not return',
+  )
+  assert.doesNotMatch(
+    section.text,
+    /is what the\s+`?SubagentStop`? guard resolves a stopping teammate to its task through/,
+    'the false claim that the recorded run branch resolves the teammate must not return',
   )
 })
 
@@ -1139,8 +1159,18 @@ test('parallel-execution states the SubagentStop guard is fail-open when the run
   const section = doc.section('Dispatch the phase')
   assert.match(
     section.text,
-    /Whenever either condition fails the guard is fail-open/,
-    'the direct-dispatch section must disclose the fail-open residual as a consequence of either condition failing',
+    /blocked either way|blocks and names the branch/,
+    'the section must state that a missing task branch is blocked regardless of the run branch record',
+  )
+  assert.match(
+    section.text,
+    /decided before the recorded run branch is read at all/,
+    'the section must state that the missing-branch layer is decided before the run branch is consulted',
+  )
+  assert.match(
+    section.text,
+    /that layer is fail-open/,
+    'the section must scope the fail-open residual to the layer that actually has one',
   )
   assert.match(
     section.text,
@@ -1149,7 +1179,7 @@ test('parallel-execution states the SubagentStop guard is fail-open when the run
   )
   assert.match(
     section.text,
-    /compares the recorded branch against the\n?\s*branch the main worktree is on/,
+    /equals the branch the main worktree is on/,
     'the section must state the second condition: the recorded branch must still be the checked-out one',
   )
   assert.doesNotMatch(
@@ -1161,6 +1191,13 @@ test('parallel-execution states the SubagentStop guard is fail-open when the run
     section.text,
     /never fail-open|closed unconditionally|always armed|armed on this path too/,
     'a sentence denying the residual must not be able to satisfy the disclosure assertion',
+  )
+  // The residual is real but bounded: it covers the strayed-file-set layer, never the missing-branch
+  // one. A sentence widening it back to the whole guard is as wrong as one denying it.
+  assert.doesNotMatch(
+    section.text,
+    /Whenever either condition fails the guard is fail-open|the guard is fail-open until/,
+    'the fail-open residual must not be restated as covering the whole guard',
   )
   // The enumeration this replaced named four commands and missed rebuild-state. A list here drifts
   // the moment a fifth writer appears, and the drift is invisible: the sentence still reads true.
