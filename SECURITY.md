@@ -18,8 +18,20 @@ So the following are **known and documented**, not vulnerabilities:
 - A teammate executing arbitrary code during its own task or its own test run.
 - A teammate editing `teammates.gate.json` in the working tree — command checks are shell strings
   read from that file.
-- A teammate writing `.teammates/` state. No check reads it when deciding a verdict; the worst it
-  buys is wasted fix rounds, not a false PASS.
+- A teammate writing `.teammates/` state. The checks that recompute — `fileset`, `ownership` and
+  `merge` — read git and never that directory, so no write there moves them.
+
+  **One check does read it, and it decides a verdict.** An `agent`-kind check such as `review` has
+  no result of its own until `collect-reviews` builds one from
+  `.teammates/<runId>/reviews/<phase>-<lens>.json`. Those files are gitignored, are written during a
+  teammate's own task, and are never compared against anything the teammate did not also write. A
+  teammate that drops one empty-findings file per declared lens, each stamped with the tips it can
+  read for itself, reaches `PASS` with no reviewer having run. The stamp check in `reviews.mjs`
+  refuses a *stale* file; it cannot refuse a *fabricated* one, and says so in place.
+
+  Treat a recorded `agent` verdict as evidence only about a reviewer you know ran. It is the reason
+  `--results` and `--enforcement-only` exist as separate, narrower doors, and the reason the
+  recompute-from-git checks are the ones described as tamper-evident here.
 - A teammate writing `teammates.local.json`. That file is gitignored, so a teammate can write it
   during its own task and `git status` stays clean: neither `fileset` nor `ownership` will ever
   see it. Read the next two paragraphs as the actual boundary rather than as a reassurance.
