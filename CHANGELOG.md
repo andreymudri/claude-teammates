@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-Three of the four follow-ups recorded for v1.0.1 below. All three are documentation or test
+All four follow-ups recorded for v1.0.1 below. They are documentation or test
 changes; no runtime behaviour moved.
 
 - **A scan over statements now reaches headings too.** `claimSites` in `tests/md-contract.mjs`
@@ -19,8 +19,22 @@ changes; no runtime behaviour moved.
 - **`skills/parallel-execution` no longer uses "block" in two senses one clause apart.** The
   gate-verdict sense now reads "fails the gate verdict"; the stop sense reads "refuses the stop".
 
-Still open: **a region lock binds one block or one section**. That is the documented scope bound of
-`tests/md-contract.mjs`, and closing it means a document-wide claim scan rather than a patch.
+And the fourth, **a region lock binds one block or one section**, which was recorded as needing a
+corpus-wide scan rather than a patch:
+
+- **`assertCorpusInventory` locks a mechanism across every document at once.** Every claim site in
+  every skill and agent contract naming the SubagentStop mechanism must be one of the sentences
+  listed in `tests/skill-contracts.test.mjs`, attributed to the document it appears in. A sentence
+  added anywhere fails, and one moved between documents fails as surely as one reworded.
+  Demonstrated by appending a contradicting sentence to `skills/phase-gate/SKILL.md` — a document
+  no lock covered: the corpus lock failed and the cross-document denylist scan did not, which is
+  the escape this closes. It buys location, not meaning: the subject pattern is a lexicon, so a
+  sentence discussing the hook without naming it still passes, exactly as under a section lock.
+- **A document's statements were counted once per enclosing heading.** `parseDoc` built
+  `doc.statements` by concatenating overlapping sections, so a sentence under `### x` inside `## y`
+  inside `# z` appeared three times — 316 entries for 154 sentences in `parallel-execution`. Scans
+  survived it by checking the same sentence twice; a corpus inventory would have encoded nesting
+  depth as content. Now built from the block list once, in document order.
 
 ## v1.0.0
 

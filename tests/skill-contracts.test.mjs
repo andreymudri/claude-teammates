@@ -7,6 +7,7 @@ import { runCli } from '../scripts/cli.mjs'
 import { collectReviewResults } from '../scripts/reviews.mjs'
 import {
   assertClaim,
+  assertCorpusInventory,
   claimSites,
   statementsOf,
   assertCode,
@@ -1149,6 +1150,91 @@ test('no skill or agent claims a SubagentStop refusal hands back the check outpu
 // reach itself rather than trusting the one call site. Both directions are asserted: the synthetic
 // document must actually contain the sentence in a heading (an anchor that silently stopped
 // matching would read exactly like a closed hole), and the sites must reach it.
+// The subject-scoped locks above each bind ONE section or ONE block. That is the documented scope
+// bound of md-contract.mjs, and it leaves the cheapest escape untouched: not rewording a locked
+// sentence, but writing a contradicting one under a different heading, or in a different document,
+// where no lock is looking. The denylist scan is the only thing that spans documents, and it is a
+// lexicon — it catches the phrasings someone thought of.
+//
+// This lock spans the corpus. Every site in every skill and agent contract that names the
+// SubagentStop mechanism must be one of the sentences below, in this order, attributed to this
+// document. A sentence added anywhere fails; one moved from parallel-execution to phase-gate fails;
+// one reworded fails. It does not read polarity and does not need to — the escape it closes is
+// location, and location is now spent.
+//
+// It buys nothing about MEANING: a sentence discussing the hook without naming it, or "stop", or
+// "stop-time", is invisible here exactly as it is to a section-scoped subject lock. The list is
+// what a human reviewed, not what is true.
+const SUBAGENT_STOP_MECHANISM = /SubagentStop|stop[- ]time|the stop\b|\bhook\b/i
+
+const SUBAGENT_STOP_CORPUS = [
+  "fleet-supervision :: A teammate's stop runs the SubagentStop hook, which re-runs the cheap enforcement checks and can refuse the stop; a refusal appears in that teammate's transcript as one of two fixed messages — the branch the task is missing, named alongside a pointer to the teammate's brief for the step that creates it, or a direction to run its own verification command — never as the failing check's text, which is not forwarded.",
+  "fleet-supervision :: But SubagentStop fires only when a teammate actually stops — a stalled or parked teammate never reaches it, so liveness remains the only thing that sees a teammate which never stops at all.",
+  "fleet-supervision :: No stop-path hook fires for a parked agent.",
+  "fleet-supervision :: The SubagentStop backstop",
+  "parallel-execution :: What it decides is whether the stop-time checks are allowed to be a verdict: complete --enforcement-only compares the recorded run branch against the branch the main worktree has checked out, and when it is absent or different it reports that it cannot verify completion and the stop is allowed.",
+  "parallel-execution :: The SubagentStop hook does two cheap things at that moment: it blocks a teammate whose task branch does not exist, and it runs complete --enforcement-only.",
+  "parallel-execution :: Only a task-scoped failure refuses the stop, meaning fileset or merge, so a refused stop is not always about a file set; an ownership failure with no task-scoped failure beside it is reported and the stop is allowed.",
+  "parallel-execution :: The teammate is shown none of that detail — the hook reads the exit status and never forwards what the check printed.",
+  "parallel-execution :: The hook resolves a stopping teammate through records under .teammates/, which is gitignored and writable by every teammate, and it allows the stop on anything it cannot establish — a teammate it cannot resolve, a plan it cannot read, a recorded run branch that is not the branch checked out.",
+  "parallel-execution :: The hook can only ever add a block that would not otherwise happen, so declining to block on anything it cannot establish is what keeps an unreadable record from costing a teammate a turn.",
+  "parallel-execution :: It is not a guarantee against being blocked over foreign state: the records are teammate-writable, so a planted location record makes the hook establish something false and block whoever stops in the worktree that record keys on — resolution is by worktree path, not by teammate identity, and any linked worktree of this repository qualifies, including a reviewer's scratch one.",
+  "tm-implementer.md :: Stopping without running that gate is caught, not waved through: a SubagentStop hook runs the enforcement checks at stop time and can refuse the stop.",
+]
+
+test('every sentence about the SubagentStop mechanism, in any document, is one a human locked', async () => {
+  const agentsDir = new URL('../agents/', import.meta.url)
+  const docs = []
+  for (const name of await allSkills()) docs.push({ label: name, doc: (await skill(name)).doc })
+  for (const file of await readdir(agentsDir)) {
+    const text = await readFile(new URL(file, agentsDir), 'utf8')
+    const { body } = splitFrontmatter(text, file)
+    docs.push({ label: file, doc: parseDoc(body, file) })
+  }
+  assertCorpusInventory(
+    docs,
+    SUBAGENT_STOP_MECHANISM,
+    SUBAGENT_STOP_CORPUS,
+    'the SubagentStop mechanism is described across several documents and no section lock spans them',
+  )
+})
+
+// A corpus inventory is a list, so a statement counted once per enclosing heading would appear in
+// it two or three times and the lock would encode nesting depth as if it were content. Adding an
+// unrelated `###` anywhere would then fail a lock about SubagentStop. Measured before the fix:
+// parallel-execution reported 316 statements for 154 sentences.
+test('a statement is counted once per document, not once per heading enclosing it', () => {
+  const source = [
+    '# Title',
+    '',
+    'Top sentence.',
+    '',
+    '## Section',
+    '',
+    'Middle sentence.',
+    '',
+    '### Subsection',
+    '',
+    'Deep sentence.',
+  ].join('\n')
+  const doc = parseDoc(source, 'synthetic')
+
+  assert.deepEqual(
+    doc.statements.map((s) => s.text),
+    ['Top sentence.', 'Middle sentence.', 'Deep sentence.'],
+    'document statements must be flat, in document order, with no sentence repeated per enclosing heading',
+  )
+
+  // The nesting that caused the duplication is still real — this pins that the fix was flattening
+  // the document view, not flattening the sections.
+  assert.deepEqual(doc.section('Title').statements.map((s) => s.text), [
+    'Top sentence.',
+    'Middle sentence.',
+    'Deep sentence.',
+  ], "a section's own view still includes everything nested under it")
+  assert.deepEqual(doc.section('Subsection').statements.map((s) => s.text), ['Deep sentence.'])
+})
+
 test('claimSites reaches a claim written into a heading, which statements alone never see', () => {
   const source = [
     '## A refusal hands back the check output',
