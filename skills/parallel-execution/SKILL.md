@@ -74,6 +74,13 @@ depends on the run branch:
   run branch and fills it in — or different, as during a detached-HEAD plan amendment, it reports
   that it cannot verify completion and the stop is allowed.
 
+While the field is empty the run is not merely unarmed, it is writable. `.teammates/` is
+gitignored, so nothing in `git status`, `fileset` or `ownership` sees a write to it, and any
+teammate can reach the main worktree's `plan.json`. A value written into that window wins over
+every later writer, a re-run of `init-run` from the correct branch included, and disarms the
+second layer for the rest of the run. Presence is therefore not evidence: read the recorded value
+and confirm it is this run's branch, rather than confirming the field is filled.
+
 So the §1 order buys the second layer, not the first. Where it is skipped that layer is fail-open,
 and the phase gate is what catches strayed work instead.
 
