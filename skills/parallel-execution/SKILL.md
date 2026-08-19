@@ -71,8 +71,9 @@ only ever a way to drift from what the gate enforces.
 
 On a pure direct-`Agent` phase a teammate can stop before any other lifecycle command has run. The
 `SubagentStop` hook does two cheap things at that moment: it blocks a teammate whose task branch
-does not exist, and it runs `complete --enforcement-only`, which keeps `fileset`, `ownership` and `merge` — so a
-blocked stop is not always about a file set.
+does not exist, and it runs `complete --enforcement-only`. That run keeps `fileset`, `ownership`
+and `merge`, but only a task-scoped failure blocks — `fileset` or `merge`, so a blocked stop is not
+always about a file set; a failing `ownership` is reported and the stop is allowed.
 
 Treat both as best effort. The hook resolves a stopping teammate through records under
 `.teammates/`, which is gitignored and writable by every teammate, and it allows the stop on

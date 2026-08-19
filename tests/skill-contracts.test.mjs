@@ -1165,7 +1165,8 @@ test('parallel-execution bounds the SubagentStop guard rather than describing it
     subject: /hook|block|stopped|best effort|barrier|verdict|enforcement|enforces|cannot establish|covered|coverage|allows the stop|record|branch|layer/i,
     allow: [
       /^The Workflow path already renders each brief from the same composer, so a hand-written dispatch is only ever a way to drift from what the gate enforces\.$/i,
-      /^The SubagentStop hook does two cheap things at that moment: it blocks a teammate whose task branch does not exist, and it runs complete --enforcement-only, which keeps fileset, ownership and merge — so a blocked stop is not always about a file set\.$/i,
+      /^The SubagentStop hook does two cheap things at that moment: it blocks a teammate whose task branch does not exist, and it runs complete --enforcement-only\.$/i,
+      /^That run keeps fileset, ownership and merge, but only a task-scoped failure blocks — fileset or merge, so a blocked stop is not always about a file set; a failing ownership is reported and the stop is allowed\.$/i,
       /^The hook resolves a stopping teammate through records under \.teammates\/, which is gitignored and writable by every teammate, and it allows the stop on anything it cannot establish — a teammate it cannot resolve, a plan it cannot read, a recorded run branch that is not the branch checked out\.$/i,
       /^The hook can only ever add a block that would not otherwise happen, so declining to block on anything it cannot establish is what keeps it from blocking a teammate over state that teammate did not write — state any teammate can write\.$/i,
       /^What this buys is a fast signal on the common honest mistake, not a barrier against a determined one\.$/i,
@@ -1176,6 +1177,20 @@ test('parallel-execution bounds the SubagentStop guard rather than describing it
   })
 
   // The claims nine rounds measured false. None may return in any wording the inventory misses.
+  // The hook blocks on complete exit 3, and exit 3 comes only from a task-scoped kind. Naming the
+  // three kinds --enforcement-only keeps, without saying which of them can block, implies a failing
+  // ownership stops a teammate; it does not, it returns 4 and the stop is allowed.
+  assertStatement(
+    section,
+    /only a task-scoped failure blocks — fileset or merge/i,
+    'the section must say which failures can actually block, not only which checks run',
+  )
+  assertStatement(
+    section,
+    /a failing ownership is reported and the stop is allowed/i,
+    'the section must say a failing ownership does not block the stop',
+  )
+
   assertStatement(
     doc.section('Initialize the run'),
     /Compare that name by bytes rather than by eye/i,
