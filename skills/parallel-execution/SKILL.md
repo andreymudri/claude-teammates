@@ -7,11 +7,22 @@ description: Use when executing a written plan across background teammates - spl
 
 ## 1. Initialize the run
 
+Create and check out this run's branch **before** initializing, then run `init-run` from it:
+
+    git checkout -b <run branch> <base branch>    # e.g. run/<runId> from master
     node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" init-run <planPath> --run <runId> --root <project root>
 
 This writes `.teammates/<runId>/plan.json` and `status.json` and prints the phase breakdown.
 Tasks land in the same phase only when their deps are satisfied and their file sets are
 disjoint.
+
+The order matters for enforcement, not just tidiness. `init-run` records the branch it is invoked
+on — it records HEAD whenever HEAD is not the base branch, and records nothing when it is — and that
+recorded run branch is what the `SubagentStop` guard resolves a stopping teammate to its task
+through. Run `init-run` while still on the base branch and it records nothing (it prints a note
+saying so); the guard is then fail-open until a later lifecycle command populates the branch.
+Checking the run branch out first closes that window at the start of the run — which is exactly what
+`init-run`'s own note advises when it records nothing.
 
 ## 2. Dispatch the phase
 
@@ -38,12 +49,13 @@ teammate's brief with the CLI rather than composing it by hand:
 The Workflow path already renders each brief from the same composer, so a hand-written dispatch is
 only ever a way to drift from what the gate enforces.
 
-Note the `SubagentStop` guard is fail-open on a pure direct-`Agent` phase: nothing on that path
-records the run branch (only `gate`, `finish`, `prune-run` and `workflow` do), so until one of
-those runs the hook cannot resolve a stopping teammate to its task and allows the stop. The phase
-gate is the enforcement that catches skipped work there; do not rely on the stop hook. Closing this
-window would require `locate` or `init-run` to record the run branch, which is tracked as a
-follow-up.
+This matters for the `SubagentStop` guard on a pure direct-`Agent` phase, where a teammate can stop
+before any other lifecycle command has run. The guard resolves a stopping teammate to its task
+through the run branch recorded at `init-run` (§1). Do the §1 order — run branch checked out before
+`init-run` — and the record is in place before the first teammate can stop, so the guard is armed on
+this path too. Skip it (or run `init-run` from the base) and nothing records the run branch until a
+later `gate`, `finish`, `prune-run` or `workflow`, leaving the guard fail-open until then; the phase
+gate still catches skipped work, but the stop hook will not.
 
 Wait on completion notifications. Do not poll in a loop.
 

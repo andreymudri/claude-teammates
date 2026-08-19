@@ -1100,22 +1100,41 @@ test('no skill or agent claims SubagentStop catches a stalled or parked teammate
   }
 })
 
-// On a pure direct-`Agent` phase nothing records the run branch (only gate/finish/prune-run/
-// workflow do), so the SubagentStop guard is fail-open there until one of those runs. The skill
-// must state that honestly rather than claim a run-branch checkout closes the window — it does not,
-// because a checkout writes no record. Bind the honest disclosure so it cannot silently regress to
-// a false closure claim.
-test('parallel-execution states the SubagentStop guard is fail-open on the direct dispatch path', async () => {
+// The SubagentStop window is closed by ORDER, not by a checkout alone: `init-run` records the
+// branch it runs on (HEAD when HEAD is not the base — pinned in tests/cli.test.mjs), so checking
+// the run branch out BEFORE init-run puts the record in place before any teammate can stop. The
+// §1 instruction must state that order. A bare `git checkout` writes no record, so the section must
+// not claim a checkout by itself closes the window.
+test('parallel-execution checks out the run branch before init-run to record it', async () => {
+  const { doc } = await skill('parallel-execution')
+  const section = doc.section('Initialize the run')
+  assert.match(
+    section.text,
+    /git checkout -b/,
+    'the Initialize section must instruct checking out the run branch before init-run',
+  )
+  assert.match(
+    section.text,
+    /init-run records the branch it is invoked on|records HEAD whenever HEAD is not the base/,
+    'the Initialize section must explain that init-run records the run branch it is invoked on',
+  )
+})
+
+// The §2 direct-dispatch note must stay honest about the residual: a checkout alone writes no
+// record, so on a pure direct-`Agent` phase where §1's order was skipped the guard is fail-open
+// until a later lifecycle command. Bind the disclosure so it cannot silently regress to a false
+// "a checkout closes the window" claim.
+test('parallel-execution states the SubagentStop guard is fail-open when the run branch is unrecorded', async () => {
   const { doc } = await skill('parallel-execution')
   const section = doc.section('Dispatch the phase')
   assert.match(
     section.text,
     /fail-open/,
-    'the direct-dispatch section must disclose the SubagentStop fail-open window, not claim it is closed',
+    'the direct-dispatch section must disclose the SubagentStop fail-open window, not claim it is unconditionally closed',
   )
   assert.doesNotMatch(
     section.text,
     /checking the branch out writes that record/,
-    'the false claim that a checkout records the run branch must not return',
+    'the false claim that a checkout by itself records the run branch must not return',
   )
 })
