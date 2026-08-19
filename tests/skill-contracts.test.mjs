@@ -1109,10 +1109,12 @@ test('no skill or agent claims SubagentStop catches a stalled or parked teammate
 // construction. Anchoring claim and allow patterns end to end closes both: any edit to a locked
 // sentence, anywhere in it, stops matching and fails.
 //
-// The subjects are deliberately broad. A vocabulary lock is escapable by writing the reversal in
-// words the lock does not name — a reversal of "best effort" was demonstrated using neither
-// "block" nor "barrier" — so these name the whole topic and pay for it in `allow` entries. Adding
-// an entry is a review step, not a formality.
+// The subjects are deliberately wide, and still lexicons: a reversal written entirely outside the
+// alternation passes, which has been demonstrated three times against successive versions of this
+// file. Each demonstration was answered by widening to the noun the escape leaned on — branch,
+// verdict, layer — rather than by adding the phrasing, because the phrasing is unbounded and the
+// nouns are not. Treat a green run as evidence that no LOCKED sentence changed, not as proof that
+// the section says nothing false. Adding an `allow` entry is a review step, not a formality.
 //
 // No pattern may contain a backtick: normalize() strips them before matching, which silently kills
 // any regex carrying one.
@@ -1135,8 +1137,9 @@ test('parallel-execution checks out the run branch before init-run to record it'
   assertClaim(section, {
     label: 'what the recorded run branch is for',
     claim: /^That record does not resolve a stopping teammate to its task — the worktree location record written by locate does that\.$/i,
-    subject: /record|runbranch|resolve|stopping teammate|checkout|\bHEAD\b|repair|arms|disarm|fill-if-absent/i,
+    subject: /record|runbranch|resolve|stopping teammate|checkout|\bHEAD\b|repair|arms|disarm|fill-if-absent|branch|verdict|layer/i,
     allow: [
+      /^Create and check out this run's branch before initializing, then run init-run from it:$/i,
       /^The order matters for enforcement, not just tidiness\. init-run records a run branch by fill-if-absent: it records HEAD when the run has no runBranch recorded yet and HEAD is not the base branch, and it records nothing when HEAD is the base\.$/i,
       /^A value already recorded always wins — writePlan resolves the field as carried \?\? usable — so a re-init from a different branch keeps the old record and prints a note naming the branch it kept\.$/i,
       /^Compare that name by bytes rather than by eye: the check is byte-wise, and zero-width and homoglyph characters render identically in a terminal\.$/i,
@@ -1159,7 +1162,7 @@ test('parallel-execution bounds the SubagentStop guard rather than describing it
   assertClaim(section, {
     label: 'the guard is best effort',
     claim: /^Treat both as best effort\.$/i,
-    subject: /hook|block|stopped|best effort|barrier|verdict|enforcement|enforces|cannot establish|covered|coverage|allows the stop|record/i,
+    subject: /hook|block|stopped|best effort|barrier|verdict|enforcement|enforces|cannot establish|covered|coverage|allows the stop|record|branch|layer/i,
     allow: [
       /^The Workflow path already renders each brief from the same composer, so a hand-written dispatch is only ever a way to drift from what the gate enforces\.$/i,
       /^The SubagentStop hook does two cheap things at that moment: it blocks a teammate whose task branch does not exist, and it runs complete --enforcement-only, which keeps fileset, ownership and merge — so a blocked stop is not always about a file set\.$/i,
@@ -1187,12 +1190,22 @@ test('parallel-execution bounds the SubagentStop guard rather than describing it
   assertNoStatement(
     section,
     /prune-run|rebuild-state|makes the stop-time checks\s*run at all|only ever turn a block into a non-block/i,
-    'the section must not enumerate the run-branch writers, nor invert the guard direction',
+    'these two command names have no legitimate use here, and neither phrasing may return; the general '
+      + 'case — any sentence naming a command as what fills the record — is caught by the subject lock above',
   )
-  assertNoStatement(
-    section,
-    /never fail-open|closed unconditionally|always armed|rely on the stop hook/i,
-    'the section must not present the guard as a barrier',
-  )
+  for (const scope of [section, doc.section('Record results')]) {
+    assertNoStatement(
+      scope,
+      /never fail-open|closed unconditionally|always armed|rely on the stop hook/i,
+      'neither section may present the guard as a barrier',
+    )
+    // "Never read a stop that was allowed as a verdict" is reversible from the next section down,
+    // where a per-section lock does not reach and a reader takes the two together.
+    assertNoStatement(
+      scope,
+      /a verdict of completeness|allowed is a verdict|needs no further check/i,
+      'neither section may say an allowed stop implies the work was checked',
+    )
+  }
 
 })
