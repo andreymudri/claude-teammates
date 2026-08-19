@@ -1191,26 +1191,39 @@ test('parallel-execution states the SubagentStop guard is fail-open when the run
     'the section must state the unrecorded condition without enumerating which commands record the branch',
   )
 
-  // The empty window is writable, not merely unarmed: .teammates/ is gitignored, so a value planted
-  // there is invisible to every enforcement check and beats a later init-run from the correct
-  // branch (writePlan resolves carried ?? usable). Presenting the window as self-healing sends an
-  // operator to check for presence, which is exactly what the planted case produces.
+  // The exposure is not bounded to the empty window. Fill-if-absent lives in writePlan and binds
+  // the CLI's writers only; a teammate writing plan.json directly rewrites a CORRECTLY recorded
+  // value at any time, including after the documented repair, and disarms the second layer from
+  // that moment. Probed at 2ec662c: complete --enforcement-only exited 3 with a correct record and
+  // 4 after a direct JSON write with no CLI involved.
   assertClaim(section, {
-    label: 'the writable window',
-    claim: /While the field is empty the run is not merely unarmed, it is writable\b/i,
-    subject: /planted|writable|Presence is therefore not evidence|wins over/i,
+    label: 'the record is a file',
+    claim: /The record is a file, not a guarantee, and the exposure is not bounded to the window where it is empty\b/i,
+    subject: /not a guarantee|bounded to the window|binds the CLI's own writers|disarmed from that moment/i,
     allow: [
-      /A value written into that window wins over every later writer, a re-run of init-run from the correct branch included, and disarms the second layer for the rest of the run/i,
-      /Presence is therefore not evidence: read the recorded value and confirm it is this run's branch, rather than confirming the field is filled/i,
+      /Fill-if-absent is a rule inside writePlan that binds the CLI's own writers; it does not bind a teammate writing the file directly, which can happen at any point in the run, including after the repair described in §1/i,
+      /A rewritten value makes complete --enforcement-only report that it cannot verify completion, so the second layer is disarmed from that moment on/i,
     ],
   })
-  // The subject lock alone does not keep this advice present — deleting a statement named in
-  // `allow` is not a lock failure, and the claim sentence survives on its own. The inspection
-  // advice is the actionable half of the finding, so it is asserted in its own right.
+
+  // The only stated mitigation is a comparison, and a comparison by eye is defeated by one
+  // invisible code point: the CLI compares bytes, printable() passes zero-width and homoglyph
+  // characters through, and the mismatch note renders the planted name identically to the real one.
   assertStatement(
     section,
-    /Presence is therefore not evidence/i,
-    'the section must tell the operator to read the recorded value rather than check the field is filled',
+    /Comparing the recorded value by eye does not detect this/i,
+    'the section must say the eyeball comparison is insufficient, not merely prescribe it',
+  )
+  assertStatement(
+    section,
+    /Compare bytes if you compare at all/i,
+    'the section must tell the operator to compare bytes rather than glyphs',
+  )
+  // And it must name what actually holds, so the reader is not left with only a defeated check.
+  assertStatement(
+    section,
+    /What holds here is the phase gate rather than the stop hook/i,
+    'the section must name the phase gate as the enforcement that this file cannot influence',
   )
   assert.match(
     section.text,

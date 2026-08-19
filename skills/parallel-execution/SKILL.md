@@ -74,12 +74,19 @@ depends on the run branch:
   different, as during a detached-HEAD plan amendment, it reports that it cannot verify completion
   and the stop is allowed.
 
-While the field is empty the run is not merely unarmed, it is writable. `.teammates/` is
-gitignored, so nothing in `git status`, `fileset` or `ownership` sees a write to it, and any
-teammate can reach the main worktree's `plan.json`. A value written into that window wins over
-every later writer, a re-run of `init-run` from the correct branch included, and disarms the
-second layer for the rest of the run. Presence is therefore not evidence: read the recorded value
-and confirm it is this run's branch, rather than confirming the field is filled.
+The record is a file, not a guarantee, and the exposure is not bounded to the window where it is
+empty. `.teammates/` is gitignored, so nothing in `git status`, `fileset` or `ownership` sees a
+write to it, and every teammate can reach the main worktree's `plan.json`. Fill-if-absent is a rule
+inside `writePlan` that binds the CLI's own writers; it does not bind a teammate writing the file
+directly, which can happen at any point in the run, including after the repair described in §1. A
+rewritten value makes `complete --enforcement-only` report that it cannot verify completion, so the
+second layer is disarmed from that moment on.
+
+Comparing the recorded value by eye does not detect this. The CLI compares bytes, while zero-width
+and homoglyph characters render identically in a terminal: a planted branch name differing from
+this run's by one invisible code point reads as correct in the very note that reports the mismatch.
+Compare bytes if you compare at all. What holds here is the phase gate rather than the stop hook —
+`fileset` and `ownership` recompute from git and read nothing this file can influence.
 
 So the §1 order buys the second layer, not the first. Where it is skipped that layer is fail-open,
 and the phase gate is what catches strayed work instead.
