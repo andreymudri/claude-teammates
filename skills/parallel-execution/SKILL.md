@@ -62,47 +62,20 @@ teammate's brief with the CLI rather than composing it by hand:
 The Workflow path already renders each brief from the same composer, so a hand-written dispatch is
 only ever a way to drift from what the gate enforces.
 
-This matters for the `SubagentStop` guard on a pure direct-`Agent` phase, where a teammate can stop
-before any other lifecycle command has run. The guard has two layers, and only the second one
-depends on the run branch:
+On a pure direct-`Agent` phase a teammate can stop before any other lifecycle command has run. The
+`SubagentStop` hook does two cheap things at that moment: it blocks a teammate whose task branch
+does not exist, and it runs `complete --enforcement-only` for the file-set checks.
 
-- **A missing task branch is blocked when the teammate is resolvable at all.** The hook resolves
-  the stopping teammate through the worktree location record `locate` wrote, then checks that the
-  task branch exists. When it does not, it blocks and names the branch — decided before the recorded
-  run branch is read at all, so this layer does not depend on the §1 order. It does depend on two
-  things the teammate controls: `locate` is the teammate's own first step, and a teammate that never
-  ran it resolves to nothing and is allowed through; and the hook reads `plan.json` for the plan
-  path, so a missing `planPath` or an unparseable file allows the stop as well.
-- **Straying outside the declared file set is caught only when the run branch is both recorded and
-  checked out.** Those checks run through `complete --enforcement-only`, which turns its result into
-  a verdict only when the recorded run branch equals the branch the main worktree is on. Absent — the
-  §1 order was skipped, and the field stays empty until some later command fills it in — or
-  different, as during a detached-HEAD plan amendment, it reports that it cannot verify completion
-  and the stop is allowed.
+Treat both as best effort. The hook resolves a stopping teammate through records under
+`.teammates/`, which is gitignored and writable by every teammate, and it allows the stop on
+anything it cannot establish — a teammate it cannot resolve, a plan it cannot read, a recorded run
+branch that is not the branch checked out. That is deliberate: the guard may only ever turn a block
+into a non-block, so that no teammate is blocked by state it did not write.
 
-The record is a file, not a guarantee, and the exposure is not bounded to the window where it is
-empty. `.teammates/` is gitignored, so nothing in `git status`, `fileset` or `ownership` sees a
-write to it, and every teammate can reach the main worktree's `plan.json`. Fill-if-absent is a rule
-inside `writePlan` that binds the CLI's own writers; it does not bind a teammate writing the file
-directly, which can happen at any point in the run, including after the repair described in §1. A
-rewritten value makes `complete --enforcement-only` report that it cannot verify completion, so the
-second layer is disarmed from that moment until an operator removes the field by hand — no
-automatic writer replaces it, which is what keeps a wrong checkout from re-pointing a run, and is
-why §1 gives the repair as a manual step. The one value that does not persist is the empty string:
-it is carried, then dropped on write, so the field disappears and the note reporting what was kept
-names nothing.
-
-Comparing the recorded value by eye does not detect this. The CLI compares bytes, while zero-width
-and homoglyph characters render identically in a terminal: a planted branch name differing from
-this run's by one invisible code point reads as correct in the very note that reports the mismatch.
-Compare bytes if you compare at all. What holds here is the phase gate rather than the stop hook —
-`fileset` and `ownership` recompute from git and read nothing this file can influence.
-
-So the §1 order buys the second layer, not the first. Where it is skipped that layer is fail-open,
-and the phase gate is what catches strayed work instead.
-
-Neither layer is a barrier a determined teammate cannot lower, because both read files it can
-write. The phase gate is what holds regardless: `fileset` and `ownership` recompute from git.
+What this buys is a fast signal on the common honest mistake, not a barrier against a determined
+one. The enforcement is the phase gate, which recomputes `fileset` and `ownership` from git and
+reads nothing under `.teammates/`. Do the §1 order because it is what makes the stop-time checks
+run at all, and never read a stop that was allowed as a verdict.
 
 Wait on completion notifications. Do not poll in a loop.
 
