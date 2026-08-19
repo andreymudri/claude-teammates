@@ -30,8 +30,9 @@ the stop is allowed. Checking the run branch out before the **first** `init-run`
 puts the record in place at the start of the run, on a run id that has none yet. It does not repair a run whose
 recorded branch is already wrong: no command overwrites that field. To correct one, remove
 `runBranch` from `.teammates/<runId>/plan.json` and run `init-run` again. When `init-run` records
-nothing it prints a note telling you to check the run branch out before **gating** — that note is
-about `gate` refusing to run from the base branch, and following it alone records no run branch.
+nothing it prints a note directing you to check the run branch out before **gating**; the note
+concerns `gate` refusing to run from the base branch, and a checkout on its own records no run
+branch.
 
 ## 2. Dispatch the phase
 

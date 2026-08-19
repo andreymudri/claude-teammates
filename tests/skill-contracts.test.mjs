@@ -1100,10 +1100,20 @@ test('no skill or agent claims SubagentStop catches a stalled or parked teammate
   }
 })
 
-// The SubagentStop window is closed by ORDER, not by a checkout alone, so §1 must put the checkout
-// BEFORE the init-run invocation. Asserting that both strings appear says nothing about which comes
-// first — a §1 that prescribed the reverse order would satisfy two independent `match` calls — so
-// the order is asserted on position, which is the only thing that distinguishes the two documents.
+// §1 must put the checkout BEFORE the init-run invocation — asserting that both strings appear
+// says nothing about which comes first. Order is asserted on position, the only thing that
+// distinguishes the two documents.
+//
+// The prose claims are bound with assertClaim's subject lock rather than with a vocabulary
+// denylist. A denylist is satisfiable by paraphrase: the round-1 version of this test matched
+// /fail-open/, which "is never fail-open" satisfies, and its successor could be cancelled by an
+// appended sentence using none of the forbidden words. The subject lock inverts that — every
+// statement in the section mentioning the subject must be the claim or an explicit allow — so a
+// new sentence about it fails whatever it says.
+//
+// No pattern here may contain a backtick: normalize() strips backticks from section text before
+// matching (tests/md-contract.mjs), so a regex carrying them can never fire. That is how the
+// previous anti-enumeration assertion came to be permanently dead.
 test('parallel-execution checks out the run branch before init-run to record it', async () => {
   const { doc } = await skill('parallel-execution')
   const section = doc.section('Initialize the run')
@@ -1115,63 +1125,66 @@ test('parallel-execution checks out the run branch before init-run to record it'
     checkout < initRun,
     `the checkout must be prescribed BEFORE the init-run invocation (checkout at ${checkout}, init-run at ${initRun})`,
   )
-  assert.match(
-    section.text,
-    /fill-if-absent|no `runBranch` recorded yet/,
-    'the Initialize section must explain that init-run records the run branch only when none is recorded yet',
-  )
-  // What the record actually does. The hook resolves a stopping teammate through the worktree
-  // location record (scripts/subagent-stop.mjs:207), never through the run branch; the run branch
-  // only decides whether `complete --enforcement-only` may treat its checks as a verdict
-  // (scripts/cli.mjs:3550-3565). Saying otherwise sends an operator diagnosing an unenforced stop
-  // to the wrong file, so assert the true attribution rather than only forbidding the false one.
-  assert.match(
-    section.text,
-    /does not resolve a stopping teammate to its task/,
-    'the Initialize section must not attribute task resolution to the recorded run branch',
-  )
-  assert.match(
-    section.text,
-    /worktree location record/,
-    'the Initialize section must name the worktree location record as what resolves the teammate',
-  )
-  // The closure claim lives in §1, so the guard against overstating it has to live here too. It was
-  // previously scoped to §2 alone, which let §1 acquire the false claim with both tests still green.
+
+  // What the record does NOT do. The hook resolves a stopping teammate through the worktree
+  // location record (scripts/subagent-stop.mjs), never through the run branch; the run branch only
+  // decides whether complete --enforcement-only may treat its checks as a verdict (scripts/cli.mjs).
+  // Misattributing this sends an operator diagnosing an unenforced stop to the wrong file.
+  assertClaim(section, {
+    label: 'what the recorded run branch resolves',
+    claim: /That record does not resolve a stopping teammate to its task — the worktree location record written by locate does that\b/i,
+    subject: /resolves? a stopping teammate|worktree location record/i,
+  })
+
+  // Fill-if-absent is a behaviour, not a token. The subject lock covers every sentence about the
+  // carried value, so a rewrite asserting that a re-init overwrites the record fails here even
+  // though it keeps the coined phrase.
+  assertClaim(section, {
+    label: 'fill-if-absent resolution',
+    claim: /A value already recorded always wins — writePlan resolves the field as carried \?\? usable/i,
+    subject: /already recorded|carried \?\? usable|overwrites (the record|that field)|repair/i,
+    allow: [
+      /so a re-init from a different branch keeps the old record and prints a note naming the branch it kept/i,
+      /It does not repair a run whose recorded branch is already wrong: no command overwrites that field/i,
+    ],
+  })
+
   assert.doesNotMatch(
     section.text,
     /checking the branch out writes that record|closes that window at the start of the run/,
     'the false claim that a checkout by itself records the run branch must not return',
   )
-  assert.doesNotMatch(
-    section.text,
-    /is what the\s+`?SubagentStop`? guard resolves a stopping teammate to its task through/,
-    'the false claim that the recorded run branch resolves the teammate must not return',
-  )
 })
 
-// The §2 note must stay honest about a guard with TWO necessary conditions: the branch is recorded,
-// and it is still what the main worktree has checked out at stop time. Matching /fail-open/ alone
-// does not pin that — "is never fail-open" contains the substring and would satisfy a positive
-// match on text asserting the opposite. So assert the subject (both conditions, and the allowed
-// outcome when either fails) and deny the phrasings that would reverse it.
+// The §2 note must stay honest about a guard with TWO layers, only the second of which depends on
+// the run branch. Both layers are bound by subject locks; see the note above on why a denylist is
+// not enough, and why no pattern here carries a backtick.
 test('parallel-execution states the SubagentStop guard is fail-open when the run branch is unrecorded', async () => {
   const { doc } = await skill('parallel-execution')
   const section = doc.section('Dispatch the phase')
-  assert.match(
-    section.text,
-    /blocked either way|blocks and names the branch/,
-    'the section must state that a missing task branch is blocked regardless of the run branch record',
-  )
-  assert.match(
-    section.text,
-    /decided before the recorded run branch is read at all/,
-    'the section must state that the missing-branch layer is decided before the run branch is consulted',
-  )
-  assert.match(
-    section.text,
-    /that layer is fail-open/,
-    'the section must scope the fail-open residual to the layer that actually has one',
-  )
+
+  // Layer one: enforced regardless of the run branch record. A sentence claiming the §1 order is
+  // what buys this layer is the specific error this lock exists to catch.
+  assertClaim(section, {
+    label: 'the missing-branch layer',
+    claim: /A missing task branch is blocked either way\b/i,
+    subject: /missing task branch|blocked either way|did nothing is caught/i,
+    allow: [
+      /When it does not, it blocks and names the branch — decided before the recorded run branch is read at all/i,
+      /A teammate that did nothing is caught whether or not the §1 order was followed/i,
+      /The hook resolves the stopping teammate through the worktree location record locate wrote, then checks that the task branch exists/i,
+    ],
+  })
+
+  // Layer two: the one with a residual. The lock covers sentences about the fail-open window, so
+  // both widening it back to the whole guard and cancelling it with a reassurance fail here.
+  assertClaim(section, {
+    label: 'the strayed-file-set layer',
+    claim: /So the §1 order buys the second layer, not the first\./i,
+    then: /Where it is skipped that layer is fail-open, and the phase gate is what catches strayed work instead/i,
+    subject: /fail-open|buys the second layer|rely on the stop hook/i,
+  })
+
   assert.match(
     section.text,
     /the field stays empty until some later command/,
@@ -1187,23 +1200,11 @@ test('parallel-execution states the SubagentStop guard is fail-open when the run
     /checking the branch out writes that record/,
     'the false claim that a checkout by itself records the run branch must not return',
   )
+  // The enumeration this replaced named four commands and missed rebuild-state. Written without
+  // backticks so it can actually fire against normalized text.
   assert.doesNotMatch(
     section.text,
-    /never fail-open|closed unconditionally|always armed|armed on this path too/,
-    'a sentence denying the residual must not be able to satisfy the disclosure assertion',
-  )
-  // The residual is real but bounded: it covers the strayed-file-set layer, never the missing-branch
-  // one. A sentence widening it back to the whole guard is as wrong as one denying it.
-  assert.doesNotMatch(
-    section.text,
-    /Whenever either condition fails the guard is fail-open|the guard is fail-open until/,
-    'the fail-open residual must not be restated as covering the whole guard',
-  )
-  // The enumeration this replaced named four commands and missed rebuild-state. A list here drifts
-  // the moment a fifth writer appears, and the drift is invisible: the sentence still reads true.
-  assert.doesNotMatch(
-    section.text,
-    /until a\n?\s*later `gate`, `finish`, `prune-run` or `workflow`/,
+    /until a later gate, finish, prune-run or workflow/i,
     'the section must not re-acquire an enumeration of the commands that record the run branch',
   )
 })
