@@ -1148,7 +1148,7 @@ test('parallel-execution checks out the run branch before init-run to record it'
       /^Checking the run branch out before the first init-run is therefore what puts the record in place at the start of the run, on a run id that has none yet\.$/i,
       /^It does not repair a run whose recorded branch is already wrong: no command overwrites that field\.$/i,
       /^To correct one, remove runBranch from \.teammates\/<runId>\/plan\.json and run init-run again — from an attached branch\.$/i,
-      /^An absent record needs no hand-editing: a later command that derives a context from the run branch fills it in\.$/i,
+      /^An absent record needs no hand-editing: some later commands fill it in and others only read it, so read runBranch in \.teammates\/<runId>\/plan\.json rather than predicting which\.$/i,
       /^On a detached HEAD init-run records the literal string HEAD, which is not a run branch and which no command overwrites, so it disarms the second layer until the field is removed by hand\.$/i,
       /^When init-run records nothing it prints a note directing you to check the run branch out before gating; the note concerns gate refusing to run from the base branch, and a checkout on its own records no run branch\.$/i,
     ],
@@ -1166,7 +1166,8 @@ test('parallel-execution bounds the SubagentStop guard rather than describing it
     allow: [
       /^The Workflow path already renders each brief from the same composer, so a hand-written dispatch is only ever a way to drift from what the gate enforces\.$/i,
       /^The SubagentStop hook does two cheap things at that moment: it blocks a teammate whose task branch does not exist, and it runs complete --enforcement-only\.$/i,
-      /^That run keeps fileset, ownership and merge, but only a task-scoped failure blocks — fileset or merge, so a blocked stop is not always about a file set; a failing ownership is reported and the stop is allowed\.$/i,
+      /^That run keeps every check the manifest declares that is not a command — usually fileset, ownership and merge\.$/i,
+      /^Only a task-scoped failure blocks, meaning fileset or merge, so a blocked stop is not always about a file set; an ownership failure with no task-scoped failure beside it is reported without blocking\.$/i,
       /^The hook resolves a stopping teammate through records under \.teammates\/, which is gitignored and writable by every teammate, and it allows the stop on anything it cannot establish — a teammate it cannot resolve, a plan it cannot read, a recorded run branch that is not the branch checked out\.$/i,
       /^The hook can only ever add a block that would not otherwise happen, so declining to block on anything it cannot establish is what keeps it from blocking a teammate over state that teammate did not write — state any teammate can write\.$/i,
       /^What this buys is a fast signal on the common honest mistake, not a barrier against a determined one\.$/i,
@@ -1182,12 +1183,12 @@ test('parallel-execution bounds the SubagentStop guard rather than describing it
   // ownership stops a teammate; it does not, it returns 4 and the stop is allowed.
   assertStatement(
     section,
-    /only a task-scoped failure blocks — fileset or merge/i,
+    /Only a task-scoped failure blocks, meaning fileset or merge/i,
     'the section must say which failures can actually block, not only which checks run',
   )
   assertStatement(
     section,
-    /a failing ownership is reported and the stop is allowed/i,
+    /an ownership failure with no task-scoped failure beside it is reported without blocking/i,
     'the section must say a failing ownership does not block the stop',
   )
 

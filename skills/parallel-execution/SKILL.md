@@ -35,8 +35,8 @@ the stop is allowed. Checking the run branch out before the **first** `init-run`
 puts the record in place at the start of the run, on a run id that has none yet. It does not repair a run whose
 recorded branch is already wrong: no command overwrites that field. To correct one, remove
 `runBranch` from `.teammates/<runId>/plan.json` and run `init-run` again — from an attached branch.
-An absent record needs no hand-editing: a later command that derives a context from the run branch
-fills it in.
+An absent record needs no hand-editing: some later commands fill it in and others only read it, so
+read `runBranch` in `.teammates/<runId>/plan.json` rather than predicting which.
 On a detached HEAD `init-run` records the literal string `HEAD`, which is not a run branch and
 which no command overwrites, so it disarms the second layer until the field is removed by hand.
 
@@ -71,9 +71,11 @@ only ever a way to drift from what the gate enforces.
 
 On a pure direct-`Agent` phase a teammate can stop before any other lifecycle command has run. The
 `SubagentStop` hook does two cheap things at that moment: it blocks a teammate whose task branch
-does not exist, and it runs `complete --enforcement-only`. That run keeps `fileset`, `ownership`
-and `merge`, but only a task-scoped failure blocks — `fileset` or `merge`, so a blocked stop is not
-always about a file set; a failing `ownership` is reported and the stop is allowed.
+does not exist, and it runs `complete --enforcement-only`. That run keeps every check the
+manifest declares that is not a `command` — usually `fileset`, `ownership` and `merge`. Only a
+task-scoped failure blocks, meaning `fileset` or `merge`, so a blocked stop is not always about a
+file set; an `ownership` failure with no task-scoped failure beside it is reported without
+blocking.
 
 Treat both as best effort. The hook resolves a stopping teammate through records under
 `.teammates/`, which is gitignored and writable by every teammate, and it allows the stop on
