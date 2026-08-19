@@ -29,8 +29,11 @@ has checked out, and when it is absent or different it reports that it cannot ve
 the stop is allowed. Checking the run branch out before the **first** `init-run` is therefore what
 puts the record in place at the start of the run, on a run id that has none yet. It does not repair a run whose
 recorded branch is already wrong: no command overwrites that field. To correct one, remove
-`runBranch` from `.teammates/<runId>/plan.json` and run `init-run` again. When `init-run` records
-nothing it prints a note directing you to check the run branch out before **gating**; the note
+`runBranch` from `.teammates/<runId>/plan.json` and run `init-run` again — from an attached branch.
+On a detached HEAD `init-run` records the literal string `HEAD`, which is not a run branch and
+which no command overwrites, so it disarms the second layer until the field is removed by hand.
+
+When `init-run` records nothing it prints a note directing you to check the run branch out before **gating**; the note
 concerns `gate` refusing to run from the base branch, and a checkout on its own records no run
 branch.
 
@@ -63,10 +66,13 @@ This matters for the `SubagentStop` guard on a pure direct-`Agent` phase, where 
 before any other lifecycle command has run. The guard has two layers, and only the second one
 depends on the run branch:
 
-- **A missing task branch is blocked either way.** The hook resolves the stopping teammate through
-  the worktree location record `locate` wrote, then checks that the task branch exists. When it does
-  not, it blocks and names the branch — decided before the recorded run branch is read at all. A
-  teammate that did nothing is caught whether or not the §1 order was followed.
+- **A missing task branch is blocked when the teammate is resolvable at all.** The hook resolves
+  the stopping teammate through the worktree location record `locate` wrote, then checks that the
+  task branch exists. When it does not, it blocks and names the branch — decided before the recorded
+  run branch is read at all, so this layer does not depend on the §1 order. It does depend on two
+  things the teammate controls: `locate` is the teammate's own first step, and a teammate that never
+  ran it resolves to nothing and is allowed through; and the hook reads `plan.json` for the plan
+  path, so a missing `planPath` or an unparseable file allows the stop as well.
 - **Straying outside the declared file set is caught only when the run branch is both recorded and
   checked out.** Those checks run through `complete --enforcement-only`, which turns its result into
   a verdict only when the recorded run branch equals the branch the main worktree is on. Absent — the
@@ -80,7 +86,11 @@ write to it, and every teammate can reach the main worktree's `plan.json`. Fill-
 inside `writePlan` that binds the CLI's own writers; it does not bind a teammate writing the file
 directly, which can happen at any point in the run, including after the repair described in §1. A
 rewritten value makes `complete --enforcement-only` report that it cannot verify completion, so the
-second layer is disarmed from that moment on.
+second layer is disarmed from that moment until an operator removes the field by hand — no
+automatic writer replaces it, which is what keeps a wrong checkout from re-pointing a run, and is
+why §1 gives the repair as a manual step. The one value that does not persist is the empty string:
+it is carried, then dropped on write, so the field disappears and the note reporting what was kept
+names nothing.
 
 Comparing the recorded value by eye does not detect this. The CLI compares bytes, while zero-width
 and homoglyph characters render identically in a terminal: a planted branch name differing from
@@ -90,6 +100,9 @@ Compare bytes if you compare at all. What holds here is the phase gate rather th
 
 So the §1 order buys the second layer, not the first. Where it is skipped that layer is fail-open,
 and the phase gate is what catches strayed work instead.
+
+Neither layer is a barrier a determined teammate cannot lower, because both read files it can
+write. The phase gate is what holds regardless: `fileset` and `ownership` recompute from git.
 
 Wait on completion notifications. Do not poll in a loop.
 

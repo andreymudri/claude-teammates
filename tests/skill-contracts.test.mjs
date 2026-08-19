@@ -1117,13 +1117,17 @@ test('no skill or agent claims SubagentStop catches a stalled or parked teammate
 test('parallel-execution checks out the run branch before init-run to record it', async () => {
   const { doc } = await skill('parallel-execution')
   const section = doc.section('Initialize the run')
-  const checkout = section.text.indexOf('git checkout -b')
-  const initRun = section.text.indexOf('init-run <planPath>')
-  assert.notEqual(checkout, -1, 'the Initialize section must instruct checking out the run branch')
-  assert.notEqual(initRun, -1, 'the Initialize section must show the init-run invocation')
+  // Read the order out of the COMMAND BLOCK, not the section text. indexOf over the whole section
+  // takes the first occurrence of each string, so any earlier prose mentioning `git checkout -b`
+  // satisfies the left side no matter what the block prescribes — the inverted order stayed green.
+  const commandBlock = section.blocks.find((b) => b.kind === 'code' && b.code.includes('init-run <planPath>'))
+  assert.ok(commandBlock, 'the Initialize section must contain a command block invoking init-run')
+  const checkout = commandBlock.code.indexOf('git checkout -b')
+  const initRun = commandBlock.code.indexOf('init-run <planPath>')
+  assert.notEqual(checkout, -1, 'the command block must instruct checking out the run branch')
   assert.ok(
     checkout < initRun,
-    `the checkout must be prescribed BEFORE the init-run invocation (checkout at ${checkout}, init-run at ${initRun})`,
+    `the checkout must be prescribed BEFORE the init-run invocation in the same command block (checkout at ${checkout}, init-run at ${initRun}): ${JSON.stringify(commandBlock.code)}`,
   )
 
   // What the record does NOT do. The hook resolves a stopping teammate through the worktree
@@ -1133,7 +1137,20 @@ test('parallel-execution checks out the run branch before init-run to record it'
   assertClaim(section, {
     label: 'what the recorded run branch resolves',
     claim: /That record does not resolve a stopping teammate to its task — the worktree location record written by locate does that\b/i,
-    subject: /resolves? a stopping teammate|worktree location record/i,
+    // The subject is the RECORD, not the verb "resolve". A denylist of verbs is escapable by
+    // paraphrase — "identifies", "maps", "looks up", "is how the hook finds" are all outside a
+    // verb list — so the lock is placed on every statement that speaks about the record or about
+    // how a stopping teammate is identified, whatever verb it uses. Each legitimate sentence about
+    // the record is named in allow; that cost is the point of an inventory lock.
+    subject: /that record|the record|recorded run branch|worktree location record|stopping teammate/i,
+    allow: [
+      /^A value already recorded always wins/i,
+      /^What it decides is whether the stop-time checks are allowed to be a verdict/i,
+      /^Checking the run branch out before the first init-run is therefore what puts the record in place/i,
+      /^It does not repair a run whose recorded branch is already wrong/i,
+      /^To correct one, remove runBranch from .teammates\/<runId>\/plan.json and run init-run again/i,
+      /^The order matters for enforcement, not just tidiness/i,
+    ],
   })
 
   // Fill-if-absent is a behaviour, not a token. The subject lock covers every sentence about the
@@ -1148,6 +1165,15 @@ test('parallel-execution checks out the run branch before init-run to record it'
       /It does not repair a run whose recorded branch is already wrong: no command overwrites that field/i,
     ],
   })
+
+  // A detached HEAD makes init-run record the literal string HEAD — not a run branch, and no
+  // command overwrites it, so the repair prescribed one sentence earlier poisons the run when it is
+  // followed from a detached HEAD. Measured on a scratch repo. Nothing else in the section says so.
+  assertStatement(
+    section,
+    /On a detached HEAD init-run records the literal string HEAD/i,
+    'the Initialize section must warn that a detached-HEAD init-run records the literal string HEAD',
+  )
 
   assert.doesNotMatch(
     section.text,
@@ -1167,11 +1193,14 @@ test('parallel-execution states the SubagentStop guard is fail-open when the run
   // what buys this layer is the specific error this lock exists to catch.
   assertClaim(section, {
     label: 'the missing-branch layer',
-    claim: /A missing task branch is blocked either way\b/i,
-    subject: /missing task branch|blocked either way|did nothing is caught/i,
+    claim: /A missing task branch is blocked when the teammate is resolvable at all\b/i,
+    // The subject covers the layer AND its two escape routes, so dropping either qualification —
+    // the teammate that never ran locate, the unreadable plan.json — fails here. Both were measured
+    // against the hook: no location record exits 0, and a plan.json without planPath exits 0.
+    subject: /missing task branch|blocked either way|did nothing is caught|resolvable|never ran it|planPath|allowed through/i,
     allow: [
-      /When it does not, it blocks and names the branch — decided before the recorded run branch is read at all/i,
-      /A teammate that did nothing is caught whether or not the §1 order was followed/i,
+      /When it does not, it blocks and names the branch — decided before the recorded run branch is read at all, so this layer does not depend on the §1 order/i,
+      /It does depend on two things the teammate controls: locate is the teammate's own first step, and a teammate that never ran it resolves to nothing and is allowed through; and the hook reads plan\.json for the plan path, so a missing planPath or an unparseable file allows the stop as well/i,
       /The hook resolves the stopping teammate through the worktree location record locate wrote, then checks that the task branch exists/i,
     ],
   })
@@ -1181,7 +1210,10 @@ test('parallel-execution states the SubagentStop guard is fail-open when the run
   assertClaim(section, {
     label: 'the strayed-file-set layer',
     claim: /So the §1 order buys the second layer, not the first\./i,
-    then: /Where it is skipped that layer is fail-open, and the phase gate is what catches strayed work instead/i,
+    // Anchored end to end. assertClaim exempts the then consequence from the subject lock, so an
+    // unanchored pattern lets a cancelling clause be appended to that exact sentence and screened
+    // by nothing at all.
+    then: /^Where it is skipped that layer is fail-open, and the phase gate is what catches strayed work instead\.$/i,
     subject: /fail-open|buys the second layer|rely on the stop hook/i,
   })
 
@@ -1199,10 +1231,26 @@ test('parallel-execution states the SubagentStop guard is fail-open when the run
   assertClaim(section, {
     label: 'the record is a file',
     claim: /The record is a file, not a guarantee, and the exposure is not bounded to the window where it is empty\b/i,
-    subject: /not a guarantee|bounded to the window|binds the CLI's own writers|disarmed from that moment/i,
+    // The inventory must be the field's own vocabulary, not the phrases this paragraph happens to
+    // use — otherwise it reads "the sentences already there" and a new one in the field's normal
+    // words ("fills the field", "a non-empty field", "once recorded") matches nothing.
+    subject: /plan\.json|runBranch|the record|the field|writable|guarantee|disarm|second layer/i,
     allow: [
       /Fill-if-absent is a rule inside writePlan that binds the CLI's own writers; it does not bind a teammate writing the file directly, which can happen at any point in the run, including after the repair described in §1/i,
       /A rewritten value makes complete --enforcement-only report that it cannot verify completion, so the second layer is disarmed from that moment on/i,
+      // The two layer bullets and the closing summary. Each states a bound this section is built
+      // on, and each was read against the code when it was written.
+      /^When it does not, it blocks and names the branch — decided before the recorded run branch is read at all\.$/i,
+      /^Those checks run through complete --enforcement-only, which turns its result into a verdict only when the recorded run branch equals the branch the main worktree is on\.$/i,
+      /^Absent — the §1 order was skipped, and the field stays empty until some later command fills it in — or different, as during a detached-HEAD plan amendment, it reports that it cannot verify completion and the stop is allowed\.$/i,
+      /^Comparing the recorded value by eye does not detect this\.$/i,
+      /^So the §1 order buys the second layer, not the first\.$/i,
+      // Round 7. Each of these was measured against the code before being written, and each is
+      // named here rather than waved through by a broader subject pattern.
+      /^When it does not, it blocks and names the branch — decided before the recorded run branch is read at all, so this layer does not depend on the §1 order\.$/i,
+      /^It does depend on two things the teammate controls: locate is the teammate's own first step, and a teammate that never ran it resolves to nothing and is allowed through; and the hook reads plan\.json for the plan path, so a missing planPath or an unparseable file allows the stop as well\.$/i,
+      /^A rewritten value makes complete --enforcement-only report that it cannot verify completion, so the second layer is disarmed from that moment until an operator removes the field by hand — no automatic writer replaces it, which is what keeps a wrong checkout from re-pointing a run, and is why §1 gives the repair as a manual step\.$/i,
+      /^The one value that does not persist is the empty string: it is carried, then dropped on write, so the field disappears and the note reporting what was kept names nothing\.$/i,
     ],
   })
 
@@ -1225,6 +1273,27 @@ test('parallel-execution states the SubagentStop guard is fail-open when the run
     /What holds here is the phase gate rather than the stop hook/i,
     'the section must name the phase gate as the enforcement that this file cannot influence',
   )
+  // Both layers read teammate-writable files, so neither is a barrier on its own. Stating that once
+  // is what stops the two bullets from reading as defence in depth.
+  assertStatement(
+    section,
+    /Neither layer is a barrier a determined teammate cannot lower, because both read files it can write/i,
+    'the section must say both layers are lowerable, so neither reads as a barrier on its own',
+  )
+  // Deleting a sentence named in `allow` is not a lock failure: the inventory screens what is
+  // present, it does not require it. Both qualifications that make layer one honest — measured
+  // against the hook, which exits 0 with no location record and 0 with a plan.json missing
+  // planPath — are therefore asserted directly.
+  assertStatement(
+    section,
+    /locate is the teammate's own first step, and a teammate that never ran it resolves to nothing and is allowed through/i,
+    'the section must say a teammate that never ran locate is allowed through',
+  )
+  assertStatement(
+    section,
+    /the hook reads plan\.json for the plan path, so a missing planPath or an unparseable file allows the stop as well/i,
+    'the section must say an unreadable plan.json allows the stop, since layer one reads it too',
+  )
   assert.match(
     section.text,
     /equals the branch the main worktree is on/,
@@ -1237,9 +1306,20 @@ test('parallel-execution states the SubagentStop guard is fail-open when the run
   )
   // The enumeration this replaced named four commands and missed rebuild-state. Written without
   // backticks so it can actually fire against normalized text.
-  assert.doesNotMatch(
-    section.text,
-    /until a later gate, finish, prune-run or workflow/i,
-    'the section must not re-acquire an enumeration of the commands that record the run branch',
+  // Not a verbatim guard. The removed list was wrong because it OMITTED a filler (rebuild-state),
+  // and any list will omit the next one, so what is forbidden is naming lifecycle commands as the
+  // things that fill the field at all — in any order and any wording. prune-run and rebuild-state
+  // have no other business in a dispatch section, so their presence is the signal.
+  assertNoStatement(
+    section,
+    /prune-run|rebuild-state/i,
+    'the section must not enumerate the commands that record the run branch; a list drifts the moment a new writer appears',
   )
+  // And the positive claim is locked on the concept of what fills the field, so an enumeration
+  // cannot be added as a subordinate clause beside it.
+  assertClaim(section, {
+    label: 'what fills the record',
+    claim: /the field stays empty until some later command fills it in/i,
+    subject: /fills it in|fill the field|records the run branch|until some later command/i,
+  })
 })
