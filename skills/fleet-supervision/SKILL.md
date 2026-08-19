@@ -89,8 +89,8 @@ used by worktree" until that worktree is pruned.
 ## The SubagentStop backstop
 
 A teammate's stop runs the `SubagentStop` hook, which re-runs the cheap enforcement checks and can
-refuse the stop; a refusal is handed back to that teammate and appears in its transcript with the
-failure text. But `SubagentStop` fires only when a teammate actually stops — a stalled or parked
+refuse the stop; a refusal appears in that teammate's transcript as a fixed message naming the
+branch to create, not as the failing check's own text, which is never forwarded. But `SubagentStop` fires only when a teammate actually stops — a stalled or parked
 teammate never reaches it, so `liveness` remains the only thing that sees a teammate which never
 stops at all. No stop-path hook fires for a parked agent.
 
