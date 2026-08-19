@@ -1116,9 +1116,55 @@ phase 1 `T1 T2 T3` · phase 2 `T4 T5` · phase 3 `T6 T7 T8`.
       is the honest disclosure: `skills/parallel-execution/SKILL.md` now states the guard is fail-open
       on the direct path and that the phase gate is the enforcement there, pinned by a
       `tests/skill-contracts.test.mjs` assertion on the literal `fail-open` (and a negative assertion
-      that the false closure claim cannot return). **Actually closing the window is a follow-up**: make
-      `locate` or `init-run` call `rememberRunBranch`, which lives in `scripts/cli.mjs` — outside any
-      phase-3 task's file set, so it could not be done here.
+      that the false closure claim cannot return).
+
+      **Closed 2026-08-16 (followup) — by a skill reorder, no `cli.mjs` change.** `locate` cannot
+      record the run branch (it runs in the teammate's worktree and never has it), but `init-run`
+      already records the branch it is invoked on — `runBranch = (head === base ? null : head)`,
+      written through `writePlan` fill-if-absent. So the fix is order: check out the run branch
+      **before** `init-run`, and init-run records it, arming the guard before any teammate can stop.
+      `skills/parallel-execution/SKILL.md` §1 now states that order and §2 keeps the residual for when
+      it is skipped; pinned by `tests/cli.test.mjs` ("init-run records the checked-out run branch, and
+      records none on the base branch") and the `tests/skill-contracts.test.mjs` §1-order assertion.
+
+---
+
+### Task 9: re-measure the integration-time citations and record the closed enforcement window
+
+**Files:**
+- Modify: `docs/specs/2026-08-10-agent-teams-adoption-design.md`
+- Modify: `skills/parallel-execution/SKILL.md`
+- Test: `tests/cli.test.mjs`
+- Test: `tests/skill-contracts.test.mjs`
+
+**Depends:** T8
+
+This task exists because two corrections can only be made against the integrated tree, and the
+plan's own "Follow-up owed after Task 5 lands" section says so: the spec's `cli.mjs` citations
+drift the moment Task 5 edits `cli.mjs`, and the §1/§2 disclosure in `skills/parallel-execution`
+can only be settled once Task 5's `init-run` behaviour and Task 8's skill text are both merged.
+Neither is doable on a phase 1–3 branch. Declaring them here keeps them inside the ownership
+model instead of arriving as a direct write to the run branch.
+
+- [ ] **Step 1:** Re-measure every `scripts/cli.mjs` citation in
+      `docs/specs/2026-08-10-agent-teams-adoption-design.md` against the merged tree — not against
+      any task branch — and correct the exit-code and false-PASS citations that moved.
+
+- [ ] **Step 2:** In `skills/parallel-execution/SKILL.md` §1, instruct checking the run branch out
+      **before** `init-run`, and state the mechanism: `init-run` records HEAD as the run branch
+      whenever HEAD is not the base, and records nothing when it is. That record is what the
+      `SubagentStop` guard resolves a stopping teammate to its task through.
+
+- [ ] **Step 3:** In §2, keep the residual honest — a bare checkout writes no record, so where the
+      §1 order is skipped the guard stays fail-open until a later `gate`, `finish`, `prune-run` or
+      `workflow` records the branch.
+
+- [ ] **Step 4:** Pin Step 2's mechanism in `tests/cli.test.mjs`: `init-run` on a non-base branch
+      records that branch, and on the base branch records none.
+
+- [ ] **Step 5:** Pin Steps 2 and 3 in `tests/skill-contracts.test.mjs`: §1 must state the order,
+      and §2 must keep the `fail-open` disclosure with a negative assertion that the false
+      "a checkout by itself records the run branch" claim cannot return.
 
 ---
 
@@ -1140,7 +1186,7 @@ phase 1 `T1 T2 T3` · phase 2 `T4 T5` · phase 3 `T6 T7 T8`.
 
 - [ ] `node --test tests/*.test.mjs` is green.
 - [ ] `node scripts/cli.mjs init-run docs/plans/2026-08-13-subagent-stop-enforcement.md --run plancheck --root .`
-      prints three phases: T1 T2 T3 / T4 T5 / T6 T7 T8. Remove `.teammates/plancheck` afterwards.
+      prints four phases: T1 T2 T3 / T4 T5 / T6 T7 T8 / T9. Remove `.teammates/plancheck` afterwards.
 - [ ] With the plugin installed, a teammate that stops having created no branch is blocked once and
       told which branch to create; stopping a second time is allowed through, and the phase gate
       still fails the task.
