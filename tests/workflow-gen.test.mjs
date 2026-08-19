@@ -420,13 +420,13 @@ test('an emitted literal never carries a raw double quote', async () => {
     baseBranch: 'feat/"q"',
     constraints: ['say "no"'],
   })
-  assert.ok(src.includes(String.raw`const PLAN_PATH = 'docs/\"p\".md'`), 'plan path quote must be escaped')
-  assert.ok(src.includes(String.raw`const BASE_BRANCH = 'feat/\"q\"'`), 'base branch quote must be escaped')
-  assert.ok(src.includes(String.raw`'say \"no\"'`), 'constraint quote must be escaped')
-  for (const decl of ['const PLAN_PATH = ', 'const BASE_BRANCH = ']) {
-    const line = src.slice(src.indexOf(decl)).split('\n')[0]
-    assert.ok(!/[^\\]"/.test(line), `unescaped double quote in: ${line}`)
-  }
+  // Briefs are embedded as a JSON.stringify'd object literal, which escapes an embedded double
+  // quote as \" rather than leaving it raw — the escaping the surrounding JS string needs to
+  // stay valid source. PLAN_PATH and BASE_BRANCH no longer exist as separate literals: the
+  // quote only ever reaches the generated source inside the composed brief text.
+  assert.ok(src.includes(String.raw`feat/\"q\"`), 'base branch quote must be escaped in the embedded brief')
+  assert.ok(src.includes(String.raw`docs/\"p\".md`), 'plan path quote must be escaped in the embedded brief')
+  assert.ok(src.includes(String.raw`say \"no\"`), 'constraint quote must be escaped in the embedded brief')
   // Escaping is transparent: the teammate still reads the value it was given.
   const [prompt] = await captureAgentPrompts(src)
   assert.ok(prompt.includes('git checkout -B teammates/r1/T1 feat/"q"'), 'escape must round-trip')
@@ -481,7 +481,7 @@ test('the dispatch names a real agent type and keeps worktree isolation', async 
   }
 })
 
-test('with caveman omitted the full brief and a false CAVEMAN marker are emitted', async () => {
+test('with caveman omitted the full brief is emitted, not the terse variant', async () => {
   const src = await generatePhaseWorkflow({
     runId: 'r1',
     phase: 1,
@@ -489,7 +489,6 @@ test('with caveman omitted the full brief and a false CAVEMAN marker are emitted
     maxParallel: 2,
     baseBranch: 'main',
   })
-  assert.ok(src.includes('const CAVEMAN = false'), 'an omitted caveman level must render as false, not a string')
   const [prompt] = await captureAgentPrompts(src)
   assert.ok(
     prompt.includes('BASELINE. Then bootstrap the worktree, before writing anything, in this order:'),
@@ -746,4 +745,57 @@ test('the generated source parses as a real module', async () => {
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+// The brief composer moved into scripts/brief.mjs; the template must not carry its own copy.
+// A silent reappearance of `brief`, `briefTerse`, `checkoutSteps` or `blastRadius` inside the
+// generated source would mean the template started composing text again instead of reading the
+// already-composed BRIEFS object, defeating the single-implementation point of this task.
+test('the generated script defines no local brief-composition function', async () => {
+  const src = await generatePhaseWorkflow({
+    runId: 'r1',
+    phase: 1,
+    tasks,
+    maxParallel: 2,
+    baseBranch: 'main',
+    planPath: 'docs/plans/p.md',
+    constraints: ['c1'],
+  })
+  for (const name of ['brief', 'briefTerse', 'checkoutSteps', 'blastRadius']) {
+    assert.ok(
+      !new RegExp(`\\bfunction\\s+${name}\\b`).test(src) && !new RegExp(`\\bconst\\s+${name}\\s*=`).test(src),
+      `generated source must not define a local ${name} function`,
+    )
+  }
+})
+
+// Cross-file pin: the text embedded in BRIEFS for a task must be exactly what composeBrief
+// produces for the same inputs — not merely similar wording. This is what makes the generator
+// and `cli.mjs brief` (via composeBrief) provably the same implementation rather than two
+// copies that happen to agree today.
+test('the embedded brief and composeBrief called directly are byte-identical', async () => {
+  const { composeBrief } = await import('../scripts/brief.mjs')
+  const task = { id: 'T1', title: 'auth middleware', files: ['src/auth.ts'], phase: 1 }
+  const runId = 'r1'
+  const planPath = 'docs/plans/p.md'
+  const baseBranch = 'main'
+  const constraints = ['Node >= 24.2.0']
+  const src = await generatePhaseWorkflow({
+    runId,
+    phase: 1,
+    tasks: [task],
+    maxParallel: 2,
+    planPath,
+    baseBranch,
+    constraints,
+  })
+  const [prompt] = await captureAgentPrompts(src)
+  const expected = composeBrief({
+    task: { id: task.id, title: task.title, files: task.files, branch: `teammates/${runId}/${task.id}` },
+    runId,
+    planPath,
+    baseBranch,
+    constraints,
+  })
+  assert.equal(prompt, expected, 'the embedded brief must be byte-identical to composeBrief\'s own output')
 })

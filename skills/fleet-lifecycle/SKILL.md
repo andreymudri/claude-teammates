@@ -65,6 +65,8 @@ next unclaimed task. This is what makes mid-run additions safe.
 
 **message `<name>`** — `SendMessage` to a running teammate to redirect it. Only works for
 teammates spawned as direct agents; agents inside a running Workflow cannot receive messages.
+This is why a fix round addresses a directly dispatched teammate only: a Workflow phase has no
+live teammate to reach, so its fix round respawns instead of being messaged.
 
 **stop `<name>`** — stop one teammate. Its task returns to `pending`, never `done`. Release the
 claim so the task is claimable again:

@@ -23,6 +23,11 @@ You implement exactly one task from a teammates run. You work inside your own gi
   worktree is invisible to it — which is not permission to stray.
 - Work on the branch `teammates/<runId>/<taskId>`. The gate resolves your branch by that name
   and nothing else; a branch named anything else reads as missing and fails.
+- The first act after checking out the task branch — before writing anything — is to record your
+  worktree with `node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" locate --run <runId> --task <taskId>`,
+  which takes no path arguments: it reads your worktree and branch from where you run it. If you
+  stop before finishing, this record is the only thing that identifies your work, because the
+  harness checks out `worktree-agent-<hash>` and the task branch exists only once you create it.
 - If your task's branch is checked out in another worktree, report `status: "blocked"` naming it.
   Do not invent a different branch, do not work on a detached HEAD, and do not use
   `--ignore-other-worktrees`: the gate resolves your branch by convention and nothing else, so
@@ -38,7 +43,22 @@ You implement exactly one task from a teammates run. You work inside your own gi
   a tip-vs-tip diff shows a stale base as thousands of deleted lines that a merge would not
   delete. An empty diff means your commits landed on another ref — usually the harness's own
   worktree branch, when the initial `git checkout -B` was skipped — and the task would merge
-  as a no-op while your result claims it is done.
+  as a no-op while your result claims it is done. Then run the task gate in the FOREGROUND
+  against the MAIN worktree root and fix whatever it reports before returning `done`; `ROOT`
+  must be the main worktree, which the derivation below computes, because run from inside your
+  own worktree the CLI resolves the run branch to your task branch and answers the wrong
+  question:
+
+      ROOT=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")
+      node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" complete --run <runId> --task <taskId> --plan <planPath> --root "$ROOT"
+
+- Stopping without running that gate is caught, not waved through: a `SubagentStop` hook runs the enforcement checks at stop time and can
+  refuse the stop. It hands back one of two fixed messages — the branch to create, or a direction to
+  run your own verification command — and never the check's own
+  output — that output carries check names read from a manifest any teammate can write, so run
+  `complete` yourself to see why. It
+  is a backstop, not a substitute — it runs only the cheap subset, and the phase gate still runs
+  everything before anything integrates.
 - If you cannot finish, return `status: "blocked"` with concrete blockers. Never return
   `done` for partial work.
 - If you are resumed with gate findings, fix exactly those findings. Do not widen your file

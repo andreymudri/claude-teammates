@@ -1292,6 +1292,42 @@ test('hooks.json wires update-check async and session-start sync', async () => {
   assert.equal(async.async, true)
 })
 
+test('hooks.json declares exactly one unmatched, synchronous SubagentStop hook', async () => {
+  const cfg = JSON.parse(await readFile(new URL('../hooks/hooks.json', import.meta.url), 'utf8'))
+  const stop = cfg.hooks.SubagentStop
+  assert.equal(stop.length, 1, 'exactly one SubagentStop matcher group')
+  assert.ok(!('matcher' in stop[0]), 'no matcher: SubagentStop must fire for every subagent, not a filtered subset')
+  const entries = stop[0].hooks
+  assert.equal(entries.length, 1, 'exactly one command under the group')
+  // Synchronous, because the enforcement decision this hook makes must land before the
+  // subagent is allowed to stop; an async hook could not block anything.
+  assert.equal(entries[0].async, false)
+})
+
+test('the SubagentStop command names a script that actually exists on disk', async () => {
+  const cfg = JSON.parse(await readFile(new URL('../hooks/hooks.json', import.meta.url), 'utf8'))
+  const command = cfg.hooks.SubagentStop[0].hooks[0].command
+  assert.match(command, /scripts\/subagent-stop\.mjs/, 'command must invoke scripts/subagent-stop.mjs')
+  // Resolve the path the declared command actually points at (not an assumed location)
+  // and confirm it exists, so a typo'd or since-renamed script fails this test instead
+  // of only failing silently at hook-run time.
+  const scriptPath = fileURLToPath(new URL('../scripts/subagent-stop.mjs', import.meta.url))
+  assert.ok(existsSync(scriptPath), `resolved script path must exist: ${scriptPath}`)
+})
+
+test('the SubagentStop command invokes node directly, not run-hook.cmd', async () => {
+  const cfg = JSON.parse(await readFile(new URL('../hooks/hooks.json', import.meta.url), 'utf8'))
+  const stopCommand = cfg.hooks.SubagentStop[0].hooks[0].command
+  assert.ok(!stopCommand.includes('run-hook.cmd'), 'SubagentStop must not route through the bash wrapper')
+  // SessionStart still does route through it: this pins that the two hooks are meant to
+  // differ here, rather than SubagentStop simply having lost the wrapper by accident.
+  const sessionStartCommands = cfg.hooks.SessionStart[0].hooks.map((h) => h.command)
+  assert.ok(
+    sessionStartCommands.every((c) => c.includes('run-hook.cmd')),
+    'SessionStart hooks must still route through run-hook.cmd'
+  )
+})
+
 // Pin the skip mechanism: verify that the skip decision is correctly extracted and used.
 // This is a plain test (not wrapped in hookTest) so it will FAIL if the skip logic is
 // accidentally disabled, rather than skipping silently. The first assertion verifies

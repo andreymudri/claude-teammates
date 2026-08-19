@@ -41,6 +41,93 @@ export async function runCommandCheck(check, { cwd = process.cwd(), exec = defau
 // appearing to record it.
 const ALWAYS_ENFORCED_KINDS = new Set(['fileset', 'ownership', 'merge'])
 
+// A CHECK KIND MUST BE A STRING BEFORE ANYTHING IS DECIDED FROM IT.
+//
+// JavaScript coerces on property lookup and does not coerce in a Set, and a manifest is JSON, so
+// `"kind": ["command"]` is expressible and lands on the wrong side of every guard at once:
+//
+//     ['command'] !== 'command'              true     survives cli.mjs's --enforcement-only filter
+//     Object.hasOwn(RUNNERS, ['command'])    true     the guard that looks like a type check
+//     RUNNERS[['command']]                   runner   executes
+//     ALWAYS_ENFORCED_KINDS.has(['fileset']) false    so `optional: true` is honoured
+//
+// The consequences were both reached end to end against the merged tree. `["command"]` runs an
+// arbitrary shell command through the stop hook — which fires for every subagent on the machine —
+// with cwd at the main worktree. `["fileset"] + optional: true` runs the REAL fileset check and
+// then declines to block it, producing `{"verdict":"PASS","failed":[],"optionalFailed":["fileset"]}`
+// — a forged manifest reaching a false gate PASS, which is a bound this design has claimed since
+// phase 1. `teammates.gate.json` is writable by any teammate, so neither needs a further foothold.
+//
+// The type test lives HERE, at the runner lookup and at the two places `optional` is computed,
+// rather than in the callers' filters: `cli.mjs`'s `--enforcement-only` filter is one call site of
+// several, and fixing it would close the execution path while leaving the false PASS. The earlier
+// prototype-key guard on the line below is a different defect — `'toString'` is a string and was
+// always handled; an array is the spelling JSON can express and nothing covered it.
+const hasUsableKind = (check) => typeof check?.kind === 'string'
+
+// The position `malformedKindResult` reports must locate the entry in `teammates.gate.json`, and
+// the list this module is handed is not always that file's list — `cli.mjs` narrows it in more
+// than one place, and counting the surviving entries then names a different entry than the message
+// tells the operator to fix.
+//
+// `ctx.checkPositions[i]` is the manifest position of the i-th entry of the list as handed over.
+// Where it is absent this falls back to the list's own index, which is correct only if nothing was
+// filtered out — so the fallback is a default, not a guarantee, and this cannot detect a caller
+// that filtered and stayed silent. What keeps callers right is on the cli.mjs side: narrowing goes
+// through `narrowChecks`, which returns the list and its positions together.
+function manifestPosition(ctx, index) {
+  const positions = ctx?.checkPositions
+  return Array.isArray(positions) && Number.isInteger(positions[index]) ? positions[index] : index
+}
+
+// A FAIL rather than a pending or a skip: a manifest this file cannot understand is a
+// configuration fault, so it must not run and must not be capable of passing.
+//
+// Built through `checkResult` rather than as its own object literal, so that `optional` is decided
+// in exactly ONE place — and the entry's OWN `kind` and `optional` are handed over unchanged, so
+// the decision `checkResult` makes is a real one. An earlier version passed a synthesized literal
+// with no `optional` at all; `checkResult`'s `hasUsableKind` clause then had nothing to refuse, and
+// restoring that shape and deleting the clause leaves tests/gate-runner.test.mjs fully green
+// (measured) — the unpinned-guard-that-reads-as-load-bearing shape this review has rejected
+// repeatedly. Now `{"kind":["fileset"],"optional":true}` reaches that clause carrying
+// `optional: true`, and deleting the clause alone turns the false-PASS test red.
+//
+// `index` is the entry's position in the manifest's check list (see `manifestPosition`), and it is
+// the whole point of this function's diagnosis. A malformed entry frequently has no `name` —
+// `null` and `"just a string"` are both reachable from a hand-written manifest — and `name` is the
+// only field `aggregateVerdict` reports, so two such entries both surfaced as `{"failed":[null]}`
+// while the text told the operator to fix a `kind` on an entry they could not identify. The
+// position is put in BOTH the message and the fallback `name`, so the verdict line alone locates
+// the entry.
+//
+// The `try` is not reachable from a manifest: that file is `JSON.parse`-only, so the kinds it can
+// express are exactly the JSON value shapes and `JSON.stringify` serialises all of them. It guards
+// the EXPORTED api instead — `runChecks` is called directly from `cli.mjs` and from tests, and a
+// programmatic caller can pass a `10n`, which is what the bigint test pins. Its scope is that one
+// serialisation and nothing wider: the reads that reach the entry's own fields happen outside the
+// `try`, so a throwing GETTER on the entry throws out of `runChecks` with no verdict recorded. No
+// manifest can express a getter, so that is programmatic callers only.
+function malformedKindResult(check, index) {
+  const position = `entry #${index} in this phase's check list`
+  let shown
+  try {
+    shown = JSON.stringify(check?.kind)
+  } catch {
+    // A BigInt, or any other value `JSON.stringify` refuses: it still has to be reportable.
+    shown = String(check?.kind)
+  }
+  // Only `name`, `kind` and `optional` are read out of this; `kind` and `optional` are passed
+  // through unchanged so that `checkResult`'s own `hasUsableKind` clause — not a second copy of
+  // the rule here — is what forces `optional: false`.
+  return checkResult(
+    { name: typeof check?.name === 'string' ? check.name : position, kind: check?.kind, optional: check?.optional },
+    'fail',
+    `check kind must be a string, got ${shown} (${position})`
+    + ' — a manifest entry this gate cannot understand is a configuration fault, not a check.'
+    + ' Fix the `kind` in teammates.gate.json.',
+  )
+}
+
 export function describePendingCheck(check) {
   return {
     name: check.name,
@@ -50,13 +137,17 @@ export function describePendingCheck(check) {
     // it is non-optional, so a manifest entry of an enforced kind that found no runner —
     // `{ "kind": "merge", "optional": true }`, the computed check a manifest must not be able
     // to supply or suppress — would otherwise land as a pending that waves the phase through.
-    optional: ALWAYS_ENFORCED_KINDS.has(check.kind) ? false : check.optional === true,
+    // A non-string kind is forced non-optional here too. `Set.has` does not coerce, so without
+    // this an unusable kind would slip past the always-enforced forcing and honour `optional`.
+    optional: !hasUsableKind(check) || ALWAYS_ENFORCED_KINDS.has(check.kind) ? false : check.optional === true,
     check,
   }
 }
 
 function checkResult(check, status, output) {
-  const optional = ALWAYS_ENFORCED_KINDS.has(check.kind) ? false : check.optional === true
+  const optional = !hasUsableKind(check) || ALWAYS_ENFORCED_KINDS.has(check.kind)
+    ? false
+    : check.optional === true
   return { name: check.name, kind: check.kind, status, output, optional }
 }
 
@@ -922,7 +1013,32 @@ const CONFLICT_SKIP = 'the phase does not merge cleanly; no merged tree exists t
 
 async function runCheckList(checks, ctx, commandCwd, mergeConflicted) {
   const results = []
+  // Counted rather than `checks.entries()`, which would narrow this loop from any iterable to an
+  // array and yield `[value, value]` for a Set.
+  let index = -1
   for (const check of checks) {
+    index += 1
+    // BEFORE THE RUNNER LOOKUP at the bottom of this loop, which is the ordering that carries the
+    // security property: that lookup coerces (`RUNNERS[['command']]` resolves to a real runner),
+    // so an unusable kind reaching it executes. That ordering is pinned: delete this block and the
+    // array-spelled execution and false-PASS tests in tests/gate-runner.test.mjs both fail.
+    //
+    // Its order relative to the merge-conflict skip below matters too, but NOT for the reason a
+    // previous version of this comment gave. That version said a non-string kind "slips past" the
+    // skip and could be reported as a benign skip; it cannot, because the skip compares
+    // `kind === 'command'` strictly and no non-string value satisfies a strict comparison. What
+    // the skip actually does is dereference `check.kind` UNGUARDED. Of the entry shapes
+    // `teammates.gate.json` can express, exactly one throws there: `null`. A string, number, array
+    // or boolean entry evaluates `check.kind` to `undefined` harmlessly and is caught below for the
+    // ordinary reason, and `undefined` itself throws but JSON has no literal for it, so it can only
+    // arrive from a programmatic caller. That one shape is enough — a `null` entry throws a
+    // TypeError out of this loop and out of `runChecks`, recording no verdict at all. Pinned: move
+    // this block below the skip and the nameless-entry test fails on that throw.
+    // See `hasUsableKind`.
+    if (!hasUsableKind(check)) {
+      results.push(malformedKindResult(check, manifestPosition(ctx, index)))
+      continue
+    }
     // A `command` check exists to answer "does the integrated tree work". Without a merged
     // tree there is no honest answer, and running it against the run branch's own tree would
     // answer a different question while looking like the one that was asked. Skipped, with

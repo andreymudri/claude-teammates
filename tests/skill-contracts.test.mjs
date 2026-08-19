@@ -7,6 +7,7 @@ import { runCli } from '../scripts/cli.mjs'
 import { collectReviewResults } from '../scripts/reviews.mjs'
 import {
   assertClaim,
+  statementsOf,
   assertCode,
   assertNoStatement,
   assertStatement,
@@ -1060,4 +1061,313 @@ test('fleet-supervision states the stall recovery resumes that agent rather than
     claim: /The recovery is to resume THAT agent with an instruction to re-run in the foreground with an explicit longer timeout/,
     then: /Do not respawn it: a respawn discards the task's whole context, and a returned teammate's worktree keeps its branch checked out, so a fresh dispatch fails with "already used by worktree" until that worktree is pruned/i,
   })
+})
+
+// The direct-dispatch instructions in parallel-execution build each teammate's brief from
+// `cli.mjs brief` rather than composing it by hand. The invocation carries the CLAUDE_PLUGIN_ROOT
+// prefix a skill CLI call must (see the relative-path test above), so the closing quote sits
+// between `cli.mjs` and `brief`; binding the literal keeps the dispatch instructions from drifting
+// away from the CLI they call.
+test('parallel-execution names the brief command its direct dispatches are built from', async () => {
+  const { body } = await skill('parallel-execution')
+  assert.ok(body.includes('cli.mjs" brief'), 'parallel-execution must name the cli.mjs brief command')
+})
+
+// SubagentStop fires only when a teammate actually stops; a stalled or parked teammate never
+// reaches it, and `liveness` is the only check that sees an absence of progress with no stop. No
+// skill or agent may claim otherwise: any sentence that names both SubagentStop and a stall or a
+// parked teammate must also name liveness, so a contract cannot quietly promote the backstop into a
+// stall detector. The guard matches both `stall` and `park` because the property it protects covers
+// a teammate that never stops for either reason, and the test name asserts exactly that coverage.
+// The hook writes a FIXED-FORM refusal naming the branch to create and forwards nothing from
+// `complete`'s stdout. The reason is security, not economy: that output carries check names read
+// from `teammates.gate.json` in the main worktree, which any teammate can write, and forwarding it
+// was reproduced delivering a check named to look like an orchestrator instruction carrying a shell
+// command. Two documents promised the opposite — the agent contract and fleet-supervision — and
+// nothing pinned either, so the contradiction survived a correction to the sibling skill. Any
+// sentence about a refusal reaching a teammate must not promise the check's own text.
+test('no skill or agent claims a SubagentStop refusal hands back the check output', async () => {
+  const agentsDir = new URL('../agents/', import.meta.url)
+  const docs = []
+  for (const name of await allSkills()) docs.push((await skill(name)).doc)
+  for (const file of await readdir(agentsDir)) {
+    const text = await readFile(new URL(file, agentsDir), 'utf8')
+    const { body } = splitFrontmatter(text, file)
+    docs.push(parseDoc(body, file))
+  }
+  for (const doc of docs) {
+    for (const st of doc.statements) {
+      if (!/refus|reject|block/i.test(st.text)) continue
+      assert.doesNotMatch(
+        st.text,
+        /hand(?:ing|s)? back the (?:same )?failure text|with the failure text|hands? back the check(?:'s)? output/i,
+        `a refusal is a fixed-form message; no document may promise the check's own text (${doc.label}): ${st.text}`,
+      )
+    }
+  }
+
+  // The denylist above is a backstop, not the contract. A phrasing it does not name restores the
+  // false promise, which is how the claim survived a correction to a sibling document in the first
+  // place. These two sentences are the contract, pinned positively: a paraphrase fails by not being
+  // the sentence, whatever words it chooses. The third copy lives inside GUARD_BLOCK already.
+  const contractDoc = parseDoc(
+    splitFrontmatter(await readFile(new URL('tm-implementer.md', agentsDir), 'utf8'), 'tm-implementer.md').body,
+    'tm-implementer.md',
+  )
+  const refusalBlock = contractDoc.blocks.find((b) => /SubagentStop/.test(b.text))
+  assert.ok(refusalBlock, 'agents/tm-implementer.md must carry a block describing the SubagentStop hook')
+  assert.deepEqual(
+    statementsOf(refusalBlock.text),
+    CONTRACT_REFUSAL,
+    'agents/tm-implementer.md: the block describing the SubagentStop refusal must match exactly — a '
+      + 'sentence was added, removed or reworded anywhere in it. A neighbour phrased outside a '
+      + 'denylist is how the false promise came back before.',
+  )
+  assert.deepEqual(
+    (await skill('fleet-supervision')).doc.section('The SubagentStop backstop').statements.map((st) => st.text),
+    SUPERVISION_REFUSAL,
+    'skills/fleet-supervision: the SubagentStop backstop section must match exactly',
+  )
+})
+
+test('no skill or agent claims SubagentStop catches a stalled or parked teammate', async () => {
+  const agentsDir = new URL('../agents/', import.meta.url)
+  const docs = []
+  for (const name of await allSkills()) docs.push((await skill(name)).doc)
+  for (const file of await readdir(agentsDir)) {
+    const text = await readFile(new URL(file, agentsDir), 'utf8')
+    const { body } = splitFrontmatter(text, file)
+    docs.push(parseDoc(body, file))
+  }
+  for (const doc of docs) {
+    for (const s of doc.statements) {
+      if (/SubagentStop/.test(s.text) && /\b(?:stall|park)/i.test(s.text)) {
+        assert.match(
+          s.text,
+          /liveness/i,
+          `a sentence naming SubagentStop and a stall or a parked teammate must also name liveness (${doc.label}): ${s.text}`,
+        )
+      }
+    }
+  }
+})
+
+// These two tests lock the EXACT STATEMENT INVENTORY of the two blocks that describe the run-branch
+// record and the SubagentStop guard. Not a subject lexicon — an ordered list.
+//
+// The lexicon approach was tried and failed four times. A subject alternation is escapable by
+// writing the reversal in words it does not name, and each escape was answered by adding the noun
+// it leaned on: branch, verdict, layer, then manifest, fileset, ownership, task-scoped, merge,
+// pending. The fifth escape used the paragraph's own opening sentence, which names none of them.
+// Separately, an `allow` entry is permissive: a sentence that exists only as an allow entry can be
+// DELETED outright and nothing fails, which was demonstrated on the "never read a stop that was
+// allowed as a verdict" caution.
+//
+// An ordered inventory closes both classes at once, because it is not a filter over what happens to
+// be written — it is the whole text of the section, from its first statement to its last. Any
+// sentence added, removed, reworded or reordered fails, in any vocabulary, whether or not it
+// mentions the subject, and wherever in the section it is placed.
+//
+// The block-kind sequence is locked alongside it. `statementsOf` builds statements only from
+// paragraphs and list items, so a heading or a fenced code block contributes none and could
+// otherwise carry false prose between two locked statements without changing the inventory.
+//
+// The cost is that every legitimate prose edit must update the list here. That is the review step,
+// and it is the point: this section made 45 findings across fifteen rounds, almost all of them
+// claims that were true of some paths and false of others. A maintainer editing it should have to
+// say so in the test.
+//
+// No entry may contain a backtick: normalize() strips them before matching.
+
+const RECORD_SHAPE = ['paragraph', 'code', 'paragraph', 'paragraph', 'paragraph', 'paragraph', 'paragraph', 'paragraph']
+const GUARD_SHAPE = [
+  'paragraph',
+  'code',
+  'paragraph',
+  'paragraph',
+  'paragraph',
+  'paragraph',
+  'code',
+  'paragraph',
+  'paragraph',
+  'paragraph',
+  'paragraph',
+  'paragraph',
+]
+
+const CONTRACT_REFUSAL = [
+  'Stopping without running that gate is caught, not waved through: a SubagentStop hook runs the enforcement checks at stop time and can refuse the stop.',
+  "It hands back one of two fixed messages — the branch to create, or a direction to run your own verification command — and never the check's own output — that output carries check names read from a manifest any teammate can write, so run complete yourself to see why.",
+  'It is a backstop, not a substitute — it runs only the cheap subset, and the phase gate still runs everything before anything integrates.',
+]
+
+const SUPERVISION_REFUSAL = [
+  "A teammate's stop runs the SubagentStop hook, which re-runs the cheap enforcement checks and can refuse the stop; a refusal appears in that teammate's transcript as one of two fixed messages — the branch to create, or a direction to run its own verification command — never as the failing check's text, which is not forwarded.",
+  'But SubagentStop fires only when a teammate actually stops — a stalled or parked teammate never reaches it, so liveness remains the only thing that sees a teammate which never stops at all.',
+  'No stop-path hook fires for a parked agent.',
+]
+
+const GUARD_CODE = [
+  "node \"$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs\" workflow --run <runId> --phase <n> --root <project root>",
+  "node \"$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs\" brief --run <id> --task <id> --plan <path> --base <branch> --root <project root>",
+]
+
+const RECORD_BLOCK = [
+  "Create and check out this run's branch before initializing, then run init-run from it:",
+  'This writes .teammates/<runId>/plan.json and status.json and prints the phase breakdown.',
+  'Tasks land in the same phase only when their deps are satisfied and their file sets are disjoint.',
+  'The order matters for enforcement, not just tidiness. init-run records a run branch by fill-if-absent: it records HEAD when the run has no runBranch recorded yet and HEAD is not the base branch, and it records nothing when HEAD is the base.',
+  'A value already recorded always wins — writePlan resolves the field as carried ?? usable — so a re-init from a different branch keeps the old record and prints a note naming the branch it kept.',
+  'Compare that name by bytes rather than by eye: the check is byte-wise, and zero-width and homoglyph characters render identically in a terminal.',
+  'It records nothing at all wherever it cannot resolve the base on its own: it derives the base itself and takes no --base, so a repository holding both main and master, or neither, throws into a catch that leaves the field unset, and no §1 order can arm anything there until a command that does take --base records it.',
+  'One input escapes that description: a recorded empty string is carried like any other, then dropped on write because it is falsy, so the field disappears, the note names no branch, and the run ends up with no record rather than the one it reports keeping.',
+  'That record does not resolve a stopping teammate to its task — the worktree location record written by locate does that.',
+  'What it decides is whether the stop-time checks are allowed to be a verdict: complete --enforcement-only compares the recorded run branch against the branch the main worktree has checked out, and when it is absent or different it reports that it cannot verify completion and the stop is allowed.',
+  'Checking the run branch out before the first init-run is therefore what puts the record in place at the start of the run, on a run id that has none yet.',
+  'It does not repair a run whose recorded branch is already wrong: no command overwrites that field.',
+  'To correct one, remove runBranch from .teammates/<runId>/plan.json and run init-run again — from an attached branch.',
+  'An absent record needs no hand-editing: some later commands fill it in and others only read it, so read runBranch in .teammates/<runId>/plan.json rather than predicting which.',
+  'On a detached HEAD init-run records the literal string HEAD, which is not a run branch and which no command overwrites, so it disarms the second layer until the field is removed by hand.',
+  'When init-run records nothing it prints a note directing you to check the run branch out before gating; the note concerns gate refusing to run from the base branch, and a checkout on its own records no run branch.',
+]
+
+const GUARD_BLOCK = [
+  'Phases with three or more tasks go through the Workflow tool:',
+  'Write that source to a file and invoke Workflow with it.',
+  "The Workflow tool needs the user's opt-in — ask once per run, then remember it for that run.",
+  'If the user declines, or the Workflow tool is unavailable, do not stop.',
+  "Fall back to the direct-agent path below for the whole phase: dispatch each task as its own background Agent with isolation: 'worktree', respecting maxParallel.",
+  'The result contract is identical, so nothing downstream changes.',
+  'Say which path you took.',
+  "Phases with fewer than three tasks are dispatched as direct background Agent calls with isolation: 'worktree' and the tm-implementer persona.",
+  'Same result contract either way.',
+  "On either direct-Agent path — the fallback above and the fewer-than-three-task case — build each teammate's brief with the CLI rather than composing it by hand:",
+  'The Workflow path already renders each brief from the same composer, so a hand-written dispatch is only ever a way to drift from what the gate enforces.',
+  'On a pure direct-Agent phase a teammate can stop before any other lifecycle command has run.',
+  'The SubagentStop hook does two cheap things at that moment: it blocks a teammate whose task branch does not exist, and it runs complete --enforcement-only.',
+  'That run keeps every non-command check the manifest declares, plus merge, which the gate computes for itself.',
+  'Do not declare merge in the manifest: it finds no runner there and lands as a blocking pending beside the computed result, an agent check declared there finds no runner either, though it blocks only when it is not marked optional.',
+  'Only a task-scoped failure blocks, meaning fileset or merge, so a blocked stop is not always about a file set; an ownership failure with no task-scoped failure beside it is reported without blocking.',
+  'The teammate is shown none of that detail — the hook reads the exit status and never forwards what the check printed.',
+  'Treat both as best effort.',
+  'The hook resolves a stopping teammate through records under .teammates/, which is gitignored and writable by every teammate, and it allows the stop on anything it cannot establish — a teammate it cannot resolve, a plan it cannot read, a recorded run branch that is not the branch checked out.',
+  'That is deliberate.',
+  'The hook can only ever add a block that would not otherwise happen, so declining to block on anything it cannot establish is what keeps an unreadable record from costing a teammate a turn.',
+  "It is not a guarantee against being blocked over foreign state: the records are teammate-writable, so a planted location record makes the hook establish something false and block whoever stops in the worktree that record keys on — resolution is by worktree path, not by teammate identity, and any linked worktree of this repository qualifies, including a reviewer's scratch one.",
+  'One plant costs one forced retry, since the next stop carries stop_hook_active.',
+  'What this buys is a fast signal on the common honest mistake, not a barrier against a determined one.',
+  'The enforcement is the phase gate: its fileset and ownership checks recompute from git and read nothing under .teammates/, whatever else the command around them reads.',
+  "Which checks run is another matter: that list comes from teammates.gate.json in the working tree, which every teammate can write, and an agent check's result comes from files under .teammates/ the enforced teammate can write too.",
+  'Do the §1 order because it is what lets complete --enforcement-only reach a verdict; the branch-existence check does not depend on it and blocks whether or not a run branch was ever recorded.',
+  'Never read a stop that was allowed as a verdict.',
+  'Wait on completion notifications.',
+  'Do not poll in a loop.',
+]
+
+// Lock the section's WHOLE statement list, not a suffix of it. An earlier version started at the
+// block's first sentence, which left everything above it free — a paragraph inserted there
+// contradicting the locked text shipped green.
+function assertBlock(section, expected, label) {
+  assert.deepEqual(
+    section.statements.map((s) => s.text),
+    expected,
+    `${label}: the section's statements must match the locked inventory exactly — a sentence was `
+      + 'added, removed, reworded or reordered, anywhere in the section. If the change is correct, '
+      + 'update the list in this file; that is the review step, not a formality.',
+  )
+}
+
+// And lock the sequence of block kinds. Headings and code blocks contribute no statements, so
+// without this a heading or fenced block could sit between two locked statements carrying prose the
+// inventory never sees.
+function assertShape(section, kinds, label) {
+  assert.deepEqual(
+    section.blocks.map((b) => b.kind),
+    kinds,
+    `${label}: the section's block structure changed. A heading, code block, list item or paragraph `
+      + 'was added, removed or reordered — including forms that carry no statement and so would '
+      + 'otherwise be invisible to the statement inventory.',
+  )
+}
+
+test('parallel-execution checks out the run branch before init-run to record it', async () => {
+  const { doc } = await skill('parallel-execution')
+  const section = doc.section('Initialize the run')
+
+  // Order is read from the COMMAND BLOCK. indexOf over section text takes the first occurrence of
+  // each string, so prose naming the checkout satisfies it regardless of what the block prescribes.
+  const commandBlock = section.blocks.find((b) => b.kind === 'code' && b.code.includes('init-run <planPath>'))
+  assert.ok(commandBlock, 'the Initialize section must contain a command block invoking init-run')
+  const checkout = commandBlock.code.indexOf('git checkout -b')
+  const initRun = commandBlock.code.indexOf('init-run <planPath>')
+  assert.notEqual(checkout, -1, 'the command block must instruct checking out the run branch')
+  assert.ok(
+    checkout < initRun,
+    `the checkout must come BEFORE init-run in the same command block: ${JSON.stringify(commandBlock.code)}`,
+  )
+
+  assertBlock(section, RECORD_BLOCK, 'the Initialize section')
+  assertShape(section, RECORD_SHAPE, 'the Initialize section')
+})
+
+test('parallel-execution bounds the SubagentStop guard rather than describing its layers', async () => {
+  const { doc } = await skill('parallel-execution')
+  assertBlock(doc.section('Dispatch the phase'), GUARD_BLOCK, 'the Dispatch section')
+  assertShape(doc.section('Dispatch the phase'), GUARD_SHAPE, 'the Dispatch section')
+
+  // The command blocks' CONTENT, not just their presence in the shape. GUARD_SHAPE pins that two
+  // code blocks exist here; without this, a comment line inside either could carry prose the
+  // statement inventory forbids, since code contributes no statements.
+  assert.deepEqual(
+    doc.section('Dispatch the phase').blocks.filter((b) => b.kind === 'code').map((b) => b.code),
+    GUARD_CODE,
+    'the Dispatch section\'s command blocks must match exactly — a comment line inside one is prose '
+      + 'the statement inventory cannot see',
+  )
+
+  // Every section, not two. The document has thirteen, and a reversal does not have to move one
+  // heading down to escape a two-section loop — any other heading will do. The section HEADINGS are
+  // scanned too: parseDoc slices a section's blocks past its own heading, so a claim placed in the
+  // heading text is invisible to both the statement inventory and the shape.
+  for (const heading of doc.sections) {
+    assert.doesNotMatch(
+      heading.label ?? '',
+      /barrier|never fail-open|always armed|blocked either way/i,
+      `a section heading may not carry a claim the body is forbidden to make: ${heading.label}`,
+    )
+  }
+  // Scoped: naming these as the commands that record the run branch is the defect the guard
+  // sections keep re-acquiring. Elsewhere the document discusses them legitimately.
+  for (const scope of [doc.section('Initialize the run'), doc.section('Dispatch the phase')]) {
+    assertNoStatement(
+      scope,
+      /prune-run|rebuild-state/i,
+      'the guard sections must not enumerate the commands that record the run branch; any such list drifts',
+    )
+  }
+  for (const scope of doc.sections) {
+    assertNoStatement(
+      scope,
+      /blocked either way|blocks regardless|caught whether or not|on (?:every|any|each) dispatch path/i,
+      'no section may claim a stop-time check fires unconditionally',
+    )
+    assertNoStatement(
+      scope,
+      /makes the stop-time checks\s*run at all|only ever turn a block into a non-block/i,
+      'no section may invert the guard direction',
+    )
+    assertNoStatement(
+      scope,
+      /never fail-open|closed unconditionally|always armed|rely on the stop hook/i,
+      'no section may present the guard as a barrier',
+    )
+    assertNoStatement(
+      scope,
+      /a verdict of completeness|allowed is a verdict|needs no further check/i,
+      'no section may say an allowed stop implies the work was checked',
+    )
+  }
+
+  // The two command blocks of the Dispatch section, locked by content.
+
 })
