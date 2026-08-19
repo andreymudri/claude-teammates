@@ -38,9 +38,9 @@ edits then take effect on the next session without a push:
 
 ### What installing registers
 
-Beyond the skills and commands, the plugin declares a  hook with no matcher and
-. That means **every** subagent stop on this machine — in any project, including one
-with no teammates run — synchronously spawns  before the stop is
+Beyond the skills and commands, the plugin declares a `SubagentStop` hook with no matcher and
+`async: false`. That means **every** subagent stop on this machine — in any project, including one
+with no teammates run — synchronously spawns `node scripts/subagent-stop.mjs` before the stop is
 allowed to complete.
 
 The handler is written to be cheap and to fail open: it resolves the stopping agent through a
