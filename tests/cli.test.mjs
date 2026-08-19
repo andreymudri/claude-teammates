@@ -5125,7 +5125,7 @@ test('init-run records the checked-out run branch, and records none on the base 
     const onBase = await readPlan(root, 'onbase')
     assert.ok(
       onBase.runBranch === null || !('runBranch' in onBase),
-      'init-run on the base branch records no run branch — the guard has nothing to resolve through',
+      'init-run on the base branch records no run branch — enforcement-only completion has nothing to compare against',
     )
   })
 })
