@@ -1112,8 +1112,13 @@ test('no skill or agent claims SubagentStop catches a stalled or parked teammate
 // allowed as a verdict" caution.
 //
 // An ordered inventory closes both classes at once, because it is not a filter over what happens to
-// be written — it is the whole text. Any sentence added, removed, reworded or reordered fails, in
-// any vocabulary, whether or not it mentions the subject.
+// be written — it is the whole text of the section, from its first statement to its last. Any
+// sentence added, removed, reworded or reordered fails, in any vocabulary, whether or not it
+// mentions the subject, and wherever in the section it is placed.
+//
+// The block-kind sequence is locked alongside it. `statementsOf` builds statements only from
+// paragraphs and list items, so a heading or a fenced code block contributes none and could
+// otherwise carry false prose between two locked statements without changing the inventory.
 //
 // The cost is that every legitimate prose edit must update the list here. That is the review step,
 // and it is the point: this section made 45 findings across fifteen rounds, almost all of them
@@ -1122,7 +1127,18 @@ test('no skill or agent claims SubagentStop catches a stalled or parked teammate
 //
 // No entry may contain a backtick: normalize() strips them before matching.
 
+const RECORD_SHAPE = ['paragraph', 'code', 'paragraph', 'paragraph', 'paragraph', 'paragraph']
+const GUARD_SHAPE = [
+  'paragraph', 'code', 'paragraph', 'paragraph', 'paragraph', 'paragraph',
+  'code', 'paragraph', 'paragraph', 'paragraph', 'paragraph', 'paragraph',
+]
+
 const RECORD_BLOCK = [
+  // The section lead-in. Locked too: an earlier version started the inventory at the sentence
+  // below, which left everything above it free to contradict the locked text.
+  "Create and check out this run's branch before initializing, then run init-run from it:",
+  'This writes .teammates/<runId>/plan.json and status.json and prints the phase breakdown.',
+  'Tasks land in the same phase only when their deps are satisfied and their file sets are disjoint.',
   'The order matters for enforcement, not just tidiness. init-run records a run branch by fill-if-absent: it records HEAD when the run has no runBranch recorded yet and HEAD is not the base branch, and it records nothing when HEAD is the base.',
   'A value already recorded always wins — writePlan resolves the field as carried ?? usable — so a re-init from a different branch keeps the old record and prints a note naming the branch it kept.',
   'Compare that name by bytes rather than by eye: the check is byte-wise, and zero-width and homoglyph characters render identically in a terminal.',
@@ -1138,6 +1154,18 @@ const RECORD_BLOCK = [
 ]
 
 const GUARD_BLOCK = [
+  // The dispatch mechanics that precede the guard discussion. Locked for the same reason.
+  'Phases with three or more tasks go through the Workflow tool:',
+  'Write that source to a file and invoke Workflow with it.',
+  "The Workflow tool needs the user's opt-in — ask once per run, then remember it for that run.",
+  'If the user declines, or the Workflow tool is unavailable, do not stop.',
+  "Fall back to the direct-agent path below for the whole phase: dispatch each task as its own background Agent with isolation: 'worktree', respecting maxParallel.",
+  'The result contract is identical, so nothing downstream changes.',
+  'Say which path you took.',
+  "Phases with fewer than three tasks are dispatched as direct background Agent calls with isolation: 'worktree' and the tm-implementer persona.",
+  'Same result contract either way.',
+  "On either direct-Agent path — the fallback above and the fewer-than-three-task case — build each teammate's brief with the CLI rather than composing it by hand:",
+  'The Workflow path already renders each brief from the same composer, so a hand-written dispatch is only ever a way to drift from what the gate enforces.',
   'On a pure direct-Agent phase a teammate can stop before any other lifecycle command has run.',
   'The SubagentStop hook does two cheap things at that moment: it blocks a teammate whose task branch does not exist, and it runs complete --enforcement-only.',
   'That run keeps every non-command check the manifest declares, plus merge, which the gate computes for itself rather than reading from the manifest — do not declare merge there, it finds no runner and lands as a blocking pending beside the computed result.',
@@ -1155,24 +1183,29 @@ const GUARD_BLOCK = [
   'Do not poll in a loop.',
 ]
 
-// Compare the block starting at its first sentence against the expected list, so prose ABOVE the
-// block (dispatch mechanics, the init-run lead-in) stays free while the block itself is exact.
+// Lock the section's WHOLE statement list, not a suffix of it. An earlier version started at the
+// block's first sentence, which left everything above it free — a paragraph inserted there
+// contradicting the locked text shipped green.
 function assertBlock(section, expected, label) {
-  const all = section.statements.map((s) => s.text)
-  const at = all.indexOf(expected[0])
-  assert.notEqual(at, -1, `${label}: the block no longer opens with ${JSON.stringify(expected[0])}`)
   assert.deepEqual(
-    all.slice(at, at + expected.length),
+    section.statements.map((s) => s.text),
     expected,
-    `${label}: the block's statements must match the locked inventory exactly. A sentence was added, `
-      + 'removed, reworded or reordered. If the change is correct, update the list in this file — that '
-      + 'is the review step, not a formality.',
+    `${label}: the section's statements must match the locked inventory exactly — a sentence was `
+      + 'added, removed, reworded or reordered, anywhere in the section. If the change is correct, '
+      + 'update the list in this file; that is the review step, not a formality.',
   )
-  assert.equal(
-    all.length,
-    at + expected.length,
-    `${label}: a statement was appended after the locked block. Nothing may follow it — the section's `
-      + 'trailing operational lines are inside the locked list, not excluded from it.',
+}
+
+// And lock the sequence of block kinds. Headings and code blocks contribute no statements, so
+// without this a heading or fenced block could sit between two locked statements carrying prose the
+// inventory never sees.
+function assertShape(section, kinds, label) {
+  assert.deepEqual(
+    section.blocks.map((b) => b.kind),
+    kinds,
+    `${label}: the section's block structure changed. A heading, code block, list item or paragraph `
+      + 'was added, removed or reordered — including forms that carry no statement and so would '
+      + 'otherwise be invisible to the statement inventory.',
   )
 }
 
@@ -1192,12 +1225,14 @@ test('parallel-execution checks out the run branch before init-run to record it'
     `the checkout must come BEFORE init-run in the same command block: ${JSON.stringify(commandBlock.code)}`,
   )
 
-  assertBlock(section, RECORD_BLOCK, 'the run-branch record block')
+  assertBlock(section, RECORD_BLOCK, 'the Initialize section')
+  assertShape(section, RECORD_SHAPE, 'the Initialize section')
 })
 
 test('parallel-execution bounds the SubagentStop guard rather than describing its layers', async () => {
   const { doc } = await skill('parallel-execution')
-  assertBlock(doc.section('Dispatch the phase'), GUARD_BLOCK, 'the SubagentStop guard block')
+  assertBlock(doc.section('Dispatch the phase'), GUARD_BLOCK, 'the Dispatch section')
+  assertShape(doc.section('Dispatch the phase'), GUARD_SHAPE, 'the Dispatch section')
 
   // The claims fifteen rounds measured false, refused in both sections so a reversal cannot simply
   // move one heading down, where a per-section lock does not reach.

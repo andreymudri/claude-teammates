@@ -80,13 +80,11 @@ export async function claimTask(root, runId, taskId, teammate) {
 // ---------------------------------------------------------------------------------------------
 // Worktree location records: `.teammates/index/<sha256 of the normalised worktree>.json`.
 //
-// NOT YET WIRED UP. As of this commit nothing in the repository calls `writeLocation` or
-// `findTaskByWorktree` outside tests: the `locate` command that will write a record and the
-// SubagentStop handler that will read one are separate tasks in
-// docs/plans/2026-08-13-subagent-stop-enforcement.md and do not exist yet. The comments below
-// describe the design those callers are being built to — read every "the hook does X" as "the
-// hook is specified to do X", not as a description of running code — and the threat model is
-// stated in the present tense because the file format is what it constrains, whoever writes it.
+// Both callers ship. `cli.mjs` writes a record from `locate`, and `scripts/subagent-stop.mjs` reads
+// one through `findTaskByWorktree` to resolve a stopping teammate to its task — that lookup, not the
+// recorded run branch, is what performs the resolution. The comments below describe running code.
+// The threat model is stated in the present tense because the file format is what it constrains,
+// whoever writes it.
 //
 // The layout is keyed rather than searched, and that is the whole security argument: a reader
 // derives one file name from the path it is asking about and opens it. Nothing enumerates the
