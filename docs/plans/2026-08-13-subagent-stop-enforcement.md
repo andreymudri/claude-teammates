@@ -1135,6 +1135,7 @@ phase 1 `T1 T2 T3` · phase 2 `T4 T5` · phase 3 `T6 T7 T8`.
 - Modify: `docs/specs/2026-08-10-agent-teams-adoption-design.md`
 - Modify: `skills/parallel-execution/SKILL.md`
 - Modify: `scripts/brief.mjs`
+- Modify: `scripts/state.mjs`
 - Test: `tests/cli.test.mjs`
 - Test: `tests/skill-contracts.test.mjs`
 
