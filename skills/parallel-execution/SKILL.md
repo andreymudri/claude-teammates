@@ -22,7 +22,13 @@ base branch, and it records nothing when HEAD is the base. A value already recor
 `writePlan` resolves the field as `carried ?? usable` — so a re-init from a different branch keeps
 the old record and prints a note naming the branch it kept. Compare that name by bytes rather than
 by eye: the check is byte-wise, and zero-width and homoglyph characters render identically in a
-terminal. One input escapes that description: a
+terminal.
+
+In a repository holding both `main` and `master` it records nothing at all: it derives the base
+itself and takes no `--base`, so the ambiguity throws into a catch that leaves the field unset, and
+no §1 order can arm anything there until a command that does take `--base` records it.
+
+One input escapes that description: a
 recorded empty string is carried like any other, then dropped on write because it is falsy, so the
 field disappears, the note names no branch, and the run ends up with no record rather than the one
 it reports keeping.
@@ -72,23 +78,28 @@ only ever a way to drift from what the gate enforces.
 On a pure direct-`Agent` phase a teammate can stop before any other lifecycle command has run. The
 `SubagentStop` hook does two cheap things at that moment: it blocks a teammate whose task branch
 does not exist, and it runs `complete --enforcement-only`. That run keeps every non-`command`
-check the manifest declares, plus `merge`, which the gate computes for itself rather than reading
-from the manifest — do not declare `merge` there, it finds no runner and lands as a blocking
-`pending` beside the computed result. Only a
+check the manifest declares, plus `merge`, which the gate computes for itself. Do not declare `merge` in the manifest: it finds
+no runner there and lands as a blocking `pending` beside the computed result, and an `agent` check
+behaves the same way at stop time. Only a
 task-scoped failure blocks, meaning `fileset` or `merge`, so a blocked stop is not always about a
-file set; an `ownership` failure with no task-scoped failure beside it is reported without
-blocking.
+file set; an `ownership` failure with no task-scoped failure beside it is reported without blocking. The
+teammate is shown none of that detail — the hook reads the exit status and never forwards what the
+check printed.
 
 Treat both as best effort. The hook resolves a stopping teammate through records under
 `.teammates/`, which is gitignored and writable by every teammate, and it allows the stop on
 anything it cannot establish — a teammate it cannot resolve, a plan it cannot read, a recorded run
 branch that is not the branch checked out. That is deliberate. The hook can only ever add a block that would
-not otherwise happen, so declining to block on anything it cannot establish is what keeps it from
-blocking a teammate over state that teammate did not write — state any teammate can write.
+not otherwise happen, so declining to block on anything it cannot establish is what keeps an unreadable record from costing a teammate a turn. It is not a guarantee against
+being blocked over foreign state: the records are teammate-writable, so a planted location record
+makes the hook establish something false and block the teammate it names, once.
 
 What this buys is a fast signal on the common honest mistake, not a barrier against a determined
 one. The enforcement is the phase gate: its `fileset` and `ownership` checks recompute from git and
-read nothing under `.teammates/`, whatever else the command around them reads. Do the §1 order because it is what lets
+read nothing under `.teammates/`, whatever else the command around them reads. Which checks run is
+another matter: that list comes from `teammates.gate.json` in the working tree, which every teammate
+can write, and an `agent` check's result comes from files under `.teammates/` the enforced teammate
+can write too. Do the §1 order because it is what lets
 `complete --enforcement-only` reach a verdict; the branch-existence check does not depend on it and
 blocks whether or not a run branch was ever recorded. Never read a stop that was allowed as a
 verdict.
