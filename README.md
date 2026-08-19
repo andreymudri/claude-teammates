@@ -36,6 +36,18 @@ edits then take effect on the next session without a push:
     /plugin marketplace add /path/to/claude-teammates
     /plugin install claude-teammates
 
+### What installing registers
+
+Beyond the skills and commands, the plugin declares a `SubagentStop` hook with no matcher and
+`async: false`. That means **every** subagent stop on this machine — in any project, including one
+with no teammates run — synchronously spawns `node scripts/subagent-stop.mjs` before the stop is
+allowed to complete.
+
+The handler is written to be cheap and to fail open: it resolves the stopping agent through a
+worktree location record and returns immediately when it finds none, which is the case for every
+subagent outside a run, and any error is an allow. But it is a synchronous spawn on a hot path and
+it is machine-wide rather than scoped to this repository, so it is worth knowing before installing.
+
 ### Update notices
 
 Claude Code updates plugins in the background and says nothing, so a new version usually arrives
