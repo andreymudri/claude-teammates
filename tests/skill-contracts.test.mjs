@@ -1127,21 +1127,32 @@ test('no skill or agent claims SubagentStop catches a stalled or parked teammate
 //
 // No entry may contain a backtick: normalize() strips them before matching.
 
-const RECORD_SHAPE = ['paragraph', 'code', 'paragraph', 'paragraph', 'paragraph', 'paragraph']
+const RECORD_SHAPE = ['paragraph', 'code', 'paragraph', 'paragraph', 'paragraph', 'paragraph', 'paragraph', 'paragraph']
 const GUARD_SHAPE = [
-  'paragraph', 'code', 'paragraph', 'paragraph', 'paragraph', 'paragraph',
-  'code', 'paragraph', 'paragraph', 'paragraph', 'paragraph', 'paragraph',
+  'paragraph',
+  'code',
+  'paragraph',
+  'paragraph',
+  'paragraph',
+  'paragraph',
+  'code',
+  'paragraph',
+  'paragraph',
+  'paragraph',
+  'paragraph',
+  'paragraph',
 ]
 
 const RECORD_BLOCK = [
-  // The section lead-in. Locked too: an earlier version started the inventory at the sentence
-  // below, which left everything above it free to contradict the locked text.
+  // The whole section, lead-in included: an earlier version started the inventory at the sentence
+  // about ordering, which left everything above it free to contradict the locked text.
   "Create and check out this run's branch before initializing, then run init-run from it:",
   'This writes .teammates/<runId>/plan.json and status.json and prints the phase breakdown.',
   'Tasks land in the same phase only when their deps are satisfied and their file sets are disjoint.',
   'The order matters for enforcement, not just tidiness. init-run records a run branch by fill-if-absent: it records HEAD when the run has no runBranch recorded yet and HEAD is not the base branch, and it records nothing when HEAD is the base.',
   'A value already recorded always wins — writePlan resolves the field as carried ?? usable — so a re-init from a different branch keeps the old record and prints a note naming the branch it kept.',
   'Compare that name by bytes rather than by eye: the check is byte-wise, and zero-width and homoglyph characters render identically in a terminal.',
+  'In a repository holding both main and master it records nothing at all: it derives the base itself and takes no --base, so the ambiguity throws into a catch that leaves the field unset, and no §1 order can arm anything there until a command that does take --base records it.',
   'One input escapes that description: a recorded empty string is carried like any other, then dropped on write because it is falsy, so the field disappears, the note names no branch, and the run ends up with no record rather than the one it reports keeping.',
   'That record does not resolve a stopping teammate to its task — the worktree location record written by locate does that.',
   'What it decides is whether the stop-time checks are allowed to be a verdict: complete --enforcement-only compares the recorded run branch against the branch the main worktree has checked out, and when it is absent or different it reports that it cannot verify completion and the stop is allowed.',
@@ -1154,7 +1165,7 @@ const RECORD_BLOCK = [
 ]
 
 const GUARD_BLOCK = [
-  // The dispatch mechanics that precede the guard discussion. Locked for the same reason.
+  // Whole section again, dispatch mechanics included, for the same reason.
   'Phases with three or more tasks go through the Workflow tool:',
   'Write that source to a file and invoke Workflow with it.',
   "The Workflow tool needs the user's opt-in — ask once per run, then remember it for that run.",
@@ -1168,17 +1179,20 @@ const GUARD_BLOCK = [
   'The Workflow path already renders each brief from the same composer, so a hand-written dispatch is only ever a way to drift from what the gate enforces.',
   'On a pure direct-Agent phase a teammate can stop before any other lifecycle command has run.',
   'The SubagentStop hook does two cheap things at that moment: it blocks a teammate whose task branch does not exist, and it runs complete --enforcement-only.',
-  'That run keeps every non-command check the manifest declares, plus merge, which the gate computes for itself rather than reading from the manifest — do not declare merge there, it finds no runner and lands as a blocking pending beside the computed result.',
+  'That run keeps every non-command check the manifest declares, plus merge, which the gate computes for itself.',
+  'Do not declare merge in the manifest: it finds no runner there and lands as a blocking pending beside the computed result, and an agent check behaves the same way at stop time.',
   'Only a task-scoped failure blocks, meaning fileset or merge, so a blocked stop is not always about a file set; an ownership failure with no task-scoped failure beside it is reported without blocking.',
+  'The teammate is shown none of that detail — the hook reads the exit status and never forwards what the check printed.',
   'Treat both as best effort.',
   'The hook resolves a stopping teammate through records under .teammates/, which is gitignored and writable by every teammate, and it allows the stop on anything it cannot establish — a teammate it cannot resolve, a plan it cannot read, a recorded run branch that is not the branch checked out.',
   'That is deliberate.',
-  'The hook can only ever add a block that would not otherwise happen, so declining to block on anything it cannot establish is what keeps it from blocking a teammate over state that teammate did not write — state any teammate can write.',
+  'The hook can only ever add a block that would not otherwise happen, so declining to block on anything it cannot establish is what keeps an unreadable record from costing a teammate a turn.',
+  'It is not a guarantee against being blocked over foreign state: the records are teammate-writable, so a planted location record makes the hook establish something false and block the teammate it names, once.',
   'What this buys is a fast signal on the common honest mistake, not a barrier against a determined one.',
   'The enforcement is the phase gate: its fileset and ownership checks recompute from git and read nothing under .teammates/, whatever else the command around them reads.',
+  "Which checks run is another matter: that list comes from teammates.gate.json in the working tree, which every teammate can write, and an agent check's result comes from files under .teammates/ the enforced teammate can write too.",
   'Do the §1 order because it is what lets complete --enforcement-only reach a verdict; the branch-existence check does not depend on it and blocks whether or not a run branch was ever recorded.',
   'Never read a stop that was allowed as a verdict.',
-  // The section's trailing operational lines are locked too, so 'nothing may follow' stays exact.
   'Wait on completion notifications.',
   'Do not poll in a loop.',
 ]
