@@ -91,8 +91,11 @@ Treat both as best effort. The hook resolves a stopping teammate through records
 anything it cannot establish — a teammate it cannot resolve, a plan it cannot read, a recorded run
 branch that is not the branch checked out. That is deliberate. The hook can only ever add a block that would
 not otherwise happen, so declining to block on anything it cannot establish is what keeps an unreadable record from costing a teammate a turn. It is not a guarantee against
-being blocked over foreign state: the records are teammate-writable, so a planted location record
-makes the hook establish something false and block the teammate it names, once.
+being blocked over foreign state: the records are teammate-writable, so a planted location record makes the hook establish
+something false and block whoever stops in the worktree that record keys on — resolution is by
+worktree path, not by teammate identity, and any linked worktree of this repository qualifies,
+including a reviewer's scratch one. One plant costs one forced retry, since the next stop carries
+`stop_hook_active`.
 
 What this buys is a fast signal on the common honest mistake, not a barrier against a determined
 one. The enforcement is the phase gate: its `fileset` and `ownership` checks recompute from git and

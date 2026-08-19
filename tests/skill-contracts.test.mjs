@@ -1078,6 +1078,34 @@ test('parallel-execution names the brief command its direct dispatches are built
 // parked teammate must also name liveness, so a contract cannot quietly promote the backstop into a
 // stall detector. The guard matches both `stall` and `park` because the property it protects covers
 // a teammate that never stops for either reason, and the test name asserts exactly that coverage.
+// The hook writes a FIXED-FORM refusal naming the branch to create and forwards nothing from
+// `complete`'s stdout. The reason is security, not economy: that output carries check names read
+// from `teammates.gate.json` in the main worktree, which any teammate can write, and forwarding it
+// was reproduced delivering a check named to look like an orchestrator instruction carrying a shell
+// command. Two documents promised the opposite — the agent contract and fleet-supervision — and
+// nothing pinned either, so the contradiction survived a correction to the sibling skill. Any
+// sentence about a refusal reaching a teammate must not promise the check's own text.
+test('no skill or agent claims a SubagentStop refusal hands back the check output', async () => {
+  const agentsDir = new URL('../agents/', import.meta.url)
+  const docs = []
+  for (const name of await allSkills()) docs.push((await skill(name)).doc)
+  for (const file of await readdir(agentsDir)) {
+    const text = await readFile(new URL(file, agentsDir), 'utf8')
+    const { body } = splitFrontmatter(text, file)
+    docs.push(parseDoc(body, file))
+  }
+  for (const doc of docs) {
+    for (const st of doc.statements) {
+      if (!/refus|reject|block/i.test(st.text)) continue
+      assert.doesNotMatch(
+        st.text,
+        /hand(?:ing|s)? back the (?:same )?failure text|with the failure text|hands? back the check(?:'s)? output/i,
+        `a refusal is a fixed-form message; no document may promise the check's own text (${doc.label}): ${st.text}`,
+      )
+    }
+  }
+})
+
 test('no skill or agent claims SubagentStop catches a stalled or parked teammate', async () => {
   const agentsDir = new URL('../agents/', import.meta.url)
   const docs = []
@@ -1144,8 +1172,6 @@ const GUARD_SHAPE = [
 ]
 
 const RECORD_BLOCK = [
-  // The whole section, lead-in included: an earlier version started the inventory at the sentence
-  // about ordering, which left everything above it free to contradict the locked text.
   "Create and check out this run's branch before initializing, then run init-run from it:",
   'This writes .teammates/<runId>/plan.json and status.json and prints the phase breakdown.',
   'Tasks land in the same phase only when their deps are satisfied and their file sets are disjoint.',
@@ -1165,7 +1191,6 @@ const RECORD_BLOCK = [
 ]
 
 const GUARD_BLOCK = [
-  // Whole section again, dispatch mechanics included, for the same reason.
   'Phases with three or more tasks go through the Workflow tool:',
   'Write that source to a file and invoke Workflow with it.',
   "The Workflow tool needs the user's opt-in — ask once per run, then remember it for that run.",
@@ -1187,7 +1212,8 @@ const GUARD_BLOCK = [
   'The hook resolves a stopping teammate through records under .teammates/, which is gitignored and writable by every teammate, and it allows the stop on anything it cannot establish — a teammate it cannot resolve, a plan it cannot read, a recorded run branch that is not the branch checked out.',
   'That is deliberate.',
   'The hook can only ever add a block that would not otherwise happen, so declining to block on anything it cannot establish is what keeps an unreadable record from costing a teammate a turn.',
-  'It is not a guarantee against being blocked over foreign state: the records are teammate-writable, so a planted location record makes the hook establish something false and block the teammate it names, once.',
+  "It is not a guarantee against being blocked over foreign state: the records are teammate-writable, so a planted location record makes the hook establish something false and block whoever stops in the worktree that record keys on — resolution is by worktree path, not by teammate identity, and any linked worktree of this repository qualifies, including a reviewer's scratch one.",
+  'One plant costs one forced retry, since the next stop carries stop_hook_active.',
   'What this buys is a fast signal on the common honest mistake, not a barrier against a determined one.',
   'The enforcement is the phase gate: its fileset and ownership checks recompute from git and read nothing under .teammates/, whatever else the command around them reads.',
   "Which checks run is another matter: that list comes from teammates.gate.json in the working tree, which every teammate can write, and an agent check's result comes from files under .teammates/ the enforced teammate can write too.",
