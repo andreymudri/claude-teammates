@@ -1137,7 +1137,7 @@ test('parallel-execution checks out the run branch before init-run to record it'
   assertClaim(section, {
     label: 'what the recorded run branch is for',
     claim: /^That record does not resolve a stopping teammate to its task — the worktree location record written by locate does that\.$/i,
-    subject: /record|runbranch|resolve|stopping teammate|checkout|\bHEAD\b|repair|arms|disarm|fill-if-absent|branch|verdict|layer/i,
+    subject: /record|runbranch|resolve|stopping teammate|checkout|\bHEAD\b|repair|arms|disarm|fill-if-absent|branch|verdict|layer|bytes|by eye|homoglyph|zero-width/i,
     allow: [
       /^Create and check out this run's branch before initializing, then run init-run from it:$/i,
       /^The order matters for enforcement, not just tidiness\. init-run records a run branch by fill-if-absent: it records HEAD when the run has no runBranch recorded yet and HEAD is not the base branch, and it records nothing when HEAD is the base\.$/i,
@@ -1162,11 +1162,11 @@ test('parallel-execution bounds the SubagentStop guard rather than describing it
   assertClaim(section, {
     label: 'the guard is best effort',
     claim: /^Treat both as best effort\.$/i,
-    subject: /hook|block|stopped|best effort|barrier|verdict|enforcement|enforces|cannot establish|covered|coverage|allows the stop|record|branch|layer/i,
+    subject: /hook|block|stopped|best effort|barrier|verdict|enforcement|enforces|cannot establish|covered|coverage|allows the stop|record|branch|layer|manifest|fileset|ownership|task-scoped|merge|pending/i,
     allow: [
       /^The Workflow path already renders each brief from the same composer, so a hand-written dispatch is only ever a way to drift from what the gate enforces\.$/i,
       /^The SubagentStop hook does two cheap things at that moment: it blocks a teammate whose task branch does not exist, and it runs complete --enforcement-only\.$/i,
-      /^That run keeps every check the manifest declares that is not a command — usually fileset, ownership and merge\.$/i,
+      /^That run keeps every non-command check the manifest declares, plus merge, which the gate computes for itself rather than reading from the manifest — do not declare merge there, it finds no runner and lands as a blocking pending beside the computed result\.$/i,
       /^Only a task-scoped failure blocks, meaning fileset or merge, so a blocked stop is not always about a file set; an ownership failure with no task-scoped failure beside it is reported without blocking\.$/i,
       /^The hook resolves a stopping teammate through records under \.teammates\/, which is gitignored and writable by every teammate, and it allows the stop on anything it cannot establish — a teammate it cannot resolve, a plan it cannot read, a recorded run branch that is not the branch checked out\.$/i,
       /^The hook can only ever add a block that would not otherwise happen, so declining to block on anything it cannot establish is what keeps it from blocking a teammate over state that teammate did not write — state any teammate can write\.$/i,
@@ -1194,8 +1194,8 @@ test('parallel-execution bounds the SubagentStop guard rather than describing it
 
   assertStatement(
     doc.section('Initialize the run'),
-    /Compare that name by bytes rather than by eye/i,
-    'the Initialize section must warn that the recorded branch name cannot be compared by eye',
+    /^Compare that name by bytes rather than by eye: the check is byte-wise, and zero-width and homoglyph characters render identically in a terminal\.$/i,
+    'the Initialize section must warn that the recorded branch name cannot be compared by eye, and say why',
   )
 
   assertNoStatement(
