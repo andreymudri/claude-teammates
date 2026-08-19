@@ -7,6 +7,7 @@ import { runCli } from '../scripts/cli.mjs'
 import { collectReviewResults } from '../scripts/reviews.mjs'
 import {
   assertClaim,
+  statementsOf,
   assertCode,
   assertNoStatement,
   assertStatement,
@@ -1104,6 +1105,29 @@ test('no skill or agent claims a SubagentStop refusal hands back the check outpu
       )
     }
   }
+
+  // The denylist above is a backstop, not the contract. A phrasing it does not name restores the
+  // false promise, which is how the claim survived a correction to a sibling document in the first
+  // place. These two sentences are the contract, pinned positively: a paraphrase fails by not being
+  // the sentence, whatever words it chooses. The third copy lives inside GUARD_BLOCK already.
+  const contractDoc = parseDoc(
+    splitFrontmatter(await readFile(new URL('tm-implementer.md', agentsDir), 'utf8'), 'tm-implementer.md').body,
+    'tm-implementer.md',
+  )
+  const refusalBlock = contractDoc.blocks.find((b) => /SubagentStop/.test(b.text))
+  assert.ok(refusalBlock, 'agents/tm-implementer.md must carry a block describing the SubagentStop hook')
+  assert.deepEqual(
+    statementsOf(refusalBlock.text),
+    CONTRACT_REFUSAL,
+    'agents/tm-implementer.md: the block describing the SubagentStop refusal must match exactly — a '
+      + 'sentence was added, removed or reworded anywhere in it. A neighbour phrased outside a '
+      + 'denylist is how the false promise came back before.',
+  )
+  assert.deepEqual(
+    (await skill('fleet-supervision')).doc.section('The SubagentStop backstop').statements.map((st) => st.text),
+    SUPERVISION_REFUSAL,
+    'skills/fleet-supervision: the SubagentStop backstop section must match exactly',
+  )
 })
 
 test('no skill or agent claims SubagentStop catches a stalled or parked teammate', async () => {
@@ -1169,6 +1193,18 @@ const GUARD_SHAPE = [
   'paragraph',
   'paragraph',
   'paragraph',
+]
+
+const CONTRACT_REFUSAL = [
+  'Stopping without running that gate is caught, not waved through: a SubagentStop hook runs the enforcement checks at stop time and can refuse the stop.',
+  "It hands back one of two fixed messages — the branch to create, or a direction to run your own verification command — and never the check's own output — that output carries check names read from a manifest any teammate can write, so run complete yourself to see why.",
+  'It is a backstop, not a substitute — it runs only the cheap subset, and the phase gate still runs everything before anything integrates.',
+]
+
+const SUPERVISION_REFUSAL = [
+  "A teammate's stop runs the SubagentStop hook, which re-runs the cheap enforcement checks and can refuse the stop; a refusal appears in that teammate's transcript as one of two fixed messages — the branch to create, or a direction to run its own verification command — never as the failing check's text, which is not forwarded.",
+  'But SubagentStop fires only when a teammate actually stops — a stalled or parked teammate never reaches it, so liveness remains the only thing that sees a teammate which never stops at all.',
+  'No stop-path hook fires for a parked agent.',
 ]
 
 const GUARD_CODE = [
@@ -1312,7 +1348,7 @@ test('parallel-execution bounds the SubagentStop guard rather than describing it
   for (const scope of doc.sections) {
     assertNoStatement(
       scope,
-      /blocked either way|blocks regardless|caught whether or not|on every dispatch path/i,
+      /blocked either way|blocks regardless|caught whether or not|on (?:every|any|each) dispatch path/i,
       'no section may claim a stop-time check fires unconditionally',
     )
     assertNoStatement(
