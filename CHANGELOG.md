@@ -1,5 +1,41 @@
 # Changelog
 
+## v1.0.1
+
+All four follow-ups recorded under v1.0.0 below, closed. They are documentation or test
+changes; no runtime behaviour moved, and no CLI, hook or gate surface changed.
+
+- **A scan over statements now reaches headings too.** `claimSites` in `tests/md-contract.mjs`
+  returns every place a claim can be written in a scope — statements built from prose, the scope's
+  own heading, and every heading nested in it. The SubagentStop refusal scan reads it instead of
+  `doc.statements`. Measured against the real tree before and after: a heading carrying the denied
+  promise scored 0 hits under the old scan and 1 under the new one. The locked
+  `The SubagentStop backstop` section additionally pins that it holds no nested heading.
+- **Two documents no longer gloss the missing-branch refusal as "the branch to create".** The
+  handler names the missing branch and sends the teammate to its brief for the step that creates
+  it, deliberately declining to present a ref derived from a teammate-writable record as an
+  instruction. `agents/tm-implementer.md` and `skills/fleet-supervision/SKILL.md` now say that, and
+  both locked inventories were updated with them.
+- **`skills/parallel-execution` no longer uses "block" in two senses one clause apart.** The
+  gate-verdict sense now reads "fails the gate verdict"; the stop sense reads "refuses the stop".
+
+And the fourth, **a region lock binds one block or one section**, which was recorded as needing a
+corpus-wide scan rather than a patch:
+
+- **`assertCorpusInventory` locks a mechanism across every document at once.** Every claim site in
+  every skill and agent contract naming the SubagentStop mechanism must be one of the sentences
+  listed in `tests/skill-contracts.test.mjs`, attributed to the document it appears in. A sentence
+  added anywhere fails, and one moved between documents fails as surely as one reworded.
+  Demonstrated by appending a contradicting sentence to `skills/phase-gate/SKILL.md` — a document
+  no lock covered: the corpus lock failed and the cross-document denylist scan did not, which is
+  the escape this closes. It buys location, not meaning: the subject pattern is a lexicon, so a
+  sentence discussing the hook without naming it still passes, exactly as under a section lock.
+- **A document's statements were counted once per enclosing heading.** `parseDoc` built
+  `doc.statements` by concatenating overlapping sections, so a sentence under `### x` inside `## y`
+  inside `# z` appeared three times — 316 entries for 154 sentences in `parallel-execution`. Scans
+  survived it by checking the same sentence twice; a corpus inventory would have encoded nesting
+  depth as content. Now built from the block list once, in document order.
+
 ## v1.0.0
 
 First stable release. The plugin orchestrates a fleet of worktree-isolated teammates against a
@@ -77,7 +113,8 @@ each is stated where an operator will meet it — in `SECURITY.md` and in
 ## Known follow-ups for v1.0.1
 
 Found by the release-gate review at the tagged tree, below the blocking threshold, recorded here
-rather than fixed after the gate ran.
+rather than fixed after the gate ran. **All four are closed in v1.0.1 above**; the list is kept as
+written so the record of what shipped in v1.0.0 stays accurate.
 
 - **The region locks in `tests/skill-contracts.test.mjs` ignore the heading of the region they lock.**
   `parseDoc` slices a section past its own heading and `statementsOf` builds statements only from
@@ -88,7 +125,9 @@ rather than fixed after the gate ran.
   `refuse|reject|block` prefilter and the denied phrasings can still carry the claim. This is the
   documented scope bound of `tests/md-contract.mjs`, which states that a contradiction placed under
   another heading is out of scope by construction.
-- **The agent contract summarises the missing-branch refusal as naming "the branch to create".** The
+- **Two documents summarise the missing-branch refusal as naming "the branch to create"** —
+  `agents/tm-implementer.md` and `skills/fleet-supervision/SKILL.md`. Two lenses raised this
+  independently, which is why five findings are recorded here as four bullets. The
   branch in that message is derived from a location record under `.teammates/index/`, which any
   teammate can write, and `scripts/subagent-stop.mjs` deliberately declines to present it as an
   instruction — it sends the teammate to its brief, whose branch name comes from the dispatch rather

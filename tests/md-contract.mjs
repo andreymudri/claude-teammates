@@ -46,8 +46,13 @@
 //    is exactly that case: it names nothing and refers to nothing this module recognises.
 //  * Back-references outside BACK_REFERENCE. That list is a lexicon and shares the weakness of
 //    every lexicon. It is a second, independent net under the subject lock — not a guarantee.
-//  * Anything in a *different* section. Scope is one section (heading plus its subsections). A
-//    contradiction placed under another heading is out of scope by construction.
+//  * Anything in a *different* section, for a section-scoped assertion. Scope is one section
+//    (heading plus its subsections), so a contradiction placed under another heading is out of
+//    that assertion's reach by construction. `assertCorpusInventory` is the answer where a claim
+//    must not move: it locks every site naming a mechanism across every document at once, so
+//    relocation fails like rewording. It buys location, not meaning — its subject pattern is a
+//    lexicon with the same weakness as any other, and a sentence that discusses the mechanism
+//    without naming it still escapes.
 //  * Anything inside a code block. Screens run over prose statements only; code is asserted
 //    against explicitly, never scanned for contradictions.
 //  * Meaning. `subject:` proves a sentence about the subject was *reviewed by a human writing the
@@ -249,9 +254,17 @@ export function parseDoc(source, label = 'document') {
     blocks,
     sections,
     text: blocks.map((b) => b.text).join(' '),
-    statements: sections[0].statements.concat(
-      ...sections.slice(1).map((s) => s.statements),
-    ),
+    // Built from the block list ONCE, in document order — not by concatenating the sections.
+    // Sections nest: a section's blocks run to the next heading of the same or higher level, so
+    // every block under `## 2` also sits under `# Title`, and one under `### 2a` sits under all
+    // three. Concatenating them counted each statement once per enclosing heading — measured at
+    // 316 entries for 154 sentences in `parallel-execution`, the deepest tripled. A scan survives
+    // that (it checks the same sentence twice), but any assertion that counts, indexes or locks
+    // an inventory at document level reads the duplicates as real, and would have to be written
+    // against a number that changes when an unrelated heading is added.
+    statements: blocks
+      .filter((b) => b.kind === 'paragraph' || b.kind === 'list-item')
+      .flatMap((b) => statementsOf(b.text).map((text) => ({ text, block: b }))),
     section(matcher) {
       const hits = sections.filter((s) =>
         matcher instanceof RegExp
@@ -287,6 +300,67 @@ export function backReferences(scope) {
 
 function show(statements) {
   return statements.map((s) => `\n    - ${s.text}`).join('')
+}
+
+// Every place in a scope where a claim can be written, not only the places `statements` reaches.
+// `parseDoc` slices a section's blocks past its own heading and `makeSection` builds statements
+// from paragraphs and list items alone, so a scan over statements sees no heading at all: neither
+// the section's own, nor one nested inside it. A reversed claim written as a heading therefore
+// ships green through a scan that would refuse the same sentence one line lower. The gap was
+// consistency, not discovery — the two prose sections in `parallel-execution` already scan their
+// headings by hand; this makes that reach available to every scan rather than to the two that
+// remembered.
+//
+// Heading text is emitted as-is, one site per heading. It is not split into statements: a heading
+// is one claim by construction, and `statementsOf` would only ever return it unchanged or, with a
+// terminator in it, cut it into fragments an assertion could pass on half of.
+export function claimSites(scope) {
+  const sites = (scope.statements ?? []).map((s) => ({ text: s.text, where: 'statement' }))
+  if (scope.title) sites.push({ text: scope.title, where: 'heading' })
+  for (const b of scope.blocks ?? []) {
+    if (b.kind === 'heading') sites.push({ text: b.text, where: 'heading' })
+  }
+  return sites
+}
+
+// ---------------------------------------------------------------------------
+// Corpus scope
+// ---------------------------------------------------------------------------
+
+// A section lock binds one section. Prose about the same mechanism written under ANOTHER heading,
+// or in another document entirely, was out of its scope by construction — so the cheapest escape
+// from an inventory was never to reword a locked sentence but to add a contradicting one somewhere
+// else. That is the hole this closes for a named mechanism: the scope becomes every document at
+// once.
+//
+// The unit is the same claim site as everywhere else, prefixed with the document it came from, so
+// a sentence that MOVES between documents fails as surely as one that is added. Document order is
+// fixed by sorting on the label, and within a document by position, so the list is stable against
+// readdir order.
+//
+// This does not detect contradiction, and the subject pattern is still a lexicon — a sentence that
+// discusses the mechanism without naming it escapes, exactly as it escapes a section-scoped
+// `subject:` lock. What it removes is the LOCATION dimension: a contradiction now has to be
+// written in vocabulary the pattern misses, rather than merely placed under a different heading.
+export function corpusSites(docs, subject) {
+  const ordered = [...docs].sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0))
+  const out = []
+  for (const { label, doc } of ordered) {
+    for (const site of claimSites(doc)) {
+      if (subject.test(site.text)) out.push(`${label} :: ${site.text}`)
+    }
+  }
+  return out
+}
+
+export function assertCorpusInventory(docs, subject, expected, message) {
+  assert.deepEqual(
+    corpusSites(docs, subject),
+    expected,
+    `${message}\n  Every sentence about this mechanism, in every document, must be in the locked `
+      + 'list — one was added, removed, reworded, reordered, or moved to another document. If the '
+      + 'change is correct, update the list; that is the review step.',
+  )
 }
 
 // ---------------------------------------------------------------------------
