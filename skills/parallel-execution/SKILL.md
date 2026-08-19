@@ -24,9 +24,10 @@ the old record and prints a note naming the branch it kept. Compare that name by
 by eye: the check is byte-wise, and zero-width and homoglyph characters render identically in a
 terminal.
 
-In a repository holding both `main` and `master` it records nothing at all: it derives the base
-itself and takes no `--base`, so the ambiguity throws into a catch that leaves the field unset, and
-no §1 order can arm anything there until a command that does take `--base` records it.
+It records nothing at all wherever it cannot resolve the base on its own: it derives the base
+itself and takes no `--base`, so a repository holding both `main` and `master`, or neither, throws
+into a catch that leaves the field unset, and no §1 order can arm anything there until a command
+that does take `--base` records it.
 
 One input escapes that description: a
 recorded empty string is carried like any other, then dropped on write because it is falsy, so the
@@ -79,8 +80,8 @@ On a pure direct-`Agent` phase a teammate can stop before any other lifecycle co
 `SubagentStop` hook does two cheap things at that moment: it blocks a teammate whose task branch
 does not exist, and it runs `complete --enforcement-only`. That run keeps every non-`command`
 check the manifest declares, plus `merge`, which the gate computes for itself. Do not declare `merge` in the manifest: it finds
-no runner there and lands as a blocking `pending` beside the computed result, and an `agent` check
-behaves the same way at stop time. Only a
+no runner there and lands as a blocking `pending` beside the computed result, an `agent` check declared there finds no runner
+either, though it blocks only when it is not marked optional. Only a
 task-scoped failure blocks, meaning `fileset` or `merge`, so a blocked stop is not always about a
 file set; an `ownership` failure with no task-scoped failure beside it is reported without blocking. The
 teammate is shown none of that detail — the hook reads the exit status and never forwards what the
