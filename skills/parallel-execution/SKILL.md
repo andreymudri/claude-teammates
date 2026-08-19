@@ -20,11 +20,14 @@ The order matters for enforcement, not just tidiness. `init-run` records a run b
 fill-if-absent: it records HEAD when the run has no `runBranch` recorded yet **and** HEAD is not the
 base branch, and it records nothing when HEAD is the base. A value already recorded always wins —
 `writePlan` resolves the field as `carried ?? usable` — so a re-init from a different branch keeps
-the old record and prints a note naming the branch it kept. That recorded run branch is what the
-`SubagentStop` guard resolves a stopping teammate to its task through.
+the old record and prints a note naming the branch it kept.
 
-Checking the run branch out before the **first** `init-run` is therefore what puts the record in
-place at the start of the run, on a run id that has none yet. It does not repair a run whose
+That record does not resolve a stopping teammate to its task — the worktree location record written
+by `locate` does that. What it decides is whether the stop-time checks are allowed to be a verdict:
+`complete --enforcement-only` compares the recorded run branch against the branch the main worktree
+has checked out, and when it is absent or different it reports that it cannot verify completion and
+the stop is allowed. Checking the run branch out before the **first** `init-run` is therefore what
+puts the record in place at the start of the run, on a run id that has none yet. It does not repair a run whose
 recorded branch is already wrong: no command overwrites that field. To correct one, remove
 `runBranch` from `.teammates/<runId>/plan.json` and run `init-run` again. When `init-run` records
 nothing it prints a note telling you to check the run branch out before **gating** — that note is
@@ -56,22 +59,22 @@ The Workflow path already renders each brief from the same composer, so a hand-w
 only ever a way to drift from what the gate enforces.
 
 This matters for the `SubagentStop` guard on a pure direct-`Agent` phase, where a teammate can stop
-before any other lifecycle command has run. The guard resolves a stopping teammate to its task
-through the run branch recorded at `init-run` (§1), and it resolves only when that recorded branch
-is also the branch the main worktree has checked out at the moment of the stop. Both conditions are
-necessary:
+before any other lifecycle command has run. The guard has two layers, and only the second one
+depends on the run branch:
 
-- **Recorded.** Do the §1 order and the record is in place before the first teammate can stop. Skip
-  it, or run `init-run` from the base, and the field stays empty until some later command derives a
-  context from the run branch and fills it in. Several lifecycle commands do; do not reason from a
-  list of which ones, read `runBranch` in `.teammates/<runId>/plan.json`.
-- **Still checked out.** `complete --enforcement-only` compares the recorded branch against the
-  branch the main worktree is on. When they differ — a detached HEAD during a plan amendment, a fix
-  round dispatched from elsewhere — it reports that it cannot verify completion and the stop is
-  allowed.
+- **A missing task branch is blocked either way.** The hook resolves the stopping teammate through
+  the worktree location record `locate` wrote, then checks that the task branch exists. When it does
+  not, it blocks and names the branch — decided before the recorded run branch is read at all. A
+  teammate that did nothing is caught whether or not the §1 order was followed.
+- **Straying outside the declared file set is caught only when the run branch is both recorded and
+  checked out.** Those checks run through `complete --enforcement-only`, which turns its result into
+  a verdict only when the recorded run branch equals the branch the main worktree is on. Absent — the
+  §1 order was skipped, and the field stays empty until some later command derives a context from the
+  run branch and fills it in — or different, as during a detached-HEAD plan amendment, it reports
+  that it cannot verify completion and the stop is allowed.
 
-Whenever either condition fails the guard is fail-open. The phase gate still catches skipped work;
-the stop hook will not.
+So the §1 order buys the second layer, not the first. Where it is skipped that layer is fail-open,
+and the phase gate is what catches strayed work instead.
 
 Wait on completion notifications. Do not poll in a loop.
 
