@@ -1,9 +1,9 @@
 # Changelog
 
-## Unreleased
+## v1.0.1
 
-All four follow-ups recorded for v1.0.1 below. They are documentation or test
-changes; no runtime behaviour moved.
+All four follow-ups recorded under v1.0.0 below, closed. They are documentation or test
+changes; no runtime behaviour moved, and no CLI, hook or gate surface changed.
 
 - **A scan over statements now reaches headings too.** `claimSites` in `tests/md-contract.mjs`
   returns every place a claim can be written in a scope — statements built from prose, the scope's
@@ -113,7 +113,8 @@ each is stated where an operator will meet it — in `SECURITY.md` and in
 ## Known follow-ups for v1.0.1
 
 Found by the release-gate review at the tagged tree, below the blocking threshold, recorded here
-rather than fixed after the gate ran.
+rather than fixed after the gate ran. **All four are closed in v1.0.1 above**; the list is kept as
+written so the record of what shipped in v1.0.0 stays accurate.
 
 - **The region locks in `tests/skill-contracts.test.mjs` ignore the heading of the region they lock.**
   `parseDoc` slices a section past its own heading and `statementsOf` builds statements only from
