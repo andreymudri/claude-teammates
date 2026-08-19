@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+Three of the four follow-ups recorded for v1.0.1 below. All three are documentation or test
+changes; no runtime behaviour moved.
+
+- **A scan over statements now reaches headings too.** `claimSites` in `tests/md-contract.mjs`
+  returns every place a claim can be written in a scope — statements built from prose, the scope's
+  own heading, and every heading nested in it. The SubagentStop refusal scan reads it instead of
+  `doc.statements`. Measured against the real tree before and after: a heading carrying the denied
+  promise scored 0 hits under the old scan and 1 under the new one. The locked
+  `The SubagentStop backstop` section additionally pins that it holds no nested heading.
+- **Two documents no longer gloss the missing-branch refusal as "the branch to create".** The
+  handler names the missing branch and sends the teammate to its brief for the step that creates
+  it, deliberately declining to present a ref derived from a teammate-writable record as an
+  instruction. `agents/tm-implementer.md` and `skills/fleet-supervision/SKILL.md` now say that, and
+  both locked inventories were updated with them.
+- **`skills/parallel-execution` no longer uses "block" in two senses one clause apart.** The
+  gate-verdict sense now reads "fails the gate verdict"; the stop sense reads "refuses the stop".
+
+Still open: **a region lock binds one block or one section**. That is the documented scope bound of
+`tests/md-contract.mjs`, and closing it means a document-wide claim scan rather than a patch.
+
 ## v1.0.0
 
 First stable release. The plugin orchestrates a fleet of worktree-isolated teammates against a
@@ -88,7 +110,9 @@ rather than fixed after the gate ran.
   `refuse|reject|block` prefilter and the denied phrasings can still carry the claim. This is the
   documented scope bound of `tests/md-contract.mjs`, which states that a contradiction placed under
   another heading is out of scope by construction.
-- **The agent contract summarises the missing-branch refusal as naming "the branch to create".** The
+- **Two documents summarise the missing-branch refusal as naming "the branch to create"** —
+  `agents/tm-implementer.md` and `skills/fleet-supervision/SKILL.md`. Two lenses raised this
+  independently, which is why five findings are recorded here as four bullets. The
   branch in that message is derived from a location record under `.teammates/index/`, which any
   teammate can write, and `scripts/subagent-stop.mjs` deliberately declines to present it as an
   instruction — it sends the teammate to its brief, whose branch name comes from the dispatch rather

@@ -289,6 +289,27 @@ function show(statements) {
   return statements.map((s) => `\n    - ${s.text}`).join('')
 }
 
+// Every place in a scope where a claim can be written, not only the places `statements` reaches.
+// `parseDoc` slices a section's blocks past its own heading and `makeSection` builds statements
+// from paragraphs and list items alone, so a scan over statements sees no heading at all: neither
+// the section's own, nor one nested inside it. A reversed claim written as a heading therefore
+// ships green through a scan that would refuse the same sentence one line lower. The gap was
+// consistency, not discovery — the two prose sections in `parallel-execution` already scan their
+// headings by hand; this makes that reach available to every scan rather than to the two that
+// remembered.
+//
+// Heading text is emitted as-is, one site per heading. It is not split into statements: a heading
+// is one claim by construction, and `statementsOf` would only ever return it unchanged or, with a
+// terminator in it, cut it into fragments an assertion could pass on half of.
+export function claimSites(scope) {
+  const sites = (scope.statements ?? []).map((s) => ({ text: s.text, where: 'statement' }))
+  if (scope.title) sites.push({ text: scope.title, where: 'heading' })
+  for (const b of scope.blocks ?? []) {
+    if (b.kind === 'heading') sites.push({ text: b.text, where: 'heading' })
+  }
+  return sites
+}
+
 // ---------------------------------------------------------------------------
 // Assertions
 // ---------------------------------------------------------------------------

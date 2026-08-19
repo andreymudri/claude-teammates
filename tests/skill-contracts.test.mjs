@@ -7,6 +7,7 @@ import { runCli } from '../scripts/cli.mjs'
 import { collectReviewResults } from '../scripts/reviews.mjs'
 import {
   assertClaim,
+  claimSites,
   statementsOf,
   assertCode,
   assertNoStatement,
@@ -1095,13 +1096,17 @@ test('no skill or agent claims a SubagentStop refusal hands back the check outpu
     const { body } = splitFrontmatter(text, file)
     docs.push(parseDoc(body, file))
   }
+  // claimSites, not statements: a heading is invisible to the statement inventory, so scanning
+  // statements alone refused the sentence and let the same claim through one line higher as a
+  // heading over the very block it contradicts.
   for (const doc of docs) {
-    for (const st of doc.statements) {
-      if (!/refus|reject|block/i.test(st.text)) continue
+    for (const site of claimSites(doc)) {
+      if (!/refus|reject|block/i.test(site.text)) continue
       assert.doesNotMatch(
-        st.text,
+        site.text,
         /hand(?:ing|s)? back the (?:same )?failure text|with the failure text|hands? back the check(?:'s)? output/i,
-        `a refusal is a fixed-form message; no document may promise the check's own text (${doc.label}): ${st.text}`,
+        `a refusal is a fixed-form message; no document may promise the check's own text `
+          + `(${doc.label}, ${site.where}): ${site.text}`,
       )
     }
   }
@@ -1123,10 +1128,62 @@ test('no skill or agent claims a SubagentStop refusal hands back the check outpu
       + 'sentence was added, removed or reworded anywhere in it. A neighbour phrased outside a '
       + 'denylist is how the false promise came back before.',
   )
+  const backstop = (await skill('fleet-supervision')).doc.section('The SubagentStop backstop')
   assert.deepEqual(
-    (await skill('fleet-supervision')).doc.section('The SubagentStop backstop').statements.map((st) => st.text),
+    backstop.statements.map((st) => st.text),
     SUPERVISION_REFUSAL,
     'skills/fleet-supervision: the SubagentStop backstop section must match exactly',
+  )
+  // A nested heading inside the locked section is prose the inventory above cannot see, exactly as
+  // a code block is. Bounded rather than enumerated: the section holds no subheading, and adding
+  // one has to be argued for here.
+  assert.deepEqual(
+    backstop.blocks.filter((b) => b.kind === 'heading').map((b) => b.text),
+    [],
+    'skills/fleet-supervision: the SubagentStop backstop section must hold no nested heading — a '
+      + 'heading carries prose the statement inventory does not reach',
+  )
+})
+
+// The scan above is only as wide as claimSites, and claimSites is in another file, so this pins the
+// reach itself rather than trusting the one call site. Both directions are asserted: the synthetic
+// document must actually contain the sentence in a heading (an anchor that silently stopped
+// matching would read exactly like a closed hole), and the sites must reach it.
+test('claimSites reaches a claim written into a heading, which statements alone never see', () => {
+  const source = [
+    '## A refusal hands back the check output',
+    '',
+    'The hook allows the stop when it cannot establish the teammate.',
+    '',
+    '### Refusals hand back the failure text',
+    '',
+    'That is the whole of it.',
+  ].join('\n')
+  const doc = parseDoc(source, 'synthetic')
+  const promise = /hand(?:ing|s)? back the (?:same )?failure text|hands? back the check(?:'s)? output/i
+
+  // The anchor: the claim exists in this document, in headings and nowhere else.
+  assert.ok(promise.test(source), 'the synthetic document must carry the claim being scanned for')
+  assert.equal(
+    doc.statements.filter((s) => promise.test(s.text)).length,
+    0,
+    'the claim must live only in headings here — otherwise this test passes without exercising the gap',
+  )
+
+  const hits = claimSites(doc).filter((s) => promise.test(s.text))
+  assert.equal(hits.length, 2, `claimSites must reach both headings, got ${JSON.stringify(hits)}`)
+  assert.deepEqual([...new Set(hits.map((h) => h.where))], ['heading'])
+
+  // And the same reach through a section, whose own heading is sliced off its block list.
+  const section = doc.section('A refusal hands back the check output')
+  assert.equal(
+    section.statements.filter((s) => promise.test(s.text)).length,
+    0,
+    "a section's statements must not reach its own heading — that is the gap this closes",
+  )
+  assert.ok(
+    claimSites(section).some((s) => s.where === 'heading' && /check output/i.test(s.text)),
+    "claimSites over a section must reach that section's own heading",
   )
 })
 
@@ -1197,12 +1254,12 @@ const GUARD_SHAPE = [
 
 const CONTRACT_REFUSAL = [
   'Stopping without running that gate is caught, not waved through: a SubagentStop hook runs the enforcement checks at stop time and can refuse the stop.',
-  "It hands back one of two fixed messages — the branch to create, or a direction to run your own verification command — and never the check's own output — that output carries check names read from a manifest any teammate can write, so run complete yourself to see why.",
+  "It hands back one of two fixed messages — the branch your task is missing, named alongside a pointer to your brief for the step that creates it, or a direction to run your own verification command — and never the check's own output — that output carries check names read from a manifest any teammate can write, so run complete yourself to see why.",
   'It is a backstop, not a substitute — it runs only the cheap subset, and the phase gate still runs everything before anything integrates.',
 ]
 
 const SUPERVISION_REFUSAL = [
-  "A teammate's stop runs the SubagentStop hook, which re-runs the cheap enforcement checks and can refuse the stop; a refusal appears in that teammate's transcript as one of two fixed messages — the branch to create, or a direction to run its own verification command — never as the failing check's text, which is not forwarded.",
+  "A teammate's stop runs the SubagentStop hook, which re-runs the cheap enforcement checks and can refuse the stop; a refusal appears in that teammate's transcript as one of two fixed messages — the branch the task is missing, named alongside a pointer to the teammate's brief for the step that creates it, or a direction to run its own verification command — never as the failing check's text, which is not forwarded.",
   'But SubagentStop fires only when a teammate actually stops — a stalled or parked teammate never reaches it, so liveness remains the only thing that sees a teammate which never stops at all.',
   'No stop-path hook fires for a parked agent.',
 ]
@@ -1246,8 +1303,8 @@ const GUARD_BLOCK = [
   'On a pure direct-Agent phase a teammate can stop before any other lifecycle command has run.',
   'The SubagentStop hook does two cheap things at that moment: it blocks a teammate whose task branch does not exist, and it runs complete --enforcement-only.',
   'That run keeps every non-command check the manifest declares, plus merge, which the gate computes for itself.',
-  'Do not declare merge in the manifest: it finds no runner there and lands as a blocking pending beside the computed result, an agent check declared there finds no runner either, though it blocks only when it is not marked optional.',
-  'Only a task-scoped failure blocks, meaning fileset or merge, so a blocked stop is not always about a file set; an ownership failure with no task-scoped failure beside it is reported without blocking.',
+  'Do not declare merge in the manifest: it finds no runner there and lands as a pending that fails the gate verdict beside the computed result, an agent check declared there finds no runner either, though it fails the verdict only when it is not marked optional.',
+  'Only a task-scoped failure refuses the stop, meaning fileset or merge, so a refused stop is not always about a file set; an ownership failure with no task-scoped failure beside it is reported and the stop is allowed.',
   'The teammate is shown none of that detail — the hook reads the exit status and never forwards what the check printed.',
   'Treat both as best effort.',
   'The hook resolves a stopping teammate through records under .teammates/, which is gitignored and writable by every teammate, and it allows the stop on anything it cannot establish — a teammate it cannot resolve, a plan it cannot read, a recorded run branch that is not the branch checked out.',

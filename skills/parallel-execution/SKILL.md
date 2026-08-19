@@ -80,10 +80,10 @@ On a pure direct-`Agent` phase a teammate can stop before any other lifecycle co
 `SubagentStop` hook does two cheap things at that moment: it blocks a teammate whose task branch
 does not exist, and it runs `complete --enforcement-only`. That run keeps every non-`command`
 check the manifest declares, plus `merge`, which the gate computes for itself. Do not declare `merge` in the manifest: it finds
-no runner there and lands as a blocking `pending` beside the computed result, an `agent` check declared there finds no runner
-either, though it blocks only when it is not marked optional. Only a
-task-scoped failure blocks, meaning `fileset` or `merge`, so a blocked stop is not always about a
-file set; an `ownership` failure with no task-scoped failure beside it is reported without blocking. The
+no runner there and lands as a `pending` that fails the gate verdict beside the computed result, an `agent` check declared there finds no runner
+either, though it fails the verdict only when it is not marked optional. Only a
+task-scoped failure refuses the stop, meaning `fileset` or `merge`, so a refused stop is not always about a
+file set; an `ownership` failure with no task-scoped failure beside it is reported and the stop is allowed. The
 teammate is shown none of that detail — the hook reads the exit status and never forwards what the
 check printed.
 
