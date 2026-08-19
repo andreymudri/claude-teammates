@@ -70,9 +70,9 @@ depends on the run branch:
 - **Straying outside the declared file set is caught only when the run branch is both recorded and
   checked out.** Those checks run through `complete --enforcement-only`, which turns its result into
   a verdict only when the recorded run branch equals the branch the main worktree is on. Absent — the
-  §1 order was skipped, and the field stays empty until some later command derives a context from the
-  run branch and fills it in — or different, as during a detached-HEAD plan amendment, it reports
-  that it cannot verify completion and the stop is allowed.
+  §1 order was skipped, and the field stays empty until some later command fills it in — or
+  different, as during a detached-HEAD plan amendment, it reports that it cannot verify completion
+  and the stop is allowed.
 
 While the field is empty the run is not merely unarmed, it is writable. `.teammates/` is
 gitignored, so nothing in `git status`, `fileset` or `ownership` sees a write to it, and any
