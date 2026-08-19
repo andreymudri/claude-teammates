@@ -323,7 +323,7 @@ export function indexDir(root) {
   return path.join(root, '.teammates', 'index')
 }
 
-// To be written by the teammate at start and read by the stop-time hook; neither exists yet.
+// Written by the teammate at start through `cli.mjs locate`, and read by the stop-time hook.
 // Overwritable on purpose: a teammate that re-enters the same worktree rewrites that worktree's
 // record in place. A respawn into a DIFFERENT worktree writes a different key, and the old
 // record stays — nothing deletes records, and nothing needs to, because no reader enumerates
