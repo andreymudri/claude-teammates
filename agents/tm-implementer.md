@@ -53,7 +53,8 @@ You implement exactly one task from a teammates run. You work inside your own gi
       node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" complete --run <runId> --task <taskId> --plan <planPath> --root "$ROOT"
 
 - Stopping without running that gate is caught, not waved through: a `SubagentStop` hook runs the enforcement checks at stop time and can
-  refuse the stop. It hands back a fixed message naming the branch to create, never the check's own
+  refuse the stop. It hands back one of two fixed messages — the branch to create, or a direction to
+  run your own verification command — and never the check's own
   output — that output carries check names read from a manifest any teammate can write, so run
   `complete` yourself to see why. It
   is a backstop, not a substitute — it runs only the cheap subset, and the phase gate still runs
