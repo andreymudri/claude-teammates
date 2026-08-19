@@ -5102,9 +5102,10 @@ test('init-run run twice preserves fixRounds recorded between the two runs', asy
   })
 })
 
-// The run branch `init-run` records is what the SubagentStop guard resolves a stopping teammate
-// to its task through, so skills/parallel-execution instructs checking the run branch out BEFORE
-// init-run. This pins the mechanism that makes that instruction load-bearing, on a run id that has
+// The run branch `init-run` records is NOT what resolves a stopping teammate to its task — the
+// worktree location record does that. What the record decides is whether `complete
+// --enforcement-only` may treat its checks as a verdict, which is why skills/parallel-execution
+// instructs checking the run branch out BEFORE init-run. This pins the mechanism that makes that instruction load-bearing, on a run id that has
 // no runBranch recorded yet: init-run records the branch it runs on when that branch is not the
 // base, and records nothing when it is. It does not pin the carried-value path — `writePlan`
 // resolves `carried ?? usable`, so on a re-init an already-recorded branch wins over HEAD and

@@ -71,8 +71,10 @@ only ever a way to drift from what the gate enforces.
 
 On a pure direct-`Agent` phase a teammate can stop before any other lifecycle command has run. The
 `SubagentStop` hook does two cheap things at that moment: it blocks a teammate whose task branch
-does not exist, and it runs `complete --enforcement-only`. That run keeps every check the
-manifest declares that is not a `command` — usually `fileset`, `ownership` and `merge`. Only a
+does not exist, and it runs `complete --enforcement-only`. That run keeps every non-`command`
+check the manifest declares, plus `merge`, which the gate computes for itself rather than reading
+from the manifest — do not declare `merge` there, it finds no runner and lands as a blocking
+`pending` beside the computed result. Only a
 task-scoped failure blocks, meaning `fileset` or `merge`, so a blocked stop is not always about a
 file set; an `ownership` failure with no task-scoped failure beside it is reported without
 blocking.
