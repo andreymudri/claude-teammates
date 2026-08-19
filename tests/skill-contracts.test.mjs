@@ -1100,26 +1100,28 @@ test('no skill or agent claims SubagentStop catches a stalled or parked teammate
   }
 })
 
-// §1 must put the checkout BEFORE the init-run invocation — asserting that both strings appear
-// says nothing about which comes first. Order is asserted on position, the only thing that
-// distinguishes the two documents.
+// Both tests below are END-ANCHORED inventory locks, and the anchoring is the point.
 //
-// The prose claims are bound with assertClaim's subject lock rather than with a vocabulary
-// denylist. A denylist is satisfiable by paraphrase: the round-1 version of this test matched
-// /fail-open/, which "is never fail-open" satisfies, and its successor could be cancelled by an
-// appended sentence using none of the forbidden words. The subject lock inverts that — every
-// statement in the section mentioning the subject must be the claim or an explicit allow — so a
-// new sentence about it fails whatever it says.
+// A start-anchored `allow` entry matches a prefix, so a clause appended to an allowed sentence's
+// tail is exempted by the entry that was meant to review it. And `statementsOf` does not split
+// before a lowercase word (tests/md-contract.mjs), so a continuation starting lowercase is absorbed
+// into the claim statement itself — which `assertClaim` exempts from its own subject lock by
+// construction. Anchoring claim and allow patterns end to end closes both: any edit to a locked
+// sentence, anywhere in it, stops matching and fails.
 //
-// No pattern here may contain a backtick: normalize() strips backticks from section text before
-// matching (tests/md-contract.mjs), so a regex carrying them can never fire. That is how the
-// previous anti-enumeration assertion came to be permanently dead.
+// The subjects are deliberately broad. A vocabulary lock is escapable by writing the reversal in
+// words the lock does not name — a reversal of "best effort" was demonstrated using neither
+// "block" nor "barrier" — so these name the whole topic and pay for it in `allow` entries. Adding
+// an entry is a review step, not a formality.
+//
+// No pattern may contain a backtick: normalize() strips them before matching, which silently kills
+// any regex carrying one.
 test('parallel-execution checks out the run branch before init-run to record it', async () => {
   const { doc } = await skill('parallel-execution')
   const section = doc.section('Initialize the run')
-  // Read the order out of the COMMAND BLOCK, not the section text. indexOf over the whole section
-  // takes the first occurrence of each string, so any earlier prose mentioning `git checkout -b`
-  // satisfies the left side no matter what the block prescribes — the inverted order stayed green.
+
+  // Order is read from the COMMAND BLOCK. indexOf over section text takes the first occurrence of
+  // each string, so prose naming the checkout satisfies it regardless of what the block prescribes.
   const commandBlock = section.blocks.find((b) => b.kind === 'code' && b.code.includes('init-run <planPath>'))
   assert.ok(commandBlock, 'the Initialize section must contain a command block invoking init-run')
   const checkout = commandBlock.code.indexOf('git checkout -b')
@@ -1127,156 +1129,63 @@ test('parallel-execution checks out the run branch before init-run to record it'
   assert.notEqual(checkout, -1, 'the command block must instruct checking out the run branch')
   assert.ok(
     checkout < initRun,
-    `the checkout must be prescribed BEFORE the init-run invocation in the same command block (checkout at ${checkout}, init-run at ${initRun}): ${JSON.stringify(commandBlock.code)}`,
+    `the checkout must come BEFORE init-run in the same command block: ${JSON.stringify(commandBlock.code)}`,
   )
 
-  // What the record does NOT do. The hook resolves a stopping teammate through the worktree
-  // location record (scripts/subagent-stop.mjs), never through the run branch; the run branch only
-  // decides whether complete --enforcement-only may treat its checks as a verdict (scripts/cli.mjs).
-  // Misattributing this sends an operator diagnosing an unenforced stop to the wrong file.
   assertClaim(section, {
-    label: 'what the recorded run branch resolves',
-    claim: /That record does not resolve a stopping teammate to its task — the worktree location record written by locate does that\b/i,
-    // The subject is the RECORD, not the verb "resolve". A denylist of verbs is escapable by
-    // paraphrase — "identifies", "maps", "looks up", "is how the hook finds" are all outside a
-    // verb list — so the lock is placed on every statement that speaks about the record or about
-    // how a stopping teammate is identified, whatever verb it uses. Each legitimate sentence about
-    // the record is named in allow; that cost is the point of an inventory lock.
-    subject: /that record|the record|recorded run branch|worktree location record|stopping teammate/i,
+    label: 'what the recorded run branch is for',
+    claim: /^That record does not resolve a stopping teammate to its task — the worktree location record written by locate does that\.$/i,
+    subject: /record|runbranch|resolve|stopping teammate|checkout|\bHEAD\b|repair|arms|disarm|fill-if-absent/i,
     allow: [
-      /^A value already recorded always wins/i,
-      /^What it decides is whether the stop-time checks are allowed to be a verdict/i,
-      /^Checking the run branch out before the first init-run is therefore what puts the record in place/i,
-      /^It does not repair a run whose recorded branch is already wrong/i,
-      /^To correct one, remove runBranch from .teammates\/<runId>\/plan.json and run init-run again/i,
-      /^The order matters for enforcement, not just tidiness/i,
+      /^The order matters for enforcement, not just tidiness\. init-run records a run branch by fill-if-absent: it records HEAD when the run has no runBranch recorded yet and HEAD is not the base branch, and it records nothing when HEAD is the base\.$/i,
+      /^A value already recorded always wins — writePlan resolves the field as carried \?\? usable — so a re-init from a different branch keeps the old record and prints a note naming the branch it kept\.$/i,
+      /^One input escapes that description: a recorded empty string is carried like any other, then dropped on write because it is falsy, so the field disappears, the note names no branch, and the run ends up with no record rather than the one it reports keeping\.$/i,
+      /^What it decides is whether the stop-time checks are allowed to be a verdict: complete --enforcement-only compares the recorded run branch against the branch the main worktree has checked out, and when it is absent or different it reports that it cannot verify completion and the stop is allowed\.$/i,
+      /^Checking the run branch out before the first init-run is therefore what puts the record in place at the start of the run, on a run id that has none yet\.$/i,
+      /^It does not repair a run whose recorded branch is already wrong: no command overwrites that field\.$/i,
+      /^To correct one, remove runBranch from \.teammates\/<runId>\/plan\.json and run init-run again — from an attached branch\.$/i,
+      /^An absent record needs no hand-editing: a later command that derives a context from the run branch fills it in\.$/i,
+      /^On a detached HEAD init-run records the literal string HEAD, which is not a run branch and which no command overwrites, so it disarms the second layer until the field is removed by hand\.$/i,
+      /^When init-run records nothing it prints a note directing you to check the run branch out before gating; the note concerns gate refusing to run from the base branch, and a checkout on its own records no run branch\.$/i,
     ],
   })
-
-  // Fill-if-absent is a behaviour, not a token. The subject lock covers every sentence about the
-  // carried value, so a rewrite asserting that a re-init overwrites the record fails here even
-  // though it keeps the coined phrase.
-  assertClaim(section, {
-    label: 'fill-if-absent resolution',
-    claim: /A value already recorded always wins — writePlan resolves the field as carried \?\? usable/i,
-    subject: /already recorded|carried \?\? usable|overwrites (the record|that field)|repair/i,
-    allow: [
-      /so a re-init from a different branch keeps the old record and prints a note naming the branch it kept/i,
-      /It does not repair a run whose recorded branch is already wrong: no command overwrites that field/i,
-    ],
-  })
-
-  // A detached HEAD makes init-run record the literal string HEAD — not a run branch, and no
-  // command overwrites it, so the repair prescribed one sentence earlier poisons the run when it is
-  // followed from a detached HEAD. Measured on a scratch repo. Nothing else in the section says so.
-  assertStatement(
-    section,
-    /On a detached HEAD init-run records the literal string HEAD/i,
-    'the Initialize section must warn that a detached-HEAD init-run records the literal string HEAD',
-  )
-  // carried is taken for ANY string, so "" resolves through carried ?? usable and is then dropped
-  // on write for being falsy: the record is deleted, not kept, and the note names no branch. The
-  // fill-if-absent account is false for that one input unless it says so.
-  assertStatement(
-    section,
-    /a\s+recorded empty string is carried like any other, then dropped on write because it is falsy/i,
-    'the Initialize section must state the one input the fill-if-absent account does not cover',
-  )
-  // An ABSENT record is filled by a later command; only a WRONG one needs hand-editing. Stated as a
-  // bound rather than a list, because every enumeration of the writers here has drifted.
-  assertStatement(
-    section,
-    /An absent record needs no hand-editing: a later command that derives a context from the run branch fills it in/i,
-    'the Initialize section must say an absent record is filled without hand-editing',
-  )
-
-  assert.doesNotMatch(
-    section.text,
-    /checking the branch out writes that record|closes that window at the start of the run/,
-    'the false claim that a checkout by itself records the run branch must not return',
-  )
 })
 
-// Seven review rounds falsified successive fine-grained accounts of this hook: which layer depends
-// on the run branch, which failures block, what re-arms a poisoned record. Every one of those
-// claims was true of some paths and false of others, because the hook is fail-open by design and
-// reads records the enforced party can write. What survived every round is the BOUND — best
-// effort, allows on anything it cannot establish, the gate is the enforcement — so that is what is
-// pinned here. A narrower claim is not a stronger contract; it is a bigger surface to be wrong on.
 test('parallel-execution bounds the SubagentStop guard rather than describing its layers', async () => {
   const { doc } = await skill('parallel-execution')
   const section = doc.section('Dispatch the phase')
 
   assertClaim(section, {
     label: 'the guard is best effort',
-    claim: /Treat both as best effort\./i,
-    then: /^The hook resolves a stopping teammate through records under \.teammates\/, which is gitignored and writable by every teammate, and it allows the stop on anything it cannot establish — a teammate it cannot resolve, a plan it cannot read, a recorded run branch that is not the branch checked out\.$/i,
-    subject: /best effort|allows the stop|cannot establish|turn a block into a non-block|barrier|covered|coverage|catches a teammate/i,
+    claim: /^Treat both as best effort\.$/i,
+    subject: /hook|block|stopped|best effort|barrier|verdict|enforcement|enforces|cannot establish|covered|coverage|allows the stop|record/i,
     allow: [
-      /^That is deliberate\.$/i,
+      /^The Workflow path already renders each brief from the same composer, so a hand-written dispatch is only ever a way to drift from what the gate enforces\.$/i,
+      /^The SubagentStop hook does two cheap things at that moment: it blocks a teammate whose task branch does not exist, and it runs complete --enforcement-only, which keeps fileset, ownership and merge — so a blocked stop is not always about a file set\.$/i,
+      /^The hook resolves a stopping teammate through records under \.teammates\/, which is gitignored and writable by every teammate, and it allows the stop on anything it cannot establish — a teammate it cannot resolve, a plan it cannot read, a recorded run branch that is not the branch checked out\.$/i,
       /^The hook can only ever add a block that would not otherwise happen, so declining to block on anything it cannot establish is what keeps it from blocking a teammate over state that teammate did not write — state any teammate can write\.$/i,
       /^What this buys is a fast signal on the common honest mistake, not a barrier against a determined one\.$/i,
+      /^The enforcement is the phase gate, which recomputes fileset and ownership from git and reads nothing under \.teammates\/\.$/i,
+      /^Do the §1 order because it is what lets complete --enforcement-only reach a verdict; the branch-existence check does not depend on it and blocks whether or not a run branch was ever recorded\.$/i,
+      /^Never read a stop that was allowed as a verdict\.$/i,
     ],
   })
 
-  assertStatement(
-    section,
-    /The enforcement is the phase gate, which recomputes fileset and ownership from git and reads nothing under \.teammates\//i,
-    'the section must name the phase gate as the enforcement, since the hook is not one',
-  )
-  // ALWAYS_ENFORCED_KINDS is fileset, ownership AND merge, so the block a teammate sees can come
-  // from merge. Describing the run as "the file-set checks" sends it to the wrong place to debug.
-  assertStatement(
-    section,
-    /which keeps fileset, ownership and merge — so a blocked stop is not always about a file set/i,
-    'the section must name every check --enforcement-only keeps, not just the file set',
-  )
-  assertStatement(
-    section,
-    /never read a stop that was allowed as a verdict/i,
-    'the section must tell the reader not to treat an allowed stop as a verdict',
-  )
-
-  // The claims that seven rounds proved unsafe to make. Each was measured false against the code
-  // while it stood in this section, so none of them may come back in any wording.
+  // The claims nine rounds measured false. None may return in any wording the inventory misses.
   assertNoStatement(
     section,
-    /blocked either way|blocks regardless|caught whether or not/i,
+    /blocked either way|blocks regardless|caught whether or not|on every dispatch path/i,
     'the section must not claim any stop-time check fires unconditionally',
   )
   assertNoStatement(
     section,
-    /prune-run|rebuild-state/i,
-    'the section must not enumerate the commands that record the run branch; any such list drifts',
+    /prune-run|rebuild-state|makes the stop-time checks\s*run at all|only ever turn a block into a non-block/i,
+    'the section must not enumerate the run-branch writers, nor invert the guard direction',
   )
   assertNoStatement(
     section,
     /never fail-open|closed unconditionally|always armed|rely on the stop hook/i,
     'the section must not present the guard as a barrier',
   )
-  // Without the hook a stop is always allowed, so the hook only ever ADDS a block. The inverted
-  // phrasing is lifted from complete's own guard (scripts/cli.mjs), where it is true of a different
-  // mechanism; retargeted here it says the opposite of what the hook does.
-  assertStatement(
-    section,
-    /The hook can only ever add a block that would not otherwise happen/i,
-    'the section must state the direction of the guard: it adds blocks, it does not withdraw them',
-  )
-  assertNoStatement(
-    section,
-    /only ever turn a block into a non-block/i,
-    'the guarantee from complete\'s recorded-branch comparison inverts when retargeted at the hook',
-  )
-  // The branch-existence check runs with no recorded run branch at all, so the §1 order cannot be
-  // what makes stop-time checking happen; it is what lets the enforcement-only run reach a verdict.
-  assertStatement(
-    section,
-    /the branch-existence check does not depend on it and blocks whether or not a run branch was ever recorded/i,
-    'the section must say the branch-existence check runs without a recorded run branch',
-  )
-  assertNoStatement(
-    section,
-    /makes the stop-time checks\s*run at all/i,
-    'the section must not claim the §1 order is what makes stop-time checking happen',
-  )
+
 })
