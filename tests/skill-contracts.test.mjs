@@ -1139,6 +1139,7 @@ test('parallel-execution checks out the run branch before init-run to record it'
     allow: [
       /^The order matters for enforcement, not just tidiness\. init-run records a run branch by fill-if-absent: it records HEAD when the run has no runBranch recorded yet and HEAD is not the base branch, and it records nothing when HEAD is the base\.$/i,
       /^A value already recorded always wins — writePlan resolves the field as carried \?\? usable — so a re-init from a different branch keeps the old record and prints a note naming the branch it kept\.$/i,
+      /^Compare that name by bytes rather than by eye: the check is byte-wise, and zero-width and homoglyph characters render identically in a terminal\.$/i,
       /^One input escapes that description: a recorded empty string is carried like any other, then dropped on write because it is falsy, so the field disappears, the note names no branch, and the run ends up with no record rather than the one it reports keeping\.$/i,
       /^What it decides is whether the stop-time checks are allowed to be a verdict: complete --enforcement-only compares the recorded run branch against the branch the main worktree has checked out, and when it is absent or different it reports that it cannot verify completion and the stop is allowed\.$/i,
       /^Checking the run branch out before the first init-run is therefore what puts the record in place at the start of the run, on a run id that has none yet\.$/i,
@@ -1165,13 +1166,19 @@ test('parallel-execution bounds the SubagentStop guard rather than describing it
       /^The hook resolves a stopping teammate through records under \.teammates\/, which is gitignored and writable by every teammate, and it allows the stop on anything it cannot establish — a teammate it cannot resolve, a plan it cannot read, a recorded run branch that is not the branch checked out\.$/i,
       /^The hook can only ever add a block that would not otherwise happen, so declining to block on anything it cannot establish is what keeps it from blocking a teammate over state that teammate did not write — state any teammate can write\.$/i,
       /^What this buys is a fast signal on the common honest mistake, not a barrier against a determined one\.$/i,
-      /^The enforcement is the phase gate, which recomputes fileset and ownership from git and reads nothing under \.teammates\/\.$/i,
+      /^The enforcement is the phase gate: its fileset and ownership checks recompute from git and read nothing under \.teammates\/, whatever else the command around them reads\.$/i,
       /^Do the §1 order because it is what lets complete --enforcement-only reach a verdict; the branch-existence check does not depend on it and blocks whether or not a run branch was ever recorded\.$/i,
       /^Never read a stop that was allowed as a verdict\.$/i,
     ],
   })
 
   // The claims nine rounds measured false. None may return in any wording the inventory misses.
+  assertStatement(
+    doc.section('Initialize the run'),
+    /Compare that name by bytes rather than by eye/i,
+    'the Initialize section must warn that the recorded branch name cannot be compared by eye',
+  )
+
   assertNoStatement(
     section,
     /blocked either way|blocks regardless|caught whether or not|on every dispatch path/i,

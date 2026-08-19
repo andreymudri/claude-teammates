@@ -20,7 +20,9 @@ The order matters for enforcement, not just tidiness. `init-run` records a run b
 fill-if-absent: it records HEAD when the run has no `runBranch` recorded yet **and** HEAD is not the
 base branch, and it records nothing when HEAD is the base. A value already recorded always wins —
 `writePlan` resolves the field as `carried ?? usable` — so a re-init from a different branch keeps
-the old record and prints a note naming the branch it kept. One input escapes that description: a
+the old record and prints a note naming the branch it kept. Compare that name by bytes rather than
+by eye: the check is byte-wise, and zero-width and homoglyph characters render identically in a
+terminal. One input escapes that description: a
 recorded empty string is carried like any other, then dropped on write because it is falsy, so the
 field disappears, the note names no branch, and the run ends up with no record rather than the one
 it reports keeping.
@@ -80,8 +82,8 @@ not otherwise happen, so declining to block on anything it cannot establish is w
 blocking a teammate over state that teammate did not write — state any teammate can write.
 
 What this buys is a fast signal on the common honest mistake, not a barrier against a determined
-one. The enforcement is the phase gate, which recomputes `fileset` and `ownership` from git and
-reads nothing under `.teammates/`. Do the §1 order because it is what lets
+one. The enforcement is the phase gate: its `fileset` and `ownership` checks recompute from git and
+read nothing under `.teammates/`, whatever else the command around them reads. Do the §1 order because it is what lets
 `complete --enforcement-only` reach a verdict; the branch-existence check does not depend on it and
 blocks whether or not a run branch was ever recorded. Never read a stop that was allowed as a
 verdict.
