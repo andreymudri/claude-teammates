@@ -3,17 +3,16 @@
 // declared file set, the global constraints and the self-verification stop being present on
 // one dispatch path and missing on another.
 //
-// That unification has NOT landed yet. Nothing outside tests/brief.test.mjs imports this
-// module: `templates/phase-workflow.js` still carries its own copy, and the two already
-// differ — this one emits the locate and complete steps, the template's copy emits neither,
-// so a workflow-dispatched implementer is currently never told to run `cli.mjs locate`.
-// Task 6 rewires the generator and the template onto `composeBrief` and adds the cross-file
-// check that pins them byte-identical; until it lands, the template's copy is still live and
-// is what a `Workflow` dispatch actually renders.
+// That unification has landed. `scripts/workflow-gen.mjs` imports `composeBrief` and calls it per
+// task, substituting the finished text into the generated script, so both dispatch paths render the
+// same brief from this module and a Workflow-dispatched implementer is told to run `cli.mjs locate`
+// like any other. `templates/phase-workflow.js` carries no copy of its own and says so in its own
+// header, and a cross-file test pins the embedded brief byte-identical to `composeBrief` called
+// directly — a check that lives in the test file rather than here, because a module cannot verify
+// its own inlining.
 //
-// The command this module emits has since been built: `cli.mjs` now has `locate`, and `complete`
-// now takes `--enforcement-only`, both landed by the same task that corrected the exit-code table
-// below. So the remaining gap is the rewiring alone — Task 6's — not the CLI surface.
+// The CLI surface it emits exists: `cli.mjs` has `locate`, and `complete` takes
+// `--enforcement-only`.
 //
 // Pure: no I/O, no filesystem, no process access. That is what lets the generator substitute
 // finished text into generated workflow scripts, which run without filesystem or module access

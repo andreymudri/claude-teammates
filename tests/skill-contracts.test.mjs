@@ -1171,8 +1171,8 @@ function assertBlock(section, expected, label) {
   assert.equal(
     all.length,
     at + expected.length,
-    `${label}: a statement was appended after the locked block; nothing may follow it in this section `
-      + 'except the trailing operational lines this test excludes by construction.',
+    `${label}: a statement was appended after the locked block. Nothing may follow it — the section's `
+      + 'trailing operational lines are inside the locked list, not excluded from it.',
   )
 }
 
