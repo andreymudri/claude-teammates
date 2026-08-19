@@ -97,8 +97,10 @@ reads on a later session. That file's only effect is a string printed into sessi
 
 - A way to get a **PASS on a phase whose content is not explained by a task branch or the base** —
   that is the property the whole design rests on.
-- A check that reads `.teammates/` when deciding a verdict, letting the enforced party supply its
-  own evidence.
+- A check OTHER THAN an `agent` check reading `.teammates/` when deciding a verdict, or any route
+  that makes a recompute-from-git check read it. The `agent` case is documented above as known: its
+  status has no source but those files, which is why a recorded `agent` verdict is only ever
+  evidence about a reviewer you know ran.
 - A path escape from the merge preview: a `preview.link` entry, or any other input, that creates a
   link or writes outside the repository.
 - Injection into generated workflow source from plan markdown, a branch name, or a task field.
