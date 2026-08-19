@@ -1190,6 +1190,28 @@ test('parallel-execution states the SubagentStop guard is fail-open when the run
     /the field stays empty until some later command/,
     'the section must state the unrecorded condition without enumerating which commands record the branch',
   )
+
+  // The empty window is writable, not merely unarmed: .teammates/ is gitignored, so a value planted
+  // there is invisible to every enforcement check and beats a later init-run from the correct
+  // branch (writePlan resolves carried ?? usable). Presenting the window as self-healing sends an
+  // operator to check for presence, which is exactly what the planted case produces.
+  assertClaim(section, {
+    label: 'the writable window',
+    claim: /While the field is empty the run is not merely unarmed, it is writable\b/i,
+    subject: /planted|writable|Presence is therefore not evidence|wins over/i,
+    allow: [
+      /A value written into that window wins over every later writer, a re-run of init-run from the correct branch included, and disarms the second layer for the rest of the run/i,
+      /Presence is therefore not evidence: read the recorded value and confirm it is this run's branch, rather than confirming the field is filled/i,
+    ],
+  })
+  // The subject lock alone does not keep this advice present — deleting a statement named in
+  // `allow` is not a lock failure, and the claim sentence survives on its own. The inspection
+  // advice is the actionable half of the finding, so it is asserted in its own right.
+  assertStatement(
+    section,
+    /Presence is therefore not evidence/i,
+    'the section must tell the operator to read the recorded value rather than check the field is filled',
+  )
   assert.match(
     section.text,
     /equals the branch the main worktree is on/,
