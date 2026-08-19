@@ -1100,41 +1100,73 @@ test('no skill or agent claims SubagentStop catches a stalled or parked teammate
   }
 })
 
-// The SubagentStop window is closed by ORDER, not by a checkout alone: `init-run` records the
-// branch it runs on (HEAD when HEAD is not the base — pinned in tests/cli.test.mjs), so checking
-// the run branch out BEFORE init-run puts the record in place before any teammate can stop. The
-// §1 instruction must state that order. A bare `git checkout` writes no record, so the section must
-// not claim a checkout by itself closes the window.
+// The SubagentStop window is closed by ORDER, not by a checkout alone, so §1 must put the checkout
+// BEFORE the init-run invocation. Asserting that both strings appear says nothing about which comes
+// first — a §1 that prescribed the reverse order would satisfy two independent `match` calls — so
+// the order is asserted on position, which is the only thing that distinguishes the two documents.
 test('parallel-execution checks out the run branch before init-run to record it', async () => {
   const { doc } = await skill('parallel-execution')
   const section = doc.section('Initialize the run')
-  assert.match(
-    section.text,
-    /git checkout -b/,
-    'the Initialize section must instruct checking out the run branch before init-run',
+  const checkout = section.text.indexOf('git checkout -b')
+  const initRun = section.text.indexOf('init-run <planPath>')
+  assert.notEqual(checkout, -1, 'the Initialize section must instruct checking out the run branch')
+  assert.notEqual(initRun, -1, 'the Initialize section must show the init-run invocation')
+  assert.ok(
+    checkout < initRun,
+    `the checkout must be prescribed BEFORE the init-run invocation (checkout at ${checkout}, init-run at ${initRun})`,
   )
   assert.match(
     section.text,
-    /init-run records the branch it is invoked on|records HEAD whenever HEAD is not the base/,
-    'the Initialize section must explain that init-run records the run branch it is invoked on',
+    /fill-if-absent|no `runBranch` recorded yet/,
+    'the Initialize section must explain that init-run records the run branch only when none is recorded yet',
+  )
+  // The closure claim lives in §1, so the guard against overstating it has to live here too. It was
+  // previously scoped to §2 alone, which let §1 acquire the false claim with both tests still green.
+  assert.doesNotMatch(
+    section.text,
+    /checking the branch out writes that record|closes that window at the start of the run/,
+    'the false claim that a checkout by itself records the run branch must not return',
   )
 })
 
-// The §2 direct-dispatch note must stay honest about the residual: a checkout alone writes no
-// record, so on a pure direct-`Agent` phase where §1's order was skipped the guard is fail-open
-// until a later lifecycle command. Bind the disclosure so it cannot silently regress to a false
-// "a checkout closes the window" claim.
+// The §2 note must stay honest about a guard with TWO necessary conditions: the branch is recorded,
+// and it is still what the main worktree has checked out at stop time. Matching /fail-open/ alone
+// does not pin that — "is never fail-open" contains the substring and would satisfy a positive
+// match on text asserting the opposite. So assert the subject (both conditions, and the allowed
+// outcome when either fails) and deny the phrasings that would reverse it.
 test('parallel-execution states the SubagentStop guard is fail-open when the run branch is unrecorded', async () => {
   const { doc } = await skill('parallel-execution')
   const section = doc.section('Dispatch the phase')
   assert.match(
     section.text,
-    /fail-open/,
-    'the direct-dispatch section must disclose the SubagentStop fail-open window, not claim it is unconditionally closed',
+    /Whenever either condition fails the guard is fail-open/,
+    'the direct-dispatch section must disclose the fail-open residual as a consequence of either condition failing',
+  )
+  assert.match(
+    section.text,
+    /the field stays empty until some later command/,
+    'the section must state the unrecorded condition without enumerating which commands record the branch',
+  )
+  assert.match(
+    section.text,
+    /compares the recorded branch against the\n?\s*branch the main worktree is on/,
+    'the section must state the second condition: the recorded branch must still be the checked-out one',
   )
   assert.doesNotMatch(
     section.text,
     /checking the branch out writes that record/,
     'the false claim that a checkout by itself records the run branch must not return',
+  )
+  assert.doesNotMatch(
+    section.text,
+    /never fail-open|closed unconditionally|always armed|armed on this path too/,
+    'a sentence denying the residual must not be able to satisfy the disclosure assertion',
+  )
+  // The enumeration this replaced named four commands and missed rebuild-state. A list here drifts
+  // the moment a fifth writer appears, and the drift is invisible: the sentence still reads true.
+  assert.doesNotMatch(
+    section.text,
+    /until a\n?\s*later `gate`, `finish`, `prune-run` or `workflow`/,
+    'the section must not re-acquire an enumeration of the commands that record the run branch',
   )
 })

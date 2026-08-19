@@ -16,13 +16,19 @@ This writes `.teammates/<runId>/plan.json` and `status.json` and prints the phas
 Tasks land in the same phase only when their deps are satisfied and their file sets are
 disjoint.
 
-The order matters for enforcement, not just tidiness. `init-run` records the branch it is invoked
-on — it records HEAD whenever HEAD is not the base branch, and records nothing when it is — and that
-recorded run branch is what the `SubagentStop` guard resolves a stopping teammate to its task
-through. Run `init-run` while still on the base branch and it records nothing (it prints a note
-saying so); the guard is then fail-open until a later lifecycle command populates the branch.
-Checking the run branch out first closes that window at the start of the run — which is exactly what
-`init-run`'s own note advises when it records nothing.
+The order matters for enforcement, not just tidiness. `init-run` records a run branch by
+fill-if-absent: it records HEAD when the run has no `runBranch` recorded yet **and** HEAD is not the
+base branch, and it records nothing when HEAD is the base. A value already recorded always wins —
+`writePlan` resolves the field as `carried ?? usable` — so a re-init from a different branch keeps
+the old record and prints a note naming the branch it kept. That recorded run branch is what the
+`SubagentStop` guard resolves a stopping teammate to its task through.
+
+Checking the run branch out before the **first** `init-run` is therefore what puts the record in
+place at the start of the run, on a run id that has none yet. It does not repair a run whose
+recorded branch is already wrong: no command overwrites that field. To correct one, remove
+`runBranch` from `.teammates/<runId>/plan.json` and run `init-run` again. When `init-run` records
+nothing it prints a note telling you to check the run branch out before **gating** — that note is
+about `gate` refusing to run from the base branch, and following it alone records no run branch.
 
 ## 2. Dispatch the phase
 
@@ -51,11 +57,21 @@ only ever a way to drift from what the gate enforces.
 
 This matters for the `SubagentStop` guard on a pure direct-`Agent` phase, where a teammate can stop
 before any other lifecycle command has run. The guard resolves a stopping teammate to its task
-through the run branch recorded at `init-run` (§1). Do the §1 order — run branch checked out before
-`init-run` — and the record is in place before the first teammate can stop, so the guard is armed on
-this path too. Skip it (or run `init-run` from the base) and nothing records the run branch until a
-later `gate`, `finish`, `prune-run` or `workflow`, leaving the guard fail-open until then; the phase
-gate still catches skipped work, but the stop hook will not.
+through the run branch recorded at `init-run` (§1), and it resolves only when that recorded branch
+is also the branch the main worktree has checked out at the moment of the stop. Both conditions are
+necessary:
+
+- **Recorded.** Do the §1 order and the record is in place before the first teammate can stop. Skip
+  it, or run `init-run` from the base, and the field stays empty until some later command derives a
+  context from the run branch and fills it in. Several lifecycle commands do; do not reason from a
+  list of which ones, read `runBranch` in `.teammates/<runId>/plan.json`.
+- **Still checked out.** `complete --enforcement-only` compares the recorded branch against the
+  branch the main worktree is on. When they differ — a detached HEAD during a plan amendment, a fix
+  round dispatched from elsewhere — it reports that it cannot verify completion and the stop is
+  allowed.
+
+Whenever either condition fails the guard is fail-open. The phase gate still catches skipped work;
+the stop hook will not.
 
 Wait on completion notifications. Do not poll in a loop.
 
