@@ -1171,6 +1171,11 @@ const GUARD_SHAPE = [
   'paragraph',
 ]
 
+const GUARD_CODE = [
+  "node \"$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs\" workflow --run <runId> --phase <n> --root <project root>",
+  "node \"$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs\" brief --run <id> --task <id> --plan <path> --base <branch> --root <project root>",
+]
+
 const RECORD_BLOCK = [
   "Create and check out this run's branch before initializing, then run init-run from it:",
   'This writes .teammates/<runId>/plan.json and status.json and prints the phase breakdown.',
@@ -1178,7 +1183,7 @@ const RECORD_BLOCK = [
   'The order matters for enforcement, not just tidiness. init-run records a run branch by fill-if-absent: it records HEAD when the run has no runBranch recorded yet and HEAD is not the base branch, and it records nothing when HEAD is the base.',
   'A value already recorded always wins — writePlan resolves the field as carried ?? usable — so a re-init from a different branch keeps the old record and prints a note naming the branch it kept.',
   'Compare that name by bytes rather than by eye: the check is byte-wise, and zero-width and homoglyph characters render identically in a terminal.',
-  'In a repository holding both main and master it records nothing at all: it derives the base itself and takes no --base, so the ambiguity throws into a catch that leaves the field unset, and no §1 order can arm anything there until a command that does take --base records it.',
+  'It records nothing at all wherever it cannot resolve the base on its own: it derives the base itself and takes no --base, so a repository holding both main and master, or neither, throws into a catch that leaves the field unset, and no §1 order can arm anything there until a command that does take --base records it.',
   'One input escapes that description: a recorded empty string is carried like any other, then dropped on write because it is falsy, so the field disappears, the note names no branch, and the run ends up with no record rather than the one it reports keeping.',
   'That record does not resolve a stopping teammate to its task — the worktree location record written by locate does that.',
   'What it decides is whether the stop-time checks are allowed to be a verdict: complete --enforcement-only compares the recorded run branch against the branch the main worktree has checked out, and when it is absent or different it reports that it cannot verify completion and the stop is allowed.',
@@ -1205,7 +1210,7 @@ const GUARD_BLOCK = [
   'On a pure direct-Agent phase a teammate can stop before any other lifecycle command has run.',
   'The SubagentStop hook does two cheap things at that moment: it blocks a teammate whose task branch does not exist, and it runs complete --enforcement-only.',
   'That run keeps every non-command check the manifest declares, plus merge, which the gate computes for itself.',
-  'Do not declare merge in the manifest: it finds no runner there and lands as a blocking pending beside the computed result, and an agent check behaves the same way at stop time.',
+  'Do not declare merge in the manifest: it finds no runner there and lands as a blocking pending beside the computed result, an agent check declared there finds no runner either, though it blocks only when it is not marked optional.',
   'Only a task-scoped failure blocks, meaning fileset or merge, so a blocked stop is not always about a file set; an ownership failure with no task-scoped failure beside it is reported without blocking.',
   'The teammate is shown none of that detail — the hook reads the exit status and never forwards what the check printed.',
   'Treat both as best effort.',
@@ -1274,9 +1279,37 @@ test('parallel-execution bounds the SubagentStop guard rather than describing it
   assertBlock(doc.section('Dispatch the phase'), GUARD_BLOCK, 'the Dispatch section')
   assertShape(doc.section('Dispatch the phase'), GUARD_SHAPE, 'the Dispatch section')
 
-  // The claims fifteen rounds measured false, refused in both sections so a reversal cannot simply
-  // move one heading down, where a per-section lock does not reach.
-  for (const scope of [doc.section('Dispatch the phase'), doc.section('Record results')]) {
+  // The command blocks' CONTENT, not just their presence in the shape. GUARD_SHAPE pins that two
+  // code blocks exist here; without this, a comment line inside either could carry prose the
+  // statement inventory forbids, since code contributes no statements.
+  assert.deepEqual(
+    doc.section('Dispatch the phase').blocks.filter((b) => b.kind === 'code').map((b) => b.code),
+    GUARD_CODE,
+    'the Dispatch section\'s command blocks must match exactly — a comment line inside one is prose '
+      + 'the statement inventory cannot see',
+  )
+
+  // Every section, not two. The document has thirteen, and a reversal does not have to move one
+  // heading down to escape a two-section loop — any other heading will do. The section HEADINGS are
+  // scanned too: parseDoc slices a section's blocks past its own heading, so a claim placed in the
+  // heading text is invisible to both the statement inventory and the shape.
+  for (const heading of doc.sections) {
+    assert.doesNotMatch(
+      heading.label ?? '',
+      /barrier|never fail-open|always armed|blocked either way/i,
+      `a section heading may not carry a claim the body is forbidden to make: ${heading.label}`,
+    )
+  }
+  // Scoped: naming these as the commands that record the run branch is the defect the guard
+  // sections keep re-acquiring. Elsewhere the document discusses them legitimately.
+  for (const scope of [doc.section('Initialize the run'), doc.section('Dispatch the phase')]) {
+    assertNoStatement(
+      scope,
+      /prune-run|rebuild-state/i,
+      'the guard sections must not enumerate the commands that record the run branch; any such list drifts',
+    )
+  }
+  for (const scope of doc.sections) {
     assertNoStatement(
       scope,
       /blocked either way|blocks regardless|caught whether or not|on every dispatch path/i,
@@ -1284,8 +1317,8 @@ test('parallel-execution bounds the SubagentStop guard rather than describing it
     )
     assertNoStatement(
       scope,
-      /prune-run|rebuild-state|makes the stop-time checks\s*run at all|only ever turn a block into a non-block/i,
-      'no section may enumerate the run-branch writers, nor invert the guard direction',
+      /makes the stop-time checks\s*run at all|only ever turn a block into a non-block/i,
+      'no section may invert the guard direction',
     )
     assertNoStatement(
       scope,
@@ -1298,5 +1331,7 @@ test('parallel-execution bounds the SubagentStop guard rather than describing it
       'no section may say an allowed stop implies the work was checked',
     )
   }
+
+  // The two command blocks of the Dispatch section, locked by content.
 
 })
