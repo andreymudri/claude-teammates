@@ -1174,6 +1174,21 @@ test('parallel-execution checks out the run branch before init-run to record it'
     /On a detached HEAD init-run records the literal string HEAD/i,
     'the Initialize section must warn that a detached-HEAD init-run records the literal string HEAD',
   )
+  // carried is taken for ANY string, so "" resolves through carried ?? usable and is then dropped
+  // on write for being falsy: the record is deleted, not kept, and the note names no branch. The
+  // fill-if-absent account is false for that one input unless it says so.
+  assertStatement(
+    section,
+    /a\s+recorded empty string is carried like any other, then dropped on write because it is falsy/i,
+    'the Initialize section must state the one input the fill-if-absent account does not cover',
+  )
+  // An ABSENT record is filled by a later command; only a WRONG one needs hand-editing. Stated as a
+  // bound rather than a list, because every enumeration of the writers here has drifted.
+  assertStatement(
+    section,
+    /An absent record needs no hand-editing: a later command that derives a context from the run branch fills it in/i,
+    'the Initialize section must say an absent record is filled without hand-editing',
+  )
 
   assert.doesNotMatch(
     section.text,
@@ -1198,7 +1213,8 @@ test('parallel-execution bounds the SubagentStop guard rather than describing it
     then: /^The hook resolves a stopping teammate through records under \.teammates\/, which is gitignored and writable by every teammate, and it allows the stop on anything it cannot establish — a teammate it cannot resolve, a plan it cannot read, a recorded run branch that is not the branch checked out\.$/i,
     subject: /best effort|allows the stop|cannot establish|turn a block into a non-block|barrier|covered|coverage|catches a teammate/i,
     allow: [
-      /^That is deliberate: the guard may only ever turn a block into a non-block, so that no teammate is blocked by state it did not write\.$/i,
+      /^That is deliberate\.$/i,
+      /^The hook can only ever add a block that would not otherwise happen, so declining to block on anything it cannot establish is what keeps it from blocking a teammate over state that teammate did not write — state any teammate can write\.$/i,
       /^What this buys is a fast signal on the common honest mistake, not a barrier against a determined one\.$/i,
     ],
   })
@@ -1207,6 +1223,13 @@ test('parallel-execution bounds the SubagentStop guard rather than describing it
     section,
     /The enforcement is the phase gate, which recomputes fileset and ownership from git and reads nothing under \.teammates\//i,
     'the section must name the phase gate as the enforcement, since the hook is not one',
+  )
+  // ALWAYS_ENFORCED_KINDS is fileset, ownership AND merge, so the block a teammate sees can come
+  // from merge. Describing the run as "the file-set checks" sends it to the wrong place to debug.
+  assertStatement(
+    section,
+    /which keeps fileset, ownership and merge — so a blocked stop is not always about a file set/i,
+    'the section must name every check --enforcement-only keeps, not just the file set',
   )
   assertStatement(
     section,
@@ -1230,5 +1253,30 @@ test('parallel-execution bounds the SubagentStop guard rather than describing it
     section,
     /never fail-open|closed unconditionally|always armed|rely on the stop hook/i,
     'the section must not present the guard as a barrier',
+  )
+  // Without the hook a stop is always allowed, so the hook only ever ADDS a block. The inverted
+  // phrasing is lifted from complete's own guard (scripts/cli.mjs), where it is true of a different
+  // mechanism; retargeted here it says the opposite of what the hook does.
+  assertStatement(
+    section,
+    /The hook can only ever add a block that would not otherwise happen/i,
+    'the section must state the direction of the guard: it adds blocks, it does not withdraw them',
+  )
+  assertNoStatement(
+    section,
+    /only ever turn a block into a non-block/i,
+    'the guarantee from complete\'s recorded-branch comparison inverts when retargeted at the hook',
+  )
+  // The branch-existence check runs with no recorded run branch at all, so the §1 order cannot be
+  // what makes stop-time checking happen; it is what lets the enforcement-only run reach a verdict.
+  assertStatement(
+    section,
+    /the branch-existence check does not depend on it and blocks whether or not a run branch was ever recorded/i,
+    'the section must say the branch-existence check runs without a recorded run branch',
+  )
+  assertNoStatement(
+    section,
+    /makes the stop-time checks\s*run at all/i,
+    'the section must not claim the §1 order is what makes stop-time checking happen',
   )
 })

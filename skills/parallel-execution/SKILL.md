@@ -20,7 +20,10 @@ The order matters for enforcement, not just tidiness. `init-run` records a run b
 fill-if-absent: it records HEAD when the run has no `runBranch` recorded yet **and** HEAD is not the
 base branch, and it records nothing when HEAD is the base. A value already recorded always wins —
 `writePlan` resolves the field as `carried ?? usable` — so a re-init from a different branch keeps
-the old record and prints a note naming the branch it kept.
+the old record and prints a note naming the branch it kept. One input escapes that description: a
+recorded empty string is carried like any other, then dropped on write because it is falsy, so the
+field disappears, the note names no branch, and the run ends up with no record rather than the one
+it reports keeping.
 
 That record does not resolve a stopping teammate to its task — the worktree location record written
 by `locate` does that. What it decides is whether the stop-time checks are allowed to be a verdict:
@@ -30,6 +33,8 @@ the stop is allowed. Checking the run branch out before the **first** `init-run`
 puts the record in place at the start of the run, on a run id that has none yet. It does not repair a run whose
 recorded branch is already wrong: no command overwrites that field. To correct one, remove
 `runBranch` from `.teammates/<runId>/plan.json` and run `init-run` again — from an attached branch.
+An absent record needs no hand-editing: a later command that derives a context from the run branch
+fills it in.
 On a detached HEAD `init-run` records the literal string `HEAD`, which is not a run branch and
 which no command overwrites, so it disarms the second layer until the field is removed by hand.
 
@@ -64,18 +69,22 @@ only ever a way to drift from what the gate enforces.
 
 On a pure direct-`Agent` phase a teammate can stop before any other lifecycle command has run. The
 `SubagentStop` hook does two cheap things at that moment: it blocks a teammate whose task branch
-does not exist, and it runs `complete --enforcement-only` for the file-set checks.
+does not exist, and it runs `complete --enforcement-only`, which keeps `fileset`, `ownership` and `merge` — so a
+blocked stop is not always about a file set.
 
 Treat both as best effort. The hook resolves a stopping teammate through records under
 `.teammates/`, which is gitignored and writable by every teammate, and it allows the stop on
 anything it cannot establish — a teammate it cannot resolve, a plan it cannot read, a recorded run
-branch that is not the branch checked out. That is deliberate: the guard may only ever turn a block
-into a non-block, so that no teammate is blocked by state it did not write.
+branch that is not the branch checked out. That is deliberate. The hook can only ever add a block that would
+not otherwise happen, so declining to block on anything it cannot establish is what keeps it from
+blocking a teammate over state that teammate did not write — state any teammate can write.
 
 What this buys is a fast signal on the common honest mistake, not a barrier against a determined
 one. The enforcement is the phase gate, which recomputes `fileset` and `ownership` from git and
-reads nothing under `.teammates/`. Do the §1 order because it is what makes the stop-time checks
-run at all, and never read a stop that was allowed as a verdict.
+reads nothing under `.teammates/`. Do the §1 order because it is what lets
+`complete --enforcement-only` reach a verdict; the branch-existence check does not depend on it and
+blocks whether or not a run branch was ever recorded. Never read a stop that was allowed as a
+verdict.
 
 Wait on completion notifications. Do not poll in a loop.
 
