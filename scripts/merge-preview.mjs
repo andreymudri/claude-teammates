@@ -96,8 +96,27 @@ export async function withMergePreview({ git, base, branches = [], link = [], re
       // junction into the repository's real node_modules is not a behaviour to discover in
       // production.
       if (teardownLinks) await teardownLinks()
-      await git.removeWorktree(dir).catch(() => {})
-      await rm(dir, { recursive: true, force: true }).catch(() => {})
+      // The directory removal is in a `finally` of its own because `.catch()` guards a REJECTED
+      // promise and nothing else: a `removeWorktree` that throws SYNCHRONOUSLY never returns a
+      // promise for `.catch` to attach to, so the throw escaped this line and skipped the `rm`
+      // below it, leaking an empty preview directory into the temp dir. Measured before the fix:
+      // one `tm-preview-*` directory left behind per run of `tests/gate-runner.test.mjs`, which
+      // drives exactly that shape.
+      //
+      // Which failures actually propagate, stated as what the code does rather than as what
+      // would be reassuring: only a SYNCHRONOUS throw from `removeWorktree` does. The `.catch`
+      // below swallows its rejection, and the real accessor's `removeWorktree` is `async`, so
+      // with real git a teardown failure never reaches the caller and never fails the `merge`
+      // check — the gate-runner test that pins propagation drives a synchronous-throwing double,
+      // and says so itself. An earlier version of this comment claimed the throw propagates
+      // generally; it does not. Only the cleanup is unconditional. `rm` keeps its own `.catch`
+      // because a directory that cannot be removed (a handle still open, a permission) must not
+      // replace the teardown error with its own.
+      try {
+        await git.removeWorktree(dir).catch(() => {})
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => {})
+      }
     } finally {
       // Its own `finally`, so release-last never becomes release-never: `teardownLinks()`
       // propagates its failures on purpose, and a marker stranded by one would claim an owner

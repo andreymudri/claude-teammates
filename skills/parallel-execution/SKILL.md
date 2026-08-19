@@ -7,11 +7,49 @@ description: Use when executing a written plan across background teammates - spl
 
 ## 1. Initialize the run
 
+Create and check out this run's branch **before** initializing, then run `init-run` from it:
+
+    git checkout -b <run branch> <base branch>    # e.g. run/<runId> from master
     node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" init-run <planPath> --run <runId> --root <project root>
 
 This writes `.teammates/<runId>/plan.json` and `status.json` and prints the phase breakdown.
 Tasks land in the same phase only when their deps are satisfied and their file sets are
 disjoint.
+
+The order matters for enforcement, not just tidiness. `init-run` records a run branch by
+fill-if-absent: it records HEAD when the run has no `runBranch` recorded yet **and** HEAD is not the
+base branch, and it records nothing when HEAD is the base. A value already recorded always wins —
+`writePlan` resolves the field as `carried ?? usable` — so a re-init from a different branch keeps
+the old record and prints a note naming the branch it kept. Compare that name by bytes rather than
+by eye: the check is byte-wise, and zero-width and homoglyph characters render identically in a
+terminal.
+
+It records nothing at all wherever it cannot resolve the base on its own: it derives the base
+itself and takes no `--base`, so a repository holding both `main` and `master`, or neither, throws
+into a catch that leaves the field unset, and no §1 order can arm anything there until a command
+that does take `--base` records it.
+
+One input escapes that description: a
+recorded empty string is carried like any other, then dropped on write because it is falsy, so the
+field disappears, the note names no branch, and the run ends up with no record rather than the one
+it reports keeping.
+
+That record does not resolve a stopping teammate to its task — the worktree location record written
+by `locate` does that. What it decides is whether the stop-time checks are allowed to be a verdict:
+`complete --enforcement-only` compares the recorded run branch against the branch the main worktree
+has checked out, and when it is absent or different it reports that it cannot verify completion and
+the stop is allowed. Checking the run branch out before the **first** `init-run` is therefore what
+puts the record in place at the start of the run, on a run id that has none yet. It does not repair a run whose
+recorded branch is already wrong: no command overwrites that field. To correct one, remove
+`runBranch` from `.teammates/<runId>/plan.json` and run `init-run` again — from an attached branch.
+An absent record needs no hand-editing: some later commands fill it in and others only read it, so
+read `runBranch` in `.teammates/<runId>/plan.json` rather than predicting which.
+On a detached HEAD `init-run` records the literal string `HEAD`, which is not a run branch and
+which no command overwrites, so it disarms the second layer until the field is removed by hand.
+
+When `init-run` records nothing it prints a note directing you to check the run branch out before **gating**; the note
+concerns `gate` refusing to run from the base branch, and a checkout on its own records no run
+branch.
 
 ## 2. Dispatch the phase
 
@@ -29,6 +67,46 @@ nothing downstream changes. Say which path you took.
 
 Phases with fewer than three tasks are dispatched as direct background `Agent` calls with
 `isolation: 'worktree'` and the `tm-implementer` persona. Same result contract either way.
+
+On either direct-`Agent` path — the fallback above and the fewer-than-three-task case — build each
+teammate's brief with the CLI rather than composing it by hand:
+
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" brief --run <id> --task <id> --plan <path> --base <branch> --root <project root>
+
+The Workflow path already renders each brief from the same composer, so a hand-written dispatch is
+only ever a way to drift from what the gate enforces.
+
+On a pure direct-`Agent` phase a teammate can stop before any other lifecycle command has run. The
+`SubagentStop` hook does two cheap things at that moment: it blocks a teammate whose task branch
+does not exist, and it runs `complete --enforcement-only`. That run keeps every non-`command`
+check the manifest declares, plus `merge`, which the gate computes for itself. Do not declare `merge` in the manifest: it finds
+no runner there and lands as a blocking `pending` beside the computed result, an `agent` check declared there finds no runner
+either, though it blocks only when it is not marked optional. Only a
+task-scoped failure blocks, meaning `fileset` or `merge`, so a blocked stop is not always about a
+file set; an `ownership` failure with no task-scoped failure beside it is reported without blocking. The
+teammate is shown none of that detail — the hook reads the exit status and never forwards what the
+check printed.
+
+Treat both as best effort. The hook resolves a stopping teammate through records under
+`.teammates/`, which is gitignored and writable by every teammate, and it allows the stop on
+anything it cannot establish — a teammate it cannot resolve, a plan it cannot read, a recorded run
+branch that is not the branch checked out. That is deliberate. The hook can only ever add a block that would
+not otherwise happen, so declining to block on anything it cannot establish is what keeps an unreadable record from costing a teammate a turn. It is not a guarantee against
+being blocked over foreign state: the records are teammate-writable, so a planted location record makes the hook establish
+something false and block whoever stops in the worktree that record keys on — resolution is by
+worktree path, not by teammate identity, and any linked worktree of this repository qualifies,
+including a reviewer's scratch one. One plant costs one forced retry, since the next stop carries
+`stop_hook_active`.
+
+What this buys is a fast signal on the common honest mistake, not a barrier against a determined
+one. The enforcement is the phase gate: its `fileset` and `ownership` checks recompute from git and
+read nothing under `.teammates/`, whatever else the command around them reads. Which checks run is
+another matter: that list comes from `teammates.gate.json` in the working tree, which every teammate
+can write, and an `agent` check's result comes from files under `.teammates/` the enforced teammate
+can write too. Do the §1 order because it is what lets
+`complete --enforcement-only` reach a verdict; the branch-existence check does not depend on it and
+blocks whether or not a run branch was ever recorded. Never read a stop that was allowed as a
+verdict.
 
 Wait on completion notifications. Do not poll in a loop.
 
@@ -62,6 +140,24 @@ moved in the repository while the phase ran.
 Run `phase-gate`. Only on PASS, dispatch `tm-integrator` to merge the teammate branches in
 dependency order with `--no-ff`. The integrator is the sole writer to the run branch and runs
 alone. No bookkeeping call follows the merge: the next phase is derived from what is merged.
+
+### Import coupling across tasks
+
+A task whose file set imports a symbol another task introduces cannot build on its own branch.
+Merging it first produces a commit whose tree cannot load. In run `followups2`, T2's
+`scripts/doctor.mjs` imported `printable` from T3's `scripts/reviews.mjs`; on T2's own tip the CLI
+died at import before printing its help, and merging T2 ahead of T3 would have carried that
+unloadable tree onto the run branch. A revert of the providing task breaks every consumer, not only
+the feature that motivated it.
+
+The softer form leaves the tree loading and only a comment wrong. In run `followups3`, T3's change
+to the CLI entrypoint carries a comment citing `reviewFileName` as precedent for wrapping before
+quoting: true once T2's `scripts/reviews.mjs` is merged, false on T3 alone. Nothing fails to load —
+the commit's comment is simply wrong about its own tree, and the merge order was given to the
+integrator for that reason.
+
+Both forms share one rule: the integrator merges in dependency order, and a reviewer judging a
+cross-task claim judges it on the merge, not on one branch.
 
 ## Choosing a model per dispatch
 
@@ -155,6 +251,18 @@ so a dispatch asking it to rebuild asks for something its contract does not cove
 Amend only when a task's declared file set is genuinely wrong. Correcting a stale *interface* — a
 signature an earlier phase's fix rounds changed — belongs in the dispatch brief, not the plan.
 
+**Branch a run's base from the default branch, not from another run's branch.** Step 1 commits the
+amendment on the base, so if the base is another run's deliverable branch the amendment lands
+there, where it belongs to no task of that run and to no ancestor of that run's own base — which is
+what `ownership` then reports, correctly, whenever that branch is gated. Run `followups2` based on
+`run/claims` did exactly this, and `ownership` gated on `run/claims` named five unowned commits:
+nothing was rewritten to hide them, and no ownership exception is added to accept them, because an
+exception broad enough to accept a parent run's branch accepts exactly what the check exists to
+catch. That report does not last. Once `run/claims` landed to the default branch it became an
+ancestor of it, the derived anchor moved onto the run tip, the commit range emptied, and `ownership`
+now passes on `run/claims` — so do not count on the check to preserve the finding. Prevent it
+instead: if work genuinely stacks, land the first run before starting the second.
+
 ## Invariants
 
 - A teammate **never touches the main worktree**; it works only in its own.
@@ -175,9 +283,13 @@ while the context to fix them is still cheap. The broad review at branch complet
 (`phase-gate`'s final pass) never substitutes for this — it catches cross-task drift, not
 per-task defects.
 
-If a teammate needs a fix round, resume the same teammate first — it still has the task's
-context. Only fall back to a fresh implementer on that task if resuming stalls; note in
-`status.json` that the task restarted.
+If a teammate needs a fix round, address the live teammate first: `SendMessage` the teammate that
+owns the failing task, by the id its dispatch returned, with the finding text. Its worktree still
+holds the context a cold respawn would have to rebuild. Respawn on that task only when that
+teammate is gone; a respawned teammate re-runs `locate`, which overwrites the record with its new
+worktree. Note in `status.json` that the task restarted. A teammate inside a running `Workflow`
+cannot receive `SendMessage`, so a phase dispatched through the `Workflow` tool has no live
+teammate to address and its fix round respawns.
 
 ## The map
 

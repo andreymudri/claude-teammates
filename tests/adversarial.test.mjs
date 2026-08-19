@@ -188,12 +188,17 @@ test('a forged status.json PASS changes neither the gate verdict nor complete', 
 
     // No task branches exist, so the recomputed gate fails naming T1's missing branch —
     // the forged PASS buys nothing because neither command ever reads status.gates.
+    //
+    // The two commands report that in their own vocabularies: `gate` exits 1 for a FAIL verdict,
+    // and `complete` exits 3, its one code meaning the recomputed checks REJECTED this task. 3
+    // rather than the 4 it used to return because 4 also covers four cannot-verify situations,
+    // and the stop-time hook has to be able to tell a rejection from a run it cannot verify.
     const gateResult = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
     assert.equal(gateResult.code, 1)
     assert.equal(JSON.parse(gateResult.out).verdict, 'FAIL')
 
     const completeResult = await runCliOn(root, ['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md'])
-    assert.equal(completeResult.code, 4)
+    assert.equal(completeResult.code, 3)
   })
 })
 
@@ -339,6 +344,431 @@ test('gate fails when a task ref is parked at a run tip carrying another task\'s
   })
 })
 
+// A plan with two phase-2 siblings (T2, T3 each depend only on T1 and touch disjoint files, so
+// `assignPhases` places both in phase 2).
+const SIBLING_TIP_PLAN = `### Task 1: A
+
+**Files:**
+- Create: \`a.mjs\`
+
+### Task 2: B
+
+**Files:**
+- Create: \`b.mjs\`
+
+**Depends:** T1
+
+### Task 3: C
+
+**Files:**
+- Create: \`c.mjs\`
+
+**Depends:** T1
+`
+
+// `gate` reads the plan at the run anchor (mergeBase of main and run-branch), not from the
+// working tree — pinned above by 'gate fails on a widened working-tree plan edit'. To make a
+// custom plan reach the anchor, it must be committed to `main` before `run-branch` diverges,
+// so it is committed there and fast-forwarded onto `run-branch`, which has not diverged yet.
+function commitPlanAtAnchor(root, planMarkdown) {
+  git(root, ['checkout', '--quiet', 'main'])
+  return writeFile(path.join(root, 'plan.md'), planMarkdown, 'utf8').then(() => {
+    git(root, ['add', '.'])
+    git(root, ['commit', '--quiet', '-m', 'plan: amend for this test'])
+    git(root, ['checkout', '--quiet', 'run-branch'])
+    git(root, ['merge', '--quiet', 'main'])
+  })
+}
+
+// Was recorded only as prose, in the spec's "Not defended against" list and in
+// `deriveContext`'s own comment (scripts/gate-runner.mjs): T3 commits `c.mjs` and is merged
+// `--no-ff`; T2 never commits anything of its own, and its ref is pointed directly at T3's tip
+// instead. T2's sha is a genuine secondary parent of the merge and genuinely inside
+// anchor..run, so the old empty-diff test (which asks only "is this sha a merged tip") passed
+// it, and the old `ownWorkBase` fork-point trick credited T2 with `c.mjs` in `deriveContext`
+// too, reading phase 2 as fully integrated and skipping the fileset check entirely.
+//
+// Closed, round 4 (see the comment above `mergedParentFiles` in scripts/gate-runner.mjs for the
+// three earlier designs and why each of them broke something real): `deriveContext` no longer
+// special-cases the shared sha at all. It asks, per task, whether the merge that landed a sha
+// carried THAT task's declared files. The merge that landed T3's tip carried `c.mjs`, T3's own
+// file — never T2's `b.mjs` — so T2 reads not-integrated and the ordinary `currentPhase`
+// machinery reaches phase 2, where `runFilesetCheck`'s own empty-diff test (same predicate,
+// same shared index) reports T2's self-contained, accurate failure.
+//
+// This is the DISJOINT case only: T2's declared file (`b.mjs`) never intersects what the merge
+// landing T3's tip carried (`c.mjs`). The predicate needs exactly that non-intersection to work
+// — `scripts/phases.mjs` guarantees it within one phase, T2 and T3 here included, but not
+// across phases. The SAME sibling-tip shape with an OVERLAPPING declared set remains open; see
+// 'LIMIT (sibling-tip, overlapping declared set)' below.
+test('gate fails when a task ref is parked at a merged SIBLING\'s tip', async () => {
+  await withRepo(async (root) => {
+    await commitPlanAtAnchor(root, SIBLING_TIP_PLAN)
+
+    await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+
+    const t3Branch = await taskBranch(root, 'r1', 'T3', { files: { 'c.mjs': 'x\n' } })
+    const t3Tip = git(root, ['rev-parse', t3Branch]).trim()
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T3', t3Branch])
+
+    // T2 never commits: its ref is pointed straight at T3's own tip commit, not at the merge
+    // commit that carried it.
+    git(root, ['branch', 'teammates/r1/T2', t3Tip])
+
+    const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(code, 1)
+    const parsed = JSON.parse(out)
+    assert.equal(parsed.verdict, 'FAIL')
+    // Phase 1 genuinely integrated, phase 2 is not (T2's own declared file never landed), so
+    // `currentPhase` reaches the unremarkable 2 — not the early, dedicated phaseError shape
+    // (`phase: null`) two earlier designs produced.
+    assert.equal(parsed.phase, 2)
+    const fileset = parsed.results.find((r) => r.name === 'fileset')
+    assert.match(fileset.output, /T2: branch teammates\/r1\/T2 contributes no file changes past its fork point/)
+    assert.match(fileset.output, new RegExp(t3Tip))
+    assert.doesNotMatch(fileset.output, /T3:/)
+  })
+})
+
+// The medium every earlier design left open (fix round 4's specific charge): T2 is parked on
+// T3's tip exactly as above, but T3 then does a SECOND round of real work — a fix-round commit
+// that moves T3's OWN ref forward, off the shared sha. Every earlier design keyed on two refs
+// sharing something RIGHT NOW (entry counts, membership sets, run-tip comparisons), so once only
+// ONE ref still pointed at the shared sha, none of those checks had anything left to compare —
+// T2 would have silently passed. `landedForFiles` reads only the merge that already landed T3's
+// FIRST round, which still only ever carried `c.mjs`; it does not care where T3's ref currently
+// sits, so T2 still fails the same way.
+test('gate still fails a parked ref after the sibling it parked on makes a further fix-round commit', async () => {
+  await withRepo(async (root) => {
+    await commitPlanAtAnchor(root, SIBLING_TIP_PLAN)
+
+    await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+
+    const t3Branch = await taskBranch(root, 'r1', 'T3', { files: { 'c.mjs': 'x\n' } })
+    const t3FirstTip = git(root, ['rev-parse', t3Branch]).trim()
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T3', t3Branch])
+
+    // T2 parks on T3's FIRST-round tip — never moves again.
+    git(root, ['branch', 'teammates/r1/T2', t3FirstTip])
+
+    // T3's fix round: a further commit on T3's OWN branch, moving T3's ref off the shared sha.
+    // (Not re-merged — this pins the shape as it stands mid-round, before any further gate.)
+    git(root, ['checkout', '--quiet', t3Branch])
+    await writeFile(path.join(root, 'c.mjs'), 'x2\n', 'utf8')
+    git(root, ['add', '.'])
+    git(root, ['commit', '--quiet', '-m', 'T3: fix-round commit'])
+    git(root, ['checkout', '--quiet', 'run-branch'])
+
+    const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(code, 1)
+    const parsed = JSON.parse(out)
+    assert.equal(parsed.verdict, 'FAIL')
+    const fileset = parsed.results.find((r) => r.name === 'fileset')
+    assert.match(fileset.output, /T2: branch teammates\/r1\/T2 contributes no file changes/)
+  })
+})
+
+// The pre-merge half of the SIBLING'S-tip shape. `landedForFiles` gates on
+// `mergedParentFiles` membership, and nothing not-yet-integrated can be a member of that
+// index — so T2's ref, pointed at T3's own STILL-UNMERGED commit, does NOT trip it. T2's diff
+// off the run tip is T3's real, non-empty `c.mjs`, so the ordinary declared-set violation
+// catches it instead (T2 only declared `b.mjs`) — the same predicate decides both shapes, so
+// the split between them is what the merge actually carried, not a separate rule.
+test('gate catches a ref parked at an unmerged sibling\'s tip via the declared-set violation, not the empty-diff test', async () => {
+  await withRepo(async (root) => {
+    await commitPlanAtAnchor(root, SIBLING_TIP_PLAN)
+
+    await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+
+    // T3 commits but is NOT yet merged.
+    const t3Branch = await taskBranch(root, 'r1', 'T3', { files: { 'c.mjs': 'x\n' } })
+    const t3Tip = git(root, ['rev-parse', t3Branch]).trim()
+
+    // T2 never commits: its ref is pointed straight at T3's own (still unmerged) tip.
+    git(root, ['branch', 'teammates/r1/T2', t3Tip])
+
+    const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(code, 1)
+    const parsed = JSON.parse(out)
+    assert.equal(parsed.verdict, 'FAIL')
+    assert.equal(parsed.phase, 2)
+    const fileset = parsed.results.find((r) => r.name === 'fileset')
+    assert.match(fileset.output, /T2: outside declared set — c\.mjs/)
+    assert.doesNotMatch(fileset.output, /parked at another's tip/)
+    assert.doesNotMatch(fileset.output, /merged sibling's tip/)
+  })
+})
+
+// Fix-round finding A: the ordinary, benign state every fleet passes through between
+// `git checkout -B <task> <run branch>` and its first commit — a phase's siblings freshly
+// created together, nothing committed yet. An earlier version of the duplicate rule had no
+// run-tip exclusion and reported every one of them as "parked at" the others; the true,
+// actionable cause is that none of them has done any work yet.
+test('gate does not treat freshly-dispatched siblings sharing the run tip as parked on each other', async () => {
+  await withRepo(async (root) => {
+    await commitPlanAtAnchor(root, SIBLING_TIP_PLAN)
+
+    const runTip = git(root, ['rev-parse', 'run-branch']).trim()
+    git(root, ['branch', 'teammates/r1/T1', runTip])
+    git(root, ['branch', 'teammates/r1/T2', runTip])
+    git(root, ['branch', 'teammates/r1/T3', runTip])
+
+    const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(code, 1)
+    const parsed = JSON.parse(out)
+    assert.equal(parsed.verdict, 'FAIL')
+    assert.equal(parsed.phase, 1)
+    const fileset = parsed.results.find((r) => r.name === 'fileset')
+    assert.match(fileset.output, /T1: branch teammates\/r1\/T1 contributes no file changes/)
+    assert.doesNotMatch(fileset.output, /parked at another's tip/)
+  })
+})
+
+// Fix-round finding 1 (security HIGH): T2 and T3 (phase 2) are dispatched together and never
+// commit — the ordinary, benign state, sharing the run tip exactly as the previous test does.
+// Unlike the previous test, something ELSE then lands on the run branch: a plan amendment
+// merging the base in, this repository's own documented amendment procedure
+// (skills/parallel-execution/SKILL.md). That moves the run tip past T2 and T3 without either of
+// them doing anything at all, so their shared sha is no longer the run tip. Two earlier designs
+// broke on this exact shape — a "not the run tip" discriminator, and, separately, a
+// `git.mergedBranchTips`-membership discriminator, since the amendment merge's secondary parent
+// IS the old run tip. `landedForFiles` does not classify the shared sha at all: it asks whether
+// the amendment merge's OWN diff (against its own first parent) carries either idle task's
+// declared file, and an amendment merge that only ever touched `amend.txt` never does.
+test('gate does not treat two idle siblings as parked when an unrelated commit moves the run tip past them', async () => {
+  await withRepo(async (root) => {
+    await commitPlanAtAnchor(root, SIBLING_TIP_PLAN)
+
+    await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+
+    // T2 and T3 (phase 2) are created at the run tip, right after T1's merge, and never commit.
+    const runTip = git(root, ['rev-parse', 'run-branch']).trim()
+    git(root, ['branch', 'teammates/r1/T2', runTip])
+    git(root, ['branch', 'teammates/r1/T3', runTip])
+
+    // The plan-amendment procedure: the base advances and the run branch merges it in. This is
+    // unrelated to T2 and T3 — neither teammate did anything — but it moves the run tip past
+    // the sha they share.
+    git(root, ['checkout', '--quiet', 'main'])
+    await writeFile(path.join(root, 'amend.txt'), 'amended\n', 'utf8')
+    git(root, ['add', '.'])
+    git(root, ['commit', '--quiet', '-m', 'amend the plan'])
+    git(root, ['checkout', '--quiet', 'run-branch'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'merge: plan amendment', 'main'])
+
+    assert.notEqual(git(root, ['rev-parse', 'run-branch']).trim(), runTip, 'fixture: the run tip must have moved past T2 and T3')
+
+    const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(code, 1)
+    const parsed = JSON.parse(out)
+    assert.equal(parsed.verdict, 'FAIL')
+    assert.equal(parsed.phase, 2)
+    const fileset = parsed.results.find((r) => r.name === 'fileset')
+    assert.match(fileset.output, /T2: branch teammates\/r1\/T2 contributes no file changes/)
+    assert.match(fileset.output, /T3: branch teammates\/r1\/T3 contributes no file changes/)
+    assert.doesNotMatch(fileset.output, /parked at another's tip/)
+    assert.doesNotMatch(fileset.output, /cannot be phase-gated until it is fixed/)
+  })
+})
+
+// Fix-round finding 1 (correctness HIGH): the executed repro from the finding, byte for byte.
+// T2's declared file is `a.mjs` — the SAME file T1 created — because that exact collision is
+// what the whole-range walk this test replaced got wrong: it attributed a merge's ENTIRE
+// first-parent diff to every one of its secondary parents, so T3's sync merge (which pulls in
+// T1's `a.mjs` while adding its own `c.mjs`) credited the post-T1 run tip with `{a.mjs}` too —
+// and T2, parked there and declaring `a.mjs`, read landed with nothing written. An earlier
+// version of this test used a declared file (`b.mjs`) that never collided with what the sync
+// carried, so it passed even against the bug it meant to pin; this version does not.
+//
+// T3 forks EARLY (before T1 lands) so its own `git merge --no-ff run-branch`, made on T3's own
+// branch to pick up T1's interface, is a genuine non-fast-forward merge naming the post-T1 tip
+// as a secondary parent — not a merge `tm-integrator` ever ran. The fix walks only the run
+// branch's own first-parent chain: the post-T1 tip is the FIRST parent of the integrator's own
+// merge of T3, never a secondary parent of anything on that chain, so it is not indexed at all.
+test('gate does not credit an idle ref parked on a run tip that only a sibling\'s own sync merge later named', async () => {
+  await withRepo(async (root) => {
+    const overlapPlan = `### Task 1: A
+
+**Files:**
+- Create: \`a.mjs\`
+
+### Task 2: B
+
+**Files:**
+- Modify: \`a.mjs\`
+
+**Depends:** T1
+
+### Task 3: C
+
+**Files:**
+- Create: \`c.mjs\`
+
+**Depends:** T1
+`
+    await commitPlanAtAnchor(root, overlapPlan)
+    await writeFile(path.join(root, 'a.mjs'), 'seed\n', 'utf8')
+    git(root, ['add', '.'])
+    git(root, ['commit', '--quiet', '-m', 'seed a.mjs'])
+
+    // T3 forks BEFORE T1 lands, so its own sync merge with run-branch (after T1 merges) is a
+    // genuine, non-fast-forward merge rather than a no-op.
+    git(root, ['checkout', '--quiet', '-b', 'teammates/r1/T3'])
+    await writeFile(path.join(root, 'c.mjs'), 'x\n', 'utf8')
+    git(root, ['add', '.'])
+    git(root, ['commit', '--quiet', '-m', 'T3: work'])
+    git(root, ['checkout', '--quiet', 'run-branch'])
+
+    await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+
+    // T2 (phase 2, idle) is dispatched right after T1 merges, and never commits.
+    git(root, ['branch', 'teammates/r1/T2', 'run-branch'])
+
+    // T3's own sync, picking up T1's interface: names the post-T1 tip as a secondary parent of
+    // this commit, which is NOT a merge `tm-integrator` ever ran.
+    git(root, ['checkout', '--quiet', 'teammates/r1/T3'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'T3: sync with run-branch', 'run-branch'])
+    git(root, ['checkout', '--quiet', 'run-branch'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T3', 'teammates/r1/T3'])
+
+    const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(code, 1)
+    const parsed = JSON.parse(out)
+    assert.equal(parsed.verdict, 'FAIL')
+    const fileset = parsed.results.find((r) => r.name === 'fileset')
+    assert.match(fileset.output, /T2: branch teammates\/r1\/T2 contributes no file changes/)
+    assert.doesNotMatch(fileset.output, /parked at another's tip/)
+    assert.doesNotMatch(fileset.output, /cannot be phase-gated until it is fixed/)
+  })
+})
+
+// Fix-round finding B1, closed by round 4's per-task predicate rather than a run-wide
+// discriminator: a phase-3 teammate points its ref at an EARLIER, already-integrated phase's
+// own merged tip. Two earlier designs (a silent, run-wide shared-sha exclusion; a dedicated
+// phaseError gated on shared-sha membership) both had to reason about T1 and T3 TOGETHER
+// because they classified the SHA, and both accidentally stripped T1's own genuine credit or
+// produced a message naming both tasks as if symmetric. The declared-files predicate needs no
+// such cross-task reasoning: T1's own check asks whether the merge that landed its sha carried
+// T1's file (`a.mjs` — yes), and T3's own, unrelated check asks the same question of T3's file
+// (`c.mjs` — no, that merge only ever carried `a.mjs`). Phase 1 and phase 2 stay cleanly
+// integrated; only phase 3, the one that is actually not done, fails — with an accurate,
+// self-contained message, never the generic ordering error.
+test('gate does not let a later phase\'s parked ref strip an earlier phase\'s genuine integration credit', async () => {
+  await withRepo(async (root) => {
+    const threePhasePlan = `### Task 1: A
+
+**Files:**
+- Create: \`a.mjs\`
+
+### Task 2: B
+
+**Files:**
+- Create: \`b.mjs\`
+
+**Depends:** T1
+
+### Task 3: C
+
+**Files:**
+- Create: \`c.mjs\`
+
+**Depends:** T2
+`
+    await commitPlanAtAnchor(root, threePhasePlan)
+
+    const t1Branch = await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+    const t1Tip = git(root, ['rev-parse', t1Branch]).trim()
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', t1Branch])
+    await taskBranch(root, 'r1', 'T2', { files: { 'b.mjs': 'x\n' } })
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T2', 'teammates/r1/T2'])
+
+    // T3 (phase 3) never commits: its ref is pointed at T1's own merged tip — a fixed
+    // ancestor now that T2's merge has moved the run tip past it.
+    git(root, ['branch', 'teammates/r1/T3', t1Tip])
+
+    const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(code, 1)
+    const parsed = JSON.parse(out)
+    assert.equal(parsed.verdict, 'FAIL')
+    // Phases 1 and 2 are both genuinely integrated, so `derivePhase` reaches phase 3 as the
+    // current phase — never the generic "phase N is not integrated but a later phase is"
+    // ordering error, which would mean phase 1's real integration went unrecognized.
+    assert.equal(parsed.phase, 3)
+    const fileset = parsed.results.find((r) => r.name === 'fileset')
+    assert.doesNotMatch(fileset.output, /refusing to guess which phase to enforce/)
+    assert.match(fileset.output, /T3: branch teammates\/r1\/T3 contributes no file changes past its fork point/)
+    assert.match(fileset.output, new RegExp(t1Tip))
+    assert.doesNotMatch(fileset.output, /T1:/)
+  })
+})
+
+// A plan with T3 as T2's only phase-2 sibling (both depend only on T1).
+const NEAR_SIBLING_PLAN = `### Task 1: A
+
+**Files:**
+- Create: \`a.mjs\`
+
+### Task 2: B
+
+**Files:**
+- Create: \`b.mjs\`
+
+**Depends:** T1
+
+### Task 3: C
+
+**Files:**
+- Create: \`c.mjs\`
+
+**Depends:** T1
+`
+
+// The near-sibling shape: a distinct sha one empty commit above a merged sibling's tip. Every
+// design before round 4 classified shas (shared-by-anyone, not-the-run-tip, a member of
+// `git.mergedBranchTips`), and this shape defeated all of them the same way — a commit that is
+// itself merged under its OWN name is a genuine, distinct member of whatever sha-level set was
+// being checked, so it read as landed regardless of what it actually contained.
+//
+// Round 4's declared-files predicate closes it, not by design intent but as a consequence of
+// asking a stricter question: `landedForFiles` requires the merge's own diff to intersect the
+// task's declared files, and T2's merge — bringing in a branch that is byte-identical to
+// content already on the run branch — has an EMPTY diff against its own first parent. An empty
+// set can never intersect a non-empty declared set, so T2 fails the same way any other
+// contribution-free branch does. Confirmed by executing this exact construction; not asserted
+// from the design alone.
+test('gate fails a ref built one empty commit above a merged sibling\'s tip, even merged under its own name', async () => {
+  await withRepo(async (root) => {
+    await commitPlanAtAnchor(root, NEAR_SIBLING_PLAN)
+
+    await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+
+    const t3Branch = await taskBranch(root, 'r1', 'T3', { files: { 'c.mjs': 'x\n' } })
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T3', t3Branch])
+
+    // T2 branches from T3's tip and adds one empty commit — a distinct sha, not T3's own —
+    // then that branch is merged under T2's own name, exactly as a genuine contribution would
+    // be.
+    git(root, ['checkout', '--quiet', '-b', 'teammates/r1/T2', t3Branch])
+    git(root, ['commit', '--quiet', '--allow-empty', '-m', 'T2: empty, contributes nothing'])
+    git(root, ['checkout', '--quiet', 'run-branch'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T2', 'teammates/r1/T2'])
+
+    const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(code, 1)
+    const parsed = JSON.parse(out)
+    assert.equal(parsed.verdict, 'FAIL')
+    const fileset = parsed.results.find((r) => r.name === 'fileset')
+    assert.match(fileset.output, /T2: branch teammates\/r1\/T2 contributes no file changes/)
+    assert.doesNotMatch(fileset.output, /T3:/)
+  })
+})
+
 // ============================================================================================
 // Step 3 — limits that are NOT defended. Each asserts the CURRENT behavior (usually a PASS),
 // with a comment naming the limitation and pointing at the spec's "Not defended against" list.
@@ -369,6 +799,50 @@ test('LIMIT (self-integration): a teammate that does real work and merges its ow
     // Both phases read as integrated, so this is the "every phase in the plan is integrated"
     // verdict — the teammate's own merges were accepted as integration, which is the point of
     // the limitation. Asserted after observing the run, not written from expectation.
+    assert.equal(parsed.phase, null)
+  })
+})
+
+// LIMIT (sibling-tip, overlapping declared set): the sibling-tip test above
+// ('gate fails when a task ref is parked at a merged SIBLING's tip') pins the DISJOINT case —
+// T2's declared file never intersects what the merge that landed T3's tip carried, so
+// `landedForFiles` correctly reads false. `scripts/phases.mjs` guarantees that disjointness
+// only WITHIN one phase; across phases a later task routinely modifies a file an earlier task
+// created, and `landedForFiles` grants landed on ANY intersection with what the integrating
+// merge carried, with no way to tell a genuine contributor from a parked ref reusing the same,
+// real intersection. Executed: T1 creates `a.mjs` and is merged; T2 declares `Modify: a.mjs,
+// Create: b.mjs`, writes nothing, and its ref is pointed at T1's own merged tip. Verdict PASS;
+// `b.mjs` never exists. Recorded in the spec's "Not defended against" list as sibling-tip
+// self-integration.
+test('LIMIT (sibling-tip, overlapping declared set): a parked ref whose declared set intersects what the sibling\'s merge carried reads as landed', async () => {
+  await withRepo(async (root) => {
+    const overlapPlan = `### Task 1: A
+
+**Files:**
+- Create: \`a.mjs\`
+
+### Task 2: B
+
+**Files:**
+- Modify: \`a.mjs\`
+- Create: \`b.mjs\`
+
+**Depends:** T1
+`
+    await commitPlanAtAnchor(root, overlapPlan)
+
+    const t1Branch = await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+    const t1Tip = git(root, ['rev-parse', t1Branch]).trim()
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', t1Branch])
+
+    // T2 never commits: its ref is pointed straight at T1's own merged tip. T2's declared set
+    // (`a.mjs`, `b.mjs`) intersects `a.mjs` — what the merge that landed T1 actually carried.
+    git(root, ['branch', 'teammates/r1/T2', t1Tip])
+
+    const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(code, 0)
+    const parsed = JSON.parse(out)
+    assert.equal(parsed.verdict, 'PASS')
     assert.equal(parsed.phase, null)
   })
 })

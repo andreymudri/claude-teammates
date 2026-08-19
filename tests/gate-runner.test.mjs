@@ -11,6 +11,9 @@ import {
   deriveContext,
   runFilesetCheck,
   runOwnershipCheck,
+  mergedParentFiles,
+  landedForFiles,
+  creditRunTipTasks,
 } from '../scripts/gate-runner.mjs'
 import { GitError, createGit, defaultGitExec } from '../scripts/git.mjs'
 
@@ -281,6 +284,129 @@ test('runFilesetCheck fails naming a stray path', async () => {
   assert.match(res.output, /secret\.mjs/)
 })
 
+// `mergedParentFiles`'s in-range filter, pinned directly: a task ref parked exactly at the
+// ANCHOR, where the merge naming the anchor as a secondary parent happens to carry a file with
+// the SAME NAME as the parked task's own declared file (the coincidence a plan amendment could
+// produce). Without the filter, the anchor itself would be keyed and `landedForFiles` would
+// read this ref as landed on a merge it was never part of — the anchor is the boundary
+// `commitsBetween` excludes, not a commit this run's history begins from. The run tip IS the
+// integrator's merge commit, on the walk's own first-parent chain (`commitParents('mergeSha1')`
+// is reached directly from `runSha`), so this test actually exercises the filter rather than
+// stopping before the walk ever visits the merge — the filter's necessity was reconfirmed
+// against this exact mock, in this shape, before the test was written.
+test('runFilesetCheck does not read a ref parked at the anchor as landed even when a coincidental filename matches', async () => {
+  const T2_TASK = { id: 'T2', phase: 1, files: ['b.mjs'] }
+  const git = fakeGit({
+    branchExists: async () => true,
+    resolveRef: async (ref) => {
+      // T2 is parked exactly at the anchor.
+      if (ref === `refs/heads/${T2_BRANCH}`) return 'anchorSha1'
+      return `${ref}-sha`
+    },
+    commitsBetween: async () => ['mergeSha1'],
+    // The lone in-range merge's SECOND parent is the anchor itself — the shape a plan
+    // amendment produces once its own base tip becomes the anchor. It is also the run tip
+    // itself, so the chain walk reaches it in one step from `runSha`.
+    commitParents: async (sha) => (sha === 'mergeSha1' ? ['firstParentSha', 'anchorSha1'] : []),
+    // Coincidence: the amendment merge happens to touch a file named `b.mjs`, the same name
+    // T2 declared. The walk's own call shape diffs the SECONDARY PARENT's own tree
+    // (`anchorSha1`) against the chain's prior tip (`firstParentSha`), not the merge commit's.
+    changedFiles: async ({ base, branch }) => (base === 'firstParentSha' && branch === 'anchorSha1' ? ['b.mjs'] : []),
+  })
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = {
+    git, runId: RUN_ID, runSha: 'mergeSha1', anchorSha: 'anchorSha1',
+    tasks: [T2_TASK], currentPhase: 1, phaseError: null,
+  }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.match(res.output, /T2: branch teammates\/r1\/T2 contributes no file changes/)
+})
+
+// T2 (phase 2, under check) sits at T1's tip (phase 1, merged). T2's own diff is empty and
+// T1's sha IS a merged tip, so without the duplicate rule this passes — the shape
+// `deriveContext`'s "ref parked at a merged SIBLING'S tip" comment names as undefended.
+// Fix-round rewrite: T2's ref is pointed at T1's own merged tip (the shared sha), instead of
+// committing. The merge that landed T1 carried T1's declared file, `a.mjs` — never T2's `b.mjs`
+// — so `landedForFiles` reads false for T2 even though the sha is shared and genuinely merged.
+// No message names T1 at all: T2's own failure is self-contained, and does not depend on
+// reasoning about any other ref, only on what the merge that named its sha actually carried.
+test('runFilesetCheck fails a branch parked on a merged sibling\'s tip, naming only its own no-op', async () => {
+  const T2_TASK = { id: 'T2', phase: 2, files: ['b.mjs'] }
+  const SHARED_SHA = 'sharedSha1'
+  const git = fakeGit({
+    branchExists: async () => true,
+    resolveRef: async (ref) => {
+      if (ref === `refs/heads/${T1_BRANCH}`) return SHARED_SHA
+      if (ref === `refs/heads/${T2_BRANCH}`) return SHARED_SHA
+      if (ref === 'refs/heads/run') return 'runSha1'
+      return `${ref}-sha`
+    },
+    commitsBetween: async () => ['mergeSha1', SHARED_SHA],
+    commitParents: async (sha) => (sha === 'mergeSha1' ? ['firstParentSha', SHARED_SHA] : []),
+    // The merge naming the shared sha carried T1's declared file, never T2's.
+    changedFiles: async ({ base, branch }) => (base === 'firstParentSha' && branch === 'mergeSha1' ? ['a.mjs'] : []),
+  })
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = {
+    git, runId: RUN_ID, runSha: 'runSha1', anchorSha: 'anchorSha1',
+    tasks: [T1_TASK, T2_TASK], currentPhase: 2, phaseError: null,
+  }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.match(res.output, /T2: branch teammates\/r1\/T2 contributes no file changes past its fork point/)
+  assert.doesNotMatch(res.output, /T1/)
+})
+
+// T8 and T9 (phase 3, untouched) both sit at the run tip while phase 2 is gated. Widening the
+// SUBJECT to every task in the run — rather than only the phase under check — would fail this
+// phase for two not-yet-started refs of a LATER phase, which is not a violation of anything.
+test('runFilesetCheck does not fail the current phase for two refs of a later phase sharing a sha', async () => {
+  const T2_TASK = { id: 'T2', phase: 2, files: ['b.mjs'] }
+  const T8_TASK = { id: 'T8', phase: 3, files: ['h.mjs'] }
+  const T9_TASK = { id: 'T9', phase: 3, files: ['i.mjs'] }
+  const T8_BRANCH = 'teammates/r1/T8'
+  const T9_BRANCH = 'teammates/r1/T9'
+  const FUTURE_SHA = 'futureSha1'
+  const git = fakeGit({
+    branchExists: async () => true,
+    resolveRef: async (ref) => {
+      if (ref === `refs/heads/${T8_BRANCH}`) return FUTURE_SHA
+      if (ref === `refs/heads/${T9_BRANCH}`) return FUTURE_SHA
+      if (ref === 'refs/heads/run') return 'runSha1'
+      return `${ref}-sha`
+    },
+    changedFiles: async ({ branch }) => (branch === `refs/heads/${T2_BRANCH}-sha` ? ['b.mjs'] : []),
+  })
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = {
+    git, runId: RUN_ID, runSha: 'runSha1', anchorSha: 'anchorSha1',
+    tasks: [T2_TASK, T8_TASK, T9_TASK], currentPhase: 2, phaseError: null,
+  }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'pass')
+})
+
+// `mergedParentFiles` walks every task ref's merge history, not just this phase's, so a
+// corrupted ref anywhere in that history must fail the check cleanly rather than let the
+// GitError propagate as an uncaught throw where a FAIL verdict belongs.
+test('runFilesetCheck fails with the git error when the merge-history walk fails', async () => {
+  const git = fakeGit({
+    branchExists: async () => true,
+    changedFiles: async () => [],
+    commitsBetween: async () => { throw new GitError('bad revision anchorSha1..runSha1') },
+  })
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = {
+    git, runId: RUN_ID, runSha: 'runSha1', anchorSha: 'anchorSha1',
+    tasks: [T1_TASK], currentPhase: 1, phaseError: null,
+  }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.match(res.output, /could not walk this run's merge history/)
+  assert.match(res.output, /bad revision/)
+})
+
 // A teammate that skips its `git checkout -B teammates/<run>/<task>` and commits on the
 // harness's own worktree branch leaves the conventional ref existing but empty: it points at
 // the run tip with no work on it. `filesetViolations` of an empty change list is empty, so the
@@ -340,19 +466,145 @@ test('runOwnershipCheck passes a task branch that is an ancestor of both the bas
 // rule is about work that never reached the conventional ref, and that question is only
 // meaningful before the branch is merged.
 test('runFilesetCheck does not report an already-integrated branch as contributing nothing', async () => {
+  const t1Sha = `refs/heads/${T1_BRANCH}-sha`
+  const git = fakeGit({
+    branchExists: async () => true,
+    isAncestor: async (_sha, target) => target === 'mergeSha1',
+    // The run tip IS the integrator's merge commit — the walk starts at `runSha` and follows
+    // `parents[0]` back to `anchorSha`, so the merge must be reachable from `runSha` by that
+    // exact chain, not merely present somewhere in `commitsBetween`'s output.
+    commitsBetween: async () => ['mergeSha1', t1Sha],
+    commitParents: async (sha) => (sha === 'mergeSha1' ? ['anchorSha1', t1Sha] : []),
+    // T1's own sha is already on the run branch, so its fork-point diff (this check's own
+    // top-level diff, computed the same way for every task) is empty — merge-base(run, sha)
+    // is `sha` itself, exactly like a real already-landed branch.
+    mergeBase: async (_run, sha) => (sha === t1Sha ? t1Sha : 'anchorSha1'),
+    // The merge that landed T1's branch carried its declared file, `a.mjs` — T1's own
+    // contribution since it diverged from the chain's prior tip (the anchor here) — which is
+    // what makes the branch read as integrated, not ancestry alone.
+    changedFiles: async ({ base, branch }) => (base === 'anchorSha1' && branch === t1Sha ? ['a.mjs'] : []),
+  })
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = { git, runId: RUN_ID, runSha: 'mergeSha1', anchorSha: 'anchorSha1', tasks: [T1_TASK], currentPhase: 1, phaseError: null }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'pass')
+  assert.deepEqual(res.branchShas, { [T1_BRANCH]: t1Sha })
+})
+
+// `landedForFiles`'s path normalization, pinned directly: plans are hand-authored on Windows,
+// and `plan-parser` stores a declared path verbatim, so a task declaring `./a.mjs` (a leading
+// `./` a human might type) must still match a merge diff reporting the same file as plain
+// `a.mjs` — the shape `git diff --name-only` actually reports paths in. Without normalizing
+// both sides the same way `filesetViolations` does, a branch that genuinely landed would read
+// as not-landed over a formatting difference, not a real absence.
+test('runFilesetCheck matches a declared path against a differently-normalized merge diff path', async () => {
+  const dotSlashTask = { id: 'T1', phase: 1, files: ['./a.mjs'] }
+  const t1Sha = `refs/heads/${T1_BRANCH}-sha`
+  const git = fakeGit({
+    branchExists: async () => true,
+    isAncestor: async (_sha, target) => target === 'mergeSha1',
+    commitsBetween: async () => ['mergeSha1', t1Sha],
+    commitParents: async (sha) => (sha === 'mergeSha1' ? ['anchorSha1', t1Sha] : []),
+    mergeBase: async (_run, sha) => (sha === t1Sha ? t1Sha : 'anchorSha1'),
+    // The diff reports the plain path, with no leading `./` — the declared path has one.
+    changedFiles: async ({ base, branch }) => (base === 'anchorSha1' && branch === t1Sha ? ['a.mjs'] : []),
+  })
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = { git, runId: RUN_ID, runSha: 'mergeSha1', anchorSha: 'anchorSha1', tasks: [dotSlashTask], currentPhase: 1, phaseError: null }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'pass')
+})
+
+// `mergedParentFiles` unions file sets across two chain commits that both name the SAME sha as
+// a secondary parent, rather than keeping only the first. Chain: `runSha` (M2) -> M1 ->
+// `anchorSha`. Both M2 and M1 name `sharedParent` as their own secondary parent, but from
+// different first parents, so each contributes a DIFFERENT file to the union: M2's own diff
+// (base M1) gives `y.mjs`; M1's own diff (base anchor) gives `x.mjs`. The task here declares
+// only `x.mjs` — the file M1's traversal contributes, processed SECOND since the walk starts at
+// `runSha` and only reaches M1 afterward. A "first merge wins" version (keeping the set from
+// M2's visit and never adding to it) would read this task as not-landed.
+test('mergedParentFiles unions file sets across two merges naming the same sha, rather than keeping only the first', async () => {
+  const declaresSecondFile = { id: 'T1', phase: 1, files: ['x.mjs'] }
+  const git = fakeGit({
+    branchExists: async () => true,
+    isAncestor: async (_sha, target) => target === 'M2',
+    resolveRef: async (ref) => (ref === `refs/heads/${T1_BRANCH}` ? 'sharedParent' : `${ref}-sha`),
+    commitsBetween: async () => ['M2', 'M1', 'sharedParent'],
+    commitParents: async (sha) => {
+      if (sha === 'M2') return ['M1', 'sharedParent']
+      if (sha === 'M1') return ['anchorSha1', 'sharedParent']
+      return []
+    },
+    mergeBase: async (_run, sha) => (sha === 'sharedParent' ? 'sharedParent' : 'anchorSha1'),
+    changedFiles: async ({ base, branch }) => {
+      if (branch !== 'sharedParent') return []
+      if (base === 'M1') return ['y.mjs'] // M2's own visit
+      if (base === 'anchorSha1') return ['x.mjs'] // M1's own visit
+      return []
+    },
+  })
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = { git, runId: RUN_ID, runSha: 'M2', anchorSha: 'anchorSha1', tasks: [declaresSecondFile], currentPhase: 1, phaseError: null }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'pass')
+})
+
+// `mergedParentFiles` and `landedForFiles` are exported so `scripts/doctor.mjs` can decide
+// `landed` with the exact same predicate `runFilesetCheck` enforces with, rather than keeping a
+// second implementation that could silently disagree with the gate. Called directly here,
+// outside `runFilesetCheck`, to pin the export itself — not just behaviour reachable only
+// through the check.
+test('mergedParentFiles and landedForFiles are exported and usable directly', async () => {
+  const git = fakeGit({
+    commitsBetween: async () => ['M1', 'sharedParent'],
+    commitParents: async (sha) => (sha === 'M1' ? ['anchorSha1', 'sharedParent'] : []),
+    changedFiles: async ({ base, branch }) => (base === 'anchorSha1' && branch === 'sharedParent' ? ['x.mjs'] : []),
+  })
+  const index = await mergedParentFiles(git, { anchorSha: 'anchorSha1', runSha: 'M1' })
+  assert.equal(landedForFiles(index, 'sharedParent', ['x.mjs']), true)
+  assert.equal(landedForFiles(index, 'sharedParent', ['y.mjs']), false)
+  assert.equal(landedForFiles(index, 'someOtherSha', ['x.mjs']), false)
+})
+
+// One merge-history walk for the whole phase, not one per task: `mergedParentFiles` is called
+// once, before the per-task loop, and its result is reused for every task in the phase.
+test('runFilesetCheck builds the merge-history index once for the whole phase, not once per task', async () => {
+  let calls = 0
   const git = fakeGit({
     branchExists: async () => true,
     changedFiles: async () => [],
-    isAncestor: async (_sha, target) => target === 'runSha1',
-    // Landed: the run branch merged this branch in, naming its tip as a secondary parent.
-    // That, not ancestry, is what makes a branch integrated.
-    mergedBranchTips: async () => new Set([`refs/heads/${T1_BRANCH}-sha`]),
+    commitsBetween: async () => { calls += 1; return [] },
+  })
+  const check = { name: 'fileset', kind: 'fileset' }
+  const ctx = {
+    git, runId: RUN_ID, runSha: 'runSha1', anchorSha: 'anchorSha1',
+    tasks: [T1_TASK, { id: 'T2', phase: 1, files: ['b.mjs'] }], currentPhase: 1, phaseError: null,
+  }
+  const res = await runFilesetCheck(check, ctx)
+  assert.equal(res.status, 'fail')
+  assert.equal(calls, 1)
+})
+
+// Reversed from the design this replaced: the merge-history walk used to be lazy, skipped
+// entirely when every branch's own diff came up non-empty. `mergedParentFiles` is now built
+// unconditionally, before the per-task loop even inspects any branch's diff, because
+// `deriveContext`'s own integration credit needs the SAME index regardless of what any single
+// task's diff looks like, and `runFilesetCheck` builds its own copy the same way. Pinned here so
+// reintroducing laziness (skipping the walk when it looks unneeded) is a deliberate choice, not
+// an accidental regression: every branch below carries real, non-empty changes, and the walk
+// still runs.
+test('runFilesetCheck builds the merge-history index even when every branch carries its own changes', async () => {
+  let calls = 0
+  const git = fakeGit({
+    branchExists: async () => true,
+    changedFiles: async () => ['a.mjs'],
+    commitsBetween: async () => { calls += 1; return [] },
   })
   const check = { name: 'fileset', kind: 'fileset' }
   const ctx = { git, runId: RUN_ID, runSha: 'runSha1', anchorSha: 'anchorSha1', tasks: [T1_TASK], currentPhase: 1, phaseError: null }
   const res = await runFilesetCheck(check, ctx)
   assert.equal(res.status, 'pass')
-  assert.deepEqual(res.branchShas, { [T1_BRANCH]: `refs/heads/${T1_BRANCH}-sha` })
+  assert.equal(calls, 1)
 })
 
 // The enforcing counterpart of doctor's run-tip case. From phase 2 onward the run tip is past
@@ -373,73 +625,23 @@ test('runFilesetCheck fails a branch parked at the run tip with no contribution'
   assert.match(res.output, /contributes no file changes/)
 })
 
-// The case the tip exclusion cannot see. The integrator merged a sibling after this branch was
-// created, so the run tip moved past the commit the branch is parked at: it is past the anchor,
-// it is not the tip, and it carries nothing. Only "was this branch merged in" tells it apart.
+// The case a run-tip-only exclusion cannot see. The integrator merged a sibling after this
+// branch was created, so the run tip moved past the commit the branch is parked at: it is past
+// the anchor, it is not the tip, and — with no merge in range naming this sha at all (the
+// default `commitsBetween`/`commitParents` stubs return nothing) — `landedForFiles` reads false
+// regardless of the sha's relationship to the tip.
 test('runFilesetCheck fails a branch parked at an intermediate post-anchor commit', async () => {
   const git = fakeGit({
     branchExists: async () => true,
     changedFiles: async () => [],
-    // Past the anchor and on the run branch, but NOT at its tip — so neither the anchor
-    // exclusion nor the tip exclusion fires, and only the merged-tips set tells it apart.
     isAncestor: async (_sha, target) => target === 'runSha2',
     resolveRef: async (ref) => (ref === 'refs/heads/run' ? 'runSha2' : 'midSha'),
-    mergedBranchTips: async () => new Set(['someOtherBranchTip']),
   })
   const check = { name: 'fileset', kind: 'fileset' }
   const ctx = { git, runId: RUN_ID, runSha: 'runSha2', anchorSha: 'anchorSha1', tasks: [T1_TASK], currentPhase: 1, phaseError: null }
   const res = await runFilesetCheck(check, ctx)
   assert.equal(res.status, 'fail')
   assert.match(res.output, /contributes no file changes/)
-})
-
-// One rev-list for the phase, not one per task.
-test('runFilesetCheck computes the merged-tips set once for the whole phase', async () => {
-  let calls = 0
-  const git = fakeGit({
-    branchExists: async () => true,
-    changedFiles: async () => [],
-    mergedBranchTips: async () => { calls += 1; return new Set() },
-  })
-  const check = { name: 'fileset', kind: 'fileset' }
-  const ctx = {
-    git, runId: RUN_ID, runSha: 'runSha1', anchorSha: 'anchorSha1',
-    tasks: [T1_TASK, { id: 'T2', phase: 1, files: ['b.mjs'] }], currentPhase: 1, phaseError: null,
-  }
-  const res = await runFilesetCheck(check, ctx)
-  assert.equal(res.status, 'fail')
-  assert.equal(calls, 1)
-})
-
-// The walk is only needed to excuse an empty diff. A phase where every branch carries work must
-// not pay for it, and must not be failed by it.
-test('runFilesetCheck does not walk the merged tips when every branch carries changes', async () => {
-  let calls = 0
-  const git = fakeGit({
-    branchExists: async () => true,
-    changedFiles: async () => ['a.mjs'],
-    mergedBranchTips: async () => { calls += 1; throw new GitError('must not be called') },
-  })
-  const check = { name: 'fileset', kind: 'fileset' }
-  const ctx = { git, runId: RUN_ID, runSha: 'runSha1', anchorSha: 'anchorSha1', tasks: [T1_TASK], currentPhase: 1, phaseError: null }
-  const res = await runFilesetCheck(check, ctx)
-  assert.equal(res.status, 'pass')
-  assert.equal(calls, 0)
-})
-
-// Fail closed: with no answer about what the run branch merged, an empty branch must not be
-// excused as integrated.
-test('runFilesetCheck fails with the git error when the merged-tips walk fails', async () => {
-  const git = fakeGit({
-    branchExists: async () => true,
-    changedFiles: async () => [],
-    mergedBranchTips: async () => { throw new GitError('bad revision anchorSha1..runSha1') },
-  })
-  const check = { name: 'fileset', kind: 'fileset' }
-  const ctx = { git, runId: RUN_ID, runSha: 'runSha1', anchorSha: 'anchorSha1', tasks: [T1_TASK], currentPhase: 1, phaseError: null }
-  const res = await runFilesetCheck(check, ctx)
-  assert.equal(res.status, 'fail')
-  assert.match(res.output, /bad revision/)
 })
 
 test('runFilesetCheck fails when a task branch contributes no file changes', async () => {
@@ -872,6 +1074,160 @@ test('runChecks yields pending for prototype-shadowing kinds', async () => {
   assert.deepEqual(results.map((r) => r.status), ['pending', 'pending', 'pending', 'pending'])
 })
 
+// --- a check kind must be a STRING before a runner is selected -------------------------------
+//
+// The test above pins prototype-shadowing kinds, and every one of them is a STRING. The spelling
+// nothing covered is the one JSON can express: an ARRAY. JavaScript coerces on property lookup and
+// does not coerce in a Set, so `["command"]` lands on the wrong side of every guard at once — it
+// survives cli.mjs's `--enforcement-only` filter (`!== 'command'`), satisfies
+// `Object.hasOwn(RUNNERS, kind)`, resolves `RUNNERS[kind]` to a real runner, and is absent from
+// `ALWAYS_ENFORCED_KINDS`, so `optional: true` is honoured.
+//
+// `teammates.gate.json` lives in the main worktree and is writable by any teammate, so this needs
+// no other foothold.
+
+// Every kind the manifest accepts, in the array spelling. `command` is the execution path;
+// `fileset`/`ownership` are the real enforcement runners; `agent`/`mcp` have no runner and would
+// otherwise land as pendings; `merge` is gate-computed and a manifest must not be able to supply
+// it at all.
+const MANIFEST_KINDS = ['command', 'fileset', 'ownership', 'agent', 'mcp', 'merge']
+
+test('an array-spelled kind never reaches a runner, for any kind the manifest accepts', async () => {
+  for (const kind of MANIFEST_KINDS) {
+    // `run` is present so that if the command runner were ever reached, it would have something
+    // to execute — the test must not pass merely because the payload was empty.
+    const results = await runChecks([{ name: `k-${kind}`, kind: [kind], run: 'node -e ""' }], {})
+    assert.equal(results.length, 1, `unexpected extra results for ${kind}`)
+    const [result] = results
+    assert.equal(result.status, 'fail', `an array-spelled ${kind} did not fail`)
+    assert.equal(result.optional, false, `an array-spelled ${kind} was optional`)
+    assert.match(result.output, /kind must be a string/)
+    // Named in the diagnosis, so an operator can find the entry in the manifest.
+    assert.match(result.output, /teammates\.gate\.json/)
+  }
+})
+
+// The false-PASS half, which the execution fix alone would not have closed: the real `fileset`
+// runner executes and then declines to block, because `ALWAYS_ENFORCED_KINDS.has` does not coerce
+// while the runner lookup does. Measured against the merged tree as
+// `{"verdict":"PASS","failed":[],"optionalFailed":["fileset"]}` — a forged manifest reaching a
+// false gate PASS, which is the bound this design has claimed since phase 1.
+test('an array-spelled enforcement kind cannot buy itself out with optional', async () => {
+  const results = await runChecks([{ name: 'fileset', kind: ['fileset'], optional: true }], {})
+  const verdict = aggregateVerdict(results)
+  assert.equal(verdict.verdict, 'FAIL')
+  assert.deepEqual(verdict.failed, ['fileset'])
+  assert.deepEqual(verdict.optionalFailed, [])
+})
+
+// Every non-string shape, not only the array. The rule is a type test, so it is asserted as one:
+// nothing that is not a string may reach a runner by any route.
+test('no non-string kind reaches a runner by any route', async () => {
+  const shapes = [
+    ['array', ['command']],
+    ['nested array', [['command']]],
+    ['object with toString', { toString: () => 'command' }],
+    ['number', 1],
+    ['boolean', true],
+    ['null', null],
+    ['undefined', undefined],
+    ['String object', new String('command')], // eslint-disable-line no-new-wrappers
+  ]
+  for (const [label, kind] of shapes) {
+    const results = await runChecks([{ name: label, kind, run: 'node -e ""' }], {})
+    assert.equal(results[0].status, 'fail', `${label} did not fail`)
+    assert.equal(results[0].optional, false, `${label} was optional`)
+    assert.match(results[0].output, /kind must be a string/, label)
+  }
+})
+
+// The control, so none of the above passes by breaking ordinary manifests: string kinds behave
+// exactly as before, including the pendings for kinds with no runner and the honoured `optional`
+// on an advisory command check.
+test('string kinds are unaffected by the type test', async () => {
+  const results = await runChecks([
+    { name: 'ok', kind: 'command', run: 'node -e ""' },
+    { name: 'advisory', kind: 'command', run: 'node -e "process.exit(1)"', optional: true },
+    { name: 'review', kind: 'agent' },
+  ], { cwd: process.cwd() })
+  const byName = Object.fromEntries(results.map((r) => [r.name, r]))
+  assert.equal(byName.ok.status, 'pass')
+  assert.equal(byName.advisory.status, 'fail')
+  assert.equal(byName.advisory.optional, true, 'an advisory command check lost its optional flag')
+  assert.equal(byName.review.status, 'pending')
+  assert.equal(aggregateVerdict(results).optionalFailed.includes('advisory'), true)
+})
+
+// The diagnosis has to name the entry the operator must go and fix. A malformed entry frequently
+// carries no `name` — `null` and a bare string are both reachable from a hand-written manifest —
+// and `name` is the only field `aggregateVerdict` reports, so two such entries both surfaced as
+// `{"failed":[null]}` under a message telling the operator to fix a `kind` on an entry they had
+// no way to identify. Position in the phase's check list is what distinguishes them.
+test('a nameless malformed entry is reported by its position in the check list', async () => {
+  const results = await runChecks([null, { name: 'ok', kind: 'command', run: 'node -e ""' }, 'just a string'], {
+    cwd: process.cwd(),
+  })
+  assert.equal(results[0].status, 'fail')
+  assert.equal(results[2].status, 'fail')
+  // Distinct, and each one points at the entry it came from — index 0 and index 2, not 0 and 1.
+  assert.match(results[0].output, /entry #0 in this phase's check list/)
+  assert.match(results[2].output, /entry #2 in this phase's check list/)
+  // ...and the verdict line alone locates them, which is where `[null, null]` was printed.
+  const { failed } = aggregateVerdict(results)
+  assert.deepEqual(failed, ["entry #0 in this phase's check list", "entry #2 in this phase's check list"])
+})
+
+// An entry that DOES have a name keeps it — the position is added to the message, not substituted
+// for the name, so an operator reading a named failure is not sent hunting by index instead.
+test('a named malformed entry keeps its name and still reports its position', async () => {
+  const [result] = await runChecks([{ name: 'lint', kind: ['command'], run: 'node -e ""' }], {})
+  assert.equal(result.name, 'lint')
+  assert.match(result.output, /entry #0 in this phase's check list/)
+})
+
+// The number in that message tells the operator which entry of `teammates.gate.json` to go and
+// fix, so it has to survive a caller that hands `runChecks` a SUBSET of the manifest's list.
+// `cli.mjs` does exactly that for `--enforcement-only`, which `complete`, `finish` and `prune-run`
+// all accept, by filtering the command checks out first — after which a recounted index names a different
+// entry than the message points at. The surviving entries' manifest positions travel on the
+// context instead of being recounted here.
+test('a filtered check list still reports the manifest position of a malformed entry', async () => {
+  // Manifest = [tests(command), lint(command), <malformed>, fileset]; the two command checks are
+  // filtered out, so the malformed entry is at list index 0 and manifest index 2.
+  const results = await runChecks(
+    [{ kind: ['fileset'] }, { name: 'fileset', kind: 'fileset' }],
+    { cwd: process.cwd(), checkPositions: [2, 3] },
+  )
+  assert.equal(results[0].status, 'fail')
+  assert.match(results[0].output, /entry #2 in this phase's check list/)
+  assert.doesNotMatch(results[0].output, /entry #0 in this phase's check list/)
+  // The fallback name carries the same position, so the verdict line alone locates the entry.
+  assert.equal(results[0].name, "entry #2 in this phase's check list")
+})
+// The no-positions fallback — an unfiltered list's own index IS the manifest position — needs no
+// test of its own here: the nameless-entry test above supplies no positions and asserts #0 and #2.
+
+// The `JSON.stringify` fallback in `malformedKindResult`. Unreachable from `teammates.gate.json`,
+// which is `JSON.parse`-only — every shape that file can express serialises. It guards the
+// EXPORTED api, which `cli.mjs` and these tests call with real JavaScript values, so it is pinned
+// through that door: without the `catch`, this throws out of `runChecks` and no verdict is
+// recorded at all, which is the failure mode the per-check `try` further down exists to prevent.
+test('a kind JSON cannot serialise is still reported rather than thrown', async () => {
+  const results = await runChecks([{ name: 'bigint', kind: 10n }], {})
+  assert.equal(results[0].status, 'fail')
+  assert.equal(results[0].optional, false)
+  assert.match(results[0].output, /kind must be a string, got 10/)
+})
+
+// `describePendingCheck` is exported and reachable independently of `runChecks`, and it computes
+// `optional` from the same non-coercing Set. A non-string kind must be non-optional there too.
+test('describePendingCheck forces a non-string kind non-optional', () => {
+  assert.equal(describePendingCheck({ name: 'a', kind: ['fileset'], optional: true }).optional, false)
+  assert.equal(describePendingCheck({ name: 'b', kind: ['command'], optional: true }).optional, false)
+  // ...while a genuine advisory command check keeps its flag.
+  assert.equal(describePendingCheck({ name: 'c', kind: 'command', optional: true }).optional, true)
+})
+
 test('runChecks records a fail when a runner throws', async () => {
   const git = fakeGit({ branchExists: async () => { throw new Error('unexpected boom') } })
   const ctx = { git, runId: RUN_ID, anchorSha: 'anchorSha1', tasks: [T1_TASK], currentPhase: 1, phaseError: null }
@@ -950,7 +1306,6 @@ test('every ref-shaped argument reaching git is a sha or a fully-qualified ref',
   assertAllShaped('commitsBetween', calls.commitsBetween.flatMap(({ from, to }) => [from, to]))
   assertAllShaped('changedFiles', calls.changedFiles.flatMap(({ base, branch }) => [base, branch]))
   assertAllShaped('commitParents', calls.commitParents)
-  assertAllShaped('mergedBranchTips', calls.mergedBranchTips.flatMap(({ runSha, anchorSha }) => [runSha, anchorSha]))
 
   assert.ok(calls.mergeBase.length > 0, 'mergeBase was never called')
   assert.ok(calls.isAncestor.length > 0, 'isAncestor was never called')
@@ -958,7 +1313,9 @@ test('every ref-shaped argument reaching git is a sha or a fully-qualified ref',
   assert.ok(calls.changedFiles.length > 0, 'changedFiles was never called')
   assert.ok(calls.commitParents.length >= 0)
   assert.ok(calls.fileAtCommit.length > 0, 'fileAtCommit was never called')
-  assert.ok(calls.mergedBranchTips.length > 0, 'mergedBranchTips was never called')
+  // `mergedBranchTips` is no longer called by anything in this file — the fix-round rewrite
+  // replaced it with `mergedParentFiles`, built from `commitsBetween`/`commitParents`/
+  // `changedFiles` directly, which the assertions above already cover.
 })
 
 // --- real-repo regressions: H2 (evil merge) and H3 (empty task branch) ----------------------
@@ -984,6 +1341,50 @@ function singleTaskPlan() {
     '- Create: `a.mjs`',
     '',
     '**Depends:** none',
+    '',
+  ].join('\n')
+}
+
+// Two phases whose declared sets OVERLAP: T2 modifies a file T1 created. Legal across phases
+// (`scripts/phases.mjs` enforces disjointness only within a phase) and routine in a real plan,
+// which is what makes it the shape a containment-only run-tip test lets through.
+function overlappingTwoPhasePlan() {
+  return [
+    '### Task 1: first task',
+    '',
+    '**Files:**',
+    '- Create: `a.mjs`',
+    '- Create: `b.mjs`',
+    '',
+    '**Depends:** none',
+    '',
+    '### Task 2: second task',
+    '',
+    '**Files:**',
+    '- Modify: `a.mjs`',
+    '',
+    '**Depends:** T1',
+    '',
+  ].join('\n')
+}
+
+// Two phases with disjoint declared sets, both of which a single merge carries — so two run-tip
+// refs are each individually eligible for the same parent and only scarcity separates them.
+function twoPhaseBothFilesPlan() {
+  return [
+    '### Task 1: first task',
+    '',
+    '**Files:**',
+    '- Create: `a.mjs`',
+    '',
+    '**Depends:** none',
+    '',
+    '### Task 2: second task',
+    '',
+    '**Files:**',
+    '- Modify: `b.mjs`',
+    '',
+    '**Depends:** T1',
     '',
   ].join('\n')
 }
@@ -1275,6 +1676,31 @@ test('a fast-forward-integrated branch is failed, not excused — the stated lim
   })
 })
 
+// The same limit, at `deriveContext`'s own level rather than `runFilesetCheck`'s: a
+// fast-forward leaves no merge commit, so the branch's sha is never a key in `mergedFiles`
+// (built by `mergedParentFiles`, which walks only merge commits), and `landedForFiles` reads
+// false even though the work genuinely is on the run branch. `tm-integrator`'s contract is
+// `--no-ff` for exactly this reason.
+test('deriveContext does not read a fast-forward-integrated branch as integrated (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'plan.md'), singleTaskPlan(), 'utf8')
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--ff-only', 'teammates/r1/T1'])
+
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+    assert.deepEqual(ctx.integratedPhases, [])
+    assert.equal(ctx.currentPhase, 1)
+  })
+})
+
 // H3-empty: a single `git commit --allow-empty`, honestly merged, is a real commit — a
 // commit-counting guard would call the phase integrated even though the branch touched no
 // file. The guard must count file changes, not commits.
@@ -1429,6 +1855,102 @@ test('a phase-2 branch parked at the run tip does not read as integrated (real r
     assert.equal(res.status, 'fail')
     assert.match(res.output, /T2: branch teammates\/r1\/T2 contributes no file changes/)
     assert.doesNotMatch(res.output, /T3:/)
+  })
+})
+
+// Fix-round rewrite (round 4): three earlier designs tried to classify the SHARED SHA as
+// suspicious or benign, and each broke something real (see the comment above `mergedParentFiles`
+// in scripts/gate-runner.mjs for the full history). This test pins the design that replaced
+// them: T3 does the real work and is merged `--no-ff`; T2 never commits and its ref is pointed
+// at T3's own tip instead of at the merge commit that carried it. `deriveContext` no longer
+// special-cases the shared sha at all — it asks, per task, whether the merge that landed this
+// sha actually carried THIS task's declared files. The merge that landed T3's tip carried
+// `c.mjs`, T3's own file, never T2's `b.mjs`, so T2 reads false and phase 2 does not integrate
+// on T3's legitimate merge alone. `integratedPhases` is the ordinary computed array on every
+// path — no dedicated phaseError, no silent exclusion. Phase 1 IS genuinely integrated and
+// phase 2 genuinely is not, so `currentPhase` reads the unremarkable 2, and
+// `runFilesetCheck`'s own empty-diff test (over the SAME shared `mergedParentFiles` index)
+// reports T2's true, actionable, self-contained failure.
+test('deriveContext does not credit a ref parked on a merged sibling\'s tip, and integratedPhases stays the computed set', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'plan.md'), twoInSecondPhasePlan(), 'utf8')
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+
+    await sh(['checkout', '-b', 'teammates/r1/T3'])
+    await writeFile(path.join(root, 'c.mjs'), 'export const c = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T3 work'])
+    const t3Tip = (await sh(['rev-parse', 'teammates/r1/T3'])).stdout.trim()
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T3', 'teammates/r1/T3'])
+
+    // T2 never commits: its ref is pointed straight at T3's own tip commit.
+    await sh(['branch', 'teammates/r1/T2', t3Tip])
+
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+
+    // Phase 1 genuinely integrated, and `integratedPhases` says so directly — no dedicated
+    // phaseError, no `[]` regardless of what is actually integrated (the shape that inverted
+    // `plan-drift`'s verdict in the previous fix round).
+    assert.deepEqual(ctx.integratedPhases, [1])
+    assert.equal(ctx.currentPhase, 2)
+    assert.equal(ctx.phaseError, null)
+
+    const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
+    assert.equal(res.status, 'fail')
+    assert.match(res.output, /T2: branch teammates\/r1\/T2 contributes no file changes/)
+    assert.doesNotMatch(res.output, /T3:/)
+  })
+})
+
+// The discriminator's other half: two refs sharing the RUN TIP itself are the ordinary state
+// every fleet passes through between `git checkout -B <task> <run branch>` and its first
+// commit. Reproduced with the real CLI (fix-round finding A): a phase-1 plan with every task
+// branch freshly created and nothing committed used to report each task as "parked at" a
+// sibling; the true, actionable cause is that none of them has done any work yet.
+test('deriveContext does not treat siblings sharing the run tip as a violation (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'plan.md'), twoInSecondPhasePlan(), 'utf8')
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+
+    // T1 is the only phase-1 task in this plan; give it its own real, unmerged commit so the
+    // run tip advances past main, then park T2 and T3 (both phase 2, still un-started) exactly
+    // where `git checkout -B <task> <run branch>` would put them.
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+
+    const runTip = (await sh(['rev-parse', 'run'])).stdout.trim()
+    await sh(['branch', 'teammates/r1/T2', runTip])
+    await sh(['branch', 'teammates/r1/T3', runTip])
+
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+
+    assert.equal(ctx.phaseError, null)
+    assert.deepEqual(ctx.integratedPhases, [1])
+    assert.equal(ctx.currentPhase, 2)
+
+    const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
+    assert.equal(res.status, 'fail')
+    assert.match(res.output, /T2: branch teammates\/r1\/T2 contributes no file changes/)
+    assert.match(res.output, /T3: branch teammates\/r1\/T3 contributes no file changes/)
+    assert.doesNotMatch(res.output, /parked at the other's tip/)
   })
 })
 
@@ -2074,4 +2596,251 @@ test('a solo run builds no preview and consults no links even when ctx.previewLi
   const results = await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], ctx)
   assert.deepEqual(results.map((r) => [r.name, r.status]), [['test', 'pass']])
   assert.deepEqual(calls.map((c) => c.cwd), ['/project/root'])
+})
+
+// --- ownWorkBase: the run-tip position, closed by scarcity (real repo) -----------------------
+//
+// Was a LIMIT: the gate FAILed a genuinely, fully landed task because a ref at the run tip is not
+// a key in `mergedParentFiles`'s index. `creditRunTipTasks` matches such a ref to a merged parent
+// that carried its whole declared set and that no other task ref already points at. This is the
+// exact construction the LIMIT used to pin, with the assertions inverted — the shape was not
+// changed to make it pass.
+test('ownWorkBase: a fix round re-pointing an already-integrated branch at the run tip reads as landed (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'plan.md'), singleTaskPlan(), 'utf8')
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+
+    // The brief's own recommended fix-round step: `git checkout -B teammates/r1/T1 run`. T1's
+    // work is already, genuinely, on the run branch — this only moves where the CONVENTIONAL
+    // REF points, at a commit that is already the run tip. Nothing else claims T1's merge, so
+    // the parent is free and T1 matches it.
+    await sh(['branch', '-f', 'teammates/r1/T1', 'run'])
+
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+    assert.deepEqual(ctx.integratedPhases, [1])
+
+    const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
+    assert.equal(res.status, 'pass')
+  })
+})
+
+// The regression guard, and the reason `creditRunTipTasks` matches instead of testing
+// containment. A closure that asked only "did some merged parent carry this task's whole declared
+// set" (`f6e2191`, reverted by `227abf2`) passed this: T1's merge carried a SUPERSET of T2's
+// declared set, which a phase-2 task that only MODIFIES a file phase 1 created has by
+// construction. T1's own ref still points at that parent, so it is spent and T2 matches nothing.
+// If this test ever goes green on a PASS, the enforcing check has been traded away again.
+test('a run-tip ref is NOT credited with a merge another task ref still points at (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'plan.md'), overlappingTwoPhasePlan(), 'utf8')
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+
+    // T1 declares and lands BOTH files; T2 declares only `a.mjs` and never writes anything.
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    await writeFile(path.join(root, 'b.mjs'), 'export const b = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+
+    await sh(['branch', '-f', 'teammates/r1/T2', 'run'])
+
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+    assert.equal(ctx.currentPhase, 2)
+    const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
+    assert.equal(res.status, 'fail')
+    assert.match(res.output, /T2: branch teammates\/r1\/T2 contributes no file changes past its fork point/)
+  })
+})
+
+// Scarcity is a cap, not a per-ref test: two refs both re-pointed to the run tip cannot both be
+// credited with the one merge between them, so one is always left over and its phase does not
+// read as integrated.
+test('two refs at the run tip cannot both be credited with a single merged parent (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'plan.md'), twoPhaseBothFilesPlan(), 'utf8')
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    await writeFile(path.join(root, 'b.mjs'), 'export const b = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+
+    await sh(['branch', '-f', 'teammates/r1/T1', 'run'])
+    await sh(['branch', '-f', 'teammates/r1/T2', 'run'])
+
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+    const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
+    assert.equal(res.status, 'fail')
+  })
+})
+
+// --- the spare parent, closed (real repo) ----------------------------------------------------
+//
+// Was a LIMIT. Two merges crediting the SAME task — an initial integration plus a fix round's own
+// merge — put two parents in the index while only one ref points AT one of them, and the leftover
+// was matchable by a run-tip ref whose declared set it contained in full. `spentParents` closes it
+// by spending a parent that is an ANCESTOR of a task ref whose declared set the parent's carried
+// files intersect, not only one a ref points directly at. Same construction the LIMIT pinned, with
+// the assertion inverted.
+test('the spare parent of a task merged twice is spent, not matchable by a run-tip ref (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'plan.md'), overlappingTwoPhasePlan(), 'utf8')
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+
+    // T1 lands `a.mjs`, then a fix round lands a second merge also touching `a.mjs`. Two parents
+    // now carry T1's file; T1's ref can only point at one of them.
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+    await sh(['checkout', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 2\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 fix round'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1 again', 'teammates/r1/T1'])
+
+    // T2 declares `a.mjs`, writes nothing, parks at the run tip. Both parents carry `a.mjs` and
+    // both are ancestors of T1's ref, so neither is free.
+    await sh(['branch', '-f', 'teammates/r1/T2', 'run'])
+
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+    const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
+    assert.equal(res.status, 'fail')
+    assert.match(res.output, /T2: branch teammates\/r1\/T2 contributes no file changes past its fork point/)
+  })
+})
+
+// The direction spending must NOT break, and the reason `spentParents` requires the carried files
+// to intersect the ref's OWN declared set rather than spending on ancestry alone. A phase-2 task
+// legitimately forks from the run tip after phase 1 was merged, so phase 1's merged parent is an
+// ancestor of the phase-2 ref. On ancestry alone that parent reads as spent by a task that never
+// earned it, and a fix round re-pointing phase 1's own ref at the run tip fails a genuinely landed
+// task — the exact false FAIL this whole mechanism exists to remove. Measured, not reasoned about:
+// deleting the intersection guard turns this test red.
+test('a later sibling does not spend the merged parent of an earlier task it never earned (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'plan.md'), twoPhaseBothFilesPlan(), 'utf8')
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+
+    // T2 forks AFTER T1's merge, so T1's merged parent is an ancestor of T2's tip.
+    await sh(['checkout', '-b', 'teammates/r1/T2', 'run'])
+    await writeFile(path.join(root, 'b.mjs'), 'export const b = 1\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T2 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T2', 'teammates/r1/T2'])
+
+    // T1's fix round finds nothing to change and leaves its ref at the run tip.
+    await sh(['branch', '-f', 'teammates/r1/T1', 'run'])
+
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+    const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
+    assert.equal(res.status, 'pass')
+  })
+})
+
+test('creditRunTipTasks matches on containment, spends each parent once, and never credits an empty declared set', () => {
+  const mergedFiles = new Map([
+    ['P1', new Set(['a.mjs', 'b.mjs'])],
+    ['P2', new Set(['c.mjs'])],
+  ])
+  const runSha = 'RUNTIP'
+
+  // A parent no ref points at, containing the whole declared set: credited.
+  assert.deepEqual(
+    [...creditRunTipTasks({
+      tasks: [{ id: 'T1', files: ['a.mjs'] }],
+      shaByTask: new Map([['T1', runSha]]),
+      runSha, mergedFiles,
+    })],
+    ['T1'],
+  )
+
+  // The same parent, but another task's ref points AT it: spent, so nothing is credited.
+  assert.deepEqual(
+    [...creditRunTipTasks({
+      tasks: [{ id: 'T1', files: ['a.mjs', 'b.mjs'] }, { id: 'T2', files: ['a.mjs'] }],
+      shaByTask: new Map([['T1', 'P1'], ['T2', runSha]]),
+      runSha, mergedFiles,
+    })],
+    [],
+  )
+
+  // Two run-tip tasks, one eligible parent: exactly one is credited, never both.
+  assert.equal(
+    creditRunTipTasks({
+      tasks: [{ id: 'T1', files: ['a.mjs'] }, { id: 'T2', files: ['b.mjs'] }],
+      shaByTask: new Map([['T1', runSha], ['T2', runSha]]),
+      runSha, mergedFiles,
+    }).size,
+    1,
+  )
+
+  // Augmenting, not greedy: T1 can only use P1, T2 can use either. T1 must not be starved by T2
+  // taking P1 first.
+  assert.equal(
+    creditRunTipTasks({
+      tasks: [{ id: 'T2', files: [] }, { id: 'T1', files: ['a.mjs'] }],
+      shaByTask: new Map([['T1', runSha], ['T2', runSha]]),
+      runSha, mergedFiles,
+    }).has('T1'),
+    true,
+  )
+
+  // Partial containment is not containment.
+  assert.deepEqual(
+    [...creditRunTipTasks({
+      tasks: [{ id: 'T1', files: ['a.mjs', 'c.mjs'] }],
+      shaByTask: new Map([['T1', runSha]]),
+      runSha, mergedFiles,
+    })],
+    [],
+  )
+
+  // An empty declared set is contained in every parent and must still be credited by none.
+  assert.deepEqual(
+    [...creditRunTipTasks({
+      tasks: [{ id: 'T1', files: [] }],
+      shaByTask: new Map([['T1', runSha]]),
+      runSha, mergedFiles,
+    })],
+    [],
+  )
 })

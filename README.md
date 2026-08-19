@@ -36,6 +36,18 @@ edits then take effect on the next session without a push:
     /plugin marketplace add /path/to/claude-teammates
     /plugin install claude-teammates
 
+### What installing registers
+
+Beyond the skills and commands, the plugin declares a `SubagentStop` hook with no matcher and
+`async: false`. That means **every** subagent stop on this machine — in any project, including one
+with no teammates run — synchronously spawns `node scripts/subagent-stop.mjs` before the stop is
+allowed to complete.
+
+The handler is written to be cheap and to fail open: it resolves the stopping agent through a
+worktree location record and returns immediately when it finds none, which is the case for every
+subagent outside a run, and any error is an allow. But it is a synchronous spawn on a hot path and
+it is machine-wide rather than scoped to this repository, so it is worth knowing before installing.
+
 ### Update notices
 
 Claude Code updates plugins in the background and says nothing, so a new version usually arrives
@@ -120,6 +132,15 @@ Seeing what is actually there:
 
 - `doctor --run <id> --plan <path>` — the run as git describes it: branch tips, real contributions,
   worktrees, dirty paths. `digest` renders what the agents wrote; this asks git instead
+- `liveness --run <id> --plan <path>` — which of the current phase's teammates have committed or
+  touched their worktree inside the window (20 minutes by default, `--stale` to change it). Exit 1
+  when one has done neither, and only when both signals were measured. Exit 2 whenever it did not
+  measure what was asked: no current phase can be named, the run id matches nothing, the
+  working-tree plan has no task in that phase, or a teammate's row reads `unknown` — no worktree of
+  its branch could be read, or the walk hit its 5000-entry cap. The walk skips what git ignores, so
+  a generated directory in .gitignore keeps the report measurable. It is a
+  supervision report and nothing else reads it: both signals are forgeable by the teammate they
+  describe, so a stalled row is a prompt to look, never gate evidence
 - `plan-drift --run <id> --plan <path>` — what changed in the plan since the anchor, and whether it
   changed too late to reach the work
 - `digest --run <id>` — the compact fleet status board
@@ -129,6 +150,12 @@ Reviews:
 - `review-dispatch --run <id>` — generate the reviewer dispatches from the manifest, with the tier,
   findings path and scratch worktree already resolved
 - `collect-reviews --run <id>` — rebuild a `gate --results` file from the reviewers' findings drops
+
+One lens carries a method of its own. `claims` reads the diff for sentences asserting a guarantee —
+a comment, a skill line, a spec line — then breaks what each one protects and runs the suite: a
+claim whose mutation leaves the suite green is a finding. It is bounded, not exhaustive. It probes a
+capped number of the claims it enumerates and reports the rest under an `unprobed` key, and it
+returns nothing at all when it cannot get a green baseline first.
 
 Housekeeping:
 

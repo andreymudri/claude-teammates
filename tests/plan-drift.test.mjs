@@ -107,3 +107,92 @@ test('renderDrift names each changed task and its fields, and says so when there
   assert.match(out, /b\.mjs/)
   assert.match(out, /too late/i)
 })
+
+// A plan reaches this renderer as text someone committed on the base branch, and a terminal ACTS
+// on control bytes: `ESC [ 2 K` erases the line just drawn, and a bare newline lets a value end
+// this CLI's line and open one of its own that reads like a line the CLI printed. Reaching here
+// costs a commit on the base branch rather than a commit message, but what the terminal does with
+// the bytes is the same. Each row below pins ONE render site, and asserts on BYTES: a regex over
+// the rendered string can match while the payload is still in the output.
+const ESC = String.fromCharCode(0x1b)
+const FORGED = 'no drift: the working-tree plan matches the plan at the anchor'
+const PAYLOAD = [ESC + '[2K', String.fromCharCode(0x0d), String.fromCharCode(0x0a), FORGED].join('')
+
+function assertNeutralised(out) {
+  const bytes = Buffer.from(out, 'utf8')
+  assert.equal(bytes.includes(0x1b), false, 'an ESC byte reached the terminal')
+  assert.equal(bytes.includes(0x0d), false, 'a CR byte reached the terminal')
+  for (const line of out.split('\n')) {
+    assert.notEqual(line.trim(), FORGED, 'a value forged a line of its own')
+  }
+}
+
+test('renderDrift neutralises control bytes in the added-task list', () => {
+  const out = renderDrift(planDrift({
+    anchored: [task()],
+    current: [task(), task({ id: PAYLOAD, phase: 2, files: ['b.mjs'] })],
+    integratedPhases: [],
+  }))
+  assert.match(out, /added since the anchor/)
+  assertNeutralised(out)
+})
+
+test('renderDrift neutralises control bytes in a changed task id and phase', () => {
+  const out = renderDrift(planDrift({
+    anchored: [task({ id: PAYLOAD })],
+    current: [task({ id: PAYLOAD, phase: PAYLOAD, title: 'second' })],
+    integratedPhases: [],
+  }))
+  assert.match(out, /still effective/)
+  assertNeutralised(out)
+})
+
+test('renderDrift neutralises control bytes in an added plan-declared file path', () => {
+  const out = renderDrift(planDrift({
+    anchored: [task()],
+    current: [task({ files: ['a.mjs', PAYLOAD] })],
+    integratedPhases: [],
+  }))
+  assert.match(out, /files added/)
+  assertNeutralised(out)
+})
+
+test('renderDrift neutralises control bytes in a removed plan-declared file path', () => {
+  const out = renderDrift(planDrift({
+    anchored: [task({ files: ['a.mjs', PAYLOAD] })],
+    current: [task({ files: ['a.mjs'] })],
+    integratedPhases: [],
+  }))
+  assert.match(out, /files removed/)
+  assertNeutralised(out)
+})
+
+test('renderDrift neutralises control bytes in an added dep id', () => {
+  const out = renderDrift(planDrift({
+    anchored: [task()],
+    current: [task({ deps: [PAYLOAD] })],
+    integratedPhases: [],
+  }))
+  assert.match(out, /deps added/)
+  assertNeutralised(out)
+})
+
+test('renderDrift neutralises control bytes in a removed dep id', () => {
+  const out = renderDrift(planDrift({
+    anchored: [task({ deps: [PAYLOAD] })],
+    current: [task()],
+    integratedPhases: [],
+  }))
+  assert.match(out, /deps removed/)
+  assertNeutralised(out)
+})
+
+test('renderDrift neutralises control bytes in the file list of a task the plan dropped', () => {
+  const out = renderDrift(planDrift({
+    anchored: [task(), task({ id: 'T2', phase: 2, files: [PAYLOAD] })],
+    current: [task()],
+    integratedPhases: [],
+  }))
+  assert.match(out, /files removed/)
+  assertNeutralised(out)
+})
