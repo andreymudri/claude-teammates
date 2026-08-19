@@ -1136,6 +1136,8 @@ phase 1 `T1 T2 T3` · phase 2 `T4 T5` · phase 3 `T6 T7 T8`.
 - Modify: `skills/parallel-execution/SKILL.md`
 - Modify: `scripts/brief.mjs`
 - Modify: `scripts/state.mjs`
+- Modify: `agents/tm-implementer.md`
+- Modify: `skills/fleet-supervision/SKILL.md`
 - Test: `tests/cli.test.mjs`
 - Test: `tests/skill-contracts.test.mjs`
 
