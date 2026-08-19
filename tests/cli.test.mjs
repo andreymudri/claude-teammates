@@ -5102,6 +5102,30 @@ test('init-run run twice preserves fixRounds recorded between the two runs', asy
   })
 })
 
+// The run branch `init-run` records is what the SubagentStop guard resolves a stopping teammate
+// to its task through, so skills/parallel-execution instructs checking the run branch out BEFORE
+// init-run. This pins the mechanism that makes that instruction load-bearing: init-run records the
+// branch it runs on when that branch is not the base, and records nothing when it is.
+test('init-run records the checked-out run branch, and records none on the base branch', async () => {
+  await withRepo(async ({ root, planPath, io, git }) => {
+    // withRepo leaves a non-base branch (run-branch) checked out; base is main.
+    await runCli(['init-run', planPath, '--run', 'onbranch', '--root', root], io)
+    assert.equal(
+      (await readPlan(root, 'onbranch')).runBranch,
+      'run-branch',
+      'init-run on a non-base branch records that branch as the run branch',
+    )
+
+    git(['checkout', '--quiet', 'main'])
+    await runCli(['init-run', planPath, '--run', 'onbase', '--root', root], io)
+    const onBase = await readPlan(root, 'onbase')
+    assert.ok(
+      onBase.runBranch === null || !('runBranch' in onBase),
+      'init-run on the base branch records no run branch — the guard has nothing to resolve through',
+    )
+  })
+})
+
 // Absent, not empty: an empty `gates` object is indistinguishable from a recorded one to
 // anything that only checks the key's presence, so a fresh run must carry neither key.
 test('init-run on a fresh run id emits neither gates nor fixRounds', async () => {

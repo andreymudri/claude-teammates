@@ -153,6 +153,18 @@ check, and — as with every other way this can go inert — it looks exactly li
 nothing deadlocks — blocking on the *phase gate* would, because the gate cannot run until the phase
 is finished.
 
+> **Shipped 2026-08-16 (run `substop`, task T5).** This section is the pre-implementation problem
+> statement; the design it prescribes was built, and the specifics moved — read the "today" and
+> "requires a new exit code" wording below as history, not as a description of the current CLI. As
+> implemented: the rejection-only code is **3** (`COMPLETE_REJECTED`, `scripts/cli.mjs:900`, returned
+> at `cli.mjs:1074`), pinned by `tests/cli.test.mjs` *"complete exits 3 when the recomputed gate
+> rejects the task"*; **4** (`COMPLETE_CANNOT_VERIFY`, `cli.mjs:905`) now carries only the
+> cannot-run cases, pinned by *"complete exits 4 when a check could not run at all"*; the handler
+> blocks on 3 and allows every other code. `complete` **does** carry `--enforcement-only` in its
+> flag table (`cli.mjs:250`), and under that flag it returns 0 at `cli.mjs:3663` **without** writing
+> `status.json` — a second exit-0 path distinct from the status-writing one at `cli.mjs:3666`. The
+> paragraphs below described why code 3 had to exist; they are not a live account of the codes.
+
 **The exit codes it returns today cannot carry this decision.** As `scripts/cli.mjs` stands:
 
 - **0** — the task passes; the run's status file is written (`cli.mjs:3666`) and the command
@@ -317,6 +329,14 @@ the phase gate remains the thing that decides.
   false gate PASS**, because the verdict is recomputed from git: `deriveContext` resolves base, run,
   anchor and plan from refs and takes no status argument, the checks receive only that context, and
   `complete` marks a task done only after recomputing.
+
+  That bound is about records under `.teammates/`. The gate **manifest** `teammates.gate.json` is a
+  separate teammate-writable surface with the same freedom, and it *is* consulted for verdicts — it
+  declares the check list — so it needs its own bound, added later: a check whose `kind` is not a
+  string is refused at the runner lookup rather than treated as passed (`hasUsableKind`,
+  `scripts/gate-runner.mjs:66`, applied at `gate-runner.mjs:1038`). A forged manifest can still
+  declare fewer checks, but it cannot smuggle a malformed check kind past the runner as a silent
+  pass. Keep this bound stated alongside the `.teammates/` one; the two protect different files.
 
   Files under `.teammates/` *are* read — for bookkeeping, not for verdicts. `gate` reads
   `status.json` at `cli.mjs:3463` and `complete` at `cli.mjs:3652`; earlier drafts of this
