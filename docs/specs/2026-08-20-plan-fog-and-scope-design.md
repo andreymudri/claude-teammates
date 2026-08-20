@@ -73,11 +73,25 @@ unparseable.
 
 Stated in `writing-plans`, and the rule the whole feature rests on:
 
-> Can you state the question precisely **now** — not answer it. If yes, it is a task, even when it
-> is blocked and cannot be worked yet. If no, it is Not Yet Specified.
+> Can you write it as a **task** — a declared file set, and acceptance criteria a green suite would
+> satisfy? If yes, it is a task, even when it is blocked and cannot be worked yet. If no, it is Not
+> Yet Specified, however sharply you can phrase the question.
 
 With the consequence spelled out: do not pre-slice fog into task-shaped pieces. One fog entry may
 graduate into three tasks, or into none.
+
+**The test is about dispatchability, not sharpness**, and that is a deliberate departure from
+`wayfinder`, where the unit is a *decision ticket* and a precisely-stated question is therefore
+already a ticket. This plugin has no decision-ticket unit. Its unit is an implementation task with a
+declared file set, dispatched to an implementer that will write code against acceptance criteria. So
+a question can be perfectly sharp and still have nowhere to go — `Should finish report a phase whose
+reviewers disagreed?` is exact, in scope, and un-dispatchable, because no file set follows from it
+until someone decides the answer.
+
+Importing the sharpness test unchanged would have made both examples in §6 into tasks, and a task
+manufactured out of an undecided question carries an invented file list and invented acceptance
+criteria. That is the exact shape of the failure in §1: a plan asserting criteria that were never
+true, which an implementer then satisfies.
 
 ### 3.2 The mechanical rules
 
@@ -87,7 +101,7 @@ Three rules, each encoding a section's purpose, each checkable by shape alone:
 |---|---|---|---|
 | `## Out of Scope` | must carry a reason clause | `- Caching` | `- Caching — the destination is the gate verdict, not latency` |
 | `## Out of Scope` | requires a `## Destination` in the plan | the section with no destination | the section with one |
-| `## Not Yet Specified` | must end with `?` | `- Rewrite scripts/reviews.mjs` | `- Should reviews keep per-lens verdicts?` |
+| `## Not Yet Specified` | must contain a `?` | `- Rewrite scripts/reviews.mjs` | `- Should reviews keep per-lens verdicts?` |
 
 **A reason clause is defined by shape, not by judgement:** the entry contains a separator — an em
 dash (`—`), an en dash (`–`), a spaced hyphen (` - `), or a spaced double hyphen (` -- `) — with at
@@ -95,9 +109,12 @@ least one non-whitespace character after it. Nothing checks that the text after 
 *good* reason; that is not decidable and the spec does not pretend otherwise. What the rule buys is
 that a boundary cannot be recorded as a bare noun.
 
-The question-mark rule reads the entry's final non-whitespace character, after the same
-normalisation the rest of the parser applies, so a trailing backtick or emphasis marker does not
-defeat it.
+The question-mark rule asks whether the entry **contains** a `?`, not whether it ends with one. It
+was written as "ends with" first, and §10 of this spec broke it on the first try: a fog entry worth
+reading is usually a question *plus the context that makes it a question* — what it depends on, what
+it would change. Requiring the final character to be `?` forbids that context and pushes the author
+toward a bare question they then explain nowhere. Containment refuses the same work-item-in-note's-
+clothing (`Rewrite scripts/reviews.mjs` has no `?` anywhere) without forbidding the explanation.
 
 A reason clause is what makes a boundary reviewable — an entry without one is a word, not a
 decision. A question mark is what keeps fog from becoming a dumping ground for work nobody wanted to
@@ -281,3 +298,21 @@ half that confers authority. It would automate the inert half and hide the half 
   with the gate as sole authority.
 - **Enforcing fog at the gate.** §6.1 states why, and it does not become in scope by being asked for
   again without a way to recompute it from git.
+
+## 10. Not yet specified
+
+In scope for this feature, and written here rather than designed, because none of it can be written
+as a task yet — the §3.1 test applied to this spec itself.
+
+- **Where does a resolved fog entry go?** Today an entry that gets decided either becomes a task or
+  disappears, and the decision that produced it is recorded nowhere. `wayfinder` answers this with
+  the map's "Decisions so far" index, which is a third section and a graduation ritual this spec has
+  not designed. Whether this plugin needs one, and whether it would be a plan section or run state
+  under `.teammates/<run>/`, is undecided — and the answer changes §7, since graduation would then
+  have to write the decision as well as delete the entry.
+- **Does `finish` reporting open fog change how a run is judged in practice?** §6.1 fixes that it
+  must not change the *verdict*. It does not establish what an operator does with the report, and
+  nobody has run a fleet with one yet.
+- **Should `status` show open fog too, or only `finish`?** §6 chose `finish` alone on the grounds
+  that fog is a landing-time concern. That was a judgement, not a measurement, and a run whose fog
+  matters mid-flight would show it.
