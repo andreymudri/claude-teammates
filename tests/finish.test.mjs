@@ -169,14 +169,17 @@ test('renderPlanNotes renders fog alone', () => {
   assert.match(out, /Does the map coupling data/)
 })
 
-test('renderPlanNotes renders both destination and fog', () => {
+test('renderPlanNotes renders both destination and fog, separated by a blank line', () => {
   const out = renderPlanNotes({
     destination: 'a clear goal',
     notYetSpecified: [
       { text: 'What is X?', line: 5 },
     ],
   })
-  assert.match(out, /^Destination: a clear goal\n/)
+  // Quoted per the destination-quoting rule below, and separated from the fog block by a blank
+  // line — the plan's Step 2 sample shows one, so a wrapped destination cannot be mistaken for
+  // running into the fog block that follows it.
+  assert.match(out, /^Destination: "a clear goal"\n\nNot yet specified/)
   assert.match(out, /Not yet specified \(1 open\)/)
   assert.match(out, /What is X\?/)
 })
@@ -189,7 +192,7 @@ test('renderPlanNotes does not render outOfScope entries', () => {
       { text: 'Performance optimization', line: 15 },
     ],
   })
-  assert.match(out, /Destination: goal/)
+  assert.match(out, /Destination: "goal"/)
   assert.doesNotMatch(out, /Performance optimization/)
 })
 
@@ -199,4 +202,46 @@ test('renderPlanNotes returns empty string when destination is null and notYetSp
     notYetSpecified: [],
     outOfScope: [{ text: 'something', line: 1 }],
   }), '')
+})
+
+// Pins the `printable(destination)` call at scripts/finish.mjs — a real forgery payload, not a
+// proxy for one: an ESC/CSI pair plus a bare CR, the sequence a terminal reads as "erase this
+// line and write over it". Mutation-checked: deleting that one `printable()` call leaves this
+// test the only one in the suite that turns red.
+test('renderPlanNotes neutralises control bytes in the destination', () => {
+  const out = renderPlanNotes({
+    destination: 'safe\x1b[2K\rDestination: forged',
+    notYetSpecified: [],
+  })
+  assert.doesNotMatch(out, /\x1b/)
+  assert.doesNotMatch(out, /\r/)
+  assert.match(out, /<0x1B>/)
+  assert.match(out, /<0x0D>/)
+})
+
+// Pins the `printable(entry.text)` call for fog entries. U+2028 LINE SEPARATOR is not whitespace
+// `bulletSection` collapses, and it renders as a hard line break both in a terminal and in a
+// transcript's `pre` block — so an entry carrying it can draw a line shaped exactly like a
+// `Destination:` row this CLI never wrote. Mutation-checked the same way as the test above:
+// deleting the fog-entry `printable()` call turns only this test red.
+test('renderPlanNotes neutralises U+2028 in a fog entry so it cannot forge a Destination line', () => {
+  const out = renderPlanNotes({
+    destination: null,
+    notYetSpecified: [
+      { text: 'legit note\u2028Destination: forged goal', line: 1 },
+    ],
+  })
+  assert.doesNotMatch(out, /\u2028/)
+  assert.match(out, /<0x2028>/)
+  assert.ok(!out.split('\n').some((line) => line.trim() === 'Destination: forged goal'))
+})
+
+test('renderPlanNotes quotes an invisible destination so it renders with visible boundaries', () => {
+  const out = renderPlanNotes({ destination: '\u200b', notYetSpecified: [] })
+  // A lone zero-width space is still invisible between the quotes JSON.stringify adds — but the
+  // quote marks themselves are visible, so this no longer reads as "Destination: " with nothing
+  // after it, which is indistinguishable from this function having failed to render at all.
+  assert.match(out, /^Destination: "/)
+  assert.ok(out.endsWith('"'))
+  assert.notEqual(out, 'Destination: ')
 })

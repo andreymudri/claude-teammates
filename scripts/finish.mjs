@@ -132,21 +132,44 @@ export function renderRunSummary(runId, phaseResults = []) {
 // is computed elsewhere and is not affected by what this function returns. A run with open fog
 // is exactly as landable as the same run without it. Making a verdict turn on these fields would
 // put landability behind free-text prose that the enforced agents can write.
+//
+// Both `destination` and each fog entry's `text` are agent-written — they arrive from `plan.json`,
+// not from this CLI — and reach the same operator's terminal `renderRunSummary` above defends, so
+// both go through `printable` before they are printed. Two mutation-pinned tests hold each call:
+// removing either one leaves the rest of this file's suite green, because nothing else in this
+// module exercises what `printable` neutralises.
+//
+// `destination` is additionally wrapped in `JSON.stringify`, the same `JSON.stringify(printable(v))`
+// shape `cli.mjs` uses everywhere else it prints an agent-written value (see `show` at
+// `scripts/cli.mjs:693`). A destination that is a lone zero-width character — U+200B, invisible in
+// a terminal — used to render as `Destination: ` with nothing visibly after it, which an operator
+// reads as this function having failed to render rather than as the destination the plan actually
+// declared. Quoting draws the boundary the missing text could not: `Destination: "​"` still shows
+// an empty-looking value, but the quote marks say a value is there. Fog entries are NOT quoted:
+// they are read as a bulleted list of prose reminders, each already bounded by its own `  - `
+// prefix and the entries around it, and quoting every one would make that list harder to read for
+// a cosmetic case `printable` has already made inert (a control byte or U+2028 in an entry cannot
+// forge a line; see `renderRunSummary` above). If an invisible fog entry proves as misleading in
+// practice as the invisible destination did, apply the same fix there too.
 export function renderPlanNotes(plan = {}) {
-  const lines = []
+  const blocks = []
   const destination = plan.destination ?? null
   const notYetSpecified = plan.notYetSpecified ?? []
 
   if (destination) {
-    lines.push(`Destination: ${printable(destination)}`)
+    blocks.push(`Destination: ${JSON.stringify(printable(destination))}`)
   }
 
   if (notYetSpecified.length > 0) {
-    lines.push(`Not yet specified (${notYetSpecified.length} open):`)
+    const fogLines = [`Not yet specified (${notYetSpecified.length} open):`]
     for (const entry of notYetSpecified) {
-      lines.push(`  - ${printable(entry.text)}`)
+      fogLines.push(`  - ${printable(entry.text)}`)
     }
+    blocks.push(fogLines.join('\n'))
   }
 
-  return lines.join('\n')
+  // Blocks, not lines: the plan's Step 2 sample shows a blank line between the destination and
+  // the fog block, so a reader does not mistake the last fog bullet for a continuation of the
+  // destination's wrapped prose.
+  return blocks.join('\n\n')
 }
