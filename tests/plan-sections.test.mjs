@@ -322,8 +322,10 @@ test('a continuation starting with `--` joins, and a hyphen-only line does not',
 })
 
 test('a hyphen followed by whitespace and nothing else is not a continuation either', () => {
-  // Built by concatenation rather than as a template literal: the line under test ends in a
-  // trailing space, which an editor or a formatter would strip out of a literal without a word.
+  // Written as a single-quoted string with explicit `\n` escapes rather than as a multi-line
+  // template literal: the line under test ends in a trailing space, and a trailing space at the
+  // end of a real source line is what an editor or a formatter strips without a word. Escaped, it
+  // is an ordinary character mid-line, and the assert below fails loudly if it goes anyway.
   const md = '## Out of Scope\n\n- Caching — its own spec\n  - \n'
   assert.ok(md.includes('\n  - \n'), 'fixture must carry the trailing-space hyphen line')
   assert.deepEqual(
@@ -356,5 +358,56 @@ test('a missing Destination is reported before any malformed entry in the same d
       assert.equal(error.index, null)
       return true
     },
+  )
+})
+
+// The Destination requirement is two decisions, and each one used to survive its own mutation
+// with the suite green. Every other refusal fixture in this file carries a bullet under
+// `## Out of Scope` AND no `## Destination` heading at all, so each of them passes under either
+// reading. The two tests below are the fixtures that do not.
+test('an Out of Scope heading with no bullets under it still requires a Destination', () => {
+  const md = `# A plan
+
+## Out of Scope
+
+`
+  assert.ok(md.includes('## Out of Scope'), 'fixture must carry the heading under test')
+  assert.ok(!md.includes('## Destination'), 'fixture must not carry a destination')
+  assert.deepEqual(bulletSection(md, 'Out of Scope'), [], 'fixture section must be empty of bullets')
+  // Triggered by the presence of the heading, not by the bullet count: an author who opened the
+  // section has declared a boundary exists, and a plan with a boundary needs the destination it
+  // is a boundary of. Reading this off `outOfScope.length` would let the empty section through.
+  assert.throws(
+    () => parsePlanSections(md),
+    (error) => {
+      assert.ok(error instanceof PlanSectionError)
+      assert.equal(error.reason, 'missing-destination')
+      return true
+    },
+  )
+})
+
+test('a Destination heading with no prose under it satisfies the requirement', () => {
+  const md = `## Destination
+
+## Out of Scope
+
+- Caching — its own spec
+`
+  assert.ok(md.includes('## Destination'), 'fixture must carry the empty destination heading')
+  assert.equal(
+    proseSection(md, 'Destination'),
+    '',
+    'fixture must produce an empty-string destination, not null',
+  )
+  // The check is `destination === null`, not `!destination`, so the empty string passes it. The
+  // rule as written is about the heading being present; a heading with nothing under it is a
+  // separate shape that nothing here addresses, and this test records that it is unaddressed
+  // rather than accidentally allowed.
+  const sections = parsePlanSections(md)
+  assert.equal(sections.destination, '')
+  assert.deepEqual(
+    sections.outOfScope.map((e) => e.text),
+    ['Caching — its own spec'],
   )
 })
