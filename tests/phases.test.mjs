@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { assignPhases } from '../scripts/phases.mjs'
+import { parsePlan } from '../scripts/plan-parser.mjs'
 
 const task = (id, files = [], deps = []) => ({ id, title: id, files, deps })
 
@@ -135,4 +136,82 @@ test('multiple spellings converge: four redundant spellings of the same file all
   ])
   // All must be in different phases, proving they all normalize to the same file
   assert.deepEqual(out.map((t) => t.phase), [1, 2, 3, 4])
+})
+
+test('fog-of-war and out-of-scope sections do not leak into the parsed task list', () => {
+  // scripts/phases.mjs reads an empty file list as "conflicts with nothing", so every task
+  // with no declared files lands in phase 1. If a fog or out-of-scope entry ever leaked into
+  // the task list as a task, it would land in phase 1 with no declared files, dispatched as a
+  // teammate against a question instead of a file set. This test is the thing standing
+  // between that regression and a green run.
+  const withNotes = `
+### Task 1: build the thing
+
+**Files:**
+- Create: \`a.mjs\`
+
+**Depends:** none
+
+- [ ] **Step 1:** Do the thing.
+
+## Destination
+
+The gate can answer "is this run landable" without an operator reading prose.
+
+## Not Yet Specified
+
+- How should finish report a phase whose reviewers disagreed?
+- Does the map's coupling data belong in the gate at all?
+- What happens when two fog entries name the same open question?
+
+## Out of Scope
+
+- Migrating existing plans to the new section format.
+- Auto-generating fog entries from review comments.
+
+### Task 2: build the other thing
+
+**Files:**
+- Create: \`b.mjs\`
+
+**Depends:** T1
+
+- [ ] **Step 1:** Do the other thing.
+`
+
+  const withoutNotes = `
+### Task 1: build the thing
+
+**Files:**
+- Create: \`a.mjs\`
+
+**Depends:** none
+
+- [ ] **Step 1:** Do the thing.
+
+### Task 2: build the other thing
+
+**Files:**
+- Create: \`b.mjs\`
+
+**Depends:** T1
+
+- [ ] **Step 1:** Do the other thing.
+`
+
+  const tasksWithNotes = parsePlan(withNotes)
+  const tasksWithoutNotes = parsePlan(withoutNotes)
+
+  assert.deepEqual(
+    tasksWithNotes.map(({ id, title, files, deps }) => ({ id, title, files, deps })),
+    tasksWithoutNotes.map(({ id, title, files, deps }) => ({ id, title, files, deps })),
+  )
+
+  const phasesWithNotes = assignPhases(tasksWithNotes)
+  const phasesWithoutNotes = assignPhases(tasksWithoutNotes)
+
+  assert.deepEqual(
+    phasesWithNotes.map((t) => t.phase),
+    phasesWithoutNotes.map((t) => t.phase),
+  )
 })
