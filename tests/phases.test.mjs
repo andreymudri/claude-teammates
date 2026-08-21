@@ -142,8 +142,9 @@ test('fog-of-war and out-of-scope sections do not leak into the parsed task list
   // scripts/phases.mjs reads an empty file list as "conflicts with nothing", so every task
   // with no declared files lands in phase 1. If a fog or out-of-scope entry ever leaked into
   // the task list as a task, it would land in phase 1 with no declared files, dispatched as a
-  // teammate against a question instead of a file set. This test is the thing standing
-  // between that regression and a green run.
+  // teammate against a question instead of a file set. This test pins that the leak is also
+  // caught at the phase level, on `brief` — the field a dispatched teammate is actually
+  // handed — not only at the parser level, which tests/plan-parser.test.mjs pins separately.
   const withNotes = `
 ### Task 1: build the thing
 
@@ -200,11 +201,18 @@ The gate can answer "is this run landable" without an operator reading prose.
 `
 
   // Anchor: the withNotes fixture actually carries the three sections this test is
-  // about, and withoutNotes actually carries none of them. Without this, a future
-  // edit that reshapes withNotes so it no longer has these headings would keep the
-  // test green while it stops exercising the fog/out-of-scope path at all.
+  // about, positioned after the Task 1 heading, and withoutNotes actually carries
+  // none of them. Position matters as much as presence: only a section that lands
+  // after "### Task 1" sits inside Task 1's body, where it is DOC_BREAK's job to
+  // stop the brief from swallowing it. A section moved above Task 1 would still be
+  // "present" in withNotes but would no longer exercise that path — presence alone
+  // would keep this test green while the regression it pins goes silently untested.
+  const task1Index = withNotes.indexOf('### Task 1')
+  assert.ok(task1Index !== -1, 'fixture must contain a Task 1 heading')
   for (const heading of ['## Destination', '## Not Yet Specified', '## Out of Scope']) {
-    assert.ok(withNotes.includes(heading), `fixture must contain ${heading}`)
+    const headingIndex = withNotes.indexOf(heading)
+    assert.ok(headingIndex !== -1, `fixture must contain ${heading}`)
+    assert.ok(headingIndex > task1Index, `${heading} must appear after Task 1's heading`)
     assert.ok(!withoutNotes.includes(heading), `control fixture must not contain ${heading}`)
   }
 
