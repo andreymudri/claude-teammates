@@ -127,3 +127,26 @@ export function renderRunSummary(runId, phaseResults = []) {
   }
   return lines.join('\n')
 }
+
+// Report the destination and open fog entries from a plan. This is for REPORTING — the verdict
+// is computed elsewhere and is not affected by what this function returns. A run with open fog
+// is exactly as landable as the same run without it. Making a verdict turn on these fields would
+// put landability behind free-text prose that the enforced agents can write.
+export function renderPlanNotes(plan = {}) {
+  const lines = []
+  const destination = plan.destination ?? null
+  const notYetSpecified = plan.notYetSpecified ?? []
+
+  if (destination) {
+    lines.push(`Destination: ${printable(destination)}`)
+  }
+
+  if (notYetSpecified.length > 0) {
+    lines.push(`Not yet specified (${notYetSpecified.length} open):`)
+    for (const entry of notYetSpecified) {
+      lines.push(`  - ${printable(entry.text)}`)
+    }
+  }
+
+  return lines.join('\n')
+}

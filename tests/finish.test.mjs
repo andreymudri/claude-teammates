@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { summarizeRun, renderRunSummary, suppliedForPhase, validateSuppliedPhases } from '../scripts/finish.mjs'
+import { summarizeRun, renderRunSummary, suppliedForPhase, validateSuppliedPhases, renderPlanNotes } from '../scripts/finish.mjs'
 
 const phase = (n, over = {}) => ({
   phase: n,
@@ -139,4 +139,64 @@ test('the summary marks a phase that passed on supplied results', () => {
     { phase: 1, supplied: true, verdict: { verdict: 'PASS', failed: [], optionalFailed: [], skipped: [], pending: [] } },
   ])
   assert.match(out, /review supplied/)
+})
+
+test('renderPlanNotes returns empty string when plan is empty', () => {
+  assert.equal(renderPlanNotes({}), '')
+})
+
+test('renderPlanNotes renders destination alone', () => {
+  const out = renderPlanNotes({
+    destination: 'the gate can answer "is this run landable" without an operator reading prose.',
+    notYetSpecified: [],
+  })
+  assert.match(out, /^Destination:/)
+  assert.match(out, /the gate can answer/)
+  assert.doesNotMatch(out, /Not yet specified/)
+})
+
+test('renderPlanNotes renders fog alone', () => {
+  const out = renderPlanNotes({
+    destination: null,
+    notYetSpecified: [
+      { text: 'How should finish report a phase whose reviewers disagreed?', line: 10 },
+      { text: 'Does the map coupling data belong in the gate at all?', line: 11 },
+    ],
+  })
+  assert.doesNotMatch(out, /^Destination:/)
+  assert.match(out, /Not yet specified \(2 open\)/)
+  assert.match(out, /How should finish report/)
+  assert.match(out, /Does the map coupling data/)
+})
+
+test('renderPlanNotes renders both destination and fog', () => {
+  const out = renderPlanNotes({
+    destination: 'a clear goal',
+    notYetSpecified: [
+      { text: 'What is X?', line: 5 },
+    ],
+  })
+  assert.match(out, /^Destination: a clear goal\n/)
+  assert.match(out, /Not yet specified \(1 open\)/)
+  assert.match(out, /What is X\?/)
+})
+
+test('renderPlanNotes does not render outOfScope entries', () => {
+  const out = renderPlanNotes({
+    destination: 'goal',
+    notYetSpecified: [],
+    outOfScope: [
+      { text: 'Performance optimization', line: 15 },
+    ],
+  })
+  assert.match(out, /Destination: goal/)
+  assert.doesNotMatch(out, /Performance optimization/)
+})
+
+test('renderPlanNotes returns empty string when destination is null and notYetSpecified is empty', () => {
+  assert.equal(renderPlanNotes({
+    destination: null,
+    notYetSpecified: [],
+    outOfScope: [{ text: 'something', line: 1 }],
+  }), '')
 })
