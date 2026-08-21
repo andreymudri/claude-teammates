@@ -251,6 +251,12 @@ so a dispatch asking it to rebuild asks for something its contract does not cove
 Amend only when a task's declared file set is genuinely wrong. Correcting a stale *interface* — a
 signature an earlier phase's fix rounds changed — belongs in the dispatch brief, not the plan.
 
+Graduating a `## Not Yet Specified` entry into a task is this same operation, and no new command
+exists for it: edit the plan — delete the fog entry, add a `### Task N` — commit it on the base
+branch, merge `--no-ff` into the run branch, then re-run `init-run` so `plan.json` is recompiled
+before rebasing any in-flight branch. A working-tree edit to the fog entry is inert for the same
+reason any other plan edit is: the gate reads the plan from git at the anchor, not the tree.
+
 **Branch a run's base from the default branch, not from another run's branch.** Step 1 commits the
 amendment on the base, so if the base is another run's deliverable branch the amendment lands
 there, where it belongs to no task of that run and to no ancestor of that run's own base — which is
