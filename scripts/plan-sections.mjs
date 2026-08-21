@@ -150,9 +150,16 @@ export function parsePlanSections(markdown) {
   // Checked before the per-entry rules because it is a defect in the document rather than in any
   // one entry: quoting a bullet here would point at a line that is not what is wrong.
   //
-  // "Requires a `## Destination`" is read as presence of the heading, per the plan. A heading
-  // with no prose under it is a separate, unaddressed shape.
-  if (hasOutOfScope && destination === null) {
+  // Two separate readings, and they do not point the same way. What TRIGGERS the requirement is
+  // the presence of the `## Out of Scope` heading, not the number of bullets under it: an author
+  // who opened the section has declared a boundary exists, and a plan with a boundary needs the
+  // destination it is a boundary of. What SATISFIES it is prose, not a heading — `!destination`
+  // rather than `destination === null`, so an empty `## Destination` is refused along with an
+  // absent one. The dependency exists because an unwritten destination leaves Out of Scope
+  // unjudgeable and makes it a place to park anything inconvenient, and a heading with nothing
+  // under it buys exactly none of that back. This is stricter than the plan's Step 6 wording,
+  // which reads as heading presence; the stricter reading is the decided one.
+  if (hasOutOfScope && !destination) {
     throw new PlanSectionError('this plan has an Out of Scope section but no Destination', {
       reason: 'missing-destination',
     })

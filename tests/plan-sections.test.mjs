@@ -361,10 +361,10 @@ test('a missing Destination is reported before any malformed entry in the same d
   )
 })
 
-// The Destination requirement is two decisions, and each one used to survive its own mutation
-// with the suite green. Every other refusal fixture in this file carries a bullet under
-// `## Out of Scope` AND no `## Destination` heading at all, so each of them passes under either
-// reading. The two tests below are the fixtures that do not.
+// The Destination requirement is two decisions — what triggers it, and what satisfies it — and
+// each one used to survive its own mutation with the suite green. No fixture elsewhere in this
+// file distinguishes the two readings of either half; the two below are written to do nothing
+// else.
 test('an Out of Scope heading with no bullets under it still requires a Destination', () => {
   const md = `# A plan
 
@@ -387,7 +387,7 @@ test('an Out of Scope heading with no bullets under it still requires a Destinat
   )
 })
 
-test('a Destination heading with no prose under it satisfies the requirement', () => {
+test('a Destination heading with no prose under it does not satisfy the requirement', () => {
   const md = `## Destination
 
 ## Out of Scope
@@ -400,14 +400,19 @@ test('a Destination heading with no prose under it satisfies the requirement', (
     '',
     'fixture must produce an empty-string destination, not null',
   )
-  // The check is `destination === null`, not `!destination`, so the empty string passes it. The
-  // rule as written is about the heading being present; a heading with nothing under it is a
-  // separate shape that nothing here addresses, and this test records that it is unaddressed
-  // rather than accidentally allowed.
-  const sections = parsePlanSections(md)
-  assert.equal(sections.destination, '')
-  assert.deepEqual(
-    sections.outOfScope.map((e) => e.text),
-    ['Caching — its own spec'],
+  // The check is `!destination`, not `destination === null`, so the empty string is refused
+  // exactly like an absent heading. What the rule buys is a destination Out of Scope can be
+  // judged against; an opened heading with nothing under it buys none of it, and accepting it
+  // would let an author satisfy the rule by typing four characters. Weakening this back to
+  // `=== null` is what the assert above and the refusal below jointly forbid.
+  assert.throws(
+    () => parsePlanSections(md),
+    (error) => {
+      assert.ok(error instanceof PlanSectionError)
+      assert.equal(error.reason, 'missing-destination')
+      assert.equal(error.line, null)
+      assert.equal(error.entry, null)
+      return true
+    },
   )
 })
