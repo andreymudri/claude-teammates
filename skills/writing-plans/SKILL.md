@@ -80,13 +80,13 @@ sharpness is not the test, dispatchability is.
 
 **Nothing enforced reads these sections yet.** `scripts/plan-sections.mjs` defines the two entry
 rules and the destination dependency above, and checks shape — a separator is present, a `?` is
-present, a destination has prose — not truth. But no caller in `scripts/` imports that module: as
-of this writing `init-run` does not parse these sections, no check consults them, no verdict
-depends on them, and no teammate is handed them. A plan can carry a bare-noun Out of Scope entry
-or an unanswered fog entry today and nothing will refuse it. The wiring that makes `init-run`
-enforce these rules at the moment a run is created is its own task; until that lands, treat this
-section as the format's rules, not as something the CLI checks. Do not write a sentence here or
-in a plan that implies otherwise.
+present, a destination has prose — not truth. But no caller in `scripts/` imports
+`parsePlanSections`: as of this writing `init-run` does not parse these sections, no check
+consults them, no verdict depends on them, and no teammate is handed them. A plan can carry a
+bare-noun Out of Scope entry or an unanswered fog entry today and nothing will refuse it. The
+wiring that makes `init-run` enforce these rules at the moment a run is created is its own task;
+until that lands, treat this section as the format's rules, not as something the CLI checks. Do
+not write a sentence here or in a plan that implies otherwise.
 
 **An `## Out of Scope` entry does not answer a reviewer's finding.** A finding relocated there
 is still a finding, and moving it changes nothing about whether it is real. The mechanical rules
