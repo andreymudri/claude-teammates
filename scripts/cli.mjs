@@ -3,6 +3,7 @@ import { livenessRows, renderLiveness, hasStall, hasUnknown, DEFAULT_STALE_MINUT
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parsePlan } from './plan-parser.mjs'
+import { bulletSection } from './plan-sections.mjs'
 import { assignPhases } from './phases.mjs'
 import { readState, writeState, claimTask, releaseClaim, readFixRounds, recordFixRound, runDir, writeLocation, worktreeKey, isLocalAbsolute } from './state.mjs'
 import { composeBrief } from './brief.mjs'
@@ -580,51 +581,12 @@ function missingArgs(command, flags, positional) {
 // the same list. It is read from the plan markdown rather than restated per task: a constraint
 // that has to be repeated is a constraint that will drift.
 //
-// The section ends at the next heading of ANY level, not just `##`. A task heading is `###`
-// and its file list is a bullet list; terminating only on `##` would sweep every task's files
-// into the constraints every teammate is told it must obey. Scanning for the terminator with
-// a second exec on the remainder — rather than one regex with a lookahead — keeps the
-// end-of-file case honest: JS has no `\Z` anchor, and `\Z` inside a pattern is an identity
-// escape matching a literal "Z", which would silently drop a section that ends the file.
+// The extraction rules — where a section ends, how a wrapped bullet is joined onto its
+// continuation, and why neither pattern spans a bullet's text with `.` — now live in
+// `scripts/plan-sections.mjs`, next to `bulletSection` itself. Read them there rather than
+// here: this is just the plan-wide list mapped down to the bare strings callers expect.
 export function parseConstraints(markdown) {
-  const text = String(markdown ?? '')
-  const heading = /^##\s+Global Constraints\s*$/m.exec(text)
-  if (!heading) return []
-  const rest = text.slice(heading.index + heading[0].length)
-  const next = /^#{1,6}\s/m.exec(rest)
-  const items = []
-  // A bullet wrapped over two lines is one constraint, not a truncated one. Keeping only
-  // the first line would hand every teammate the opening clause of a rule and silently
-  // drop the rest — the failure is invisible in the brief, which reads as a complete
-  // sentence. An indented, non-blank line directly under an item is joined onto it; a
-  // blank line closes the item, so a following indented paragraph is not swallowed. A
-  // nested bullet matches the bullet pattern first and so stays a standalone constraint.
-  //
-  // The continuation test excludes an indented line that is itself bullet-shaped (`- ` or a
-  // bare `-`), so a line the bullet pattern rejects is dropped rather than appended. Joining
-  // it would fuse two unrelated rules into a single constraint that reads as one sentence and
-  // says what neither author wrote; a dropped malformed rule is the lesser failure, and the
-  // only one that cannot silently misinform a teammate. The lookahead is `-\s|-$` rather than
-  // a bare `-`, so a continuation that merely *starts* with a hyphen still joins: `--no-ff`
-  // opens a rule's second line in this project's own constraints, and excluding every leading
-  // hyphen would truncate it into a sentence that reads complete.
-  //
-  // Both patterns use `[^\n]` rather than `.`: `.` does not match U+2028/U+2029 while `\s`
-  // does, so a bullet whose text contains one failed the bullet pattern entirely and was
-  // dropped with no diagnostic — a rule the plan states that reaches no teammate.
-  let open = false
-  for (const line of (next ? rest.slice(0, next.index) : rest).split('\n')) {
-    const bullet = /^\s*-\s+([^\n]*\S)\s*$/.exec(line)
-    if (bullet) {
-      items.push(bullet[1])
-      open = true
-    } else if (open && /^\s+(?!-\s|-$)\S/.test(line)) {
-      items[items.length - 1] += ` ${line.trim()}`
-    } else {
-      open = false
-    }
-  }
-  return items
+  return bulletSection(markdown, 'Global Constraints').map((item) => item.text)
 }
 
 // runId/taskId become path segments under root/.teammates. Without containment, a value
