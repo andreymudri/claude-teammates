@@ -5,9 +5,11 @@
 // rule below was found the hard way; the comments are the record of why, and dropping one is how
 // the next reader re-breaks it.
 //
-// Nothing here is enforced by any gate. `parsePlanSections` refuses a malformed section at the
-// moment a run is created, and that is the whole of its authority: no verdict recomputes from
-// these sections and no teammate is handed them.
+// Nothing here is enforced by any gate, and in this tree nothing outside the tests imports this
+// module: what `parsePlanSections` does is DEFINE the refusals. The wiring that applies them at
+// the moment a run is created lands with the `init-run` task, and even then that is the whole of
+// its authority: no verdict recomputes from these sections and no teammate is handed them. Do not
+// restate this in the present tense until an actual caller in `scripts/` imports the module.
 
 const SECTION_SEPARATORS = /(?:—|–|\s--\s|\s-\s)\s*\S/
 
@@ -73,9 +75,10 @@ export function bulletSection(markdown, heading) {
   // line in this project's own constraints, and excluding every leading hyphen would truncate it
   // into a sentence that reads complete.
   //
-  // Both patterns use `[^\n]` rather than `.`: `.` does not match U+2028/U+2029 while `\s` does,
-  // so a bullet whose text contains one failed the bullet pattern entirely and was dropped with
-  // no diagnostic — a line the plan states that reaches nobody.
+  // Neither pattern below uses `.` to span a bullet's text: `.` does not match U+2028/U+2029
+  // while `\s` does, so a bullet whose text contains one failed the bullet pattern entirely and
+  // was dropped with no diagnostic — a line the plan states that reaches nobody. Any future
+  // widening of either pattern has to keep that property.
   let open = false
   const lines = section.body.split('\n')
   for (let i = 0; i < lines.length; i += 1) {

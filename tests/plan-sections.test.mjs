@@ -297,3 +297,64 @@ test('proseSection returns null for an absent heading and collapses whitespace o
     'One line and a second.',
   )
 })
+
+// The continuation lookahead is `-\s|-$`, not a bare `-` and not nothing at all. Both mutations
+// used to leave the whole suite green, so the two tests below are written to go red under each:
+// widening the lookahead away lets a bullet-shaped line be swallowed as continuation, and
+// narrowing it to `(?!-)` truncates a continuation that merely starts with a hyphen.
+test('a continuation starting with `--` joins, and a hyphen-only line does not', () => {
+  const md = `## Out of Scope
+
+- Merge flags — the runner passes
+  --no-ff so the merge commit survives
+  -
+- Caching — its own spec
+`
+  assert.ok(md.includes('\n  --no-ff'), 'fixture must carry the `--` continuation under test')
+  assert.ok(md.includes('\n  -\n'), 'fixture must carry the hyphen-only line under test')
+  assert.deepEqual(
+    bulletSection(md, 'Out of Scope').map((e) => e.text),
+    [
+      'Merge flags — the runner passes --no-ff so the merge commit survives',
+      'Caching — its own spec',
+    ],
+  )
+})
+
+test('a hyphen followed by whitespace and nothing else is not a continuation either', () => {
+  // Built by concatenation rather than as a template literal: the line under test ends in a
+  // trailing space, which an editor or a formatter would strip out of a literal without a word.
+  const md = '## Out of Scope\n\n- Caching — its own spec\n  - \n'
+  assert.ok(md.includes('\n  - \n'), 'fixture must carry the trailing-space hyphen line')
+  assert.deepEqual(
+    bulletSection(md, 'Out of Scope').map((e) => e.text),
+    ['Caching — its own spec'],
+  )
+})
+
+test('a missing Destination is reported before any malformed entry in the same document', () => {
+  const md = `# A plan
+
+## Out of Scope
+
+- Caching
+
+## Not Yet Specified
+
+- A note with no question mark
+`
+  assert.ok(!md.includes('## Destination'), 'fixture must not carry a destination')
+  assert.ok(md.split('\n').includes('- Caching'), 'fixture must also carry a malformed entry')
+  assert.throws(
+    () => parsePlanSections(md),
+    (error) => {
+      // The document-level defect wins: an entry refusal here would quote `- Caching`, a bullet
+      // that is not what is wrong with this plan.
+      assert.equal(error.reason, 'missing-destination')
+      assert.equal(error.line, null)
+      assert.equal(error.entry, null)
+      assert.equal(error.index, null)
+      return true
+    },
+  )
+})
