@@ -52,9 +52,11 @@ The gate can answer "is this run landable" without an operator reading any prose
 ```
 
 All three are optional. `## Out of Scope` requires a `## Destination` with prose under it in
-the same document — an empty `## Destination` heading is refused exactly like an absent one,
+the same document — an empty `## Destination` heading is treated exactly like an absent one,
 because "out of scope" means beyond the destination, and a heading with nothing under it leaves
-that unjudgeable.
+that unjudgeable. This is the format's rule, defined in `scripts/plan-sections.mjs`; it is
+refused at the moment a run is created once `init-run` wires that module in, which has not
+happened yet — see below.
 
 **The fog-or-task test**, and the rule the whole feature rests on — it turns on
 dispatchability, not sharpness:
@@ -76,11 +78,15 @@ sharpness is not the test, dispatchability is.
   at the end, so the question can carry the context that makes it worth reading. A question mark
   is what keeps fog from becoming a dumping ground for work nobody wanted to size.
 
-**Nothing enforced reads these sections.** No check consults them, no verdict depends on them,
-no teammate is handed them. `init-run`'s two entry rules and the destination dependency above
-are the only enforcement, and they check shape — a separator is present, a `?` is present, a
-destination has prose — not truth. Do not write a sentence here or in a plan that implies
-otherwise.
+**Nothing enforced reads these sections yet.** `scripts/plan-sections.mjs` defines the two entry
+rules and the destination dependency above, and checks shape — a separator is present, a `?` is
+present, a destination has prose — not truth. But no caller in `scripts/` imports that module: as
+of this writing `init-run` does not parse these sections, no check consults them, no verdict
+depends on them, and no teammate is handed them. A plan can carry a bare-noun Out of Scope entry
+or an unanswered fog entry today and nothing will refuse it. The wiring that makes `init-run`
+enforce these rules at the moment a run is created is its own task; until that lands, treat this
+section as the format's rules, not as something the CLI checks. Do not write a sentence here or
+in a plan that implies otherwise.
 
 **An `## Out of Scope` entry does not answer a reviewer's finding.** A finding relocated there
 is still a finding, and moving it changes nothing about whether it is real. The mechanical rules
