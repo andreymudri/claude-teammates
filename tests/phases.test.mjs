@@ -199,12 +199,36 @@ The gate can answer "is this run landable" without an operator reading prose.
 - [ ] **Step 1:** Do the other thing.
 `
 
+  // Anchor: the withNotes fixture actually carries the three sections this test is
+  // about, and withoutNotes actually carries none of them. Without this, a future
+  // edit that reshapes withNotes so it no longer has these headings would keep the
+  // test green while it stops exercising the fog/out-of-scope path at all.
+  for (const heading of ['## Destination', '## Not Yet Specified', '## Out of Scope']) {
+    assert.ok(withNotes.includes(heading), `fixture must contain ${heading}`)
+    assert.ok(!withoutNotes.includes(heading), `control fixture must not contain ${heading}`)
+  }
+
   const tasksWithNotes = parsePlan(withNotes)
   const tasksWithoutNotes = parsePlan(withoutNotes)
 
+  // Absolute expectations: a parser that silently returns nothing for both fixtures
+  // (e.g. TASK_HEADING broken) or drops declared files (e.g. FILE_LINE broken) still
+  // passes a purely comparative check, because both sides would go empty together.
+  const expectedTasks = [
+    { id: 'T1', title: 'build the thing', files: ['a.mjs'], deps: [] },
+    { id: 'T2', title: 'build the other thing', files: ['b.mjs'], deps: ['T1'] },
+  ]
+  const pick = (list) => list.map(({ id, title, files, deps }) => ({ id, title, files, deps }))
+  assert.deepEqual(pick(tasksWithNotes), expectedTasks)
+  assert.deepEqual(pick(tasksWithoutNotes), expectedTasks)
+
+  // Also compare `brief` — the field actually handed to a dispatched teammate. If
+  // DOC_BREAK stops catching a document-level `## ` heading, the fog/out-of-scope
+  // prose leaks into Task 1's brief in the withNotes fixture but not in the control,
+  // so this comparison, unlike the id/title/files/deps one above, would catch it.
   assert.deepEqual(
-    tasksWithNotes.map(({ id, title, files, deps }) => ({ id, title, files, deps })),
-    tasksWithoutNotes.map(({ id, title, files, deps }) => ({ id, title, files, deps })),
+    tasksWithNotes.map((t) => t.brief),
+    tasksWithoutNotes.map((t) => t.brief),
   )
 
   const phasesWithNotes = assignPhases(tasksWithNotes)
