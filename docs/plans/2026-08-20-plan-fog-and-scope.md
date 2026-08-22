@@ -127,6 +127,8 @@ exit code, and `finish` reports them to the operator — with the task list prov
 **Files:**
 - Modify: `scripts/cli.mjs`
 - Test: `tests/cli.test.mjs`
+- Modify: `scripts/plan-sections.mjs`
+- Test: `tests/plan-sections.test.mjs`
 
 **Depends:** T1, T2
 
@@ -172,6 +174,15 @@ exit code, and `finish` reports them to the operator — with the task list prov
 
 - [ ] **Step 6:** Assert the exact refusal text for one entry-level case, including the line number
       and the quoted entry, so a message that degrades into something unactionable fails here.
+
+- [ ] **Step 7:** Accept every CommonMark bullet marker, not just the hyphen. `bulletSection`
+      in `scripts/plan-sections.mjs` matches `-` only, so a section written with `*` or `+` yields no
+      entries at all and every refusal Step 3 adds is skipped: a reasonless Out of Scope entry and a
+      questionless fog entry both pass `init-run` with exit 0, and `plan.json` then disagrees with the
+      plan a reader sees. Widen the marker to a `[-*+]` class in BOTH the bullet pattern and the
+      continuation lookahead — widening one without the other splits a multi-line entry. Pin it in
+      `tests/plan-sections.test.mjs` with all three markers, including a continuation line, and pin
+      that an entry-level refusal still fires for a `*` bullet.
 
 ### Task 4: the leak regression
 
