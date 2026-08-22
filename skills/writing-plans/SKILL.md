@@ -31,6 +31,68 @@ carries the Global Constraints too. That's why `parallel-execution` dispatch han
 implementer the global constraints alongside its task brief: they're plan-wide, not
 per-task, so nothing downstream has to look them up separately.
 
+## Destination, fog, and out-of-scope
+
+Three more optional header sections, alongside `## Global Constraints`, before the first task:
+
+```markdown
+## Destination
+
+The gate can answer "is this run landable" without an operator reading any prose.
+
+## Not Yet Specified
+
+- How should finish report a phase whose reviewers disagreed?
+- Does the map's coupling data belong in the gate at all?
+
+## Out of Scope
+
+- Replacing `.teammates/` with a real datastore — swapping it invalidates every check that
+  reads it, and the coordination store is not what this destination is about.
+```
+
+All three are optional. `## Out of Scope` requires a `## Destination` with prose under it in
+the same document — an empty `## Destination` heading is treated exactly like an absent one,
+because "out of scope" means beyond the destination, and a heading with nothing under it leaves
+that unjudgeable. This is the format's rule, defined in `scripts/plan-sections.mjs`; it is
+refused at the moment a run is created once `init-run` wires that module in, which has not
+happened yet — see below.
+
+**The fog-or-task test**, and the rule the whole feature rests on — it turns on
+dispatchability, not sharpness:
+
+> Can you write it as a task — a declared file set, and acceptance criteria a green suite would
+> satisfy? If yes, it is a task, even when it is blocked and cannot be worked yet. If no, it is
+> Not Yet Specified, however sharply you can phrase the question.
+
+The consequence: do not pre-slice fog into task-shaped pieces. One fog entry may graduate into
+three tasks, or into none. A question can be perfectly sharp and still have nowhere to go —
+sharpness is not the test, dispatchability is.
+
+**The two entry rules, and what each is for:**
+
+- Every `## Out of Scope` entry needs a reason clause — a separator (em dash, en dash, spaced
+  hyphen, or spaced double hyphen) followed by at least one non-whitespace character. A reason
+  clause is what makes a boundary reviewable; an entry without one is a word, not a decision.
+- Every `## Not Yet Specified` entry must contain a `?` — anywhere in the entry, not necessarily
+  at the end, so the question can carry the context that makes it worth reading. A question mark
+  is what keeps fog from becoming a dumping ground for work nobody wanted to size.
+
+**Nothing enforced reads these sections yet.** `scripts/plan-sections.mjs` defines the two entry
+rules and the destination dependency above, and checks shape — a separator is present, a `?` is
+present, a destination has prose — not truth. But no caller in `scripts/` imports
+`parsePlanSections`: as of this writing `init-run` does not parse these sections, no check
+consults them, no verdict depends on them, and no teammate is handed them. A plan can carry a
+bare-noun Out of Scope entry or an unanswered fog entry today and nothing will refuse it. The
+wiring that makes `init-run` enforce these rules at the moment a run is created is its own task;
+until that lands, treat this section as the format's rules, not as something the CLI checks. Do
+not write a sentence here or in a plan that implies otherwise.
+
+**An `## Out of Scope` entry does not answer a reviewer's finding.** A finding relocated there
+is still a finding, and moving it changes nothing about whether it is real. The mechanical rules
+cannot catch this: a well-formed entry with a plausible reason is exactly what silencing a
+finding would look like to a parser.
+
 ## Machine-readable task format
 
 This plugin parses its own plans. `scripts/plan-parser.mjs` reads a `**Files:**` block under
