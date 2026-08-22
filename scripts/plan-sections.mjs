@@ -5,12 +5,13 @@
 // rule below was found the hard way; the comments are the record of why, and dropping one is how
 // the next reader re-breaks it.
 //
-// Nothing here is enforced by any gate. `bulletSection` now has a production caller in
-// `scripts/`; `parsePlanSections` does not yet — what it does is DEFINE the refusals. The wiring
-// that applies those refusals at the moment a run is created lands with the `init-run` task, and
-// even then that is the whole of its authority: no verdict recomputes from these sections and no
-// teammate is handed them. Do not restate `parsePlanSections` as wired in until an actual caller
-// in `scripts/` imports it.
+// `parsePlanSections` is called wherever `scripts/cli.mjs` WRITES a run's `plan.json` — never
+// from anything that only reads it back — which is the whole of its authority: it defines and
+// applies the refusals at the moment the three fields are (re)derived from the plan file, and
+// nothing downstream of that write recomputes from these sections — no gate check re-derives
+// them, and no teammate brief is built from them. State that bound, not the list of callers that
+// satisfy it today: an enumeration of importers goes stale the moment one is added or removed,
+// while the bound (applied at plan-write time, nothing later) stays true regardless.
 
 const SECTION_SEPARATORS = /(?:—|–|\s--\s|\s-\s)\s*\S/
 
@@ -67,14 +68,17 @@ export function bulletSection(markdown, heading) {
   // following indented paragraph is not swallowed. A nested bullet matches the bullet pattern
   // first and so stays a standalone entry.
   //
-  // The continuation test excludes an indented line that is itself bullet-shaped (`- ` or a bare
-  // `-`), so a line the bullet pattern rejects is dropped rather than appended. Joining it would
-  // fuse two unrelated entries into one that reads as a single sentence and says what neither
-  // author wrote; a dropped malformed entry is the lesser failure, and the only one that cannot
-  // silently misinform a reader. The lookahead is `-\s|-$` rather than a bare `-`, so a
-  // continuation that merely *starts* with a hyphen still joins: `--no-ff` opens a rule's second
-  // line in this project's own constraints, and excluding every leading hyphen would truncate it
-  // into a sentence that reads complete.
+  // The continuation test excludes an indented line that is itself bullet-shaped (a marker from
+  // the `-`/`*`/`+` class followed by a space, or a bare marker), so a line the bullet pattern
+  // rejects is dropped rather than appended. Joining it would fuse two unrelated entries into one
+  // that reads as a single sentence and says what neither author wrote; a dropped malformed entry
+  // is the lesser failure, and the only one that cannot silently misinform a reader. The
+  // lookahead is `[-*+]\s|[-*+]$` rather than a bare marker character, so a continuation that
+  // merely *starts* with a marker character still joins: `--no-ff` opens a rule's second line in
+  // this project's own constraints, and excluding every leading hyphen would truncate it into a
+  // sentence that reads complete. Both patterns share the same `[-*+]` class deliberately —
+  // widening the bullet pattern without widening this lookahead in step would let a `*`/`+`
+  // continuation line get mistaken for a fresh bullet and split a multi-line entry in two.
   //
   // Neither pattern below uses `.` to span a bullet's text: `.` does not match U+2028/U+2029
   // while `\s` does, so a bullet whose text contains one failed the bullet pattern entirely and
@@ -84,11 +88,11 @@ export function bulletSection(markdown, heading) {
   const lines = section.body.split('\n')
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i]
-    const bullet = /^\s*-\s+([^\n]*\S)\s*$/.exec(line)
+    const bullet = /^\s*[-*+]\s+([^\n]*\S)\s*$/.exec(line)
     if (bullet) {
       items.push({ text: bullet[1], line: section.headingLine + i })
       open = true
-    } else if (open && /^\s+(?!-\s|-$)\S/.test(line)) {
+    } else if (open && /^\s+(?![-*+]\s|[-*+]$)\S/.test(line)) {
       items[items.length - 1].text += ` ${line.trim()}`
     } else {
       open = false
