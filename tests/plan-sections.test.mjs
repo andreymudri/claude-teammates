@@ -282,6 +282,55 @@ test('a bullet containing U+2028 survives, because the patterns use a negated ne
   )
 })
 
+// Reproduced: `bulletSection` matched only the `-` marker, so a section written with `*` or
+// `+` bullets (both valid CommonMark, and both used in this project's own plans) yielded no
+// entries at all — and for `## Out of Scope`/`## Not Yet Specified` that meant every refusal
+// was silently skipped, because a section that parses to zero entries has nothing to refuse.
+// Widening the marker to a `[-*+]` class in the bullet pattern alone (without widening the
+// continuation lookahead the same way) would still lose the second line of a multi-line entry
+// written with `*` or `+`, so both halves are pinned here.
+test('bulletSection recognises `-`, `*` and `+` as bullet markers', () => {
+  const md = '## Out of Scope\n\n- Dash — its own spec\n* Star — its own spec\n+ Plus — its own spec\n'
+  assert.deepEqual(
+    bulletSection(md, 'Out of Scope').map((e) => e.text),
+    ['Dash — its own spec', 'Star — its own spec', 'Plus — its own spec'],
+  )
+})
+
+test('a `*` bulleted entry still joins its wrapped continuation line', () => {
+  const md = '## Out of Scope\n\n* Caching — worth its own spec,\n  and a different destination\n'
+  assert.deepEqual(
+    bulletSection(md, 'Out of Scope').map((e) => e.text),
+    ['Caching — worth its own spec, and a different destination'],
+  )
+})
+
+test('a `+` bulleted entry still joins its wrapped continuation line', () => {
+  const md = '## Out of Scope\n\n+ Caching — worth its own spec,\n  and a different destination\n'
+  assert.deepEqual(
+    bulletSection(md, 'Out of Scope').map((e) => e.text),
+    ['Caching — worth its own spec, and a different destination'],
+  )
+})
+
+// An entry-level refusal must still fire when the section is written with `*` bullets — not
+// only for `-`, which is the one shape a marker-narrow implementation happens to see.
+test('a `*` bulleted Out of Scope entry with no reason is still refused', () => {
+  const md = '## Destination\n\nSomething landable.\n\n## Out of Scope\n\n* Caching\n'
+  assert.throws(
+    () => parsePlanSections(md),
+    (err) => err instanceof PlanSectionError && err.reason === 'missing-reason' && err.entry === 'Caching',
+  )
+})
+
+test('a `*` bulleted Not Yet Specified entry with no question mark is still refused', () => {
+  const md = '## Not Yet Specified\n\n* no question at all\n'
+  assert.throws(
+    () => parsePlanSections(md),
+    (err) => err instanceof PlanSectionError && err.reason === 'missing-question' && err.entry === 'no question at all',
+  )
+})
+
 test('bulletSection returns an empty array when the heading is absent', () => {
   assert.deepEqual(bulletSection('# A plan\n', 'Out of Scope'), [])
 })

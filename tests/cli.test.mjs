@@ -20,9 +20,11 @@ import {
   idRefusal,
   MAX_RUN_ID_BYTES,
   MAX_TASK_ID_BYTES,
+  planSectionsRefusal,
 } from '../scripts/cli.mjs'
 import { previewOwnerMarkerPath } from '../scripts/merge-preview.mjs'
 import { renderRunSummary } from '../scripts/finish.mjs'
+import { PlanSectionError } from '../scripts/plan-sections.mjs'
 
 const PLAN = `### Task 1: A
 
@@ -155,7 +157,7 @@ test('init-run writes plan and status and reports phases', async () => {
 })
 
 // A plan carrying all three header sections, in the shape T1 (plan-sections.mjs) already has
-// tests pinning: a Destination, two Not Yet Specified questions, and one Out of Scope entry
+// tests pinning: a Destination, one Not Yet Specified question, and one Out of Scope entry
 // with a reason. `init-run` must compile them into plan.json unchanged.
 const PLAN_WITH_SECTIONS = `# A plan
 
@@ -187,11 +189,11 @@ test('init-run compiles Destination, Not Yet Specified and Out of Scope into pla
     assert.equal(code, 0)
     const plan = await readPlan(root, 'r1')
     assert.equal(plan.destination, 'The gate answers PASS or FAIL from git alone.')
-    assert.deepEqual(plan.notYetSpecified.map((e) => e.text), [
-      'Where does a resolved fog entry go once someone decides it?',
+    assert.deepEqual(plan.notYetSpecified, [
+      { text: 'Where does a resolved fog entry go once someone decides it?', line: 9 },
     ])
-    assert.deepEqual(plan.outOfScope.map((e) => e.text), [
-      'Caching — the destination is the verdict, not latency',
+    assert.deepEqual(plan.outOfScope, [
+      { text: 'Caching — the destination is the verdict, not latency', line: 13 },
     ])
   })
 })
@@ -208,7 +210,7 @@ test('init-run over a plan with none of the three sections writes null and empty
 })
 
 test('init-run refuses a Not Yet Specified entry with no question mark, run directory not created', async () => {
-  await withRepo(async ({ root, io }) => {
+  await withRepo(async ({ root, io, lines }) => {
     const planPath = path.join(root, 'foggy-plan.md')
     await writeFile(
       planPath,
@@ -219,7 +221,43 @@ test('init-run refuses a Not Yet Specified entry with no question mark, run dire
     git(root, ['commit', '--quiet', '-m', 'add foggy plan'])
     const code = await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     assert.equal(code, 2)
+    assert.equal(
+      lines.join('\n'),
+      'plan defect: Not Yet Specified entry 1 (line 3) asks no question.\n'
+      + 'An entry without a question mark is a work item wearing fog\'s clothes.\n'
+      + 'Ask it as a question, or write it as a task with a declared file set.\n\n'
+      + '  - "This is a work item, not a question"',
+    )
     await assert.rejects(readPlan(root, 'r1'))
+    await assert.rejects(stat(path.join(root, '.teammates', 'r1')))
+  })
+})
+
+// A verdict-forgery reproduction: a Not Yet Specified entry carrying a cursor-erase escape
+// sequence (ESC[2A ESC[0J moves the cursor up two lines and clears to end of screen). Quoting
+// `err.entry` raw would let this bullet erase the refusal just printed above it and draw a
+// forged line in its place; `formatPlanSectionError` must route it through
+// `JSON.stringify(printable(...))`, the same shape `idRefusal` uses, so every control byte
+// becomes a visible `<0xNN>` token instead of being executed by the terminal.
+test('init-run neutralises control bytes in a quoted Not Yet Specified entry', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const planPath = path.join(root, 'forged-plan.md')
+    await writeFile(
+      planPath,
+      `## Not Yet Specified\n\n- Deploy \x1b[2A\x1b[0Jrollout\n\n${PLAN}`,
+      'utf8',
+    )
+    git(root, ['add', '.'])
+    git(root, ['commit', '--quiet', '-m', 'add forged plan'])
+    const code = await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    assert.equal(code, 2)
+    assert.equal(
+      lines.join('\n'),
+      'plan defect: Not Yet Specified entry 1 (line 3) asks no question.\n'
+      + 'An entry without a question mark is a work item wearing fog\'s clothes.\n'
+      + 'Ask it as a question, or write it as a task with a declared file set.\n\n'
+      + '  - "Deploy <0x1B>[2A<0x1B>[0Jrollout"',
+    )
   })
 })
 
@@ -240,7 +278,7 @@ test('init-run refuses an Out of Scope entry with no reason, quoting the exact r
       'plan defect: Out of Scope entry 1 (line 7) has no reason.\n'
       + 'An entry without a reason is not a scope boundary — it is a word.\n'
       + 'Write what it is, and why it is beyond the destination.\n\n'
-      + '  - Caching',
+      + '  - "Caching"',
     )
     await assert.rejects(readPlan(root, 'r1'))
   })
@@ -266,6 +304,34 @@ test('init-run refuses an Out of Scope section with an empty Destination', async
     )
     await assert.rejects(readPlan(root, 'r1'))
   })
+})
+
+// The guard `init-run` and `rebuild-state` both wrap their `parsePlanSections(...)` call in:
+// a real bug inside `plan-sections.mjs` never surfaces as anything but a `PlanSectionError`
+// under any markdown a test can feed it, so this pins the router directly rather than trying
+// to force `parsePlanSections` itself to misbehave. Deleting the `instanceof` check (or
+// replacing the whole function with an unconditional format-and-return) would let a plain
+// `TypeError` be reported as `plan defect: TypeError: ...` with a bullet reading `  - undefined`
+// — an internal fault mis-reported as a defect in the operator's plan.
+test('planSectionsRefusal re-throws anything that is not a PlanSectionError, unchanged', () => {
+  const bug = new TypeError('boom')
+  assert.throws(() => planSectionsRefusal(bug), (err) => err === bug)
+})
+
+test('planSectionsRefusal formats a PlanSectionError instead of throwing it', () => {
+  const err = new PlanSectionError('Out of Scope entry 1 (line 7) has no reason', {
+    line: 7,
+    entry: 'Caching',
+    reason: 'missing-reason',
+    index: 1,
+  })
+  assert.equal(
+    planSectionsRefusal(err),
+    'plan defect: Out of Scope entry 1 (line 7) has no reason.\n'
+    + 'An entry without a reason is not a scope boundary — it is a word.\n'
+    + 'Write what it is, and why it is beyond the destination.\n\n'
+    + '  - "Caching"',
+  )
 })
 
 test('digest renders from the status written by init-run', async () => {
@@ -3093,6 +3159,44 @@ test('rebuild-state with --force replaces existing state and drops the gate hist
     // The branch exists and contributes nothing, so the rebuilt record says orphaned.
     assert.equal(after.tasks[0].state, 'orphaned')
   })
+})
+
+// The three existing rebuild-state tests above all use `withRepo`'s plain PLAN, which has none
+// of the header sections, so none of them can see `destination`/`notYetSpecified`/`outOfScope`
+// getting dropped. This one commits `PLAN_WITH_SECTIONS` as the plan at the anchor instead —
+// `rebuild-state` reads the plan the same way `derive` does, via `git show <anchor>:<planPath>`,
+// so the sections have to be committed, not just written to the working tree.
+test('rebuild-state re-derives destination, notYetSpecified and outOfScope from the plan at the anchor', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-cli-'))
+  try {
+    git(root, ['init', '--quiet', '--initial-branch=main'])
+    git(root, ['config', 'user.email', 'test@example.com'])
+    git(root, ['config', 'user.name', 'Test'])
+    await writeFile(path.join(root, 'plan.md'), PLAN_WITH_SECTIONS, 'utf8')
+    await writeFile(path.join(root, '.gitignore'), '.teammates/\n', 'utf8')
+    git(root, ['add', '.'])
+    git(root, ['commit', '--quiet', '-m', 'initial'])
+    git(root, ['checkout', '--quiet', '-b', 'run-branch'])
+    const lines = []
+    const io = { out: (t) => lines.push(t), err: () => {} }
+    const initCode = await runCli(['init-run', path.join(root, 'plan.md'), '--run', 'r1', '--root', root], io)
+    assert.equal(initCode, 0)
+    // The state is gitignored, so this is what a clean checkout leaves behind.
+    await rm(path.join(root, '.teammates'), { recursive: true, force: true })
+    lines.length = 0
+    const code = await runCli(['rebuild-state', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    assert.equal(code, 0)
+    const plan = await readPlan(root, 'r1')
+    assert.equal(plan.destination, 'The gate answers PASS or FAIL from git alone.')
+    assert.deepEqual(plan.notYetSpecified, [
+      { text: 'Where does a resolved fog entry go once someone decides it?', line: 9 },
+    ])
+    assert.deepEqual(plan.outOfScope, [
+      { text: 'Caching — the destination is the verdict, not latency', line: 13 },
+    ])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('gate reports a JSON verdict when a manifest exists', async () => {

@@ -592,9 +592,16 @@ export function parseConstraints(markdown) {
 // Renders a `PlanSectionError` as the refusal `init-run` prints before it exits 2. The
 // document-level defect (a missing Destination) has no offending bullet to quote, so it gets
 // its own two-line explanation with nothing indented below it. Both entry-level defects share
-// one shape: the raw message (which already names the section, ordinal and line), one line of
+// one shape: the raw message (which already names the section, ordinal and line), two lines of
 // explanation for why the shape rule exists, and the offending bullet quoted back so the
-// author does not have to reopen the plan to see what tripped it.
+// author does not have to reopen the plan to see what tripped it. `err.entry` is plan-authored
+// text reaching this refusal unfiltered — the same attacker channel `idRefusal` above quotes
+// with `JSON.stringify(printable(...))` — so it gets the identical treatment here: `printable`
+// neutralises control bytes (including line-erasing CSI sequences and the C1 range that
+// `JSON.stringify` leaves raw) and `JSON.stringify` supplies quoting, so a boundary is visible
+// even when the entry is empty, whitespace-only, or a lone zero-width character. `err.message`
+// needs none of this: it is composed by `plan-sections.mjs` from a fixed string plus an ordinal
+// and a line number and carries no plan-authored text.
 function formatPlanSectionError(err) {
   if (err.reason === 'missing-destination') {
     return 'plan defect: this plan has an Out of Scope section but no Destination.\n'
@@ -605,13 +612,27 @@ function formatPlanSectionError(err) {
     return `plan defect: ${err.message}.\n`
       + 'An entry without a reason is not a scope boundary — it is a word.\n'
       + 'Write what it is, and why it is beyond the destination.\n\n'
-      + `  - ${err.entry}`
+      + `  - ${JSON.stringify(printable(err.entry))}`
   }
   // missing-question
   return `plan defect: ${err.message}.\n`
     + 'An entry without a question mark is a work item wearing fog\'s clothes.\n'
     + 'Ask it as a question, or write it as a task with a declared file set.\n\n'
-    + `  - ${err.entry}`
+    + `  - ${JSON.stringify(printable(err.entry))}`
+}
+
+// The router both `init-run` and `rebuild-state` put around their `parsePlanSections(...)`
+// call: format a `PlanSectionError` as the refusal to print, or re-throw anything else
+// unchanged. Extracted so this decision has a test that does not depend on making
+// `parsePlanSections` itself throw a non-`PlanSectionError` — under any real markdown it never
+// does, which is exactly why deleting this guard left the whole suite green: nothing that runs
+// through a real plan file can distinguish "the guard is gone" from "the guard was never
+// exercised". Without it, a stray bug inside `plan-sections.mjs` would print as
+// `plan defect: TypeError: ...` with a bullet reading `  - undefined`, reporting an internal
+// fault as though the operator's plan prose were at fault.
+export function planSectionsRefusal(err) {
+  if (!(err instanceof PlanSectionError)) throw err
+  return formatPlanSectionError(err)
 }
 
 // runId/taskId become path segments under root/.teammates. Without containment, a value
@@ -1785,11 +1806,9 @@ export async function runCli(argv, io = { out: console.log }) {
     try {
       sections = parsePlanSections(planText)
     } catch (err) {
-      // Only a `PlanSectionError` is a plan defect. A read error reaching here (it cannot,
-      // since the read already succeeded above, but a future refactor could change that) must
-      // not be reported as if the plan's prose were at fault.
-      if (!(err instanceof PlanSectionError)) throw err
-      io.out(formatPlanSectionError(err))
+      // `planSectionsRefusal` re-throws anything that is not a `PlanSectionError` rather than
+      // reporting it as if the plan's prose were at fault.
+      io.out(planSectionsRefusal(err))
       return 2
     }
 
@@ -2483,6 +2502,23 @@ export async function runCli(argv, io = { out: console.log }) {
     const resolved = await resolveConfig(root, io)
     if (!resolved) return 2
 
+    // `rebuild-state` already takes `--plan` and reads it at the same anchor `derive` above
+    // just used to parse the task list, so `destination`, `notYetSpecified` and `outOfScope`
+    // are re-derived the same way `init-run` derives them the first time — rather than left to
+    // fall out as `undefined`, which is what writing `plan` verbatim below would do: none of
+    // those three keys exists on `rebuildRunState`'s output, and `writePlan`'s fill-if-absent
+    // rule only carries a field FORWARD from the previous plan.json, it does not invent one
+    // that was never written into the object passed in.
+    const rebuiltPlanPath = path.relative(root, path.resolve(root, flags.plan)).split(path.sep).join('/')
+    let sections
+    try {
+      const planMarkdown = await ctx.git.fileAtCommit(ctx.anchorSha, rebuiltPlanPath)
+      sections = parsePlanSections(planMarkdown)
+    } catch (err) {
+      io.out(planSectionsRefusal(err))
+      return 2
+    }
+
     const git = createGit({ cwd: root })
     const info = {}
     for (const task of ctx.tasks ?? []) {
@@ -2531,10 +2567,15 @@ export async function runCli(argv, io = { out: console.log }) {
     // Carrying the existing value forward and deriving only when there is none is `writePlan`'s
     // rule, shared with every other plan write rather than restated here — this command had its
     // own copy of it, which is how it became the writer that could still overwrite a good value.
-    const rebuiltPlanPath = path.relative(root, path.resolve(root, flags.plan)).split(path.sep).join('/')
     const rebuiltRecord = await writePlan(
       root, runId,
-      { ...plan, planPath: rebuiltPlanPath },
+      {
+        ...plan,
+        planPath: rebuiltPlanPath,
+        destination: sections.destination,
+        notYetSpecified: sections.notYetSpecified,
+        outOfScope: sections.outOfScope,
+      },
       { candidateRunBranch: ctx.runBranch, baseBranch: ctx.baseBranch },
     )
     await writeState(root, runId, 'status', status)
