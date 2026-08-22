@@ -141,7 +141,7 @@ export function renderRunSummary(runId, phaseResults = []) {
 //
 // `destination` is additionally wrapped in `JSON.stringify`, the same `JSON.stringify(printable(v))`
 // shape `cli.mjs` uses everywhere else it prints an agent-written value (see `show` at
-// `scripts/cli.mjs:693`). A destination that is a lone zero-width character — U+200B, invisible in
+// `scripts/cli.mjs:655`). A destination that is a lone zero-width character — U+200B, invisible in
 // a terminal — used to render as `Destination: ` with nothing visibly after it, which an operator
 // reads as this function having failed to render rather than as the destination the plan actually
 // declared. Quoting draws the boundary the missing text could not: `Destination: "​"` still shows

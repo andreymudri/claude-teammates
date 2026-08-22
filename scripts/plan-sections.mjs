@@ -5,11 +5,12 @@
 // rule below was found the hard way; the comments are the record of why, and dropping one is how
 // the next reader re-breaks it.
 //
-// Nothing here is enforced by any gate, and in this tree nothing outside the tests imports this
-// module: what `parsePlanSections` does is DEFINE the refusals. The wiring that applies them at
-// the moment a run is created lands with the `init-run` task, and even then that is the whole of
-// its authority: no verdict recomputes from these sections and no teammate is handed them. Do not
-// restate this in the present tense until an actual caller in `scripts/` imports the module.
+// Nothing here is enforced by any gate. `bulletSection` now has a production caller in
+// `scripts/`; `parsePlanSections` does not yet — what it does is DEFINE the refusals. The wiring
+// that applies those refusals at the moment a run is created lands with the `init-run` task, and
+// even then that is the whole of its authority: no verdict recomputes from these sections and no
+// teammate is handed them. Do not restate `parsePlanSections` as wired in until an actual caller
+// in `scripts/` imports it.
 
 const SECTION_SEPARATORS = /(?:—|–|\s--\s|\s-\s)\s*\S/
 
