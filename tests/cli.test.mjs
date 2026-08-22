@@ -154,6 +154,120 @@ test('init-run writes plan and status and reports phases', async () => {
   })
 })
 
+// A plan carrying all three header sections, in the shape T1 (plan-sections.mjs) already has
+// tests pinning: a Destination, two Not Yet Specified questions, and one Out of Scope entry
+// with a reason. `init-run` must compile them into plan.json unchanged.
+const PLAN_WITH_SECTIONS = `# A plan
+
+## Destination
+
+The gate answers PASS or FAIL from git alone.
+
+## Not Yet Specified
+
+- Where does a resolved fog entry go once someone decides it?
+
+## Out of Scope
+
+- Caching — the destination is the verdict, not latency
+
+### Task 1: A
+
+**Files:**
+- Create: \`a.mjs\`
+`
+
+test('init-run compiles Destination, Not Yet Specified and Out of Scope into plan.json', async () => {
+  await withRepo(async ({ root, io }) => {
+    const planPath = path.join(root, 'sections-plan.md')
+    await writeFile(planPath, PLAN_WITH_SECTIONS, 'utf8')
+    git(root, ['add', '.'])
+    git(root, ['commit', '--quiet', '-m', 'add sections plan'])
+    const code = await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    assert.equal(code, 0)
+    const plan = await readPlan(root, 'r1')
+    assert.equal(plan.destination, 'The gate answers PASS or FAIL from git alone.')
+    assert.deepEqual(plan.notYetSpecified.map((e) => e.text), [
+      'Where does a resolved fog entry go once someone decides it?',
+    ])
+    assert.deepEqual(plan.outOfScope.map((e) => e.text), [
+      'Caching — the destination is the verdict, not latency',
+    ])
+  })
+})
+
+test('init-run over a plan with none of the three sections writes null and empty arrays', async () => {
+  await withRepo(async ({ root, planPath, io }) => {
+    const code = await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    assert.equal(code, 0)
+    const plan = await readPlan(root, 'r1')
+    assert.equal(plan.destination, null)
+    assert.deepEqual(plan.notYetSpecified, [])
+    assert.deepEqual(plan.outOfScope, [])
+  })
+})
+
+test('init-run refuses a Not Yet Specified entry with no question mark, run directory not created', async () => {
+  await withRepo(async ({ root, io }) => {
+    const planPath = path.join(root, 'foggy-plan.md')
+    await writeFile(
+      planPath,
+      `## Not Yet Specified\n\n- This is a work item, not a question\n\n${PLAN}`,
+      'utf8',
+    )
+    git(root, ['add', '.'])
+    git(root, ['commit', '--quiet', '-m', 'add foggy plan'])
+    const code = await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    assert.equal(code, 2)
+    await assert.rejects(readPlan(root, 'r1'))
+  })
+})
+
+test('init-run refuses an Out of Scope entry with no reason, quoting the exact refusal', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const planPath = path.join(root, 'scope-plan.md')
+    await writeFile(
+      planPath,
+      `## Destination\n\nSomething landable.\n\n## Out of Scope\n\n- Caching\n\n${PLAN}`,
+      'utf8',
+    )
+    git(root, ['add', '.'])
+    git(root, ['commit', '--quiet', '-m', 'add scope plan'])
+    const code = await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    assert.equal(code, 2)
+    assert.equal(
+      lines.join('\n'),
+      'plan defect: Out of Scope entry 1 (line 7) has no reason.\n'
+      + 'An entry without a reason is not a scope boundary — it is a word.\n'
+      + 'Write what it is, and why it is beyond the destination.\n\n'
+      + '  - Caching',
+    )
+    await assert.rejects(readPlan(root, 'r1'))
+  })
+})
+
+test('init-run refuses an Out of Scope section with an empty Destination', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const planPath = path.join(root, 'no-destination-plan.md')
+    await writeFile(
+      planPath,
+      `## Destination\n\n## Out of Scope\n\n- Caching — out of scope\n\n${PLAN}`,
+      'utf8',
+    )
+    git(root, ['add', '.'])
+    git(root, ['commit', '--quiet', '-m', 'add no-destination plan'])
+    const code = await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    assert.equal(code, 2)
+    assert.equal(
+      lines.join('\n'),
+      'plan defect: this plan has an Out of Scope section but no Destination.\n'
+      + 'Out of scope means beyond the destination, so without one there is\n'
+      + 'nothing to judge an entry against.',
+    )
+    await assert.rejects(readPlan(root, 'r1'))
+  })
+})
+
 test('digest renders from the status written by init-run', async () => {
   await withRepo(async ({ root, planPath, io, lines }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)

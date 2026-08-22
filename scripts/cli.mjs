@@ -3,7 +3,7 @@ import { livenessRows, renderLiveness, hasStall, hasUnknown, DEFAULT_STALE_MINUT
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parsePlan } from './plan-parser.mjs'
-import { bulletSection } from './plan-sections.mjs'
+import { bulletSection, parsePlanSections, PlanSectionError } from './plan-sections.mjs'
 import { assignPhases } from './phases.mjs'
 import { readState, writeState, claimTask, releaseClaim, readFixRounds, recordFixRound, runDir, writeLocation, worktreeKey, isLocalAbsolute } from './state.mjs'
 import { composeBrief } from './brief.mjs'
@@ -587,6 +587,31 @@ function missingArgs(command, flags, positional) {
 // here: this is just the plan-wide list mapped down to the bare strings callers expect.
 export function parseConstraints(markdown) {
   return bulletSection(markdown, 'Global Constraints').map((item) => item.text)
+}
+
+// Renders a `PlanSectionError` as the refusal `init-run` prints before it exits 2. The
+// document-level defect (a missing Destination) has no offending bullet to quote, so it gets
+// its own two-line explanation with nothing indented below it. Both entry-level defects share
+// one shape: the raw message (which already names the section, ordinal and line), one line of
+// explanation for why the shape rule exists, and the offending bullet quoted back so the
+// author does not have to reopen the plan to see what tripped it.
+function formatPlanSectionError(err) {
+  if (err.reason === 'missing-destination') {
+    return 'plan defect: this plan has an Out of Scope section but no Destination.\n'
+      + 'Out of scope means beyond the destination, so without one there is\n'
+      + 'nothing to judge an entry against.'
+  }
+  if (err.reason === 'missing-reason') {
+    return `plan defect: ${err.message}.\n`
+      + 'An entry without a reason is not a scope boundary — it is a word.\n'
+      + 'Write what it is, and why it is beyond the destination.\n\n'
+      + `  - ${err.entry}`
+  }
+  // missing-question
+  return `plan defect: ${err.message}.\n`
+    + 'An entry without a question mark is a work item wearing fog\'s clothes.\n'
+    + 'Ask it as a question, or write it as a task with a declared file set.\n\n'
+    + `  - ${err.entry}`
 }
 
 // runId/taskId become path segments under root/.teammates. Without containment, a value
@@ -1751,7 +1776,24 @@ export async function runCli(argv, io = { out: console.log }) {
     // it: reading from the cwd while recording relative to the root would write a pointer to a
     // file the recorded path does not name.
     const planFile = path.resolve(root, positional[0])
-    const tasks = assignPhases(parsePlan(await readFile(planFile, 'utf8')))
+    const planText = await readFile(planFile, 'utf8')
+
+    // Parsed from the same text the task list is about to be parsed from below — read once,
+    // handed to both parsers — before `assignPhases(parsePlan(...))` runs, so a malformed
+    // section refuses the run before any task work is even derived from the file.
+    let sections
+    try {
+      sections = parsePlanSections(planText)
+    } catch (err) {
+      // Only a `PlanSectionError` is a plan defect. A read error reaching here (it cannot,
+      // since the read already succeeded above, but a future refactor could change that) must
+      // not be reported as if the plan's prose were at fault.
+      if (!(err instanceof PlanSectionError)) throw err
+      io.out(formatPlanSectionError(err))
+      return 2
+    }
+
+    const tasks = assignPhases(parsePlan(planText))
 
     // DEFENCE IN DEPTH, and stated as such rather than as a validation that earns its keep:
     // `plan-parser.mjs` builds every id as `T${digits}` from `/^###\s+Task\s+(\d+)\s*:/`, so no
@@ -1852,7 +1894,12 @@ export async function runCli(argv, io = { out: console.log }) {
     // branch re-pointed the run at it, permanently.
     const recorded = await writePlan(
       root, runId,
-      { runId, totalPhases, tasks, planPath },
+      {
+        runId, totalPhases, tasks, planPath,
+        destination: sections.destination,
+        notYetSpecified: sections.notYetSpecified,
+        outOfScope: sections.outOfScope,
+      },
       { candidateRunBranch: runBranch, baseBranch: baseHere },
     )
     if (recorded.runBranch === null) {
