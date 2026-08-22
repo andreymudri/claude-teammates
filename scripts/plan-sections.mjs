@@ -5,13 +5,13 @@
 // rule below was found the hard way; the comments are the record of why, and dropping one is how
 // the next reader re-breaks it.
 //
-// `parsePlanSections` is called wherever `scripts/cli.mjs` WRITES a run's `plan.json` — never
-// from anything that only reads it back — which is the whole of its authority: it defines and
-// applies the refusals at the moment the three fields are (re)derived from the plan file, and
-// nothing downstream of that write recomputes from these sections — no gate check re-derives
-// them, and no teammate brief is built from them. State that bound, not the list of callers that
-// satisfy it today: an enumeration of importers goes stale the moment one is added or removed,
-// while the bound (applied at plan-write time, nothing later) stays true regardless.
+// `parsePlanSections` is called only where `scripts/cli.mjs` (re)derives the three fields from
+// the plan markdown itself — not at every `plan.json` write: a write that only carries forward
+// fields already on disk (recording the run branch, retiering tasks) never calls it. Nothing
+// downstream of a derivation recomputes from these sections — no gate check re-derives them, and
+// no teammate brief is built from them. State that bound, not the list of callers that satisfy
+// it today: an enumeration of call sites goes stale the moment one is added or removed, while the
+// bound (applied only at derivation, nothing later) stays true regardless.
 
 const SECTION_SEPARATORS = /(?:—|–|\s--\s|\s-\s)\s*\S/
 
