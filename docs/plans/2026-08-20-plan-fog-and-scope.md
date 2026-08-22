@@ -246,6 +246,7 @@ exit code, and `finish` reports them to the operator — with the task list prov
 
 **Files:**
 - Modify: `scripts/cli.mjs`
+- Test: `tests/cli.test.mjs`
 
 **Depends:** T5
 
@@ -262,6 +263,13 @@ exit code, and `finish` reports them to the operator — with the task list prov
 
 - [ ] **Step 4:** Confirm the exit codes are untouched: the value returned by `finish` must be
       identical with and without plan notes present. State in your result which lines you checked.
+
+- [ ] **Step 5:** Pin all four steps above in `tests/cli.test.mjs`: that `finish` prints the
+      destination and the open fog entries when `plan.json` carries them; that it prints nothing
+      extra when it does not; that a corrupt or unreadable `plan.json` leaves `finish`'s output and
+      its exit code unchanged rather than crashing; and that the exit code is byte-identical with
+      and without notes present. A wiring step that nothing pins is indistinguishable from one that
+      was never wired.
 
 ### Task 7: the skills say what the code does and does not do
 
