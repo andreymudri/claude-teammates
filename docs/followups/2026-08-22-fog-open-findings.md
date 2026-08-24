@@ -83,6 +83,82 @@ block that.
 - **`tests/phases.test.mjs:246`** — the phase-level assertion is implied by the absolute
   expectations above it; gutting `assignPhases` leaves it green.
 
+## Phase 4 items still open
+
+All eight were reported against `teammates/fog/T6@380532f`, rated `low`, and knowingly
+integrated at merge `2c39ce8`. Line numbers are as of that tip.
+
+Three of them are the same defect seen from different angles — the `if (notes)` guard is
+unpinned — and two lenses reached it independently:
+
+- **`scripts/cli.mjs:2882`** (tests, claims) — removing the `if (notes)` guard leaves the
+  suite green. `renderPlanNotes` returns `''` for a plan with neither section (the common
+  case), so `finish` then prints a stray blank line after the summary for every such run.
+  The test that exists to catch this (`tests/cli.test.mjs:2504`, "prints nothing extra when
+  plan.json carries no destination or fog") asserts only `doesNotMatch(/Destination:/)` and
+  `doesNotMatch(/Not yet specified/)`, never that the output is unchanged. Fix: assert
+  `lines.length`, or compare the captured output to the summary alone.
+
+- **`scripts/cli.mjs:2877`** (claims) — the comment justifying `plan ?? {}` claims
+  `renderPlanNotes` has no input-shape defense of its own. Deleting `?? {}` leaves the suite
+  green: with no `plan.json`, `readState` returns null, the render throws a TypeError, and
+  the surrounding try swallows it, so output is byte-identical. The guard is real defense
+  that nothing pins; a later author removing it as dead code gets a green suite.
+
+- **`scripts/cli.mjs:2881`** (correctness) — `plan ?? {}` guards only null. A `notYetSpecified`
+  that is wrong-shaped but still iterable misrenders rather than being suppressed, and a try
+  cannot catch a misrender. `"notYetSpecified": ["a fog item"]` (strings, not `{text, line}`)
+  prints `Not yet specified (1 open):` then `  - undefined`; `"notYetSpecified": "ab"` prints
+  two `  - undefined` bullets; a non-string `destination` prints `Destination: "[object Object]"`.
+  Verified by calling `renderPlanNotes` directly at 380532f. Exit code unaffected — the wrong
+  result is the fog count an operator reads. The comment at `:2876-2878` lists "misrenders"
+  among what the try handles, which it does not.
+
+- **`scripts/cli.mjs:2880`** (correctness) — notes come from `.teammates/<run>/plan.json`
+  while the verdict above them is computed from the plan at the git anchor, so one report's
+  two halves can describe different plan versions with nothing marking which. Repro: `init-run`
+  on a plan with one fog entry, amend and commit the plan to resolve it, run `finish` without
+  re-running `init-run` — the summary still prints `Not yet specified (1 open):` for an entry
+  the current plan no longer has. This is the reader the task specified, so it is a
+  reporting-freshness limit rather than a wiring error, but no output distinguishes the sources.
+
+- **`scripts/cli.mjs:2882`** (security) — fog lines are uncapped and print *after* the verdict.
+  Reproduced against the real `finish` path at 380532f: a `plan.json` with 50,000
+  `notYetSpecified` entries printed 50,005 lines (3.1 MB), the last 50,001 attacker-chosen,
+  pushing the "do not land" lines to the 3rd and 4th line of output, far above any viewport.
+  Entries were `<U+202E>dnal ot ydaer si hcnarb nur eht :sessap esahp yreve N`, which renders
+  right-to-left as prose reading like a passing summary. `plan.json` is teammate-writable and
+  gitignored, so nothing gates it. The exit code stays 4, so a scripted caller cannot be fooled;
+  only a human reading the tail of the terminal can. Mitigation: cap the lines with an "N more"
+  tail, or print notes before the summary.
+
+- **`tests/cli.test.mjs:2455`** (claims) — the claim that `finish` reads and prints notes
+  *after* the run summary is unpinned. Moving the whole try block above
+  `io.out(renderRunSummary(...))` leaves the suite green, because every assertion in the new
+  tests uses `lines.join('\n')` with `assert.match` and nothing constrains relative order.
+
+- **`tests/cli.test.mjs:2570`** (claims) — the comment calls the exit-code test's check a
+  "never-run check", but the manifest it writes uses `fileset`, which `finish` *does* execute
+  and which is precisely what makes both arms exit 0. Swapping in the section's actual
+  never-run agent check makes the test fail (`actual: 4, expected: 0`). A maintainer trusting
+  the comment and "restoring" the agent check would turn it into a comparison of two 4s,
+  no longer exercising the `summary.complete` path the claim is about. The comment also
+  contradicts the section preamble at `:2457` ("every case here exits 4").
+
+### Claims the phase 4 review enumerated but never reached
+
+The `claims` lens is bounded by a mutation cap of 8. It probed 8 and left these 6 unprobed —
+they are not clean, they are unexamined:
+
+- `tests/cli.test.mjs:2457` — "the checks in these tests never run ... so every case here exits 4"
+- `tests/cli.test.mjs:2458` — "a later test pins that the verdict itself never moves"
+- `tests/cli.test.mjs:2523` — "`readState` throws on unparseable JSON"
+- `tests/cli.test.mjs:2547` — "a `notYetSpecified` entry that is `null` throws reading `entry.text`"
+- `scripts/cli.mjs:2874` — "same rule `writePlan` states about its own read"
+- `scripts/cli.mjs:2884` — "Swallow and print nothing — see the comment above."
+
+Across all four phases the reviews left **49** enumerated claims unprobed (21 / 11 / 11 / 6).
+
 ## Documentation debt, no owner
 
 The plan (`docs/plans/2026-08-20-plan-fog-and-scope.md`, Step 6) and the design spec
