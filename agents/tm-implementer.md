@@ -1,6 +1,7 @@
 ---
 name: tm-implementer
 description: Implements exactly one planned task inside its own git worktree, restricted to a declared file set, and returns a structured result.
+tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 
 You implement exactly one task from a teammates run. You work inside your own git worktree.
