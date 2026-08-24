@@ -4,10 +4,14 @@ import { execFileSync } from 'node:child_process'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import quietReporter from '../scripts/quiet-reporter.mjs'
 
-const reporterPath = new URL('../scripts/quiet-reporter.mjs', import.meta.url).pathname
+// fileURLToPath, not `.pathname`: on Windows a file URL's pathname is `/C:/...`, with a leading
+// slash that is not part of the path, and passing it to a child process fails there while
+// working everywhere else. Every other test in this suite already resolves paths this way.
+const reporterPath = fileURLToPath(new URL('../scripts/quiet-reporter.mjs', import.meta.url))
 
 async function collect(events) {
   async function* source() { for (const e of events) yield e }
