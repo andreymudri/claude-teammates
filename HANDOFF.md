@@ -1,7 +1,7 @@
 # Handoff — 2026-08-24, end of session
 
 Everything below is on `master` and pushed. Working tree clean, one branch, one worktree.
-`v1.1.0` is tagged at `a6b3054`; `master` has moved past it (see *Release state*).
+`v1.1.1` is tagged at `b36b821`, which is `master` — nothing is unreleased.
 
 ## Read this first
 
@@ -90,16 +90,24 @@ after pushing rather than trusting a local pass.
 
 ## Release state
 
-`v1.1.0` is tagged at `a6b3054` and pushed. `master` has since moved: the `usage` command, the
-tool declarations, and the Windows slug fix all landed after the tag. **They are unreleased.**
-Either move the tag again or cut `v1.1.1` when convenient; `CHANGELOG.md` has no entry for them
-yet.
+`v1.1.1` is tagged at `b36b821` and pushed; `master`, the tag, `package.json` and
+`.claude-plugin/plugin.json` all agree. Nothing is unreleased.
+
+One judgement recorded rather than hidden: `usage` is a **new CLI subcommand**, and by the
+reasoning that made v1.1.0 a minor bump — `init-run` gained a refusal it did not have — this
+would conventionally have been `v1.2.0`. It was tagged as a patch at the user's request.
+Retagging is cheap if that reads wrong later.
 
 ## Verify before trusting anything above
 
     npm test                              # expect 1874 tests, 1871 pass, 0 fail, 3 skipped
     gh run list --limit 1                 # the last push must be green on all three platforms
     node scripts/cli.mjs usage --root .   # the measurement tool
+
+The last CI run this session verified was `323e86b`, green on Linux, macOS and Windows. The
+release commit on top of it (`b36b821`) touches only `CHANGELOG.md`, `package.json` and
+`.claude-plugin/plugin.json`, so nothing should have moved — **but that run was not watched.**
+Confirm it before trusting the tree.
 
 ## Still open, unchanged
 
