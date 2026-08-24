@@ -12,9 +12,13 @@ const usageRecord = (over = {}) => ({
   },
 })
 
-test('projectSlug replaces both separator kinds', () => {
+// The colon matters as much as the separators: every absolute Windows path carries a drive
+// letter, and a colon cannot appear in a Windows filename, so a slug that kept it would name a
+// directory that can never exist.
+test('projectSlug replaces both separator kinds and the drive colon', () => {
   assert.equal(projectSlug('/home/u/p'), '-home-u-p')
-  assert.equal(projectSlug('C:\\Users\\u\\p'), 'C:-Users-u-p')
+  assert.equal(projectSlug('C:\\Users\\u\\p'), 'C--Users-u-p')
+  assert.doesNotMatch(projectSlug('D:\\a\\b'), /:/, 'a slug with a colon is not a legal Windows directory name')
 })
 
 test('summarizeTranscript sums every usage category', () => {

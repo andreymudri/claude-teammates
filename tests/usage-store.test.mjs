@@ -7,7 +7,9 @@ import path from 'node:path'
 import { readSessionUsage } from '../scripts/usage-store.mjs'
 import { projectSlug } from '../scripts/usage.mjs'
 
-const FAKE_ROOT = '/fake/project'
+// Resolved here, because the store resolves before deriving the slug. Passing the unresolved
+// path built the fixture under a different name on Windows, where resolve adds a drive letter.
+const FAKE_ROOT = path.resolve('/fake/project')
 
 const line = (over) => JSON.stringify({
   message: { usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, ...over } },

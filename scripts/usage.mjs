@@ -12,8 +12,13 @@
 // The harness's directory name for a project: its absolute path with the separators replaced.
 // Both separator kinds are replaced rather than `path.sep` alone, because the answer must not
 // depend on which platform is asking about which path.
+//
+// The COLON is replaced for the same reason and one more: every absolute Windows path carries a
+// drive letter, and a colon cannot appear in a Windows filename at all. Leaving it in produced a
+// slug like `D:-fake-project`, naming a directory that can never exist there — so the lookup
+// could not fail in any way a reader would recognise as "wrong slug".
 export function projectSlug(root) {
-  return String(root).replace(/[/\\]/g, '-')
+  return String(root).replace(/[/\\:]/g, '-')
 }
 
 // `prefix` is the MINIMUM context observed, not the first message's. A minimum cannot be inflated
