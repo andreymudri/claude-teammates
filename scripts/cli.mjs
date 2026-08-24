@@ -3,6 +3,7 @@ import { livenessRows, renderLiveness, hasStall, hasUnknown, DEFAULT_STALE_MINUT
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parsePlan } from './plan-parser.mjs'
+import { bulletSection, parsePlanSections, PlanSectionError } from './plan-sections.mjs'
 import { assignPhases } from './phases.mjs'
 import { readState, writeState, claimTask, releaseClaim, readFixRounds, recordFixRound, runDir, writeLocation, worktreeKey, isLocalAbsolute } from './state.mjs'
 import { composeBrief } from './brief.mjs'
@@ -26,7 +27,7 @@ import { realpathSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { validateLinkPaths } from './preview-links.mjs'
 import { planDrift, renderDrift } from './plan-drift.mjs'
-import { summarizeRun, renderRunSummary, suppliedForPhase, validateSuppliedPhases } from './finish.mjs'
+import { summarizeRun, renderRunSummary, renderPlanNotes, suppliedForPhase, validateSuppliedPhases } from './finish.mjs'
 import { selectPrunableWorktrees, renderPrunePlan, leakedPreviews } from './prune.mjs'
 import { previewOwnerMarkerPath } from './merge-preview.mjs'
 import { rebuildRunState } from './rebuild.mjs'
@@ -580,51 +581,58 @@ function missingArgs(command, flags, positional) {
 // the same list. It is read from the plan markdown rather than restated per task: a constraint
 // that has to be repeated is a constraint that will drift.
 //
-// The section ends at the next heading of ANY level, not just `##`. A task heading is `###`
-// and its file list is a bullet list; terminating only on `##` would sweep every task's files
-// into the constraints every teammate is told it must obey. Scanning for the terminator with
-// a second exec on the remainder — rather than one regex with a lookahead — keeps the
-// end-of-file case honest: JS has no `\Z` anchor, and `\Z` inside a pattern is an identity
-// escape matching a literal "Z", which would silently drop a section that ends the file.
+// The extraction rules — where a section ends, how a wrapped bullet is joined onto its
+// continuation, and why neither pattern spans a bullet's text with `.` — now live in
+// `scripts/plan-sections.mjs`, next to `bulletSection` itself. Read them there rather than
+// here: this is just the plan-wide list mapped down to the bare strings callers expect.
 export function parseConstraints(markdown) {
-  const text = String(markdown ?? '')
-  const heading = /^##\s+Global Constraints\s*$/m.exec(text)
-  if (!heading) return []
-  const rest = text.slice(heading.index + heading[0].length)
-  const next = /^#{1,6}\s/m.exec(rest)
-  const items = []
-  // A bullet wrapped over two lines is one constraint, not a truncated one. Keeping only
-  // the first line would hand every teammate the opening clause of a rule and silently
-  // drop the rest — the failure is invisible in the brief, which reads as a complete
-  // sentence. An indented, non-blank line directly under an item is joined onto it; a
-  // blank line closes the item, so a following indented paragraph is not swallowed. A
-  // nested bullet matches the bullet pattern first and so stays a standalone constraint.
-  //
-  // The continuation test excludes an indented line that is itself bullet-shaped (`- ` or a
-  // bare `-`), so a line the bullet pattern rejects is dropped rather than appended. Joining
-  // it would fuse two unrelated rules into a single constraint that reads as one sentence and
-  // says what neither author wrote; a dropped malformed rule is the lesser failure, and the
-  // only one that cannot silently misinform a teammate. The lookahead is `-\s|-$` rather than
-  // a bare `-`, so a continuation that merely *starts* with a hyphen still joins: `--no-ff`
-  // opens a rule's second line in this project's own constraints, and excluding every leading
-  // hyphen would truncate it into a sentence that reads complete.
-  //
-  // Both patterns use `[^\n]` rather than `.`: `.` does not match U+2028/U+2029 while `\s`
-  // does, so a bullet whose text contains one failed the bullet pattern entirely and was
-  // dropped with no diagnostic — a rule the plan states that reaches no teammate.
-  let open = false
-  for (const line of (next ? rest.slice(0, next.index) : rest).split('\n')) {
-    const bullet = /^\s*-\s+([^\n]*\S)\s*$/.exec(line)
-    if (bullet) {
-      items.push(bullet[1])
-      open = true
-    } else if (open && /^\s+(?!-\s|-$)\S/.test(line)) {
-      items[items.length - 1] += ` ${line.trim()}`
-    } else {
-      open = false
-    }
+  return bulletSection(markdown, 'Global Constraints').map((item) => item.text)
+}
+
+// Renders a `PlanSectionError` as the refusal `init-run` prints before it exits 2. The
+// document-level defect (a missing Destination) has no offending bullet to quote, so it gets
+// its own two-line explanation with nothing indented below it. Both entry-level defects share
+// one shape: the raw message (which already names the section, ordinal and line), two lines of
+// explanation for why the shape rule exists, and the offending bullet quoted back so the
+// author does not have to reopen the plan to see what tripped it. `err.entry` is plan-authored
+// text reaching this refusal unfiltered — the same attacker channel `idRefusal` above quotes
+// with `JSON.stringify(printable(...))` — so it gets the identical treatment here: `printable`
+// neutralises control bytes (including line-erasing CSI sequences and the C1 range that
+// `JSON.stringify` leaves raw) and `JSON.stringify` supplies quoting, so a boundary is visible
+// even when the entry is empty, whitespace-only, or a lone zero-width character. `err.message`
+// needs none of this: it is composed by `plan-sections.mjs` from a fixed string plus an ordinal
+// and a line number and carries no plan-authored text.
+function formatPlanSectionError(err) {
+  if (err.reason === 'missing-destination') {
+    return 'plan defect: this plan has an Out of Scope section but no Destination.\n'
+      + 'Out of scope means beyond the destination, so without one there is\n'
+      + 'nothing to judge an entry against.'
   }
-  return items
+  if (err.reason === 'missing-reason') {
+    return `plan defect: ${err.message}.\n`
+      + 'An entry without a reason is not a scope boundary — it is a word.\n'
+      + 'Write what it is, and why it is beyond the destination.\n\n'
+      + `  - ${JSON.stringify(printable(err.entry))}`
+  }
+  // missing-question
+  return `plan defect: ${err.message}.\n`
+    + 'An entry without a question mark is a work item wearing fog\'s clothes.\n'
+    + 'Ask it as a question, or write it as a task with a declared file set.\n\n'
+    + `  - ${JSON.stringify(printable(err.entry))}`
+}
+
+// The router both `init-run` and `rebuild-state` put around their `parsePlanSections(...)`
+// call: format a `PlanSectionError` as the refusal to print, or re-throw anything else
+// unchanged. Extracted so this decision has a test that does not depend on making
+// `parsePlanSections` itself throw a non-`PlanSectionError` — under any real markdown it never
+// does, which is exactly why deleting this guard left the whole suite green: nothing that runs
+// through a real plan file can distinguish "the guard is gone" from "the guard was never
+// exercised". Without it, a stray bug inside `plan-sections.mjs` would print as
+// `plan defect: TypeError: ...` with a bullet reading `  - undefined`, reporting an internal
+// fault as though the operator's plan prose were at fault.
+export function planSectionsRefusal(err) {
+  if (!(err instanceof PlanSectionError)) throw err
+  return formatPlanSectionError(err)
 }
 
 // runId/taskId become path segments under root/.teammates. Without containment, a value
@@ -1789,7 +1797,22 @@ export async function runCli(argv, io = { out: console.log }) {
     // it: reading from the cwd while recording relative to the root would write a pointer to a
     // file the recorded path does not name.
     const planFile = path.resolve(root, positional[0])
-    const tasks = assignPhases(parsePlan(await readFile(planFile, 'utf8')))
+    const planText = await readFile(planFile, 'utf8')
+
+    // Parsed from the same text the task list is about to be parsed from below — read once,
+    // handed to both parsers — before `assignPhases(parsePlan(...))` runs, so a malformed
+    // section refuses the run before any task work is even derived from the file.
+    let sections
+    try {
+      sections = parsePlanSections(planText)
+    } catch (err) {
+      // `planSectionsRefusal` re-throws anything that is not a `PlanSectionError` rather than
+      // reporting it as if the plan's prose were at fault.
+      io.out(planSectionsRefusal(err))
+      return 2
+    }
+
+    const tasks = assignPhases(parsePlan(planText))
 
     // DEFENCE IN DEPTH, and stated as such rather than as a validation that earns its keep:
     // `plan-parser.mjs` builds every id as `T${digits}` from `/^###\s+Task\s+(\d+)\s*:/`, so no
@@ -1890,7 +1913,12 @@ export async function runCli(argv, io = { out: console.log }) {
     // branch re-pointed the run at it, permanently.
     const recorded = await writePlan(
       root, runId,
-      { runId, totalPhases, tasks, planPath },
+      {
+        runId, totalPhases, tasks, planPath,
+        destination: sections.destination,
+        notYetSpecified: sections.notYetSpecified,
+        outOfScope: sections.outOfScope,
+      },
       { candidateRunBranch: runBranch, baseBranch: baseHere },
     )
     if (recorded.runBranch === null) {
@@ -2474,6 +2502,23 @@ export async function runCli(argv, io = { out: console.log }) {
     const resolved = await resolveConfig(root, io)
     if (!resolved) return 2
 
+    // `rebuild-state` already takes `--plan` and reads it at the same anchor `derive` above
+    // just used to parse the task list, so `destination`, `notYetSpecified` and `outOfScope`
+    // are re-derived the same way `init-run` derives them the first time — rather than left to
+    // fall out as `undefined`, which is what writing `plan` verbatim below would do: none of
+    // those three keys exists on `rebuildRunState`'s output, and `writePlan`'s fill-if-absent
+    // rule only carries a field FORWARD from the previous plan.json, it does not invent one
+    // that was never written into the object passed in.
+    const rebuiltPlanPath = path.relative(root, path.resolve(root, flags.plan)).split(path.sep).join('/')
+    let sections
+    try {
+      const planMarkdown = await ctx.git.fileAtCommit(ctx.anchorSha, rebuiltPlanPath)
+      sections = parsePlanSections(planMarkdown)
+    } catch (err) {
+      io.out(planSectionsRefusal(err))
+      return 2
+    }
+
     const git = createGit({ cwd: root })
     const info = {}
     for (const task of ctx.tasks ?? []) {
@@ -2522,10 +2567,15 @@ export async function runCli(argv, io = { out: console.log }) {
     // Carrying the existing value forward and deriving only when there is none is `writePlan`'s
     // rule, shared with every other plan write rather than restated here — this command had its
     // own copy of it, which is how it became the writer that could still overwrite a good value.
-    const rebuiltPlanPath = path.relative(root, path.resolve(root, flags.plan)).split(path.sep).join('/')
     const rebuiltRecord = await writePlan(
       root, runId,
-      { ...plan, planPath: rebuiltPlanPath },
+      {
+        ...plan,
+        planPath: rebuiltPlanPath,
+        destination: sections.destination,
+        notYetSpecified: sections.notYetSpecified,
+        outOfScope: sections.outOfScope,
+      },
       { candidateRunBranch: ctx.runBranch, baseBranch: ctx.baseBranch },
     )
     await writeState(root, runId, 'status', status)
@@ -2821,6 +2871,18 @@ export async function runCli(argv, io = { out: console.log }) {
     // byte of any output this suite produces and left every sanitising row green. It is gone
     // rather than kept as a layer no test can drive.
     io.out(renderRunSummary(runId, phaseResults))
+    // `plan.json` is teammate-writable, same rule `writePlan` states about its own read: a
+    // corrupt or wrong-shaped file must not crash the command that reports the verdict. Both the
+    // read and the render go inside this try — `readState` throws on unparseable JSON, and
+    // `renderPlanNotes` has no input-shape defense of its own (a null plan, or a `notYetSpecified`
+    // that is not an array of `{text, line}` objects, throws or misrenders rather than refusing).
+    try {
+      const plan = await readState(root, runId, 'plan')
+      const notes = renderPlanNotes(plan ?? {})
+      if (notes) io.out(notes)
+    } catch {
+      // Swallow and print nothing — see the comment above.
+    }
     const summary = summarizeRun(phaseResults)
     if (summary.complete) return 0
     // 1 for a phase that was verified and failed; 4 for one that was never verified at all.

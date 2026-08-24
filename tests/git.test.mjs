@@ -559,6 +559,38 @@ test('a failure unrelated to --end-of-options in the "unrecognized argument" fam
   )
 })
 
+// --- fileModeAtCommit ------------------------------------------------------------------------
+
+test('fileModeAtCommit builds the argv with the path after -- and returns the six-digit mode', async () => {
+  const { calls, exec } = recorder({ code: 0, stdout: '100755 blob ceec3a7\thooks/run-hook.cmd\n', stderr: '' })
+  const mode = await createGit({ exec }).fileModeAtCommit('sha1', 'hooks/run-hook.cmd')
+  assert.deepEqual(calls[0], ['ls-tree', '--end-of-options', 'sha1', '--', 'hooks/run-hook.cmd'])
+  assert.equal(mode, '100755')
+})
+
+// `ls-tree` exits 0 with empty output for a path that is not in the tree, so absence has to be
+// read off the output rather than caught as a GitError. null, never '' — an empty string would
+// compare equal to a real answer nowhere, but it reads as "a mode I found" to a caller.
+test('fileModeAtCommit returns null when the path is absent at that commit', async () => {
+  const { exec } = recorder({ code: 0, stdout: '', stderr: '' })
+  assert.equal(await createGit({ exec }).fileModeAtCommit('sha1', 'gone.md'), null)
+})
+
+test('fileModeAtCommit rejects an empty or non-string sha/path with GitError', async () => {
+  const { calls, exec } = recorder()
+  await assert.rejects(() => createGit({ exec }).fileModeAtCommit('', 'a.md'), GitError)
+  await assert.rejects(() => createGit({ exec }).fileModeAtCommit('sha1', ''), GitError)
+  assert.deepEqual(calls, [])
+})
+
+test('fileModeAtCommit on a too-old git raises a GitError naming the 2.24 floor', async () => {
+  const { exec } = recorder({ code: 129, stdout: '', stderr: "error: unknown option `end-of-options'\n" })
+  await assert.rejects(
+    () => createGit({ exec }).fileModeAtCommit('sha1', 'a.md'),
+    (err) => err instanceof GitError && /2\.24/.test(err.message) && /too old/.test(err.message),
+  )
+})
+
 // --- resolveRef ------------------------------------------------------------------------------
 
 test('resolveRef builds the argv exactly and returns the trimmed sha', async () => {

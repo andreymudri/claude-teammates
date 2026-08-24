@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
@@ -138,6 +138,10 @@ function fakeGit(overrides = {}) {
   const defaults = {
     mergeBase: async () => 'anchorSha1',
     fileAtCommit: async () => planMarkdown(),
+    // Every path is a plain file unless a test says otherwise. contentAt pairs this with
+    // fileAtCommit, so a double that omits it makes the ownership check throw rather than
+    // exercise the branch under test.
+    fileModeAtCommit: async () => '100644',
     resolveRef: async (ref) => {
       resolveRefCalls.push(ref)
       if (ref === 'refs/heads/run') return 'runSha1'
@@ -2843,4 +2847,46 @@ test('creditRunTipTasks matches on containment, spends each parent once, and nev
     })],
     [],
   )
+})
+
+// A mode-only change carries no bytes, so a byte-only comparison sees "no parent touched this
+// file" for a file `git diff --name-only` did list — and mergeContentExplainedByParents then
+// condemns the whole merge as having content with no legitimate source. That is a false FAIL:
+// the chmod is the honest contribution of the very parent being consulted. Found in run `fog`,
+// where a hooks fix whose entire payload was `100644 -> 100755` on one file made a correctly
+// re-parented base merge unexplainable, with no route around it.
+test('a base merge whose only contribution is a mode change is explained, not flagged (real repo)', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    await writeFile(path.join(root, 'plan.md'), singleTaskPlan(), 'utf8')
+    await writeFile(path.join(root, 'hook.sh'), '#!/bin/sh\necho hi\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+
+    // One honest task branch, merged --no-ff, so the run branch is a normal mid-run branch.
+    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'work\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1 work'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+
+    // The base advances by a commit whose ENTIRE payload is the executable bit: same blob
+    // before and after. This is the documented, legitimate route for a mid-run amendment.
+    await sh(['checkout', 'main'])
+    await chmod(path.join(root, 'hook.sh'), 0o755)
+    await sh(['add', 'hook.sh'])
+    await sh(['commit', '-m', 'chmod +x hook.sh'])
+    const before = await sh(['rev-parse', 'HEAD~1:hook.sh'])
+    const after = await sh(['rev-parse', 'HEAD:hook.sh'])
+    assert.equal(after.stdout.trim(), before.stdout.trim(), 'setup: the blob must be identical, so this is mode-only')
+
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'Merge base', 'main'])
+
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+    const res = await runOwnershipCheck({ name: 'ownership', kind: 'ownership' }, ctx)
+
+    assert.equal(res.status, 'pass', res.output)
+  })
 })
