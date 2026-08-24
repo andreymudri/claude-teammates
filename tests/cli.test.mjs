@@ -10783,3 +10783,71 @@ test('init-run refuses an invisible character in a run id and still shows it', a
     assert.match(lines.join('\n'), /200c/i)
   })
 })
+
+// A `## Destination` heading with no prose under it, while `## Out of Scope` exists — the
+// missing-destination refusal. `init-run` is run against a GOOD plan first so the run exists,
+// then the defective plan is committed and becomes what sits at the anchor.
+const PLAN_DEFECTIVE_SECTIONS = `# A plan
+
+## Destination
+
+## Out of Scope
+
+- Caching — the destination is the verdict, not latency
+
+### Task 1: A
+
+**Files:**
+- Create: \`a.mjs\`
+`
+
+// THE DECISION (user, 2026-08-22): rebuild-state exists to restore state after .teammates/ is
+// lost. A defect in a plan committed long ago must not make that impossible — the operator
+// cannot fix a historical commit, and fixing the working-tree copy does not clear it because
+// the plan is read from git at the anchor. So the three section fields degrade to
+// null / [] / [] with a warning, and everything git CAN vouch for is still rebuilt.
+test('rebuild-state recovers from a section defect in the plan at the anchor instead of refusing', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-cli-'))
+  try {
+    git(root, ['init', '--quiet', '--initial-branch=main'])
+    git(root, ['config', 'user.email', 'test@example.com'])
+    git(root, ['config', 'user.name', 'Test'])
+    // The DEFECTIVE plan is what gets committed, so it is what sits at the anchor.
+    await writeFile(path.join(root, 'plan.md'), PLAN_DEFECTIVE_SECTIONS, 'utf8')
+    await writeFile(path.join(root, '.gitignore'), '.teammates/\n', 'utf8')
+    git(root, ['add', '.'])
+    git(root, ['commit', '--quiet', '-m', 'initial'])
+    git(root, ['checkout', '--quiet', '-b', 'run-branch'])
+    // The operator corrects the copy on disk but does not commit it. `init-run` reads the
+    // working tree, so it succeeds and the run exists.
+    await writeFile(path.join(root, 'plan.md'), PLAN_WITH_SECTIONS, 'utf8')
+    const lines = []
+    const io = { out: (t) => lines.push(t), err: () => {} }
+    assert.equal(await runCli(['init-run', path.join(root, 'plan.md'), '--run', 'r1', '--root', root], io), 0)
+
+    await rm(path.join(root, '.teammates'), { recursive: true, force: true })
+    lines.length = 0
+
+    const code = await runCli(['rebuild-state', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    assert.equal(code, 0, `expected recovery, got exit ${code}: ${lines.join('\n')}`)
+
+    const plan = await readPlan(root, 'r1')
+    assert.equal(plan.destination, null)
+    assert.deepEqual(plan.notYetSpecified, [])
+    assert.deepEqual(plan.outOfScope, [])
+    // Everything git can vouch for is still rebuilt.
+    assert.equal(plan.planPath, 'plan.md')
+    const status = await readStatus(root, 'r1')
+    assert.deepEqual(status.tasks.map((t) => t.id), ['T1'])
+
+    // The warning has to say which command degraded the fields, and that the plan came from
+    // git at the anchor rather than the working tree — without that, an operator who has
+    // already corrected plan.md on disk cannot tell why the warning persists.
+    const out = lines.join('\n')
+    assert.match(out, /rebuild-state/)
+    assert.match(out, /anchor/)
+    assert.match(out, /destination/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
