@@ -2510,13 +2510,32 @@ export async function runCli(argv, io = { out: console.log }) {
     // rule only carries a field FORWARD from the previous plan.json, it does not invent one
     // that was never written into the object passed in.
     const rebuiltPlanPath = path.relative(root, path.resolve(root, flags.plan)).split(path.sep).join('/')
-    let sections
+    // RECOVERY, NOT REFUSAL — decided 2026-08-22. This command exists to restore state after
+    // `.teammates/` is lost, and the plan it reads is the one COMMITTED AT THE ANCHOR, not the
+    // one on disk. A section defect there is therefore unfixable by the operator: correcting
+    // plan.md in the working tree does not change a historical commit, so refusing would leave
+    // the run permanently unrecoverable for a reason nobody can act on. `init-run` still
+    // refuses — it reads the working tree, where a defect IS fixable, and refusing is how a bad
+    // plan gets caught before a run starts. Here the three section fields degrade to
+    // `null` / `[]` / `[]` and everything git can vouch for is rebuilt regardless.
+    //
+    // The warning names this command, the anchor, and where the plan was read from, because
+    // without those an operator who has already corrected plan.md cannot tell why it persists.
+    // Only a `PlanSectionError` degrades: `planSectionsRefusal` re-throws anything else, and a
+    // plan MISSING at the anchor is a different failure that `derive` above has already made
+    // impossible to reach here.
+    let sections = { destination: null, notYetSpecified: [], outOfScope: [] }
     try {
       const planMarkdown = await ctx.git.fileAtCommit(ctx.anchorSha, rebuiltPlanPath)
       sections = parsePlanSections(planMarkdown)
     } catch (err) {
-      io.out(planSectionsRefusal(err))
-      return 2
+      const refusal = planSectionsRefusal(err)
+      io.out(`rebuild-state: the plan at the anchor ${printable(ctx.anchorSha)} has a section defect, `
+        + 'so destination, notYetSpecified and outOfScope were rebuilt as empty. Everything else '
+        + 'below came from git and is unaffected. The plan was read from git at that anchor, not '
+        + `from ${printable(rebuiltPlanPath)} in the working tree, so correcting the file on disk `
+        + 'will not clear this — only a plan committed at the anchor would.')
+      io.out(refusal)
     }
 
     const git = createGit({ cwd: root })

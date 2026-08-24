@@ -4,7 +4,7 @@ Every item below was reported by a phase reviewer, rated below the gate's `block
 threshold (`high`), and knowingly integrated. Each names the reproduction the reviewer
 ran, so none of them needs re-deriving from scratch.
 
-## Decided, not yet implemented
+## Decided and now implemented
 
 **`rebuild-state` must recover, not refuse, on a section defect in the plan at the anchor.**
 `scripts/cli.mjs` (the `rebuild-state` catch, ~:2513). Today it prints `init-run`'s refusal
@@ -18,6 +18,15 @@ succeeds; delete `.teammates/`; `rebuild-state` then exits 2 and rebuilds nothin
 defect, and write `null` / `[]` / `[]` for the three fields.** `rebuild-state` exists to
 restore state after `.teammates/` is lost; a defect in a historical committed plan must not
 block that.
+
+**Implemented.** `rebuild-state` now degrades the three section fields to `null` / `[]` / `[]`,
+prints a warning naming the command, the anchor sha, and the fact that the plan was read from
+git at that anchor rather than the working tree, and returns 0 having rebuilt everything git
+can vouch for. `init-run` still refuses, because it reads the working tree, where a defect is
+fixable and refusing is how a bad plan is caught before a run starts. Pinned by
+`rebuild-state recovers from a section defect in the plan at the anchor instead of refusing`
+in `tests/cli.test.mjs`; three mutations of the recovery (degrade to non-empty, refuse anyway,
+strip the command name and anchor from the warning) were each confirmed to turn it red.
 
 ## Unpinned claims — the code is right, nothing holds it there
 
