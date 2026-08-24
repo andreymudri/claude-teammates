@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -1326,6 +1326,102 @@ test('the SubagentStop command invokes node directly, not run-hook.cmd', async (
     sessionStartCommands.every((c) => c.includes('run-hook.cmd')),
     'SessionStart hooks must still route through run-hook.cmd'
   )
+})
+
+// Every source value Claude Code puts on a SessionStart hook payload. A matcher that omits
+// one is not a filter, it is a hole: sessions begun that way run with no entrypoint injected
+// and nothing said about it.
+const SESSION_START_SOURCES = ['startup', 'resume', 'clear', 'compact', 'fork']
+
+test('the SessionStart matcher covers every source Claude Code emits', async () => {
+  const cfg = JSON.parse(await readFile(new URL('../hooks/hooks.json', import.meta.url), 'utf8'))
+  const matchers = cfg.hooks.SessionStart.map((g) => g.matcher)
+  // Matched the way the harness matches: the declared string as a regular expression,
+  // tested against the source. `startup|clear|compact` shipped for a while and accepts
+  // three of the five — `resume` and `fork` fell through it silently, which is the whole
+  // failure mode this pins.
+  for (const source of SESSION_START_SOURCES) {
+    assert.ok(
+      matchers.some((m) => new RegExp(m).test(source)),
+      `no SessionStart matcher accepts source "${source}": sessions started that way get no entrypoint injection`
+    )
+  }
+})
+
+// THE EXEC BIT IS THE PLUGIN'S ON SWITCH ON UNIX.
+//
+// Claude Code runs a hook by handing the command string to `/bin/sh -c`, and the shell execs
+// the named path as a program. The `"shell": "bash"` field in the declaration does NOT rewrite
+// that into `bash <file>` — the stderr from a failing session start is a plain `/bin/sh: line
+// 1: ... Permission denied`, exit 126. So a run-hook.cmd without the bit takes BOTH SessionStart
+// hooks down with it: the blocking session-start that injects the entrypoint, and the async
+// update-check.
+//
+// Nothing surfaces the loss. A non-blocking hook error leaves a session that looks entirely
+// healthy — no injected context, no warning, no failed command — and the plugin's own
+// broken-install self-check cannot fire either, because that check lives inside the script
+// that never ran.
+//
+// This shipped: run-hook.cmd was committed 100644 while session-start and update-check, the
+// two scripts it dispatches to, were both 100755. Every Linux and macOS install ran with the
+// entrypoint injection dead. Windows was unaffected, cmd.exe not consulting the bit at all,
+// which is exactly why it survived review.
+//
+// The INDEX mode is the assertion, not merely the working-tree stat. The index is what reaches
+// a user's install; a local `chmod +x` that never got staged would leave every clone broken
+// while making this test pass. Where git cannot answer — hook-mechanism.test.mjs copies this
+// suite into a tree with no .git — the filesystem mode is the only witness left, so it is
+// checked rather than skipped: a weaker question answered beats a pass nobody earned.
+test('every executable a SessionStart hook invokes is committed executable', async () => {
+  const cfg = JSON.parse(await readFile(new URL('../hooks/hooks.json', import.meta.url), 'utf8'))
+  const commands = cfg.hooks.SessionStart.flatMap((g) => g.hooks.map((h) => h.command))
+  assert.ok(commands.length > 0, 'at least one SessionStart command must be declared')
+
+  // The path the shell will exec, read out of the command text rather than assumed, so a
+  // renamed or relocated wrapper is followed here instead of quietly going unchecked.
+  const targets = commands.map((c) => {
+    const m = c.match(/\$\{CLAUDE_PLUGIN_ROOT\}\/([^"']+)/)
+    assert.ok(m, `SessionStart command must name a plugin-relative path: ${c}`)
+    return m[1].trim()
+  })
+
+  // run-hook.cmd's own argument names the second program in the chain, which the wrapper
+  // runs with an explicit `bash` and so does not strictly need the bit — but these three
+  // files are one mechanism, and a mode that drifts between them is the defect itself.
+  const dispatched = commands
+    .map((c) => c.match(/run-hook\.cmd"?\s+(\S+)/))
+    .filter(Boolean)
+    .map((m) => `hooks/${m[1].replace(/"/g, '')}`)
+
+  const files = [...new Set([...targets, ...dispatched])]
+
+  let indexModes = null
+  try {
+    const out = execFileSync('git', ['ls-files', '-s', '--', 'hooks/'], {
+      cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore']
+    })
+    indexModes = new Map(out.split('\n').filter(Boolean).map((line) => {
+      const [meta, file] = line.split('\t')
+      return [file, meta.split(' ')[0]]
+    }))
+  } catch {
+    indexModes = null
+  }
+
+  for (const file of files) {
+    const abs = path.join(root, file)
+    assert.ok(existsSync(abs), `a SessionStart hook names ${file}, which does not exist`)
+    if (indexModes) {
+      assert.equal(
+        indexModes.get(file), '100755',
+        `${file} must be committed 100755; at 100644 the shell cannot exec it and session start dies at exit 126 on every Unix install`
+      )
+    }
+    assert.ok(
+      (statSync(abs).mode & 0o111) !== 0,
+      `${file} must be executable on disk`
+    )
+  }
 })
 
 // Pin the skip mechanism: verify that the skip decision is correctly extracted and used.
