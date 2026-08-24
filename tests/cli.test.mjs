@@ -2516,6 +2516,15 @@ test('finish prints nothing extra when plan.json carries no destination or fog',
     const out = lines.join('\n')
     assert.doesNotMatch(out, /Destination:/)
     assert.doesNotMatch(out, /Not yet specified/)
+    // "nothing extra" has to mean NOTHING, not merely "no notes heading". `renderPlanNotes`
+    // returns '' for a plan with neither section — the common case — and the two doesNotMatch
+    // assertions above are equally satisfied when `finish` emits a stray empty line, which is
+    // exactly what dropping the `if (notes)` guard in cli.mjs does. Asserting no captured line
+    // is empty is what makes this test able to fail for the behaviour it is named after.
+    assert.ok(
+      lines.every((line) => line !== ''),
+      `finish emitted an empty line: ${JSON.stringify(lines)}`,
+    )
     assert.equal(code, 4)
   })
 })
@@ -10850,4 +10859,55 @@ test('rebuild-state recovers from a section defect in the plan at the anchor ins
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+// --- pinning four claims the reviews found unpinned (run fog followups) ---------------------
+
+// SIBLING OF the missing-question test above, for the OTHER entry-level refusal. The comment at
+// formatPlanSectionError states both branches get identical control-byte neutralisation, but
+// only missing-question was pinned: reverting the missing-reason branch to
+// `JSON.stringify(err.entry)` left the whole suite green. An Out of Scope entry with no
+// separator takes this branch, so the same cursor-erase payload reaches it.
+test('init-run neutralises control bytes in a quoted Out of Scope entry', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const planPath = path.join(root, 'forged-scope-plan.md')
+    await writeFile(
+      planPath,
+      `## Destination\n\nSomething landable.\n\n## Out of Scope\n\n- Deploy \x1b[2A\x1b[0Jrollout\n\n${PLAN}`,
+      'utf8',
+    )
+    git(root, ['add', '.'])
+    git(root, ['commit', '--quiet', '-m', 'add forged scope plan'])
+    const code = await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    assert.equal(code, 2)
+    const out = lines.join('\n')
+    assert.match(out, /^plan defect: Out of Scope entry 1 \(line 7\) has no reason\./)
+    // The payload must arrive as visible tokens, never as bytes the terminal executes.
+    assert.match(out, /  - "Deploy <0x1B>\[2A<0x1B>\[0Jrollout"$/)
+    assert.doesNotMatch(out, /\x1b/, 'a raw ESC reached the operator terminal')
+  })
+})
+
+// The section guard sits ABOVE `assignPhases(parsePlan(...))` deliberately, so a plan malformed
+// in BOTH ways reports the section defect rather than the task failure. Nothing pinned that:
+// hoisting the task derivation above the guard left the suite green, and a plan with a
+// dependency cycle plus a section defect then died on `unsatisfiable dependencies` instead.
+test('init-run reports a section defect ahead of a task defect in the same plan', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const planPath = path.join(root, 'doubly-bad-plan.md')
+    await writeFile(
+      planPath,
+      '## Destination\n\n## Out of Scope\n\n- Caching — the destination is the verdict\n\n'
+      + '### Task 1: A\n\n**Files:**\n- Create: `a.mjs`\n\n**Depends:** T2\n\n'
+      + '### Task 2: B\n\n**Files:**\n- Create: `b.mjs`\n\n**Depends:** T1\n',
+      'utf8',
+    )
+    git(root, ['add', '.'])
+    git(root, ['commit', '--quiet', '-m', 'add doubly bad plan'])
+    const code = await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    assert.equal(code, 2)
+    const out = lines.join('\n')
+    assert.match(out, /plan defect: this plan has an Out of Scope section but no Destination\./)
+    assert.doesNotMatch(out, /unsatisfiable dependencies/, 'the task failure outran the section guard')
+  })
 })

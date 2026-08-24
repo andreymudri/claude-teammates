@@ -494,3 +494,34 @@ test('a thematic break closes the list rather than joining across it', () => {
   const md = ['## Global Constraints', '', '- alpha', '* * *', '  trailing', ''].join('\n')
   assert.deepEqual(bulletSection(md, 'Global Constraints').map((i) => i.text), ['alpha'])
 })
+
+// The continuation lookahead was widened from `-` to `[-*+]` so a bare `*` or `+` marker line
+// is not glued onto the entry above it, but nothing pinned the widening: reverting the
+// lookahead alone to `-`-only left the suite green, because the two tests named for
+// continuation joining detect the BULLET pattern's class, not the lookahead's. A bare marker
+// line is the only input that tells them apart — it cannot be a bullet (no content follows),
+// so only the lookahead decides whether it joins.
+test('a bare `*` or `+` marker line is dropped, not joined onto the entry above', () => {
+  for (const marker of ['*', '+', '-']) {
+    const md = ['## Global Constraints', '', '- alpha', `  ${marker}`, ''].join('\n')
+    assert.deepEqual(
+      bulletSection(md, 'Global Constraints').map((i) => i.text),
+      ['alpha'],
+      `a bare ${JSON.stringify(marker)} must not be appended to the previous entry`,
+    )
+  }
+})
+
+// The other half of the same lookahead: `[-*+]\s` — an indented marker FOLLOWED by content is a
+// nested bullet, which the bullet pattern claims first, so it stays a standalone entry rather
+// than joining. Pinned per marker for the same reason as above.
+test('an indented marker with content stays its own entry rather than joining', () => {
+  for (const marker of ['*', '+', '-']) {
+    const md = ['## Global Constraints', '', '- alpha', `  ${marker} beta`, ''].join('\n')
+    assert.deepEqual(
+      bulletSection(md, 'Global Constraints').map((i) => i.text),
+      ['alpha', 'beta'],
+      `an indented ${JSON.stringify(marker)} entry must not be appended to the previous entry`,
+    )
+  }
+})
