@@ -308,6 +308,15 @@ names that would otherwise go stale. Setting a model name as a tier is rejected.
 
     npm test
 
+Prints failures and one summary line — nothing per passing test. For the full per-test output:
+
+    npm run test:verbose
+
+The suite's pass lines were about 40,000 tokens of output. That mattered more than it looks:
+every agent in a fleet run is told to run `npm test`, some of them repeatedly, and anything
+sitting in an agent's context is re-read on every later turn. Measured across three real agents,
+cache reads were 2.19M tokens against 212 tokens of fresh input.
+
 Design notes: `docs/specs/`.
 
 ## License
