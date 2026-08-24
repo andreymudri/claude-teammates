@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -118,6 +118,39 @@ test('a relative root is resolved before the slug is derived', async () => {
       () => readSessionUsage({ projectsDir: dir, root: '.' }),
       (err) => err.message.includes(projectSlug(path.resolve('.')))
         && !err.message.includes(`${path.sep}.${path.sep}`),
+    )
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+// The project directory holds more than sessions: the harness keeps `memory/` alongside them, and
+// being the most recently written directory it won every mtime comparison — so the command
+// reported on a directory that can never hold a transcript. A session is identified by the store
+// it carries, not by being newest. Caught by running the real command against a real ~/.claude.
+test('a non-session directory is not mistaken for the newest session', async () => {
+  await withStore(async ({ projectsDir }) => {
+    const notASession = path.join(projectsDir, projectSlug(FAKE_ROOT), 'memory')
+    await mkdir(notASession, { recursive: true })
+    const future = new Date(Date.now() + 60_000)
+    await utimes(notASession, future, future)
+
+    const report = await readSessionUsage({ projectsDir, root: FAKE_ROOT })
+    assert.equal(report.sessionId, 'sess-1')
+  }, { files: { 'agent-a.jsonl': line({ cache_read_input_tokens: 10 }) } })
+})
+
+// Without this the failure names whichever directory happened to be newest, which reads as "that
+// session is empty" rather than "no session here has a store at all".
+test('a project directory with no session store throws, naming the layout', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-usage-nosess-'))
+  try {
+    await mkdir(path.join(dir, projectSlug(FAKE_ROOT), 'memory'), { recursive: true })
+    await assert.rejects(
+      () => readSessionUsage({ projectsDir: dir, root: FAKE_ROOT }),
+      (err) => err.message.includes('subagents')
+        && !err.message.includes('memory')
+        && /may have changed/.test(err.message),
     )
   } finally {
     await rm(dir, { recursive: true, force: true })
