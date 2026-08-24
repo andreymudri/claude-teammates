@@ -2450,6 +2450,166 @@ test('finish exits 1 and names the phase whose computed check fails', async () =
   })
 })
 
+// --- finish reports the plan's destination and open fog alongside the verdict ---------------
+//
+// Task 6: `finish` reads `plan.json` after printing the run summary and prints
+// `renderPlanNotes`'s output when it is non-empty. This is reporting only: the checks in these
+// tests never run (an `agent` check `finish` cannot execute), so every case here exits 4 — the
+// point is what gets printed, not the verdict, and a later test pins that the verdict itself
+// never moves because notes are present or absent.
+
+const PLAN_WITH_DESTINATION_AND_FOG = `## Destination
+
+The gate answers PASS or FAIL from git alone.
+
+## Not Yet Specified
+
+- Where does a resolved fog entry go once someone decides it?
+
+### Task 1: A
+
+**Files:**
+- Create: \`a.mjs\`
+`
+
+test('finish prints the destination and open fog entries when plan.json carries them', async () => {
+  await withRepo(async ({ root, io, lines, git: g }) => {
+    const planPath = path.join(root, 'foggy-plan.md')
+    // `finish` reads the plan via `git show <anchor>:<path>`, and the anchor is
+    // merge-base(main, run-branch): the plan must be committed on main, not on the run branch,
+    // or the anchor lookup cannot find it. run-branch has not diverged from main yet, so a
+    // fast-forward merge brings the new commit onto both.
+    g(['checkout', '--quiet', 'main'])
+    await writeFile(planPath, PLAN_WITH_DESTINATION_AND_FOG, 'utf8')
+    g(['add', '.'])
+    g(['commit', '--quiet', '-m', 'add foggy plan'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--quiet', 'main'])
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      lens: ['correctness'],
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    const code = await runCli(['finish', '--run', 'r1', '--plan', 'foggy-plan.md', '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    assert.match(out, /Destination: "The gate answers PASS or FAIL from git alone\."/)
+    assert.match(out, /Not yet specified \(1 open\):/)
+    assert.match(out, /Where does a resolved fog entry go once someone decides it\?/)
+    assert.equal(code, 4)
+  })
+})
+
+test('finish prints nothing extra when plan.json carries no destination or fog', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      lens: ['correctness'],
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    const code = await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    assert.doesNotMatch(out, /Destination:/)
+    assert.doesNotMatch(out, /Not yet specified/)
+    assert.equal(code, 4)
+  })
+})
+
+// A `plan.json` that fails to parse at all. `readState` throws on unparseable JSON — the read
+// itself, not just the render, has to be inside the swallowing try or this crashes `finish`
+// instead of reporting its verdict.
+test('finish swallows an unparseable plan.json and still reports the verdict unchanged', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      lens: ['correctness'],
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    await writeFile(path.join(root, '.teammates', 'r1', 'plan.json'), '{ not valid json', 'utf8')
+    lines.length = 0
+    const code = await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    assert.doesNotMatch(out, /Destination:/)
+    assert.doesNotMatch(out, /Not yet specified/)
+    assert.match(out, /pending: review/)
+    assert.equal(code, 4)
+  })
+})
+
+// A `plan.json` that parses but is the wrong shape for `renderPlanNotes`, which has no
+// input-shape defense of its own: a `notYetSpecified` entry that is `null` throws reading
+// `entry.text` off it. The render call, not only the read, must be inside the swallowing try.
+test('finish swallows a wrong-shaped plan.json and still reports the verdict unchanged', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      lens: ['correctness'],
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    const plan = await readPlan(root, 'r1')
+    plan.notYetSpecified = [null]
+    await writeFile(path.join(root, '.teammates', 'r1', 'plan.json'), JSON.stringify(plan), 'utf8')
+    lines.length = 0
+    const code = await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    assert.doesNotMatch(out, /Not yet specified/)
+    assert.match(out, /pending: review/)
+    assert.equal(code, 4)
+  })
+})
+
+// Step 4: the exit code `finish` returns must not depend on whether plan notes were printed.
+// Same manifest and same never-run check in both branches, so the only variable is the plan.
+test('finish returns the identical exit code with and without plan notes present', async () => {
+  const runOnce = async (planText) => {
+    let code
+    await withRepo(async ({ root, io, git: g }) => {
+      const planPath = path.join(root, 'a-plan.md')
+      // See the comment in the destination/fog test above: the plan must be committed on
+      // main (the base branch `finish` anchors against), then fast-forwarded onto run-branch.
+      g(['checkout', '--quiet', 'main'])
+      await writeFile(planPath, planText, 'utf8')
+      g(['add', '.'])
+      g(['commit', '--quiet', '-m', 'add plan'])
+      g(['checkout', '--quiet', 'run-branch'])
+      g(['merge', '--quiet', 'main'])
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+        phases: { default: { checks: [{ name: 'fileset', kind: 'fileset' }] } },
+      }), 'utf8')
+      g(['add', 'teammates.gate.json'])
+      g(['commit', '--quiet', '-m', 'manifest'])
+      g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+      await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+      g(['add', 'a.mjs'])
+      g(['commit', '--quiet', '-m', 'T1 work'])
+      g(['checkout', '--quiet', 'run-branch'])
+      g(['merge', '--no-ff', '--quiet', '-m', 'integrate T1', 'teammates/r1/T1'])
+      code = await runCli(['finish', '--run', 'r1', '--plan', 'a-plan.md', '--base', 'main', '--root', root], io)
+    })
+    return code
+  }
+
+  const withNotes = await runOnce(PLAN_WITH_DESTINATION_AND_FOG)
+  const withoutNotes = await runOnce(`### Task 1: A
+
+**Files:**
+- Create: \`a.mjs\`
+`)
+  assert.equal(withNotes, 0)
+  assert.equal(withoutNotes, 0)
+  assert.equal(withNotes, withoutNotes)
+})
+
 // --- --enforcement-only: the cheap verdict, and what it must never hide ----------------------
 //
 // `finish` and `prune-run` recompute every phase, and the `command` checks are what makes that

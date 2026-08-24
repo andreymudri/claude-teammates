@@ -27,7 +27,7 @@ import { realpathSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { validateLinkPaths } from './preview-links.mjs'
 import { planDrift, renderDrift } from './plan-drift.mjs'
-import { summarizeRun, renderRunSummary, suppliedForPhase, validateSuppliedPhases } from './finish.mjs'
+import { summarizeRun, renderRunSummary, renderPlanNotes, suppliedForPhase, validateSuppliedPhases } from './finish.mjs'
 import { selectPrunableWorktrees, renderPrunePlan, leakedPreviews } from './prune.mjs'
 import { previewOwnerMarkerPath } from './merge-preview.mjs'
 import { rebuildRunState } from './rebuild.mjs'
@@ -2871,6 +2871,18 @@ export async function runCli(argv, io = { out: console.log }) {
     // byte of any output this suite produces and left every sanitising row green. It is gone
     // rather than kept as a layer no test can drive.
     io.out(renderRunSummary(runId, phaseResults))
+    // `plan.json` is teammate-writable, same rule `writePlan` states about its own read: a
+    // corrupt or wrong-shaped file must not crash the command that reports the verdict. Both the
+    // read and the render go inside this try — `readState` throws on unparseable JSON, and
+    // `renderPlanNotes` has no input-shape defense of its own (a null plan, or a `notYetSpecified`
+    // that is not an array of `{text, line}` objects, throws or misrenders rather than refusing).
+    try {
+      const plan = await readState(root, runId, 'plan')
+      const notes = renderPlanNotes(plan ?? {})
+      if (notes) io.out(notes)
+    } catch {
+      // Swallow and print nothing — see the comment above.
+    }
     const summary = summarizeRun(phaseResults)
     if (summary.complete) return 0
     // 1 for a phase that was verified and failed; 4 for one that was never verified at all.
