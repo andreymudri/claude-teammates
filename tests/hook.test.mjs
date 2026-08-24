@@ -1328,6 +1328,26 @@ test('the SubagentStop command invokes node directly, not run-hook.cmd', async (
   )
 })
 
+// Every source value Claude Code puts on a SessionStart hook payload. A matcher that omits
+// one is not a filter, it is a hole: sessions begun that way run with no entrypoint injected
+// and nothing said about it.
+const SESSION_START_SOURCES = ['startup', 'resume', 'clear', 'compact', 'fork']
+
+test('the SessionStart matcher covers every source Claude Code emits', async () => {
+  const cfg = JSON.parse(await readFile(new URL('../hooks/hooks.json', import.meta.url), 'utf8'))
+  const matchers = cfg.hooks.SessionStart.map((g) => g.matcher)
+  // Matched the way the harness matches: the declared string as a regular expression,
+  // tested against the source. `startup|clear|compact` shipped for a while and accepts
+  // three of the five — `resume` and `fork` fell through it silently, which is the whole
+  // failure mode this pins.
+  for (const source of SESSION_START_SOURCES) {
+    assert.ok(
+      matchers.some((m) => new RegExp(m).test(source)),
+      `no SessionStart matcher accepts source "${source}": sessions started that way get no entrypoint injection`
+    )
+  }
+})
+
 // THE EXEC BIT IS THE PLUGIN'S ON SWITCH ON UNIX.
 //
 // Claude Code runs a hook by handing the command string to `/bin/sh -c`, and the shell execs
