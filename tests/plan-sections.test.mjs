@@ -465,3 +465,32 @@ test('a Destination heading with no prose under it does not satisfy the requirem
     },
   )
 })
+
+// A spaced thematic break (`* * *`, `- - -`) satisfies the bullet pattern: `[-*+]` takes the
+// first marker, `\s+` takes the space, and the capture group swallows the rest, yielding an
+// entry whose text is the leftover markers. Both consumers are hit — `parseConstraints`
+// injects `* *` into every teammate brief, and `parsePlanSections` refuses a plan whose only
+// defect is a horizontal rule. CommonMark gives thematic breaks precedence over list items
+// for exactly this ambiguity.
+//
+// `+` is deliberately NOT covered: it is not a thematic-break character in CommonMark, so
+// `+ + +` really is a list item whose content is `+ +`, and must keep parsing as one.
+test('a spaced thematic break is not a bullet entry', () => {
+  for (const rule of ['* * *', '- - -', '*  *  *', '- - - -', '  * * *', '***', '---']) {
+    const md = ['## Global Constraints', '', '- alpha', '', rule, '', '- beta', ''].join('\n')
+    const items = bulletSection(md, 'Global Constraints').map((i) => i.text)
+    assert.deepEqual(items, ['alpha', 'beta'], `${JSON.stringify(rule)} must not yield an entry`)
+  }
+})
+
+test('a `+` run is still a bullet, because `+` is not a thematic-break character', () => {
+  const md = ['## Global Constraints', '', '+ + +', ''].join('\n')
+  assert.deepEqual(bulletSection(md, 'Global Constraints').map((i) => i.text), ['+ +'])
+})
+
+// A thematic break ends the list, so an indented line after one is not a continuation of the
+// entry above it.
+test('a thematic break closes the list rather than joining across it', () => {
+  const md = ['## Global Constraints', '', '- alpha', '* * *', '  trailing', ''].join('\n')
+  assert.deepEqual(bulletSection(md, 'Global Constraints').map((i) => i.text), ['alpha'])
+})
