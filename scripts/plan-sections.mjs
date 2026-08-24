@@ -81,9 +81,14 @@ export function bulletSection(markdown, heading) {
   // lookahead is `[-*+]\s|[-*+]$` rather than a bare marker character, so a continuation that
   // merely *starts* with a marker character still joins: `--no-ff` opens a rule's second line in
   // this project's own constraints, and excluding every leading hyphen would truncate it into a
-  // sentence that reads complete. Both patterns share the same `[-*+]` class deliberately —
-  // widening the bullet pattern without widening this lookahead in step would let a `*`/`+`
-  // continuation line get mistaken for a fresh bullet and split a multi-line entry in two.
+  // sentence that reads complete. Both patterns share the same `[-*+]` class deliberately, but
+  // NOT for the reason this comment used to give. It claimed a narrow lookahead would let a
+  // `*`/`+` continuation be mistaken for a fresh bullet and split a multi-line entry in two;
+  // that cannot happen, because the bullet pattern is tested FIRST, so an indented `  * and b`
+  // becomes its own entry under either lookahead — measured, identical output both ways. What
+  // the shared class actually decides is the one line the bullet pattern rejects: a BARE `*` or
+  // `+` marker with no content. Narrow, it is appended to the entry above (`alpha *`); wide, it
+  // is dropped. That is the opposite direction from splitting — joining, not severing.
   //
   // Neither pattern below uses `.` to span a bullet's text: `.` does not match U+2028/U+2029
   // while `\s` does, so a bullet whose text contains one failed the bullet pattern entirely and

@@ -283,12 +283,18 @@ test('a bullet containing U+2028 survives, because the patterns use a negated ne
 })
 
 // Reproduced: `bulletSection` matched only the `-` marker, so a section written with `*` or
-// `+` bullets (both valid CommonMark, and both used in this project's own plans) yielded no
-// entries at all — and for `## Out of Scope`/`## Not Yet Specified` that meant every refusal
-// was silently skipped, because a section that parses to zero entries has nothing to refuse.
-// Widening the marker to a `[-*+]` class in the bullet pattern alone (without widening the
-// continuation lookahead the same way) would still lose the second line of a multi-line entry
-// written with `*` or `+`, so both halves are pinned here.
+// `+` bullets (both valid CommonMark) yielded no entries at all — and for `## Out of Scope`/
+// `## Not Yet Specified` that meant every refusal was silently skipped, because a section that
+// parses to zero entries has nothing to refuse. This comment used to add "and both used in this
+// project's own plans", which is false and was worth checking rather than repeating: there are
+// ZERO `*` bullets in docs/plans and docs/specs, and every `+` at a line start is inside a code
+// fence or a JS string concatenation. Nothing here depended on the claim, but a reader deciding
+// whether the widening still earns its keep would have been told the wrong thing.
+//
+// This test pins the BULLET pattern's marker class only. The continuation lookahead's matching
+// class is a separate half, pinned by `a bare \`*\` or \`+\` marker line is dropped, not joined
+// onto the entry above` — a bare `*` or `+` line is the only input the two patterns disagree
+// about.
 test('bulletSection recognises `-`, `*` and `+` as bullet markers', () => {
   const md = '## Out of Scope\n\n- Dash — its own spec\n* Star — its own spec\n+ Plus — its own spec\n'
   assert.deepEqual(
@@ -347,10 +353,14 @@ test('proseSection returns null for an absent heading and collapses whitespace o
   )
 })
 
-// The continuation lookahead is `-\s|-$`, not a bare `-` and not nothing at all. Both mutations
-// used to leave the whole suite green, so the two tests below are written to go red under each:
-// widening the lookahead away lets a bullet-shaped line be swallowed as continuation, and
-// narrowing it to `(?!-)` truncates a continuation that merely starts with a hyphen.
+// The continuation lookahead is `[-*+]\s|[-*+]$` — not a bare marker character, and not nothing
+// at all. (It read `-\s|-$` when this comment was written; the marker class was widened to
+// `[-*+]` and this text was not updated with it.) Both mutations used to leave the whole suite
+// green, so the two tests below are written to go red under each: dropping the lookahead lets a
+// bullet-shaped line be swallowed as continuation, and narrowing it to `(?![-*+])` truncates a
+// continuation that merely starts with a marker character. The tests below exercise the `-`
+// half; the `*`/`+` half of the same class is covered by `a bare \`*\` or \`+\` marker line is
+// dropped, not joined onto the entry above`.
 test('a continuation starting with `--` joins, and a hyphen-only line does not', () => {
   const md = `## Out of Scope
 
