@@ -74,7 +74,13 @@ exit code, and `finish` reports them to the operator — with the task list prov
       ` -- `, with at least one non-whitespace character after it. Nothing checks that the text
       after the separator is a *good* reason; that is not decidable.
 
-      A `## Out of Scope` section requires a `## Destination` in the same document. This refusal
+      A `## Out of Scope` section requires a `## Destination` **with prose under it** in the same
+      document. What satisfies the dependency is a written destination, not the heading: the check
+      is `!destination`, so a `## Destination` heading with nothing under it is refused exactly
+      like an absent one. (This clause originally read as heading presence. The stricter reading
+      was decided by the user during phase 1 — an unwritten destination leaves Out of Scope
+      unjudgeable, and a bare heading buys none of that back — and the code has always implemented
+      the stricter one. Corrected here so the plan states the rule that shipped.) This refusal
       names the missing section rather than an entry, because there is no offending line to quote —
       set `line` to `null` and `entry` to `null` on that error.
 

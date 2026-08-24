@@ -50,7 +50,11 @@ thematic-break entry that was in this section is gone: that was a real defect, f
   section try/catch stays green. A plan malformed in both ways then reports the task failure
   instead of the promised section refusal.
 
-## Prose that overstates what the code does
+## Prose that overstated what the code does — CORRECTED
+
+Each claim was checked against the code before rewriting, not just reworded. Four of the five
+were wrong and are fixed; the fifth was already accurate.
+
 
 - **`scripts/plan-sections.mjs:79-81`** — the rationale for widening the lookahead describes a
   failure mode the code cannot produce ("would split a multi-line entry in two"). An indented
@@ -65,6 +69,19 @@ thematic-break entry that was in this section is gone: that was a real defect, f
   project's own plans". Zero `*` bullets exist; the two `+` lines are inside quoted diff hunks.
 - **`scripts/plan-sections.mjs` header** — see the integrator's correction; the "wherever
   cli.mjs writes plan.json" clause was false for the retier write and `rememberRunBranch`.
+
+**Outcome.** The header item needed no change — it already states the bound as "called only
+where cli.mjs (re)derives the three fields", and that is accurate: `parsePlanSections` has
+exactly two call sites (`init-run`, `rebuild-state`), both derivations, while `writePlan` has
+four, the retier and run-branch writes among them. The other four were corrected:
+the lookahead rationale described a split the code cannot produce (an indented `  * and b`
+parses identically under either lookahead — the bullet pattern claims it first; the real
+difference is a BARE marker line, appended when narrow and dropped when wide, the opposite
+direction); the "`*` and `+` both used in this project's own plans" claim is false (zero `*`
+bullets in docs/plans and docs/specs, every line-start `+` inside a code fence or a JS string);
+"both halves are pinned here" named a test that pins only the bullet pattern's class; and the
+lookahead was still described as `-\s|-$`, a pattern the widening replaced. Cross-references
+now name the tests they mean rather than saying "above"/"below", which had already drifted.
 
 ## Behaviour worth a decision
 
@@ -173,7 +190,7 @@ they are not clean, they are unexamined:
 
 Across all four phases the reviews left **49** enumerated claims unprobed (21 / 11 / 11 / 6).
 
-## Documentation debt, no owner
+## Documentation debt — CORRECTED
 
 The plan (`docs/plans/2026-08-20-plan-fog-and-scope.md`, Step 6) and the design spec
 (`docs/specs/2026-08-20-plan-fog-and-scope-design.md`) both still say an `## Out of Scope`
@@ -181,5 +198,12 @@ section requires only that a `## Destination` heading be *present*. The implemen
 stricter and deliberate: the heading must have prose under it, and an empty one is refused
 exactly like an absent one (`reason: "missing-destination"`, `line: null`, `entry: null`).
 The divergence was raised by the correctness lens in phase 1 and decided by the user. The
-reason is recorded in a comment above the check in `scripts/plan-sections.mjs`. No task owns
-correcting the two documents.
+reason is recorded in a comment above the check in `scripts/plan-sections.mjs`.
+
+**Corrected.** Both documents now state the implemented rule: an `## Out of Scope` section
+requires a `## Destination` **with prose under it**, and a heading with nothing beneath it is
+refused exactly like an absent one (verified: `missing-destination` for both). Plan Step 6, the
+spec's §2 prose, its dependency sentence and its rules table were each updated, and the code
+comment no longer claims the documents disagree with it. The plan's task list and phase
+breakdown are unchanged by the edit — T1(p1) T2/T4/T5/T7(p2) T3(p3) T6(p4), exactly what run
+`fog` executed.
