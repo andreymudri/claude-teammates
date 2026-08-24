@@ -33,7 +33,8 @@ the next run, gets re-argued, and is ruled out again. Runs `followups`, `followu
 
 "Out of scope" means *beyond the destination*. Without a written destination it is unjudgeable and
 becomes a place to park anything inconvenient. So a plan that uses `## Out of Scope` needs a
-`## Destination`.
+`## Destination` **with prose under it** — a heading with nothing beneath it is refused exactly
+like an absent one, because it buys back none of the judgeability the dependency exists for.
 
 The destination is **judgeable scope only**. It is parsed, stored, and shown to the operator. It is
 deliberately NOT carried into any teammate's brief and NOT read by any check. Adding it to briefs
@@ -61,7 +62,8 @@ The gate can answer "is this run landable" without an operator reading any prose
 ```
 
 All three are optional, with one dependency between them: a plan that carries `## Out of Scope` must
-also carry `## Destination`, because §2 is what makes an out-of-scope entry judgeable. That
+also carry a `## Destination` with prose under it — the heading alone does not satisfy it — because
+§2 is what makes an out-of-scope entry judgeable. That
 dependency is enforced (§3.2, §5), not merely recommended. Fog needs no destination — a question is
 answerable without one.
 
@@ -100,7 +102,7 @@ Three rules, each encoding a section's purpose, each checkable by shape alone:
 | Section | Rule | Refused | Accepted |
 |---|---|---|---|
 | `## Out of Scope` | must carry a reason clause | `- Caching` | `- Caching — the destination is the gate verdict, not latency` |
-| `## Out of Scope` | requires a `## Destination` in the plan | the section with no destination | the section with one |
+| `## Out of Scope` | requires a `## Destination` carrying prose | the section with no destination, or with an empty `## Destination` heading | the section with a destination that has prose under it |
 | `## Not Yet Specified` | must contain a `?` | `- Rewrite scripts/reviews.mjs` | `- Should reviews keep per-lens verdicts?` |
 
 **A reason clause is defined by shape, not by judgement:** the entry contains a separator — an em

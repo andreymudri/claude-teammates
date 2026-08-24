@@ -190,7 +190,7 @@ they are not clean, they are unexamined:
 
 Across all four phases the reviews left **49** enumerated claims unprobed (21 / 11 / 11 / 6).
 
-## Documentation debt, no owner
+## Documentation debt — CORRECTED
 
 The plan (`docs/plans/2026-08-20-plan-fog-and-scope.md`, Step 6) and the design spec
 (`docs/specs/2026-08-20-plan-fog-and-scope-design.md`) both still say an `## Out of Scope`
@@ -198,5 +198,12 @@ section requires only that a `## Destination` heading be *present*. The implemen
 stricter and deliberate: the heading must have prose under it, and an empty one is refused
 exactly like an absent one (`reason: "missing-destination"`, `line: null`, `entry: null`).
 The divergence was raised by the correctness lens in phase 1 and decided by the user. The
-reason is recorded in a comment above the check in `scripts/plan-sections.mjs`. No task owns
-correcting the two documents.
+reason is recorded in a comment above the check in `scripts/plan-sections.mjs`.
+
+**Corrected.** Both documents now state the implemented rule: an `## Out of Scope` section
+requires a `## Destination` **with prose under it**, and a heading with nothing beneath it is
+refused exactly like an absent one (verified: `missing-destination` for both). Plan Step 6, the
+spec's §2 prose, its dependency sentence and its rules table were each updated, and the code
+comment no longer claims the documents disagree with it. The plan's task list and phase
+breakdown are unchanged by the edit — T1(p1) T2/T4/T5/T7(p2) T3(p3) T6(p4), exactly what run
+`fog` executed.

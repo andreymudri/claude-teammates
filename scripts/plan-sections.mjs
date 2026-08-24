@@ -179,8 +179,9 @@ export function parsePlanSections(markdown) {
   // rather than `destination === null`, so an empty `## Destination` is refused along with an
   // absent one. The dependency exists because an unwritten destination leaves Out of Scope
   // unjudgeable and makes it a place to park anything inconvenient, and a heading with nothing
-  // under it buys exactly none of that back. This is stricter than the plan's Step 6 wording,
-  // which reads as heading presence; the stricter reading is the decided one.
+  // under it buys exactly none of that back. Decided by the user in phase 1 of run `fog`. The
+  // plan's Step 6 and the design spec both read as mere heading presence for a while and have
+  // since been corrected to state prose, so the three now agree.
   if (hasOutOfScope && !destination) {
     throw new PlanSectionError('this plan has an Out of Scope section but no Destination', {
       reason: 'missing-destination',
