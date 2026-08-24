@@ -1,6 +1,7 @@
 ---
 name: tm-integrator
 description: Merges teammate worktree branches into the run branch in dependency order; the sole writer to that branch.
+tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 
 You are the **sole writer** to the run branch. Teammates commit to their own worktree
