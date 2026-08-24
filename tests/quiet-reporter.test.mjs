@@ -4,14 +4,17 @@ import { execFileSync } from 'node:child_process'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 
 import quietReporter from '../scripts/quiet-reporter.mjs'
 
-// fileURLToPath, not `.pathname`: on Windows a file URL's pathname is `/C:/...`, with a leading
-// slash that is not part of the path, and passing it to a child process fails there while
-// working everywhere else. Every other test in this suite already resolves paths this way.
-const reporterPath = fileURLToPath(new URL('../scripts/quiet-reporter.mjs', import.meta.url))
+// A file:// URL, not a filesystem path. `--test-reporter` is resolved by the ESM loader, and on
+// Windows an absolute path begins `D:\...`, whose drive letter the loader reads as a URL scheme:
+// it fails with ERR_UNSUPPORTED_ESM_URL_SCHEME, "Received protocol 'd:'". A file:// URL is
+// accepted on every platform, so it is what this passes. (`.pathname` is wrong for the opposite
+// reason — it keeps the URL's leading slash, `/C:/...`, which is not a valid path.) Note this
+// applies to the ABSOLUTE specifier only: package.json passes a relative one,
+// `./scripts/quiet-reporter.mjs`, which has no scheme to misread and works as-is.
+const reporterUrl = new URL('../scripts/quiet-reporter.mjs', import.meta.url).href
 
 async function collect(events) {
   async function* source() { for (const e of events) yield e }
@@ -119,7 +122,7 @@ test('the reporter drives a real run and preserves exit codes', async () => {
 
     const run = (file) => {
       try {
-        const stdout = execFileSync('node', ['--test', '--test-reporter', reporterPath, file], { encoding: 'utf8', env })
+        const stdout = execFileSync('node', ['--test', '--test-reporter', reporterUrl, file], { encoding: 'utf8', env })
         return { status: 0, stdout }
       } catch (err) {
         return { status: err.status, stdout: err.stdout ?? '' }
