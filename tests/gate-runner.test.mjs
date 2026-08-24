@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
@@ -2873,9 +2873,17 @@ test('a base merge whose only contribution is a mode change is explained, not fl
 
     // The base advances by a commit whose ENTIRE payload is the executable bit: same blob
     // before and after. This is the documented, legitimate route for a mid-run amendment.
+    //
+    // `update-index --chmod` writes the bit into the INDEX directly, which is the only way to
+    // stage a mode change on Windows, where the filesystem has no exec bit for `chmod` to set
+    // and a chmod-then-add commits nothing at all. `core.fileMode false` then keeps the two
+    // platforms in agreement: where git DOES honour filemode, the working tree would otherwise
+    // read as dirty against the new index and the ownership check would fail on that instead of
+    // on the thing under test. Same technique, and same reason, as the mode-only case in
+    // tests/adversarial.test.mjs.
+    await sh(['config', 'core.fileMode', 'false'])
     await sh(['checkout', 'main'])
-    await chmod(path.join(root, 'hook.sh'), 0o755)
-    await sh(['add', 'hook.sh'])
+    await sh(['update-index', '--chmod=+x', 'hook.sh'])
     await sh(['commit', '-m', 'chmod +x hook.sh'])
     const before = await sh(['rev-parse', 'HEAD~1:hook.sh'])
     const after = await sh(['rev-parse', 'HEAD:hook.sh'])

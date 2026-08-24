@@ -1417,10 +1417,19 @@ test('every executable a SessionStart hook invokes is committed executable', asy
         `${file} must be committed 100755; at 100644 the shell cannot exec it and session start dies at exit 126 on every Unix install`
       )
     }
-    assert.ok(
-      (statSync(abs).mode & 0o111) !== 0,
-      `${file} must be executable on disk`
-    )
+    // NTFS carries no POSIX exec bit, so a Windows checkout of a correctly-committed 100755
+    // file still stats as non-executable — the question is unanswerable there rather than
+    // answered "no". The INDEX mode above is the assertion that matters on every platform,
+    // because the index is what reaches a user's install; this on-disk check is the weaker
+    // witness kept for the case where git cannot answer at all (hook-mechanism.test.mjs copies
+    // this suite into a tree with no .git). Asserting it on Windows failed CI for a mode that
+    // was committed correctly the whole time.
+    if (process.platform !== 'win32') {
+      assert.ok(
+        (statSync(abs).mode & 0o111) !== 0,
+        `${file} must be executable on disk`
+      )
+    }
   }
 })
 
