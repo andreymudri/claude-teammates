@@ -4,6 +4,9 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parsePlan } from './plan-parser.mjs'
 import { bulletSection, parsePlanSections, PlanSectionError } from './plan-sections.mjs'
+import { renderUsage } from './usage.mjs'
+import { readSessionUsage } from './usage-store.mjs'
+import { homedir } from 'node:os'
 import { assignPhases } from './phases.mjs'
 import { readState, writeState, claimTask, releaseClaim, readFixRounds, recordFixRound, runDir, writeLocation, worktreeKey, isLocalAbsolute } from './state.mjs'
 import { composeBrief } from './brief.mjs'
@@ -67,7 +70,7 @@ function resolvedTempRoot() {
   }
 }
 
-const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclaim|locate|brief|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|config> [options]
+const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclaim|locate|brief|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|usage|config> [options]
 
   init-run <planPath> --run <id> [--root <path>]
   doctor   --run <id> --plan <path> [--base <branch>] [--run-branch <name>] [--root <path>]
@@ -77,6 +80,7 @@ const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclai
   rebuild-state --run <id> --plan <path> [--base <branch>] [--force] [--root <path>]
   map      [--files <a,b>] [--commits <n>] [--top <n>] [--root <path>]
   map-notes --run <id> [--root <path>] [--write <path>]
+  usage    [--session <id>] [--json] [--root <path>]
   plan-drift --run <id> --plan <path> [--base <branch>] [--root <path>]
   preview-check [--root <path>]
   review-dispatch --run <id> [--phase <name>] [--models <json>] [--root <path>]
@@ -210,6 +214,8 @@ export const REQUIRED = {
   // Belongs to no run: it reads git history and the working tree, and answers a question about
   // the repository rather than about a fleet.
   map: [],
+  // Belongs to no run either: the transcript store is keyed by session, not by run id.
+  usage: [],
   'map-notes': ['run'],
   digest: ['run'],
   claim: ['run', 'task', 'by'],
@@ -260,6 +266,7 @@ export const KNOWN_FLAGS = {
   'prune-run': ['run', 'plan', 'base', 'yes', 'results', 'enforcement-only'],
   'rebuild-state': ['run', 'plan', 'base', 'force'],
   map: ['files', 'commits', 'top'],
+  usage: ['session', 'json'],
   'map-notes': ['run', 'write'],
   config: ['local'],
 }
@@ -2993,6 +3000,27 @@ export async function runCli(argv, io = { out: console.log }) {
     // how a plan is meant to evolve mid-run, and exiting 1 for it would train a caller to
     // ignore the exit code for the case that actually costs something.
     return report.tooLate.length > 0 ? 1 : 0
+  }
+
+  if (command === 'usage') {
+    // Reads the harness's own transcript store, which is internal and may change: a failure to
+    // find it is reported with the path rather than rendered as an empty table, because a table
+    // of zeros reads as "this run cost nothing".
+    try {
+      const report = await readSessionUsage({
+        // CLAUDE_CONFIG_DIR is the harness's own variable for relocating that directory, so
+        // honouring it is correct for a user who has moved it — and it is what lets this command
+        // be tested against a fixture store instead of the developer's real transcripts.
+        projectsDir: path.join(process.env.CLAUDE_CONFIG_DIR || path.join(homedir(), '.claude'), 'projects'),
+        root,
+        sessionId: typeof flags.session === 'string' && flags.session !== '' ? flags.session : null,
+      })
+      io.out(flags.json === true ? JSON.stringify(report, null, 2) : renderUsage(report))
+      return 0
+    } catch (err) {
+      io.out(err.message)
+      return 1
+    }
   }
 
   if (command === 'map') {
