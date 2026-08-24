@@ -193,3 +193,10 @@ test('fleet-supervision quotes the liveness stall hint exactly as renderLiveness
     'renderLiveness must still emit the hint the skill quotes',
   )
 })
+
+// Without a documented way back to the full output, a contributor hitting a confusing failure
+// has no obvious next move and the quiet suite just looks like it has gone silent.
+test('the README documents the escape hatch to full test output', async () => {
+  const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8')
+  assert.match(readme, /npm run test:verbose/)
+})
