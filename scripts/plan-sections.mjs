@@ -57,6 +57,11 @@ function sectionBody(markdown, heading) {
  * @returns {{ text: string, line: number }[]} one entry per bullet, `line` being the 1-based
  *   line number of the bullet's FIRST line (a wrapped bullet reports where it starts)
  */
+// Same marker three or more times, each optionally separated by spaces or tabs — the
+// CommonMark thematic break. `_` is included for fidelity even though it can never reach the
+// bullet pattern, so this reads as the rule it is rather than a bullet-collision special case.
+const THEMATIC_BREAK = /^\s*([-*_])(?:[ \t]*\1){2,}[ \t]*$/
+
 export function bulletSection(markdown, heading) {
   const section = sectionBody(markdown, heading)
   if (!section) return []
@@ -88,7 +93,14 @@ export function bulletSection(markdown, heading) {
   const lines = section.body.split('\n')
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i]
-    const bullet = /^\s*[-*+]\s+([^\n]*\S)\s*$/.exec(line)
+    // A thematic break outranks a list item, per CommonMark, and without this check a spaced
+    // one parses AS a list item: `[-*+]` takes the first marker, `\s+` takes the space, and the
+    // capture group swallows the rest, so `* * *` yields an entry reading `* *`. That entry
+    // reaches both consumers — `parseConstraints` puts it in every teammate brief, and
+    // `parsePlanSections` refuses a plan whose only defect is a horizontal rule. Only `-` and
+    // `*` collide: `_` is a break character but never a bullet marker, and `+` is a bullet
+    // marker but never a break character, so `+ + +` stays the list item it is.
+    const bullet = THEMATIC_BREAK.test(line) ? null : /^\s*[-*+]\s+([^\n]*\S)\s*$/.exec(line)
     if (bullet) {
       items.push({ text: bullet[1], line: section.headingLine + i })
       open = true
