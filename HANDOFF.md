@@ -104,10 +104,8 @@ Retagging is cheap if that reads wrong later.
     gh run list --limit 1                 # the last push must be green on all three platforms
     node scripts/cli.mjs usage --root .   # the measurement tool
 
-The last CI run this session verified was `323e86b`, green on Linux, macOS and Windows. The
-release commit on top of it (`b36b821`) touches only `CHANGELOG.md`, `package.json` and
-`.claude-plugin/plugin.json`, so nothing should have moved — **but that run was not watched.**
-Confirm it before trusting the tree.
+CI was watched through `cfc7de6` — the tip of `master` — and is green on Linux, macOS and
+Windows. Nothing on this branch is unverified.
 
 ## Still open, unchanged
 
