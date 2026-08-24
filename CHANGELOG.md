@@ -1,5 +1,77 @@
 # Changelog
 
+## v1.1.0
+
+Plans gain three optional header sections, `finish` reports them, `rebuild-state` stops refusing
+a defect it cannot let anyone fix, and the test suite stops spending ~40,000 tokens of context
+per run. One CLI surface is new (`init-run` now refuses a malformed header section); the rest is
+behaviour that was already promised.
+
+### Plans can now state a destination, its fog, and its boundaries
+
+- **`## Destination`, `## Not Yet Specified` and `## Out of Scope`** are parsed by
+  `scripts/plan-sections.mjs`, compiled into `plan.json` by `init-run`, and reported by `finish`.
+  All three are optional. An `## Out of Scope` section requires a `## Destination` **with prose
+  under it** — an empty heading is refused exactly like an absent one, because "out of scope"
+  means beyond the destination and a bare heading leaves that unjudgeable.
+- **Two entry rules, checked for shape and not for truth.** Every Out of Scope entry needs a
+  reason clause (a separator followed by non-whitespace); every Not Yet Specified entry must
+  contain a `?`. A malformed section now fails `init-run` with the offending line quoted, its
+  control bytes neutralised so a crafted entry cannot redraw the refusal above it.
+- **`finish` prints the destination and the open fog** after the run summary, and says when those
+  notes no longer match the plan at the anchor — the notes come from `plan.json` while the verdict
+  is computed from git, and one report could previously describe two versions with nothing marking
+  it.
+
+### The test suite stopped costing 40,000 tokens a run
+
+- **`npm test` prints failures and one summary line**, down from 161,489 chars (~40,372 tokens) to
+  504 (~126), a 99.7% reduction on a green run. `npm run test:verbose` keeps the full output.
+  This was measured, not guessed: across three real agent transcripts, fresh input was 212 tokens
+  and cache reads were 2,190,488. Cache reads scale with turns × context, so anything sitting in
+  an agent's context is paid for again on every later turn — and every agent in a fleet is told to
+  run this command, some of them repeatedly.
+- Failures keep their full stack and diff, stderr passes through, the summary prints on red as
+  well as green, and exit codes are unchanged.
+
+### Fixes
+
+- **`ownership` no longer false-FAILs on a mode-only change.** `contentAt` compared blob bytes and
+  never the tree mode, so a chmod was invisible in both directions: an honest merge carrying one
+  could never be explained, and a tampered permission bit was waved through. The second half was a
+  recorded limitation; one change closes both.
+- **`rebuild-state` recovers from a section defect in the plan at the anchor** instead of printing
+  `init-run`'s refusal and returning 2. That plan is a historical commit the operator cannot fix,
+  and correcting the working-tree copy did not clear it. It now warns — naming the command, the
+  anchor, and where the plan was read from — writes `null`/`[]`/`[]` for the three fields, and
+  rebuilds everything git can vouch for. `init-run` still refuses, because it reads the working
+  tree, where a defect is fixable.
+- **A spaced thematic break no longer parses as a bullet.** `* * *` satisfied the bullet pattern,
+  so `parseConstraints` injected `* *` as a constraint into **every teammate brief**, and a plan
+  whose only defect was a horizontal rule was refused. Thematic breaks now outrank list items, per
+  CommonMark. `+ + +` still parses as a list item, because `+` is not a thematic-break character.
+- **`renderPlanNotes` defends its own input shape.** `plan.json` is teammate-writable and
+  gitignored: a null plan and a null entry threw, a string `notYetSpecified` iterated per
+  character into `  - undefined` rows, and a non-string destination rendered
+  `Destination: "[object Object]"`. The fog list is also capped at 20 entries — it prints after
+  the verdict, and 50,000 entries pushed the "do not land" lines off screen (50,005 lines / 3.1 MB,
+  now 22 lines / 1.3 KB). The heading still reports the true total.
+- **SessionStart hooks run on Unix again.** `hooks/run-hook.cmd` was committed 100644, so every
+  Unix install died at exit 126, and the hook matched three of five SessionStart sources.
+- **Windows CI is green again.** Two tests asserted a POSIX exec bit on a filesystem that has
+  none; the index mode was correct throughout, and remains the assertion that matters.
+
+### Tests
+
+- Four claims the phase reviews found unpinned are now pinned, each confirmed unpinned first and
+  re-checked by mutation afterwards: the `printable` call on the missing-reason refusal branch, the
+  continuation lookahead's marker class, `init-run`'s section-before-task ordering, and the
+  `if (notes)` guard in `finish`.
+- Two vacuous assertions repaired: a phase comparison with no absolute expectation (gutting
+  `assignPhases` left it green) and a U+2028 forgery check that split on `\n`, which that split
+  can never produce.
+- Prose corrected in four places where a comment claimed more than the code delivered.
+
 ## v1.0.1
 
 All four follow-ups recorded under v1.0.0 below, closed. They are documentation or test
