@@ -2498,6 +2498,15 @@ test('finish prints the destination and open fog entries when plan.json carries 
     assert.match(out, /Destination: "The gate answers PASS or FAIL from git alone\."/)
     assert.match(out, /Not yet specified \(1 open\):/)
     assert.match(out, /Where does a resolved fog entry go once someone decides it\?/)
+    // ORDER, not just presence. Every assertion here uses `lines.join('\n')` with `match`, so
+    // nothing constrained where the notes landed: relocating the whole block above
+    // `renderRunSummary` left the suite green, and the fog then printed ahead of the verdict
+    // table. The step this test covers says the notes come AFTER the run summary, so that is
+    // what has to be asserted rather than implied.
+    const summaryAt = out.indexOf('run r1 —')
+    const notesAt = out.indexOf('Destination: "The gate answers')
+    assert.ok(summaryAt !== -1, 'fixture must produce a run summary header')
+    assert.ok(notesAt > summaryAt, `plan notes must follow the run summary; got summary@${summaryAt}, notes@${notesAt}`)
     assert.equal(code, 4)
   })
 })
@@ -2581,7 +2590,13 @@ test('finish swallows a wrong-shaped plan.json and still reports the verdict unc
 })
 
 // Step 4: the exit code `finish` returns must not depend on whether plan notes were printed.
-// Same manifest and same never-run check in both branches, so the only variable is the plan.
+// Same manifest in both branches, so the only variable is the plan. NOTE the manifest below
+// declares a `fileset` check, which `finish` DOES run — and its passing is exactly what makes
+// both arms exit 0. This comment used to call it a "never-run check", contradicting both the
+// section preamble above (which says every case there exits 4) and the assertions below (which
+// expect 0). Swapping in the section's actual never-run agent check makes this test fail with
+// `actual: 4, expected: 0`, so a maintainer "restoring" it on the strength of the old wording
+// would turn this into a comparison of two 4s that no longer exercises `summary.complete`.
 test('finish returns the identical exit code with and without plan notes present', async () => {
   const runOnce = async (planText) => {
     let code
@@ -10913,5 +10928,115 @@ test('init-run reports a section defect ahead of a task defect in the same plan'
     const out = lines.join('\n')
     assert.match(out, /plan defect: this plan has an Out of Scope section but no Destination\./)
     assert.doesNotMatch(out, /unsatisfiable dependencies/, 'the task failure outran the section guard')
+  })
+})
+
+// The notes come from `.teammates/<run>/plan.json`, recorded when `init-run` last ran, while the
+// verdict above them is computed from the plan at the git anchor. Amend and commit the plan
+// without re-running `init-run` and the two halves of one report describe different versions of
+// it, with nothing saying so. The fix is not to change which source the notes use — that is the
+// reader the task specified — but to stop the report presenting a stale half as current.
+test('finish marks plan notes as stale when the plan at the anchor has moved on', async () => {
+  await withRepo(async ({ root, io, lines, git: g }) => {
+    const planPath = path.join(root, 'foggy-plan.md')
+    g(['checkout', '--quiet', 'main'])
+    await writeFile(planPath, PLAN_WITH_DESTINATION_AND_FOG, 'utf8')
+    g(['add', '.'])
+    g(['commit', '--quiet', '-m', 'add foggy plan'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--quiet', 'main'])
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      lens: ['correctness'],
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+
+    // The fog entry is resolved and the change committed — but `init-run` is NOT re-run, so
+    // plan.json still carries it.
+    g(['checkout', '--quiet', 'main'])
+    await writeFile(planPath, PLAN_WITH_DESTINATION_AND_FOG.replace(
+      '- Where does a resolved fog entry go once someone decides it?\n', '',
+    ), 'utf8')
+    g(['add', '.'])
+    g(['commit', '--quiet', '-m', 'resolve the fog entry'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--quiet', 'main'])
+
+    lines.length = 0
+    await runCli(['finish', '--run', 'r1', '--plan', 'foggy-plan.md', '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    // The stale entry is still shown — it is what plan.json holds — but no longer presented as
+    // the current state of the plan.
+    assert.match(out, /Where does a resolved fog entry go once someone decides it\?/)
+    assert.match(out, /stale|out of date|no longer match/i)
+    assert.match(out, /init-run/, 'the advisory must say how to refresh it')
+  })
+})
+
+// The other side: when the two sources agree, the report says nothing extra. An advisory that
+// fires on every run is one an operator learns to ignore.
+test('finish says nothing about staleness when plan.json matches the plan at the anchor', async () => {
+  await withRepo(async ({ root, io, lines, git: g }) => {
+    const planPath = path.join(root, 'foggy-plan.md')
+    g(['checkout', '--quiet', 'main'])
+    await writeFile(planPath, PLAN_WITH_DESTINATION_AND_FOG, 'utf8')
+    g(['add', '.'])
+    g(['commit', '--quiet', '-m', 'add foggy plan'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--quiet', 'main'])
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      lens: ['correctness'],
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    await runCli(['finish', '--run', 'r1', '--plan', 'foggy-plan.md', '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    assert.match(out, /Not yet specified \(1 open\):/)
+    assert.doesNotMatch(out, /stale|out of date|no longer match/i)
+  })
+})
+
+// Drift in the DESTINATION, not the fog list — the other half of what these notes render. Found
+// by mutation: deleting the destination comparison in `samePlanNotes` left the two fog-drift
+// tests above green, because neither of them varies the destination.
+test('finish marks plan notes as stale when only the destination has changed', async () => {
+  await withRepo(async ({ root, io, lines, git: g }) => {
+    const planPath = path.join(root, 'foggy-plan.md')
+    g(['checkout', '--quiet', 'main'])
+    await writeFile(planPath, PLAN_WITH_DESTINATION_AND_FOG, 'utf8')
+    g(['add', '.'])
+    g(['commit', '--quiet', '-m', 'add foggy plan'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--quiet', 'main'])
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      lens: ['correctness'],
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+
+    // The fog list is untouched; only the destination prose is rewritten and committed.
+    g(['checkout', '--quiet', 'main'])
+    await writeFile(planPath, PLAN_WITH_DESTINATION_AND_FOG.replace(
+      'The gate answers PASS or FAIL from git alone.',
+      'The gate answers PASS or FAIL from git alone, and says why.',
+    ), 'utf8')
+    g(['add', '.'])
+    g(['commit', '--quiet', '-m', 'sharpen the destination'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--quiet', 'main'])
+
+    lines.length = 0
+    await runCli(['finish', '--run', 'r1', '--plan', 'foggy-plan.md', '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    // The recorded destination is still what is shown, and it is now flagged as stale.
+    assert.match(out, /Destination: "The gate answers PASS or FAIL from git alone\."/)
+    assert.match(out, /no longer match/i)
   })
 })

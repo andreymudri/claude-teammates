@@ -233,7 +233,16 @@ test('renderPlanNotes neutralises U+2028 in a fog entry so it cannot forge a Des
   })
   assert.doesNotMatch(out, /\u2028/)
   assert.match(out, /<0x2028>/)
-  assert.ok(!out.split('\n').some((line) => line.trim() === 'Destination: forged goal'))
+  // Split on every separator a RENDERER may treat as a line break, not just `\n`. Splitting on
+  // `\n` alone made this assertion unfalsifiable by the very forgery it names: a raw U+2028
+  // never becomes its own element, so the line `Destination: forged goal` could not appear as
+  // one however the render behaved. The forgery is only a forgery in a viewer that DOES break
+  // on U+2028, so that is the split this has to model.
+  const renderedLines = out.split(/\r\n|\r|\n|\u2028|\u2029/)
+  assert.ok(
+    !renderedLines.some((line) => line.trim() === 'Destination: forged goal'),
+    `a forged Destination line surfaced: ${JSON.stringify(renderedLines)}`,
+  )
 })
 
 test('renderPlanNotes quotes an invisible destination so it renders with visible boundaries', () => {

@@ -630,6 +630,34 @@ function formatPlanSectionError(err) {
 // exercised". Without it, a stray bug inside `plan-sections.mjs` would print as
 // `plan defect: TypeError: ...` with a bullet reading `  - undefined`, reporting an internal
 // fault as though the operator's plan prose were at fault.
+// Reads the three header sections from the plan COMMITTED AT THE ANCHOR, or null when that
+// cannot be done — an absent plan, an unreadable one, or one whose sections no longer parse.
+// null means "no comparison is possible", never "they match": a defect at the anchor is not
+// evidence that `plan.json` is current, so the caller stays quiet rather than asserting either.
+async function planSectionsAtAnchor(ctx, planPath) {
+  if (!ctx?.git || !ctx?.anchorSha || typeof planPath !== 'string' || planPath === '') return null
+  try {
+    return parsePlanSections(await ctx.git.fileAtCommit(ctx.anchorSha, planPath))
+  } catch {
+    return null
+  }
+}
+
+// Compares only what the notes actually render — the destination and the fog list. `outOfScope`
+// is deliberately excluded: it never reaches this report, so a change to it is not a staleness
+// the operator is looking at. Entry text is compared, not `line`, because a fog entry that only
+// moved down the file says the same thing.
+function samePlanNotes(plan, anchored) {
+  const recordedDestination = typeof plan?.destination === 'string' ? plan.destination : null
+  if (recordedDestination !== (anchored.destination ?? null)) return false
+  const textsOf = (list) => (Array.isArray(list) ? list : [])
+    .filter((e) => e !== null && typeof e === 'object' && typeof e.text === 'string')
+    .map((e) => e.text)
+  const recorded = textsOf(plan?.notYetSpecified)
+  const current = textsOf(anchored.notYetSpecified)
+  return recorded.length === current.length && recorded.every((t, i) => t === current[i])
+}
+
 export function planSectionsRefusal(err) {
   if (!(err instanceof PlanSectionError)) throw err
   return formatPlanSectionError(err)
@@ -2903,7 +2931,23 @@ export async function runCli(argv, io = { out: console.log }) {
     try {
       const plan = await readState(root, runId, 'plan')
       const notes = renderPlanNotes(plan)
-      if (notes) io.out(notes)
+      if (notes) {
+        io.out(notes)
+        // THE TWO HALVES OF THIS REPORT HAVE DIFFERENT SOURCES. The verdict above is computed
+        // from the plan at the git anchor; these notes come from `plan.json`, written when
+        // `init-run` last ran. Amend and commit the plan without re-running `init-run` and the
+        // report describes two different versions of it at once — the fog count can name an
+        // entry the current plan no longer contains, or miss one it now does. `plan.json` is
+        // the reader this feature specified, so the fix is not to switch sources; it is to stop
+        // presenting a stale half as current. Compared only when there is something to show,
+        // and reported only when the two actually differ: an advisory printed on every run is
+        // one an operator learns to skip past.
+        const anchored = await planSectionsAtAnchor(ctx, plan?.planPath)
+        if (anchored && !samePlanNotes(plan, anchored)) {
+          io.out('  (these notes are from plan.json and no longer match the plan at the anchor; '
+            + 're-run init-run to refresh them — the verdict above is computed from the anchor, not from this)')
+        }
+      }
     } catch {
       // Swallow and print nothing — see the comment above.
     }

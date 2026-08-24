@@ -242,8 +242,11 @@ The gate can answer "is this run landable" without an operator reading prose.
   const phasesWithNotes = assignPhases(tasksWithNotes)
   const phasesWithoutNotes = assignPhases(tasksWithoutNotes)
 
-  assert.deepEqual(
-    phasesWithNotes.map((t) => t.phase),
-    phasesWithoutNotes.map((t) => t.phase),
-  )
+  // Absolute here too, for the same reason the task expectations above are: a purely
+  // comparative check is satisfied by any `assignPhases` that treats both fixtures alike,
+  // INCLUDING one that has stopped assigning phases at all. Confirmed — gutting the function
+  // so every task lands in phase 1 left the comparison green, because both sides degrade
+  // together. T2 depends on T1, so the split is the thing worth stating.
+  assert.deepEqual(phasesWithNotes.map((t) => t.phase), [1, 2])
+  assert.deepEqual(phasesWithoutNotes.map((t) => t.phase), [1, 2])
 })

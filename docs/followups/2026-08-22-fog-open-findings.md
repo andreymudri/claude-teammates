@@ -83,7 +83,14 @@ bullets in docs/plans and docs/specs, every line-start `+` inside a code fence o
 lookahead was still described as `-\s|-$`, a pattern the widening replaced. Cross-references
 now name the tests they mean rather than saying "above"/"below", which had already drifted.
 
-## Behaviour worth a decision
+## Behaviour worth a decision — RESOLVED
+
+The `* * *` bullet-injection recorded here was a real defect, not a decision: a spaced thematic
+break satisfied the bullet pattern, so `parseConstraints` put `* *` into every teammate brief
+and `parsePlanSections` refused a plan whose only defect was a horizontal rule. Fixed — thematic
+breaks now outrank list items, per CommonMark. `+ + +` deliberately still parses as a list item,
+because `+` is not a thematic-break character.
+
 
 - **`* * *` parses as a bullet entry** (`scripts/plan-sections.mjs:91`, after the `[-*+]`
   widening). `parsePlanSections` on a plan whose only defect is a spaced horizontal rule
@@ -104,7 +111,7 @@ now name the tests they mean rather than saying "above"/"below", which had alrea
   refusal is unreachable because `bulletSection`'s `[^\n]*` bars a newline from entering the
   entry. The CLI's literal `  - ` indent stays leftmost and `init-run` still exits 2.
 
-## Phase 2 items still open
+## Phase 2 items — CLOSED
 
 - **`scripts/finish.mjs:157`** — `renderPlanNotes` has no input-shape defense: `null` throws,
   and a string `notYetSpecified` renders `  - undefined` rows.
@@ -114,7 +121,7 @@ now name the tests they mean rather than saying "above"/"below", which had alrea
 - **`tests/phases.test.mjs:246`** — the phase-level assertion is implied by the absolute
   expectations above it; gutting `assignPhases` leaves it green.
 
-## Phase 4 items still open
+## Phase 4 items — CLOSED
 
 All eight were reported against `teammates/fog/T6@380532f`, rated `low`, and knowingly
 integrated at merge `2c39ce8`. Line numbers are as of that tip.
@@ -207,3 +214,36 @@ spec's §2 prose, its dependency sentence and its rules table were each updated,
 comment no longer claims the documents disagree with it. The plan's task list and phase
 breakdown are unchanged by the edit — T1(p1) T2/T4/T5/T7(p2) T3(p3) T6(p4), exactly what run
 `fog` executed.
+
+
+## Closing summary (autonomous pass)
+
+Everything above that named a defect or a gap is now addressed. What was done, and how each was
+verified:
+
+- **`renderPlanNotes` input-shape defense** (phase 2 `finish.mjs:157`, phase 4 `cli.mjs:2881`,
+  `cli.mjs:2877` — one root cause, three findings). Each field is checked for its documented
+  shape. Unreadable entries are dropped and named when readable fog remains beside them; with
+  nothing readable the block is omitted, preserving the contract that a corrupt `plan.json` does
+  not perturb the verdict report. The call site passes the plan verbatim and two comments
+  claiming the function has no defense are corrected.
+- **Fog list capped at 20** (phase 4 security, `cli.mjs:2882`). The 50,000-entry attack now
+  renders 22 lines / 1.3 KB instead of 50,005 lines / 3.1 MB. The heading keeps the true total
+  and the tail names what was withheld.
+- **Staleness advisory** (phase 4 `cli.mjs:2880`). The notes come from `plan.json` and the
+  verdict from the plan at the anchor; when the two disagree the report now says so and points
+  at `init-run`. Silent when they agree. Four mutations killed, one of which (ignoring
+  destination drift) survived the first two tests and required a third.
+- **Report ordering pinned** (phase 4 `tests/cli.test.mjs:2455`). Relocating the notes block
+  above `renderRunSummary` now fails with a named assertion.
+- **Two vacuous assertions repaired** (phase 2). `tests/phases.test.mjs` compared phases between
+  two fixtures without an absolute expectation — gutting `assignPhases` left it green; it now
+  asserts `[1, 2]`. `tests/finish.test.mjs` split on `\n` to look for a U+2028-forged
+  `Destination` line, which that split can never produce; it now splits on every separator a
+  renderer may break on.
+- **The "never-run check" comment** (phase 4 `tests/cli.test.mjs:2570`) named a `fileset` check
+  that `finish` does run, and whose passing is what makes both arms exit 0.
+
+Still open by design: the bidi exposure under **Accepted, documented exposure**, which is a
+recorded decision rather than a gap, and the fog/scope entries in the plan's own
+`## Not Yet Specified`, which are questions for the operator, not defects.
