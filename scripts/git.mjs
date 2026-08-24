@@ -12,7 +12,7 @@ export class GitError extends Error {}
 //
 //   COVERED — `error: unknown option \`<name>'` on stderr, exit 129: merge-base (mergeBase,
 //   isAncestor), fetch (fetchRefspec), worktree add/remove (addWorktreeDetached,
-//   removeWorktree), merge (mergeInto).
+//   removeWorktree), merge (mergeInto), ls-tree (fileModeAtCommit).
 //
 //   COVERED — `fatal: unrecognized argument: <name>` on stderr, exit 128: log
 //   (commitSubject), show (fileAtCommit).
@@ -414,6 +414,19 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
         throw new GitError(`fileAtCommit requires a non-empty sha and path, got sha=${JSON.stringify(sha)} path=${JSON.stringify(filePath)}`)
       }
       return run(['show', '--end-of-options', `${sha}:${filePath}`, '--'])
+    },
+    // The mode fileAtCommit deliberately drops. A chmod is a real change that carries no bytes,
+    // so any caller comparing two commits by content alone concludes nothing touched the file —
+    // which reads as "this file has no legitimate source" in the ownership check. Returns the
+    // six-digit tree mode, or null when the path is absent at that commit (`ls-tree` exits 0
+    // with empty output for a path it does not find, so absence is not a GitError here).
+    async fileModeAtCommit(sha, filePath) {
+      if (!isNonEmptyString(sha) || !isNonEmptyString(filePath)) {
+        throw new GitError(`fileModeAtCommit requires a non-empty sha and path, got sha=${JSON.stringify(sha)} path=${JSON.stringify(filePath)}`)
+      }
+      const out = await run(['ls-tree', '--end-of-options', sha, '--', filePath])
+      const match = /^(\d{6}) /.exec(out)
+      return match ? match[1] : null
     },
     // A bare name is resolved through refs/tags/ BEFORE refs/heads/, so a teammate that
     // creates a tag named like its branch makes every range command read a different

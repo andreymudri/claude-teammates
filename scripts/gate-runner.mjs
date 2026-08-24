@@ -815,9 +815,16 @@ export async function runFilesetCheck(check, ctx = {}) {
 // not a git failure. `null` is a sentinel distinct from any real file content; every caller
 // compares it against another call of this same function, so the sentinel only ever meets
 // itself or real content.
+// Content AND mode, as one comparable value. Mode is part of it because a chmod is a change
+// that carries no bytes: comparing bytes alone reports "this parent never touched the file"
+// for a file the diff did list, which leaves the merge with no explained source and fails an
+// honest integration. Joined on a NUL, which cannot occur in a six-digit mode, so no
+// content can spoof a mode boundary.
 async function contentAt(git, sha, filePath) {
   try {
-    return await git.fileAtCommit(sha, filePath)
+    const content = await git.fileAtCommit(sha, filePath)
+    const mode = await git.fileModeAtCommit(sha, filePath)
+    return `${mode ?? ''}\u0000${content}`
   } catch (err) {
     if (!(err instanceof GitError)) throw err
     return null
