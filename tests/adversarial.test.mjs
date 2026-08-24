@@ -847,17 +847,21 @@ test('LIMIT (sibling-tip, overlapping declared set): a parked ref whose declared
   })
 })
 
-test('LIMIT (mode-only change): a merge that only flips a file\'s executable bit is invisible to ownership', async () => {
+// WAS a recorded LIMIT: contentAt compared bytes and never mode, so an integrator could flip a
+// file's permission bits beyond what the honest task branch committed and the merge still read
+// as clean. contentAt now pairs each blob with its tree mode, which closes it — a mode the
+// merge commit carries and no parent contributed is content with no legitimate source, exactly
+// like a fabricated byte. The same change also stopped a legitimate chmod from reading as
+// "no parent touched this file", which is what surfaced the gap; see the mode-change test in
+// tests/gate-runner.test.mjs for that direction.
+//
+// `update-index --chmod` writes the bit into the index without touching the file on disk.
+// Where git honours filemode — POSIX, not Windows — the working tree then differs from HEAD,
+// and the next `checkout -b <branch> main` is refused as an overwrite of local changes, so the
+// test failed on Linux and macOS while passing there. Turning filemode off for this repository
+// makes the platforms agree, and costs the test nothing: the bit still reaches the commit.
+test('a merge that flips a file\'s executable bit beyond its task branch is caught by ownership', async () => {
   await withRepo(async (root) => {
-    // Spec: fileAtCommit returns bytes and never mode. The ownership check's merge-content
-    // verification compares byte content only, so a merge that silently changes a file's
-    // permission bits beyond what the honest task branch committed is accepted as clean.
-    // `update-index --chmod` writes the bit into the index without touching the file on disk.
-    // Where git honours filemode — POSIX, not Windows — the working tree then differs from
-    // HEAD, and the next `checkout -b <branch> main` is refused as an overwrite of local
-    // changes, so the test failed on Linux and macOS while passing here. Turning filemode off
-    // for this repository makes the platforms agree, and costs the test nothing: the point is
-    // that ownership compares bytes and never mode, and the bit still reaches the commit.
     git(root, ['config', 'core.fileMode', 'false'])
     await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
     git(root, ['merge', '--quiet', '--no-ff', '--no-commit', 'teammates/r1/T1'])
@@ -868,8 +872,8 @@ test('LIMIT (mode-only change): a merge that only flips a file\'s executable bit
     git(root, ['merge', '--quiet', '--no-ff', '-m', 'integrate T2', 'teammates/r1/T2'])
 
     const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
-    assert.equal(code, 0)
-    assert.equal(JSON.parse(out).verdict, 'PASS')
+    assert.equal(code, 1)
+    assert.match(out, /reachable from no task branch/)
   })
 })
 
