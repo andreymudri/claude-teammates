@@ -1,5 +1,61 @@
 # Changelog
 
+## v1.1.1
+
+Token-usage work. `npm test` stops emitting ~40,000 tokens of pass lines, a `usage` command makes
+per-run token cost measurable, and the two agents that inherited every tool now declare the six
+they need. No behaviour a plan or a gate depends on has moved.
+
+### `npm test` costs ~126 tokens of output instead of ~40,372
+
+- **A quiet test reporter** (`scripts/quiet-reporter.mjs`) prints failures and one summary line:
+  161,489 chars down to 504, a **99.7% reduction** on a green run. `npm run test:verbose` keeps
+  the full per-test output.
+- Failures keep their full stack and diff, `test:stderr`/`test:stdout` pass through, the summary
+  prints on red as well as green, and exit codes are unchanged. The whole saving comes from the
+  success path, which is where the noise was.
+- Counts come from the root `test:summary` event, never from tallying `test:pass` — a parent
+  suite emits its own, which measured 5 where the truth was 4.
+
+### `usage` — per-run token reporting
+
+- **New subcommand:** `cli.mjs usage [--session <id>] [--json] [--root <path>]` reads the
+  harness's transcript store and reports, per agent role, the turns, the fixed prefix, the prefix
+  paid across all turns, cache reads and output.
+- It reports the **fixed prefix** separately because totals hide the thing worth knowing: on run
+  `fog` the integrator looked *cheapest* by cache reads while carrying a 5× larger prefix than a
+  reviewer whose prompt was longer. Fixed prefix was 40% of all cache reads.
+- An unparseable transcript is named and counted rather than skipped, a missing store fails
+  naming the path rather than rendering zeros, and a transcript with no metadata keeps its row.
+  Each of those would otherwise let the tool understate a total, which is how an optimization
+  appears to prove a saving nobody made.
+- Honours `CLAUDE_CONFIG_DIR`.
+
+### Agents declare their tool sets
+
+- `tm-implementer` and `tm-integrator` declared no `tools:` and so inherited every tool, including
+  whatever MCP servers a session happens to have connected. Both now declare
+  `Read, Write, Edit, Bash, Grep, Glob`. `tm-reviewer` already declared its own.
+- Measured, with an identical probe prompt and model in one session: an agent whose declaration
+  was active carried a **7,867**-token prefix against **27,499** for one without — **19,632
+  tokens per turn**, of which agent-definition size explains only ~604. The prefix is re-read on
+  every turn.
+- **The saving is not yet confirmed for these two agents.** Claude Code loads agent definitions at
+  session start, so the declarations added here could not take effect in the session that measured
+  them; `HANDOFF.md` records the one probe that closes it. Least privilege stands on its own
+  merits meanwhile: a teammate implementing one task in one worktree has no business holding the
+  tool that sends email.
+
+### Fixes
+
+- **`projectSlug` stripped of the drive colon.** Every absolute Windows path carries a drive
+  letter and a colon cannot appear in a Windows filename, so the slug named a directory that could
+  never exist and `usage` could only ever miss there. Whether the harness itself substitutes the
+  same character is unverified against a real Windows install.
+- **Three test-only Windows failures**, each an assumption that POSIX semantics hold everywhere: a
+  file mode asserted on a filesystem with no exec bit, a reporter path passed as a native path
+  where the ESM loader reads `D:` as a URL scheme, and the slug above.
+
 ## v1.1.0
 
 Plans gain three optional header sections, `finish` reports them, `rebuild-state` stops refusing
