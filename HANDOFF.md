@@ -1,34 +1,66 @@
 # Handoff — 2026-08-24, end of session
 
-Everything below is on `master` and pushed. Working tree clean, one branch, one worktree.
-`v1.1.1` is tagged at `b36b821`, which is `master` — nothing is unreleased.
+One branch, one worktree. `v1.1.1` is tagged at `b36b821`. Everything below is on `master` and
+pushed **except** the `usage` session-selection fix and this file, which are uncommitted — see
+the second section.
 
 ## Read this first
 
-**One measurement is pending, and it needs a fresh session to take — that is why this handoff
-exists.** Agent definitions are loaded by Claude Code at session start, so the `tools:` lines
-added to `tm-implementer` and `tm-integrator` today could not take effect in the session that
-wrote them.
+**The measurement is taken and the loop is closed.** A `tm-implementer` dispatched with the
+`tools:` declaration actually loaded carries a **9,610**-token prefix, against **27,499** for the
+same agent from the pinned snapshot that lacked the line — **17,889 tokens per turn, 65%**.
 
-**First job next session:**
+    node scripts/cli.mjs usage --root .   # run 389bd517: tm-implementer, sonnet, 1 turn, 9,610
 
-    node scripts/cli.mjs usage --root .          # note the numbers, then dispatch anything
-    # dispatch one trivial tm-implementer, then:
-    node scripts/cli.mjs usage --root .
+Higher than the ~7,900 the previous session predicted, and the prediction was the wrong shape
+rather than the measurement being off: 7,900 came from `tm-reviewer`, which declares five tools
+to `tm-implementer`'s seven and has a shorter definition. The number to carry forward is the
+**delta**, not either absolute.
 
-If the `tm-implementer` prefix has dropped from **27,499** to roughly **7,900**, the loop is
-closed and the saving is real. If it is still ~27,499, the declaration is not being honoured and
-the finding below needs re-explaining, not re-asserting.
+The cache is at `1.1.1`, pinned at `c3c6937` — `master` at the time of the refresh — and
+`installed_plugins.json` agrees. This session loaded it: both agent types arrived with their
+restricted tool sets in force.
+
+**Standing rule this exposed:** editing `agents/`, `skills/`, `hooks/` or `scripts/` in this repo
+changes nothing about the running session. It loads a pinned snapshot from
+`~/.claude/plugins/cache/claude-teammates/claude-teammates/<version>/`, copied at the SHA in
+`~/.claude/plugins/installed_plugins.json`. Before measuring any such change, check
+`claude plugin list` against `.claude-plugin/plugin.json`, then:
+
+    claude plugin update claude-teammates@claude-teammates   # bare name fails; @marketplace is required
+
+and restart. An unbumped version means the update is a no-op. **This applies to the `usage` fix
+below: it is not in the running snapshot.**
+
+## Uncommitted on `master` — the `usage` session-selection fix
+
+`usage --root .` reported on the harness's `memory/` directory, which sits beside the session
+directories inside the project directory. `newestSession` chose the newest *directory*, and
+`memory/` is written every session, so it won every mtime comparison — the command failed with
+`no transcripts found at .../memory/subagents`, which reads as "that session is empty" rather than
+"that was never a session".
+
+A session is now identified by the `subagents/` store it carries, ordered by the later of the
+session directory's and the store's mtime, and the no-store failure names the layout rather than
+whichever directory happened to be newest. Two tests cover it; the suite is **1876 tests, 1873
+pass, 0 fail, 3 skipped** locally.
+
+**Not committed, not pushed, not CI-verified, and not released.** The bugfix would conventionally
+be `v1.1.2`, and until the version is bumped and the cache updated the running harness keeps the
+broken selection.
 
 ## What the measurement already established
 
-Measured this session with the identical probe prompt, identical model, same session — the only
-variable being whether the agent's `tools:` declaration was already active:
+Measured with a no-tool probe prompt on `sonnet`, the only variable being whether the agent's
+`tools:` declaration was active. The first two rows are from one session; the third is from the
+session after the cache refresh, so it is a cross-session comparison and the probe prompt differs
+slightly — the 17,889 delta is far outside anything that accounts for.
 
 | agent | `tools:` active | prefix per turn |
 |---|---|---|
 | `tm-reviewer` | yes (predates the session) | **7,867** |
-| `tm-implementer` | no (edit not yet loaded) | **27,499** |
+| `tm-implementer` | no (absent from the loaded snapshot) | **27,499** |
+| `tm-implementer` | yes (cache refreshed to 1.1.1) | **9,610** |
 
 **19,632 tokens per turn**, of which the agent-definition size difference explains only ~604.
 The prefix is re-read on every turn, so for a fleet the size of run `fog` — 7 implementers at
@@ -56,7 +88,7 @@ Measured composition of the 27,499-token prefix:
 |---|---|
 | quiet test reporter | **shipped, proven** — `npm test` output 40,372 → 126 tokens (99.7%) |
 | `usage` command | **shipped** — reproduces the original ad-hoc numbers exactly |
-| tool declarations | **shipped, activation unverified** — see above |
+| tool declarations | **shipped and verified active** — 27,499 → 9,610 per implementer turn |
 | skill descriptions | **measured and rejected** — ~144 tokens/turn against real routing risk |
 | agent verbosity (`caveman`) | **unexplored, and the largest remaining lever** |
 
@@ -100,7 +132,7 @@ Retagging is cheap if that reads wrong later.
 
 ## Verify before trusting anything above
 
-    npm test                              # expect 1874 tests, 1871 pass, 0 fail, 3 skipped
+    npm test                              # expect 1876 tests, 1873 pass, 0 fail, 3 skipped
     gh run list --limit 1                 # the last push must be green on all three platforms
     node scripts/cli.mjs usage --root .   # the measurement tool
 

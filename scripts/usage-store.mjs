@@ -18,6 +18,11 @@ function missing(dir) {
   return new Error(`no transcripts found at ${dir} — this is a harness-internal layout and may have changed`)
 }
 
+// A session is identified by the store it carries, not by being the newest directory. The project
+// directory holds more than sessions — the harness keeps `memory/` beside them — and that one is
+// written on every session, so it won every mtime comparison and the command reported on a
+// directory that can never hold a transcript. Requiring `subagents/` is the same test the read
+// below performs, moved to where the choice is made.
 async function newestSession(projectDir) {
   let entries
   try {
@@ -25,14 +30,27 @@ async function newestSession(projectDir) {
   } catch {
     throw missing(projectDir)
   }
-  const dirs = entries.filter((e) => e.isDirectory()).map((e) => e.name)
-  if (dirs.length === 0) throw missing(projectDir)
-  const stamped = await Promise.all(dirs.map(async (name) => ({
-    name,
-    mtime: (await stat(path.join(projectDir, name))).mtimeMs,
-  })))
-  stamped.sort((a, b) => b.mtime - a.mtime)
-  return stamped[0].name
+  const sessions = []
+  for (const entry of entries.filter((e) => e.isDirectory())) {
+    const dir = path.join(projectDir, entry.name)
+    let store
+    try {
+      store = await stat(path.join(dir, 'subagents'))
+    } catch {
+      continue
+    }
+    if (!store.isDirectory()) continue
+    // The later of the two: the session directory is stamped when its store is created, the store
+    // when a transcript is added to it. Taking the max keeps the current session ahead of an older
+    // one whichever of the two the harness last touched.
+    const own = (await stat(dir)).mtimeMs
+    sessions.push({ name: entry.name, mtime: Math.max(own, store.mtimeMs) })
+  }
+  // Named for the layout rather than for whichever directory happened to be newest, which would
+  // read as "that session is empty" instead of "no session here has a store at all".
+  if (sessions.length === 0) throw missing(path.join(projectDir, '<session-id>', 'subagents'))
+  sessions.sort((a, b) => b.mtime - a.mtime)
+  return sessions[0].name
 }
 
 export async function readSessionUsage({ projectsDir, root, sessionId = null }) {
