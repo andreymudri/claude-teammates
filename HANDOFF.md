@@ -1,8 +1,7 @@
 # Handoff — 2026-08-24, end of session
 
-`v1.1.1` is tagged at `b36b821`. Everything below is on `master` **except** the `usage`
-session-selection fix and this file, which are on `fix/usage-session-selection` — pushed, green
-on all three platforms, open as PR #14 and unmerged. See the second section.
+Everything below is on `master` and pushed. One branch, one worktree. `v1.1.2` is tagged at
+`master` — nothing is unreleased.
 
 ## Read this first
 
@@ -32,7 +31,7 @@ changes nothing about the running session. It loads a pinned snapshot from
 and restart. An unbumped version means the update is a no-op. **This applies to the `usage` fix
 below: it is not in the running snapshot.**
 
-## Uncommitted on `master` — the `usage` session-selection fix
+## Released in v1.1.2 — the `usage` session-selection fix
 
 `usage --root .` reported on the harness's `memory/` directory, which sits beside the session
 directories inside the project directory. `newestSession` chose the newest *directory*, and
@@ -45,9 +44,9 @@ session directory's and the store's mtime, and the no-store failure names the la
 whichever directory happened to be newest. Two tests cover it; the suite is **1876 tests, 1873
 pass, 0 fail, 3 skipped** locally.
 
-**Green on Linux, macOS and Windows; open as PR #14, unmerged and unreleased.** The bugfix
-would conventionally be `v1.1.2`, and until it is merged, the version bumped and the cache
-updated, the running harness keeps the broken selection.
+Green on Linux, macOS and Windows, merged via PR #14, and released as `v1.1.2`. **The running
+harness still has the broken selection until `claude plugin update` and a restart** — the rule
+above applies to this release like any other.
 
 ## What the measurement already established
 

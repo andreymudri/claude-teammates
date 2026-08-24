@@ -1,5 +1,38 @@
 # Changelog
 
+## v1.1.2
+
+A `usage` bugfix, and the measurement v1.1.1 shipped unconfirmed is now taken.
+
+### Fixes
+
+- **`usage` mistook the harness's `memory/` directory for a session.** It sits beside the session
+  directories inside the project directory and is written every session, so it won every mtime
+  comparison in `newestSession` — the command failed with `no transcripts found at
+  .../memory/subagents`, which reads as "that session is empty" rather than "that was never a
+  session". A session is now the newest directory that carries a `subagents/` store, ordered by
+  the later of the session directory's and the store's mtime. With no store anywhere, the failure
+  names the layout instead of whichever directory happened to be newest.
+
+### The v1.1.1 tool-declaration saving is confirmed — and its stated cause was wrong
+
+- **Measured: 27,499 → 9,610 tokens of fixed prefix per `tm-implementer` turn**, a saving of
+  **17,889 per turn**, re-paid on every turn. v1.1.1 predicted ~7,900 by extrapolating from
+  `tm-reviewer`; the extrapolation was the wrong shape, since `tm-implementer` declares seven
+  tools to the reviewer's five and has a longer definition. The delta is the number that carries,
+  not either absolute.
+- **v1.1.1 said the declarations "could not take effect in the session that measured them"
+  because Claude Code loads agent definitions at session start. That was right about the symptom
+  and wrong about the cause,** and a reader who inherited it would have drawn the wrong
+  conclusion: restarting would never have fixed it. Claude Code does not load this repo. It loads
+  a snapshot under `~/.claude/plugins/cache/…/<version>/`, copied at the git SHA recorded in
+  `installed_plugins.json`, and that snapshot was pinned 40 commits behind `master` — it contained
+  no `usage.mjs`, no `quiet-reporter.mjs` and no `tools:` line on `tm-implementer`. Everything in
+  v1.1.0 and v1.1.1 had never been exercised by the live harness at the time it was released.
+- The practical consequence, which applies to this release too: **editing `agents/`, `skills/`,
+  `hooks/` or `scripts/` changes nothing about a running session.** Run `claude plugin update
+  claude-teammates@claude-teammates` and restart; an unbumped version makes the update a no-op.
+
 ## v1.1.1
 
 Token-usage work. `npm test` stops emitting ~40,000 tokens of pass lines, a `usage` command makes
