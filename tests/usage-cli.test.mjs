@@ -7,6 +7,7 @@ import path from 'node:path'
 import { runCli } from '../scripts/cli.mjs'
 import { projectSlug } from '../scripts/usage.mjs'
 
+// Resolved, and the slug strips the drive colon, so the fixture directory is legal on Windows.
 const FAKE_ROOT = path.resolve('/fake/cli-project')
 const line = (over) => JSON.stringify({ message: { usage: { cache_read_input_tokens: 0, output_tokens: 0, ...over } } })
 
