@@ -28,7 +28,12 @@ fixable and refusing is how a bad plan is caught before a run starts. Pinned by
 in `tests/cli.test.mjs`; three mutations of the recovery (degrade to non-empty, refuse anyway,
 strip the command name and anchor from the warning) were each confirmed to turn it red.
 
-## Unpinned claims — the code is right, nothing holds it there
+## Unpinned claims — NOW PINNED
+
+All four below were confirmed still unpinned (each mutation left the full suite green), then
+pinned, then each mutation was re-run and confirmed to turn the suite red. The `* * *`
+thematic-break entry that was in this section is gone: that was a real defect, fixed separately.
+
 
 - **`scripts/cli.mjs:615` — `printable` on the missing-reason branch.** Reverting it to
   `JSON.stringify(err.entry)` leaves the suite green. The missing-question sibling IS pinned.
