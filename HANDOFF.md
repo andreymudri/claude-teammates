@@ -1,8 +1,8 @@
 # Handoff — 2026-08-24, end of session
 
-One branch, one worktree. `v1.1.1` is tagged at `b36b821`. Everything below is on `master` and
-pushed **except** the `usage` session-selection fix and this file, which are uncommitted — see
-the second section.
+`v1.1.1` is tagged at `b36b821`. Everything below is on `master` **except** the `usage`
+session-selection fix and this file, which are on `fix/usage-session-selection` — pushed, green
+on all three platforms, open as PR #14 and unmerged. See the second section.
 
 ## Read this first
 
@@ -45,9 +45,9 @@ session directory's and the store's mtime, and the no-store failure names the la
 whichever directory happened to be newest. Two tests cover it; the suite is **1876 tests, 1873
 pass, 0 fail, 3 skipped** locally.
 
-**Not committed, not pushed, not CI-verified, and not released.** The bugfix would conventionally
-be `v1.1.2`, and until the version is bumped and the cache updated the running harness keeps the
-broken selection.
+**Green on Linux, macOS and Windows; open as PR #14, unmerged and unreleased.** The bugfix
+would conventionally be `v1.1.2`, and until it is merged, the version bumped and the cache
+updated, the running harness keeps the broken selection.
 
 ## What the measurement already established
 
