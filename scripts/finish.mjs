@@ -151,19 +151,54 @@ export function renderRunSummary(runId, phaseResults = []) {
 // a cosmetic case `printable` has already made inert (a control byte or U+2028 in an entry cannot
 // forge a line; see `renderRunSummary` above). If an invisible fog entry proves as misleading in
 // practice as the invisible destination did, apply the same fix there too.
+// INPUT-SHAPE DEFENSE LIVES HERE, not at the call site. `plan.json` is teammate-writable and
+// gitignored, so this function is fed hostile input by construction, and a caller's `?? {}` can
+// only ever cover the null case. Everything else it used to do wrong was a MISRENDER, not a
+// throw — a string `notYetSpecified` iterated per character into `  - undefined` rows, a
+// non-string destination printed `Destination: "[object Object]"` — and a surrounding `try`
+// cannot catch a misrender. So each field is checked for the shape it is documented to have and
+// ignored when it does not have it.
+//
+// Unreadable entries are COUNTED AND REPORTED rather than silently skipped: the count on the
+// heading is what an operator reads as "how much fog is left", so it must describe what is on
+// screen, and dropping four entries without a word would report the fog as smaller than it is.
+// This block prints AFTER the verdict, and `plan.json` is teammate-writable and gitignored, so
+// an unbounded list scrolls the "do not land" lines off the operator's screen — measured at
+// 50,000 entries: 50,005 lines, 3.1 MB, the verdict on lines 3 and 4. The exit code was never
+// affected, so no scripted caller could be fooled; this cap exists for the human reading the
+// tail of a terminal. The heading still reports the TRUE total and the tail names what was
+// withheld, because a cap that quietly shrinks the count would trade one misreport for another.
+const FOG_LINE_CAP = 20
+
 export function renderPlanNotes(plan = {}) {
   const blocks = []
-  const destination = plan.destination ?? null
-  const notYetSpecified = plan.notYetSpecified ?? []
+  const source = (plan !== null && typeof plan === 'object') ? plan : {}
+  const destination = typeof source.destination === 'string' ? source.destination : null
+  const entries = Array.isArray(source.notYetSpecified) ? source.notYetSpecified : []
+  const readable = entries.filter(
+    (entry) => entry !== null && typeof entry === 'object' && typeof entry.text === 'string',
+  )
+  const unreadable = entries.length - readable.length
 
   if (destination) {
     blocks.push(`Destination: ${JSON.stringify(printable(destination))}`)
   }
 
-  if (notYetSpecified.length > 0) {
-    const fogLines = [`Not yet specified (${notYetSpecified.length} open):`]
-    for (const entry of notYetSpecified) {
+  // Silence when NOTHING is readable, which is the established contract for a corrupt
+  // `plan.json` — an unparseable one is swallowed without a word, and a wholly wrong-shaped one
+  // is the same failure seen one layer in. The notes block exists to report fog; with no fog it
+  // can report, printing a bare "(0 open)" heading would add noise to the verdict report for a
+  // condition the operator cannot act on from here. But once there IS something to show, the
+  // count beside it has to be honest, so drops are named rather than quietly subtracted.
+  if (readable.length > 0) {
+    const fogLines = [`Not yet specified (${readable.length} open):`]
+    for (const entry of readable.slice(0, FOG_LINE_CAP)) {
       fogLines.push(`  - ${printable(entry.text)}`)
+    }
+    const withheld = readable.length - Math.min(readable.length, FOG_LINE_CAP)
+    if (withheld > 0) fogLines.push(`  ... ${withheld} more (capped; the full list is in plan.json)`)
+    if (unreadable > 0) {
+      fogLines.push(`  (${unreadable} unreadable ${unreadable === 1 ? 'entry' : 'entries'} in plan.json omitted)`)
     }
     blocks.push(fogLines.join('\n'))
   }

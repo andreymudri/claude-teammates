@@ -2891,13 +2891,18 @@ export async function runCli(argv, io = { out: console.log }) {
     // rather than kept as a layer no test can drive.
     io.out(renderRunSummary(runId, phaseResults))
     // `plan.json` is teammate-writable, same rule `writePlan` states about its own read: a
-    // corrupt or wrong-shaped file must not crash the command that reports the verdict. Both the
-    // read and the render go inside this try — `readState` throws on unparseable JSON, and
-    // `renderPlanNotes` has no input-shape defense of its own (a null plan, or a `notYetSpecified`
-    // that is not an array of `{text, line}` objects, throws or misrenders rather than refusing).
+    // corrupt or wrong-shaped file must not crash the command that reports the verdict.
+    //
+    // The try is here for the READ. `readState` throws on unparseable JSON, and that is a throw
+    // a try can catch. `renderPlanNotes` now defends its own input shape, so it is handed the
+    // value verbatim: a `plan ?? {}` here used to stand in for a defense it did not have, and it
+    // only ever covered null anyway — a wrong-shaped `notYetSpecified` MISRENDERED, which no try
+    // can catch, so the fix belongs where the shape is known rather than at this call site. The
+    // render stays inside the try regardless, because a function that must never crash the
+    // verdict report is not a function to leave one refactor away from doing so.
     try {
       const plan = await readState(root, runId, 'plan')
-      const notes = renderPlanNotes(plan ?? {})
+      const notes = renderPlanNotes(plan)
       if (notes) io.out(notes)
     } catch {
       // Swallow and print nothing — see the comment above.

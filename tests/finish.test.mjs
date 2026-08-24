@@ -245,3 +245,94 @@ test('renderPlanNotes quotes an invisible destination so it renders with visible
   assert.ok(out.endsWith('"'))
   assert.notEqual(out, 'Destination: ')
 })
+
+// --- input-shape defense (run fog followups) -------------------------------------------------
+
+// `plan.json` is teammate-writable and gitignored, so renderPlanNotes is fed operator-hostile
+// input by construction. It had no shape defense: a null plan and a null entry threw, a string
+// `notYetSpecified` iterated per CHARACTER into `  - undefined` rows, and a non-string
+// destination rendered `Destination: "[object Object]"`. The caller's `plan ?? {}` only ever
+// covered the null case, and a `try` cannot catch a misrender.
+test('renderPlanNotes tolerates a nullish plan instead of throwing', () => {
+  assert.equal(renderPlanNotes(null), '')
+  assert.equal(renderPlanNotes(undefined), '')
+  assert.equal(renderPlanNotes(), '')
+})
+
+test('renderPlanNotes ignores a destination that is not a string', () => {
+  for (const bad of [{ a: 1 }, 42, true, ['x'], () => {}]) {
+    assert.equal(renderPlanNotes({ destination: bad }), '', `destination ${JSON.stringify(bad)} must render nothing`)
+  }
+})
+
+// A string is iterable, so `for (const entry of 'ab')` yields characters — the shape that
+// produced one `  - undefined` per character.
+test('renderPlanNotes ignores a notYetSpecified that is not an array', () => {
+  for (const bad of ['ab', 7, true, { text: 'x' }]) {
+    const out = renderPlanNotes({ notYetSpecified: bad })
+    assert.equal(out, '', `notYetSpecified ${JSON.stringify(bad)} must render nothing`)
+    assert.doesNotMatch(out, /undefined/)
+  }
+})
+
+test('renderPlanNotes drops unreadable entries, counts only what it rendered, and says so', () => {
+  const out = renderPlanNotes({
+    notYetSpecified: [
+      { text: 'A real question?', line: 1 },
+      null,
+      'a bare string',
+      { line: 2 },
+      { text: 99 },
+    ],
+  })
+  // The count must describe what is on screen, not what was in the file.
+  assert.match(out, /^Not yet specified \(1 open\):/)
+  assert.match(out, /  - A real question\?/)
+  assert.doesNotMatch(out, /undefined/)
+  // Silently dropping four entries would misreport the fog as smaller than it is.
+  assert.match(out, /4 unreadable/)
+})
+
+// The other side of the same rule: with nothing readable there is no fog to report, so the
+// block is omitted entirely rather than printed as a bare "(0 open)" heading. This is the
+// established contract for a corrupt plan.json — an unparseable one is swallowed silently, and
+// a wholly wrong-shaped one is that same failure one layer in.
+test('renderPlanNotes prints nothing when no entry is readable', () => {
+  assert.equal(renderPlanNotes({ notYetSpecified: [null] }), '')
+  assert.equal(renderPlanNotes({ notYetSpecified: [null, 'x', 7] }), '')
+  // ...but a destination that IS readable still renders beside it.
+  assert.equal(renderPlanNotes({ destination: 'Ship it.', notYetSpecified: [null] }), 'Destination: "Ship it."')
+})
+
+test('renderPlanNotes still renders a wholly valid plan unchanged', () => {
+  const out = renderPlanNotes({
+    destination: 'Ship the verdict.',
+    notYetSpecified: [{ text: 'What about X?', line: 3 }],
+  })
+  assert.equal(out, 'Destination: "Ship the verdict."\n\nNot yet specified (1 open):\n  - What about X?')
+})
+
+// SECURITY (run fog, phase 4). `plan.json` is teammate-writable and gitignored, and the notes
+// block prints AFTER the verdict, so an unbounded fog list scrolls the "do not land" lines off
+// the operator's terminal. Reproduced at the time with 50,000 entries: 50,005 lines / 3.1 MB,
+// the verdict on lines 3 and 4, far above any viewport. The exit code was never affected — a
+// scripted caller could not be fooled — so this is a human-readability defense, and a cap with
+// an honest tail is what closes it without hiding that the entries exist.
+test('renderPlanNotes caps the fog list and says how many it withheld', () => {
+  const entries = Array.from({ length: 5000 }, (_, i) => ({ text: `question ${i}?`, line: i }))
+  const out = renderPlanNotes({ notYetSpecified: entries })
+  const lines = out.split('\n')
+  assert.ok(lines.length < 40, `expected a capped block, got ${lines.length} lines`)
+  // The true total still has to reach the operator — capping is not undercounting.
+  assert.match(out, /^Not yet specified \(5000 open\):/)
+  assert.match(out, /4980 more/)
+  assert.match(out, /question 0\?/)
+  assert.doesNotMatch(out, /question 4999\?/)
+})
+
+test('renderPlanNotes does not add a tail when the list fits under the cap', () => {
+  const entries = Array.from({ length: 3 }, (_, i) => ({ text: `q${i}?`, line: i }))
+  const out = renderPlanNotes({ notYetSpecified: entries })
+  assert.doesNotMatch(out, /more/)
+  assert.equal(out.split('\n').length, 4)
+})

@@ -2552,9 +2552,13 @@ test('finish swallows an unparseable plan.json and still reports the verdict unc
   })
 })
 
-// A `plan.json` that parses but is the wrong shape for `renderPlanNotes`, which has no
-// input-shape defense of its own: a `notYetSpecified` entry that is `null` throws reading
-// `entry.text` off it. The render call, not only the read, must be inside the swallowing try.
+// A `plan.json` that parses but is the wrong shape. `renderPlanNotes` now defends its own input
+// shape, so a `notYetSpecified` of `[null]` no longer throws reading `entry.text` off it — it
+// yields nothing readable, and the block is omitted rather than printed as a bare "(0 open)"
+// heading. Either way the verdict report is unperturbed, which is what this test is for. The
+// render stays inside the swallowing try regardless: the read above it still throws on
+// unparseable JSON, and a function that must never crash the verdict report is not one to leave
+// a refactor away from doing so.
 test('finish swallows a wrong-shaped plan.json and still reports the verdict unchanged', async () => {
   await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
