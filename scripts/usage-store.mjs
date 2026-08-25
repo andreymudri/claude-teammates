@@ -15,6 +15,8 @@ import path from 'node:path'
 import { printable } from './reviews.mjs'
 import { projectSlug, summarizeTranscript } from './usage.mjs'
 
+const MAX_ENTRIES = 20_000
+
 function missing(dir) {
   return new Error(`no transcripts found at ${dir} — this is a harness-internal layout and may have changed`)
 }
@@ -54,7 +56,11 @@ async function newestSession(projectDir) {
   return sessions[0].name
 }
 
-export async function readSessionUsage({ projectsDir, root, sessionId = null }) {
+// `maxEntries` is injectable so the cap can be TESTED without building a store past it. Creating
+// 20,000 real files to exercise a bound is slow everywhere and fails outright where the open-file
+// limit is lower than the fixture — macOS CI refused it with EMFILE. A bound nothing can reach in
+// a test is a bound nothing verifies.
+export async function readSessionUsage({ projectsDir, root, sessionId = null, maxEntries = MAX_ENTRIES }) {
   // `root` is resolved here rather than trusted. The CLI passes `flags.root ?? process.cwd()`
   // verbatim, so `--root .` arrives as the literal ".", whose slug is "." — and `path.join`
   // then collapses to the projects directory itself, where the newest PROJECT gets mistaken for
@@ -93,11 +99,10 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null }) 
   //   3. It is unbounded. The cap is cheap insurance, and this repo's worktree walk carries one.
   //
   // Only the TOP-LEVEL read failing is the "layout has changed" case; that is the one that throws.
-  const MAX_ENTRIES = 20_000
   const transcripts = []
   const unreadable = []
   const pending = ['']
-  let budget = MAX_ENTRIES
+  let budget = maxEntries
   let readAnything = false
   while (pending.length > 0 && budget > 0) {
     const relative = pending.shift()
@@ -129,7 +134,7 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null }) 
   if (budget <= 0) {
     unreadable.push({
       name: '(walk)',
-      reason: `stopped after ${MAX_ENTRIES.toLocaleString('en-US')} entries; this report is incomplete`,
+      reason: `stopped after ${maxEntries.toLocaleString('en-US')} entries; this report is incomplete`,
       kind: 'truncated',
       dropped: 0,
       kept: 0,

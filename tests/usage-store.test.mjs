@@ -440,17 +440,26 @@ test('a truncated walk says so rather than under-reporting silently', async () =
     await mkdir(path.join(subagents, 'wf-1'), { recursive: true })
     await writeFile(path.join(subagents, 'agent-flat.jsonl'), line({ cache_read_input_tokens: 1000 }), 'utf8')
     await writeFile(path.join(subagents, 'wf-1', 'agent-nested.jsonl'), line({ cache_read_input_tokens: 1000 }), 'utf8')
-    // Enough siblings at the top level to exhaust the cap before the walk reaches wf-1.
-    await Promise.all(Array.from({ length: 20_050 }, (_, i) =>
-      writeFile(path.join(subagents, `junk-${i}.txt`), '', 'utf8')))
 
-    const report = await readSessionUsage({ projectsDir: dir, root: FAKE_ROOT })
+    // The cap is INJECTED rather than reached. Building a store past the real 20,000 took 20,050
+    // files, which is slow everywhere and failed on macOS CI with EMFILE — the fixture, not the
+    // code. A bound a test cannot reach cheaply is a bound no test verifies.
+    const report = await readSessionUsage({ projectsDir: dir, root: FAKE_ROOT, maxEntries: 2 })
     const truncated = report.unreadable.filter((e) => e.kind === 'truncated')
     assert.equal(truncated.length, 1, 'a truncated walk must be reported, never silent')
     assert.match(truncated[0].reason, /incomplete/i)
+    assert.match(truncated[0].reason, /stopped after 2 entries/)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+// And an uncapped walk says nothing, so the notice cannot become background noise.
+test('a walk that finishes within the cap reports no truncation', async () => {
+  await withStore(async ({ projectsDir }) => {
+    const report = await readSessionUsage({ projectsDir, root: FAKE_ROOT })
+    assert.equal(report.unreadable.filter((e) => e.kind === 'truncated').length, 0)
+  }, { files: { 'agent-a.jsonl': line({ cache_read_input_tokens: 10 }) } })
 })
 
 
