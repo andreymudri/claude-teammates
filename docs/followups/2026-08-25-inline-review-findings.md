@@ -14,8 +14,9 @@ Four `tm-reviewer` lenses at the fixed `capable` tier (`agents.reviewer.tier` an
     recorded in .teammates/usage/status.json under `solo:default`
     findings in .teammates/inline-review/reviews/
 
-**Post-refutation tally: 1 high, 11 medium, 10 low — all 22 addressed.** Twenty-one are fixed;
-one is accepted with its reasoning recorded, not quietly dropped. Two of the 22 were missing from
+**Post-refutation tally: 1 high, 11 medium, 10 low — all 22 fixed.** The last of them,
+`quiet-reporter.mjs:54`, was first recorded here as accepted-not-fixed; that judgement was wrong
+and is corrected above. Two of the 22 were missing from
 this document's own first draft (`cli.mjs:2955` and `quiet-reporter.mjs:54`) — a silent drop of
 exactly the kind the reviews exist to catch, found when re-reading the lens files against the
 record.
@@ -176,19 +177,21 @@ claim is confirmed still unpinned, first-hand.
 | `cli.mjs:2955` — staleness advisory looped | The remedy has a direction. `init-run` records from the working tree; the anchor is the plan at `merge-base(base, run)`. When plan.json is **ahead**, re-running `init-run` rewrote the identical file and the advisory fired forever. Both cases are now named. |
 | the `gate`/`fix` gap | A `--no-fleet` verdict carries `phaseName` with no integer `phase`, so `fix` refused it as a **missing argument** — a typo's error for a real boundary. It now states that a named phase has no task set to adjudicate and its findings are fixed directly. |
 
-### Accepted, not fixed — `quiet-reporter.mjs:54` (low)
+### `quiet-reporter.mjs:54` — test output could smuggle an escape sequence (low)
 
-Test-authored stdout is passed through verbatim, so a test can print a line byte-identical to the
-reporter's own summary. **Not fixed, deliberately.** The only way to close it is to neutralise or
-mark passed-through output, and the reporter exists precisely to keep failure output readable —
-its header says a reporter that made a failing run harder to read would have traded the only
-output anyone reads for the output nobody does. Neutralising escape sequences in a stack trace
-does exactly that.
+First recorded here as *accepted, not fixed*, on the reasoning that closing it meant degrading
+failure output — the one thing the reporter exists to protect. **That reasoning was wrong, and the
+finding is now fixed.** `renderFailure` reads the stack from the `test:fail` event, never from the
+`test:stdout`/`test:stderr` passthrough, so neutralising those two streams costs no failure detail
+at all.
 
-Recorded like the bidi exposure: the exit code is the authority (`scripts/gate-runner.mjs:26`
-reads it, never the text), gate-captured output is re-wrapped by `printableBlock`, and the
-exposure is to a human reading a raw terminal. A plain-text lookalike line remains possible and
-always will be.
+`printableBlock` was already in the repo for exactly this shape: it keeps the content's own
+newlines and tabs, so a multi-line `console.log` still reads as written, and neutralises every
+other control byte. A test can no longer erase the summary line and redraw it.
+
+The limit is stated in the code and pinned by a test rather than left implied: this cannot stop a
+test printing a line that merely *looks* like the summary. The exit code remains the authority,
+and `scripts/gate-runner.mjs:26` reads that, never this text.
 
 ## Not reviewed
 

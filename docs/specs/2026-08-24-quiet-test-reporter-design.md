@@ -57,7 +57,7 @@ something a caller opts into. `test:verbose` keeps the full spec output one comm
 |---|---|
 | green | one line: `1846 tests \| 1843 pass \| 0 fail \| 3 skipped` |
 | red | `✖ <name>` plus the error's stack and diff, per failure, then the same summary |
-| either | `test:stderr` and `test:stdout` passed through verbatim |
+| either | `test:stderr` and `test:stdout` passed through, their own newlines and tabs kept and other control bytes neutralised — a test writes these streams itself, so raw passthrough let one erase this reporter's summary and draw its own. Failure detail is unaffected: it comes from the `test:fail` event, not these streams. |
 | either | process exit code unchanged (0 green / 1 red) |
 
 Three properties are load-bearing, each because it is a way this could quietly go wrong:
@@ -115,7 +115,8 @@ never failed has not proven it can catch anything.
 | failing run | `✖ name`, stack and diff present; summary still printed; exit 1 |
 | **nested suites** | counts match the root summary rather than the inflated tally — the 4-vs-5 case |
 | skipped | counted in the summary, not named |
-| stderr | passed through verbatim |
+| stderr | passed through with its own newlines and tabs intact, other control bytes neutralised |
+| stdout carrying an escape sequence | cannot erase or redraw the summary line; the exit code stays the authority |
 | load failure | non-zero exit and a visible reason |
 
 The nested-suite test is the one that matters most: it is the bug the prototype actually hit, and

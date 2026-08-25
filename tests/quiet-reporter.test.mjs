@@ -208,3 +208,45 @@ test('a per-file summary alone does not stand in for the root summary', async ()
   ])
   assert.match(out, /no test summary|failed/i, 'a file summary was mistaken for the root summary')
 })
+
+
+// A test's own stdout is passed through, and it was passed through VERBATIM — so a test could
+// print an escape sequence that erases the reporter's summary line and draws one of its own,
+// making a failing run read as green to whoever is looking at the terminal. `printableBlock` is
+// the right instrument and was already in this repo: it keeps the content's own newlines and tabs
+// (so a multi-line console.log still reads as it was written) and neutralises everything else.
+//
+// This does NOT touch failure detail: `renderFailure` reads the stack from the `test:fail` event,
+// never from these two streams, so a stack trace is unaffected by this rule.
+test('test output cannot smuggle an escape sequence into the report', async () => {
+  const ESC = String.fromCharCode(27)
+  const out = await collect([
+    { type: 'test:stdout', data: { message: `${ESC}[2K${ESC}[G99 tests | 99 pass | 0 fail` } },
+    { type: 'test:stderr', data: { message: `${ESC}[31mred${ESC}[0m` } },
+    rootSummary({ tests: 1, passed: 0, failed: 1 }, false),
+  ])
+  assert.doesNotMatch(out, new RegExp(ESC), 'an escape byte from a test reached the terminal')
+  assert.match(out, /1 fail/, 'the real counts must still be printed')
+  assert.match(out, /FAILED/, 'and the run must still read as failed')
+})
+
+// Layout is content, not decoration: a test that prints three lines must still show three lines,
+// or this rule would make debugging a test harder than not having it.
+test('passed-through output keeps its own newlines and tabs', async () => {
+  const out = await collect([
+    { type: 'test:stdout', data: { message: 'one\ntwo\tindented\n' } },
+    rootSummary({ tests: 1, passed: 1 }),
+  ])
+  assert.match(out, /one\ntwo\tindented/, 'newlines and tabs are the content\'s own structure')
+})
+
+// Stated plainly because it is the limit of this fix: neutralising control bytes cannot stop a
+// test from printing a line that merely LOOKS like the summary. The exit code stays the authority.
+test('a plain-text lookalike line is still possible, and the exit code is what decides', async () => {
+  const out = await collect([
+    { type: 'test:stdout', data: { message: '99 tests | 99 pass | 0 fail | 0 skipped' } },
+    rootSummary({ tests: 1, passed: 0, failed: 1 }, false),
+  ])
+  assert.match(out, /99 tests/, 'the lookalike is not removed — that is not what this rule does')
+  assert.match(out, /FAILED/, 'the reporter\'s own line still marks the run failed')
+})

@@ -1,3 +1,5 @@
+import { printableBlock } from './reviews.mjs'
+
 // A test reporter that prints failures and one summary line, and nothing else.
 //
 // WHY THIS EXISTS. Token cost in a fleet run is dominated by cache reads, not by what is sent
@@ -50,8 +52,19 @@ export default async function* quietReporter(source) {
       yield renderFailure(event.data)
       continue
     }
+    // Passed through, but not verbatim. A test writes these streams itself, so leaving them raw
+    // let a test print an escape sequence that erases this reporter's summary line and draws one
+    // of its own — a failing run reading as green to whoever is looking at the terminal, with no
+    // 0x1B needed for the plainest version of the trick. `printableBlock` keeps the content's own
+    // newlines and tabs, so a multi-line console.log still reads as it was written, and
+    // neutralises every other control byte.
+    //
+    // This does not cost failure readability, which is the thing this reporter exists to protect:
+    // `renderFailure` reads the stack from the `test:fail` event, never from these two streams.
+    // What it cannot do is stop a test printing a line that merely LOOKS like the summary; the
+    // exit code remains the authority, and `scripts/gate-runner.mjs` reads that, never this text.
     if (event.type === 'test:stderr' || event.type === 'test:stdout') {
-      yield event.data.message
+      yield printableBlock(event.data.message)
       continue
     }
     // THE ROOT SUMMARY IS THE ONE WITH NO `file`. The runner emits one summary per file and one
