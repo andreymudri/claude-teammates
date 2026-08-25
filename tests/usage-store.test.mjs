@@ -198,3 +198,42 @@ test('a non-agent .jsonl beside the transcripts is not reported as an agent', as
     },
   })
 })
+
+// A transcript is appended to while the session runs, so reading one during a live fleet run —
+// exactly when an operator reports on it — catches a half-written last line. Parsing the whole
+// file in one try sent every record in it to `unreadable`, so an agent's entire spend vanished
+// and the `fixed prefix = N%` headline was computed from what survived. The line is dropped and
+// counted; the records before it are not.
+test('a torn last line drops that line, not the whole transcript', async () => {
+  await withStore(async ({ projectsDir }) => {
+    const report = await readSessionUsage({ projectsDir, root: FAKE_ROOT })
+    const agent = report.agents.find((a) => a.name.endsWith('agent-big.jsonl'))
+    assert.ok(agent, 'the transcript must still produce a row')
+    assert.equal(agent.turns, 2, 'both complete records must be counted')
+    assert.equal(agent.cacheRead, 1_700_000)
+    assert.equal(report.unreadable.length, 1, 'the drop must still be reported, not absorbed')
+    assert.equal(report.unreadable[0].dropped, 1)
+    assert.equal(report.unreadable[0].kept, 2)
+  }, {
+    files: {
+      'agent-big.jsonl': [
+        line({ cache_read_input_tokens: 1_000_000 }),
+        line({ cache_read_input_tokens: 700_000 }),
+        '{"message":{"usa',
+      ].join('\n'),
+    },
+  })
+})
+
+// The reason is built from a line count, never from the JSON.parse message, which quotes the
+// offending source text back — and the source here is the operator's real transcript, so the
+// snippet put private conversation content into a printed report.
+test('a drop reason carries no content from the transcript', async () => {
+  await withStore(async ({ projectsDir }) => {
+    const report = await readSessionUsage({ projectsDir, root: FAKE_ROOT })
+    assert.equal(report.unreadable.length, 1)
+    // JSON.parse quotes only the first ten characters back, so asserting on the full secret
+    // would pass against the leaky message too. The prefix is what actually leaks.
+    assert.doesNotMatch(report.unreadable[0].reason, /ANTHROPIC/)
+  }, { files: { 'agent-secret.jsonl': 'ANTHROPIC_API_KEY=sk-ant-secret-abc123' } })
+})

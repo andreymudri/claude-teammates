@@ -102,7 +102,17 @@ export function renderUsage(report) {
   if (unreadable.length > 0) {
     lines.push('')
     for (const entry of unreadable) lines.push(`  ! ${entry.name}: ${entry.reason}`)
-    lines.push(`${unreadable.length} transcript(s) unreadable`)
+    // Counted apart, because a transcript that lost one line still contributed its row and every
+    // other record in it. Filing that under "unreadable" states the opposite of what happened, in
+    // the one line a reader takes the totals' trustworthiness from. A missing `kept` is the older
+    // shape, where nothing was salvaged.
+    const partial = unreadable.filter((e) => (e.kept ?? 0) > 0)
+    const lost = unreadable.length - partial.length
+    if (lost > 0) lines.push(`${lost} transcript(s) unreadable`)
+    if (partial.length > 0) {
+      const dropped = partial.reduce((sum, e) => sum + (e.dropped ?? 0), 0)
+      lines.push(`${partial.length} transcript(s) with dropped lines (${dropped} line(s) total)`)
+    }
   }
   return lines.join('\n')
 }

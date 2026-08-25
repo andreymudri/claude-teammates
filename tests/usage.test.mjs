@@ -98,3 +98,19 @@ test('renderUsage keeps columns apart when an agentType is long', () => {
   assert.ok(row.includes(' sonnet') || row.includes('sonnet'), 'the model must still be present')
   assert.doesNotMatch(row, /integratorsonnet/, 'the agentType column ran into the model column')
 })
+
+// A partially-parsed transcript still produced its row, so counting it under "unreadable" states
+// the opposite of what happened — and this is the one line a reader takes the totals'
+// trustworthiness from. The two cases are counted separately.
+test('renderUsage distinguishes a dropped line from an unreadable transcript', () => {
+  const out = renderUsage({
+    sessionId: 'sess-1',
+    agents: [{ agentType: 'tm-reviewer', model: 'opus', turns: 2, prefix: 10, cacheRead: 20, output: 1 }],
+    unreadable: [
+      { name: 'agent-torn.jsonl', reason: '1 of 3 line(s) did not parse', dropped: 1, kept: 2 },
+      { name: 'agent-dead.jsonl', reason: 'could not be read', dropped: 0, kept: 0 },
+    ],
+  })
+  assert.match(out, /1 transcript\(s\) unreadable/, 'only the transcript with no records is unreadable')
+  assert.match(out, /1 transcript\(s\) with dropped lines/, 'the partial one is counted apart')
+})

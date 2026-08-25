@@ -82,16 +82,45 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null }) 
   const isTranscript = (f) => f.endsWith('.jsonl') && path.basename(f).startsWith('agent-')
   for (const name of entries.filter(isTranscript).sort()) {
     const full = path.join(subagentsDir, name)
-    let records
+    let body
     try {
-      const body = await readFile(full, 'utf8')
-      records = body.split('\n').filter((l) => l.trim() !== '').map((l) => JSON.parse(l))
+      body = await readFile(full, 'utf8')
     } catch (err) {
       // Named and counted, then carry on with the rest. Skipping silently would understate the
       // totals this command exists to make trustworthy.
-      unreadable.push({ name, reason: err.message })
+      unreadable.push({ name, reason: 'could not be read', dropped: 0, kept: 0 })
       continue
     }
+
+    // Per line, not per file. A transcript is appended to while its session runs, so reading one
+    // during a live fleet run — exactly when an operator reports on it — catches a half-written
+    // last line. Parsing the whole file in one try sent every record in it here, so an agent's
+    // entire spend vanished while `fixed prefix = N%` was still computed from what survived.
+    const records = []
+    let dropped = 0
+    for (const raw of body.split('\n')) {
+      if (raw.trim() === '') continue
+      try {
+        records.push(JSON.parse(raw))
+      } catch {
+        // The count, never the parse message: that message quotes the offending source text back,
+        // and the source is the operator's real transcript, so the snippet put private
+        // conversation content into a printed report.
+        dropped += 1
+      }
+    }
+    if (dropped > 0) {
+      unreadable.push({
+        name,
+        reason: `${dropped} of ${dropped + records.length} line(s) did not parse`,
+        dropped,
+        kept: records.length,
+      })
+    }
+    // Nothing parsed at all: there is no spend to attribute, so no row — but the drop above is
+    // still reported, because a silently absent agent is the understatement this command exists
+    // to prevent.
+    if (records.length === 0) continue
 
     // A transcript with no readable meta is still an agent that spent tokens, so it gets a row
     // with its role unknown rather than being dropped.
