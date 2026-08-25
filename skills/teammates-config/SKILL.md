@@ -27,6 +27,33 @@ for it through `agents.reviewer.*`: the reviewer produces the verdict for `agent
 its tier and effort are enforcement, not ergonomics, and are rejected from the local layer for the
 same reason `phases`, `lens`, and `preview` are.
 
+## What `caveman` actually reaches
+
+Measured 2026-08-25 against real subagent transcripts. `caveman` is a much narrower knob than its
+position beside `maxParallel` suggests, and the measurement contradicts the name, so state its
+scope rather than letting an operator infer it.
+
+`caveman` has exactly two consumers: it rewrites the **implementer** brief, and it renders the
+local `digest` output terse. Reviewer and integrator dispatches carry no caveman path at all, so the
+reviewers — the largest emitters in a run — are unaffected by any value you set.
+
+Within the implementer brief its instruction is scoped to the returned summary and blockers, not
+to intermediate turns. That summary is the last message an agent emits, so it is re-read zero
+times by the agent that wrote it.
+
+The caveman brief is **larger** than the default, by about 3%. Compressing the connective prose
+saves less than the added STYLE block costs, and a brief sits in the agent's prefix, so that cost
+is re-read on every turn.
+
+The four levels are validated but not honoured by this plugin's own code: `digest` reads only
+whether the value is truthy, and the brief passes the level through to an external
+`caveman:caveman` skill, telling the agent to apply the style directly when that skill is absent.
+
+Reach for `agents.<role>.effort` instead when a run's output cost is the problem. Thinking is
+72-76% of an agent's output tokens, `effort` is the control for thinking, and no style
+instruction can touch it. Lowering it is a real quality trade-off, so raise it with the operator
+rather than setting it quietly.
+
 ## Read before you write
 
 Always resolve both layers together, for both roots:
