@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { composeBrief } from '../scripts/brief.mjs'
 import { renderDigest } from '../scripts/digest.mjs'
@@ -28,12 +29,17 @@ const doc = async () => {
 // across whatever scope it is handed, so passing the document made an innocuous sentence in an
 // unrelated section fail the caveman test — with a message about caveman. Both screens belong
 // where the claim lives.
-const cavemanSection = async () => {
-  const parsed = await doc()
+//
+// ONE definition of "which section", used by every caller. It was a helper nothing called, beside
+// a regression test that re-implemented the same `sections.find` inline — so the helper could
+// regress without failing anything, which a review filed twice: once as bypassed, once as
+// unreachable. A lookup used in two places is written once.
+const findCavemanSection = (parsed) => {
   const section = parsed.sections.find((s) => /What .*caveman.* actually reaches/.test(s.title ?? ''))
   assert.ok(section, 'the skill must keep a section stating what caveman reaches')
   return section
 }
+
 
 const task = {
   id: 'T1',
@@ -43,61 +49,173 @@ const task = {
 }
 const brief = (caveman) => composeBrief({ task, runId: 'r1', planPath: 'p.md', baseBranch: 'main', caveman })
 
-// WHY THIS IS A SNAPSHOT AND NOT A PATTERN.
+// WHY THIS IS SIX LAYERS AND NOT ONE, AND WHY NONE OF THEM IS A PROOF.
 //
-// This claim has now been defeated FIVE times, and every fix opened the next hole: co-occurrence
+// The claim has now been defeated TEN times, and every fix opened the next hole: co-occurrence
 // matching; one sentence satisfying the claim while stating its inverse; the inverse appended to
 // the claim sentence, which `assertClaim` exempts by construction; a heading, which `parseDoc`
 // never turns into a statement; the inverse appended to an allow-listed sentence; an inversion in
 // another section once the claim was scoped to its own; a sentence naming neither "reviewer" nor
-// "caveman" ("the grading lenses ... do receive the level in full"); and — the round-four
-// instrument defeating itself — an aside spliced INSIDE the claim sentence, through the `[^.]*`
-// in the exact-shape regex, which both inventory screens then skip because it IS the claim.
+// "caveman"; the round-four instrument defeating itself, through the `[^.]*` in its own
+// exact-shape regex; a heading pairing "reviewer" with "level", which a round-six fix stopped
+// screening for; and — round six again — a whole ADDED section stating the inverse, carried past
+// a byte-for-byte snapshot by updating the fixture with `cp` in the same commit.
 //
-// The lesson is structural, not a matter of a better regex. A word-matcher over prose can only
-// forbid the phrasings its author imagined, and prose has unbounded ways to say the opposite. So
-// the section that carries the claim is pinned EXACTLY. Any edit to it fails this test, which is
-// the point: the measurement it records is load-bearing, and changing it should be a deliberate
-// act that updates this fixture in the same commit.
-const CAVEMAN_SECTION = "## What `caveman` actually reaches\n\nMeasured 2026-08-25 against real subagent transcripts. `caveman` is a much narrower knob than its\nposition beside `maxParallel` suggests, and the measurement contradicts the name, so state its\nscope rather than letting an operator infer it.\n\n`caveman` has exactly two consumers: it rewrites the **implementer** brief, and it renders the\nlocal `digest` output terse. Reviewer and integrator dispatches carry no caveman path at all, so the\nreviewers \u2014 the largest emitters in a run \u2014 are unaffected by any value you set.\n\nWithin the implementer brief its instruction is scoped to the returned summary and blockers, not\nto intermediate turns. That summary is the last message an agent emits, so it is re-read zero\ntimes by the agent that wrote it.\n\nThe caveman brief is **larger** than the default, by about 3%. Compressing the connective prose\nsaves less than the added STYLE block costs, and a brief sits in the agent's prefix, so that cost\nis re-read on every turn.\n\nThe three levels are validated but not honoured by this plugin's own code: `digest` reads only\nwhether the value is truthy, and the brief passes the level through to an external\n`caveman:caveman` skill, telling the agent to apply the style directly when that skill is absent.\n\nReach for `agents.<role>.effort` instead when a run's output cost is the problem. Thinking is\n72-76% of an agent's output tokens, `effort` is the control for thinking, and no style\ninstruction can touch it. Lowering it is a real quality trade-off, so raise it with the operator\nrather than setting it quietly.\n"
+// Two lessons, both learned the expensive way:
+//
+//   1. ANY boundary drawn inside the file leaves the rest of the file to be a word-matching
+//      problem again. Pinning one section moved the hole to every other section.
+//   2. A snapshot whose fixture lives beside it can be updated with one `cp`, which defeats the
+//      snapshot AND any presence check in the same motion. A presence check is not a negative:
+//      `includes()` asserts the claim is still THERE, never that nothing contradicts it — which
+//      is escape #3's shape, and it was re-shipped as a "fix" for escape #9.
+//
+// So what a fixture cannot carry lives HERE, in the test file, where updating it is a separate and
+// visible act: the heading inventory, the caveman-line inventory, and the negative screens. `cp`
+// on the fixture does not touch them.
+//
+// AND, STATED PLAINLY: none of this proves the skill cannot contradict itself. An author who edits
+// the fixture AND this file can say anything. What the layers buy is that every route now requires
+// a deliberate edit to a test file, which is a line in a diff a reviewer can question. The claim
+// that is genuinely PROVEN is the runtime one — no caveman path in any reviewer or integrator
+// dispatch artifact — because that is mechanically checkable. The prose layers are change
+// detectors. Six rounds of calling a change detector a proof is what produced this comment.
+const SKILL_URL = new URL('../skills/teammates-config/SKILL.md', import.meta.url)
+const SKILL_FIXTURE_URL = new URL('./fixtures/teammates-config.SKILL.md', import.meta.url)
 
-test('the caveman section is exactly what was measured', async () => {
-  const text = await readFile(new URL('../skills/teammates-config/SKILL.md', import.meta.url), 'utf8')
-  const i = text.indexOf('## What `caveman` actually reaches')
-  assert.notEqual(i, -1, 'the skill must keep a section stating what caveman reaches')
-  assert.equal(text.indexOf('## What `caveman` actually reaches', i + 1), -1,
-    'exactly one such section: a duplicate-titled decoy would absorb every assertion below')
-  const j = text.indexOf('\n## ', i + 10)
-  assert.equal(text.slice(i, j === -1 ? undefined : j), CAVEMAN_SECTION,
-    'the caveman section changed; if the measurement changed, update CAVEMAN_SECTION deliberately')
+// LAYER 0 — THE ANCHOR THAT DOES NOT LIVE IN A FILE THE SKILL CAN BE COPIED OVER.
+//
+// The fixture is the weak link in every snapshot: `cp skills/... tests/fixtures/...` updates it in
+// one motion, and layers 1 and 5 both go green. That is how escape #10 got in, and re-running the
+// battery showed escape #7 — a contradicting sentence added INSIDE an existing section, naming
+// neither "reviewer" nor "caveman" — was still green after five layers, because it adds no
+// heading, no caveman token, and leaves the claim sentence intact.
+//
+// A digest constant lives in THIS file. `cp` on the fixture cannot touch it, so ANY byte change to
+// the skill — added sentence, added section, reworded aside, trailing space — fails here first.
+// This is the layer that actually closes the prose surface. The rest survive because they turn
+// "the digest changed" into a message that says WHICH kind of change it was.
+const SKILL_SHA256 = 'd541e851e3d7b2cfcef2e50317394d96a857e9560213561aae1fdd673664ce29'
+
+test('the skill matches the digest recorded in this test file', async () => {
+  const text = await readFile(SKILL_URL)
+  const actual = createHash('sha256').update(text).digest('hex')
+  assert.equal(actual, SKILL_SHA256,
+    'skills/teammates-config/SKILL.md changed. Updating tests/fixtures/ is NOT enough — this ' +
+    'constant is deliberately outside any file a `cp` from the skill can reach. Update it here, ' +
+    'in the same commit, and say in the message what the measurement now is and why it changed')
 })
 
-// The section is pinned, so the remaining surface is every OTHER mention of caveman in the skill —
-// including headings, code blocks and the frontmatter, none of which `parseDoc` turns into a
-// statement, and each of which carried a working escape. Every such site is inventoried by hand.
+// LAYER 1 — the readable diff. Redundant for DETECTION now that layer 0 exists; kept because a
+// byte-equality failure prints what changed, and a digest mismatch prints two hex strings.
+test('the teammates-config skill is exactly the reviewed text, byte for byte', async () => {
+  const [text, fixture] = await Promise.all([
+    readFile(SKILL_URL, 'utf8'),
+    readFile(SKILL_FIXTURE_URL, 'utf8'),
+  ])
+  assert.equal(text, fixture,
+    'skills/teammates-config/SKILL.md changed; if the change is intended, update ' +
+    'tests/fixtures/teammates-config.SKILL.md in the SAME commit and say why in the message')
+})
+
+// LAYER 2 — the section inventory, which is what closes the `cp` route. An added section is the
+// escape that carried an inversion past the byte snapshot; the allow-list lives here rather than
+// in the fixture, so copying the skill over the fixture does not authorise it.
+const HEADINGS = [
+  '# Teammates Config',
+  '## What `config` covers, and what it does not',
+  '## What `caveman` actually reaches',
+  '## Read before you write',
+  '## Collect the change interactively',
+  '## Never hand-edit a key `config set` accepts',
+]
+
+test('the skill has exactly the sections that were reviewed', async () => {
+  const text = await readFile(SKILL_URL, 'utf8')
+  const found = text.split('\n').filter((l) => /^#{1,6} /.test(l))
+  assert.deepEqual(found, HEADINGS,
+    'a section was added, removed or renamed; an ADDED section stating the inverse is escape #10, ' +
+    'so add it to HEADINGS here deliberately rather than only updating the fixture')
+})
+
+// LAYER 3 — every caveman mention outside the pinned section, inventoried. Restored: a round-six
+// fix narrowed this to a line filter and it stopped catching what it had caught.
+const ALLOWED_CAVEMAN_LINES = [
+  /^`config` manages the \*\*ergonomics\*\* keys only: `maxParallel`, `caveman`, and$/,
+]
+
 test('every mention of caveman outside the pinned section is accounted for', async () => {
-  const text = await readFile(new URL('../skills/teammates-config/SKILL.md', import.meta.url), 'utf8')
+  const text = await readFile(SKILL_URL, 'utf8')
   const i = text.indexOf('## What `caveman` actually reaches')
   const j = text.indexOf('\n## ', i + 10)
   const outside = text.slice(0, i) + (j === -1 ? '' : text.slice(j))
-  const lines = outside.split('\n').filter((l) => /caveman/i.test(l))
-  const ALLOWED = [
-    /^`config` manages the \*\*ergonomics\*\* keys only: `maxParallel`, `caveman`, and$/,
-    /^\s*caveman: false \| lite \| full \| ultra$/,
-    /^- `caveman` — `false`, or one of `lite`, `full`, `ultra`\. See below for what it reaches\.$/,
-  ]
-  const strays = lines.filter((l) => !ALLOWED.some((a) => a.test(l.trim())))
+  const strays = outside.split('\n').filter((l) => /caveman/i.test(l))
+    .filter((l) => !ALLOWED_CAVEMAN_LINES.some((a) => a.test(l.trim())))
   assert.deepEqual(strays, [],
     'a mention of caveman outside the pinned section is unreviewed; add it here deliberately')
 })
 
+// LAYER 4 — the doc-wide heading screen a round-six fix DELETED, restored with both halves. It
+// keys on `caveman|level`, because the escape it was written for named "level" and not "caveman".
+test('no heading pairs reviewers with the caveman level', async () => {
+  const text = await readFile(SKILL_URL, 'utf8')
+  const offenders = text.split('\n')
+    .filter((l) => /^#{1,6} /.test(l))
+    .filter((l) => /reviewer|lens|grading/i.test(l) && /caveman|level/i.test(l))
+  assert.deepEqual(offenders, [],
+    'a heading can state the inverse of the claim without any sentence doing so')
+})
 
-test('caveman never reaches a reviewer dispatch', async () => {
-  const source = await readFile(new URL('../scripts/review-gen.mjs', import.meta.url), 'utf8')
+// LAYER 5 — the bytes still SAY the thing. Presence only, and deliberately labelled as such: this
+// catches deletion and alteration of the claim, never an addition beside it. Layer 2 is what
+// covers additions.
+test('the pinned skill still states that reviewers are unaffected by caveman', async () => {
+  const text = await readFile(SKILL_URL, 'utf8')
   assert.ok(
-    !/caveman/i.test(source),
-    'review-gen.mjs must carry no caveman path; the skill claims reviewers are unaffected',
+    text.includes('Reviewer and integrator dispatches carry no caveman path at all, so the\nreviewers — the largest emitters in a run — are unaffected by any value you set.'),
+    'the load-bearing sentence must survive verbatim in the skill',
   )
+  assert.ok(
+    text.includes('The caveman brief is **larger** than the default, by about 3%.'),
+    'the measurement that motivates the claim must survive verbatim',
+  )
+})
+
+// LAYER 6 — the operator-facing copies. README was bound by nothing until round six; CHANGELOG was
+// bound by nothing until round seven, and states the measurement in MORE detail than either pinned
+// file. Exact sentences rather than whole-file snapshots: both are long and edited constantly for
+// reasons that have nothing to do with this claim.
+test('every operator-facing copy of the claim says the same thing', async () => {
+  const [readme, changelog] = await Promise.all([
+    readFile(new URL('../README.md', import.meta.url), 'utf8'),
+    readFile(new URL('../CHANGELOG.md', import.meta.url), 'utf8'),
+  ])
+  assert.ok(
+    readme.includes('Reviewer and integrator dispatches carry no caveman path, so the\nreviewers — the largest emitters in a run — are unaffected by any value you set.'),
+    'README.md must carry the claim verbatim',
+  )
+  assert.ok(
+    changelog.includes('`scripts/review-gen.mjs` has no caveman path, so reviewers — the largest emitters, at 22,900 and\n  12,965 output tokens — never receive the instruction at all.'),
+    'CHANGELOG.md carries the same measurement in more detail and must not drift from it',
+  )
+})
+
+// THE ONE LAYER THAT IS A PROOF RATHER THAN A CHANGE DETECTOR. The claim is about RUNTIME, and
+// every prior round attacked the prose — so once the prose was pinned, the next hole was the
+// artifact the prose describes. `review-gen.mjs` builds the dispatch; `agents/tm-reviewer.md` and
+// `agents/tm-integrator.md` ARE the dispatch prompts, and were bound by nothing: a caveman path
+// added to either makes the pinned sentence false at runtime with every prose layer still green.
+test('caveman never reaches a reviewer or integrator dispatch', async () => {
+  const artifacts = [
+    '../scripts/review-gen.mjs',
+    '../agents/tm-reviewer.md',
+    '../agents/tm-integrator.md',
+  ]
+  for (const rel of artifacts) {
+    const source = await readFile(new URL(rel, import.meta.url), 'utf8')
+    assert.ok(!/caveman/i.test(source),
+      `${rel} must carry no caveman path; the skill claims reviewers and integrators are unaffected`)
+  }
 })
 
 test('the skill states that the terse brief is larger, not smaller', async () => {
@@ -204,11 +322,15 @@ test('prose in an unrelated section does not fail the caveman claim', async () =
   const { body } = splitFrontmatter(text, 'teammates-config')
   const edited = `${body}\n\n## Troubleshooting\n\nThe above requirement applies to every layer.\n`
   const parsed = parseDoc(edited, 'teammates-config/SKILL.md (edited)')
-  const section = parsed.sections.find((s) => /What .*caveman.* actually reaches/.test(s.title ?? ''))
+  const section = findCavemanSection(parsed)
   assertClaim(section, {
     label: 'reviewers are unaffected by caveman',
     claim: /Reviewer and integrator dispatches carry no caveman path at all/,
     subject: /reviewer/i,
-    allow: [/enforcement key never goes in the local file/, /a well-shaped value passes silently/],
+    // No `allow` entries: both that were here matched nothing in the screened section — one
+    // appears nowhere in the skill, the other lives in a different section — so they were carried
+    // over from when `assertClaim` ran document-wide. A dead allow entry only makes the screen
+    // stricter, so this is not a hole; it is a list that had stopped describing anything.
+    allow: [],
   })
 })

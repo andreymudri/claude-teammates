@@ -1514,3 +1514,37 @@ test('parallel-execution bounds the SubagentStop guard rather than describing it
   // The two command blocks of the Dispatch section, locked by content.
 
 })
+
+
+// The solo-gate paragraph was bound by NOTHING, and a review verified its EXACT NEGATION passes
+// the suite: inverting all four sentences ("reported as a clean first-pass PASS", "a check that
+// was skipped is never reported as skipped", "writes a verdict into status.json on every
+// invocation", "--run writes no verdict anywhere") left 1959 tests | 1956 pass | 0 fail. Filed by
+// pass five, carried unclosed through passes six and seven.
+//
+// Two layers, and the difference between them matters. The sentence pins are CHANGE DETECTORS —
+// they catch an inversion because an inversion changes the bytes, not because anything checks the
+// behaviour. The persistence claim is the one that is mechanically decidable, so it gets a real
+// assertion against the code that implements it.
+test('phase-gate states what still binds on a solo gate, and the persistence rule is true', async () => {
+  const text = await readFile(new URL('phase-gate/SKILL.md', dir), 'utf8')
+
+  const CLAIMS = [
+    'a PASS reached after N rounds of fixes is reported as such, never as a clean first-pass PASS',
+    'a check that was skipped is reported as skipped, every time',
+    'A solo gate writes a verdict\ninto `status.json` only when the caller passes `--run`, and a solo gate invoked without `--run`\nwrites no verdict anywhere.',
+  ]
+  for (const claim of CLAIMS) {
+    assert.ok(text.includes(claim),
+      `phase-gate must carry this solo-gate rule verbatim, and its negation must fail this test: ${claim}`)
+  }
+
+  // The decidable half. `status` is loaded only when a runId is present, and the gate persists
+  // exclusively inside `if (status)`, so no `--run` means no write — the claim above, checked
+  // against the code rather than against its own restatement.
+  const cli = await readFile(new URL('../scripts/cli.mjs', import.meta.url), 'utf8')
+  const persistSite = cli.slice(cli.indexOf("io.out(JSON.stringify({ ...bound, results }, null, 2))"))
+  assert.match(persistSite.slice(0, 200), /if \(status\) \{/,
+    'the gate verdict must be persisted only under `if (status)`; if that guard moves, the ' +
+    'solo-gate persistence rule the skill states is no longer true and must be rewritten')
+})

@@ -91,13 +91,26 @@ export function printableBlock(value) {
 // WINDOWS STRIPS TRAILING SPACES AND DOTS from a path component, so `'.. '` reaches the filesystem
 // as `..` and `'. '` as `.` — the two values this refuses, wearing a suffix that `=== '..'` cannot
 // see. The test is therefore on what the component RESOLVES to, not on the literal: a name that
-// merely contains dots (`v1.2.3`) is fine, and one that collapses to nothing, `.` or `..` is not.
+// merely contains dots (`v1.2.3`) is fine, and one that collapses to nothing is not.
+//
+// ONE arm, not three. `resolved === '.' || resolved === '..'` read as the substance of the rule
+// and was DEAD CODE: the strip below removes the entire trailing run, and `.` and `..` are
+// nothing but dots, so both collapse to `''` and never reach a second comparison. Exhaustive
+// enumeration over the alphabet {'.', ' ', '\t', 'a', 'x'} up to length 6 found zero inputs
+// reaching either arm and zero where the three-arm and one-arm predicates disagree — so no test
+// could ever have distinguished them, and two thirds of the predicate was unkillable by
+// construction. The strip is the rule; the arms restated it in a form that could not run.
+//
+// The class stripped is `[. \t]`, which is WIDER than Win32's own rule: Win32 trims trailing
+// spaces and dots, and forbids a tab in a filename outright rather than trimming it. Refusing a
+// trailing tab too is deliberate and safe — it is the stricter side — but the character class is
+// not a transcription of Win32 behaviour, and a later reader tightening it to match the
+// documented rule would delete `\t` and fail the fixtures that carry `'..\t'`.
 export function isUnsafePathComponent(value) {
   if (typeof value !== 'string' || value === '') return true
   if (/[\\/]/.test(value)) return true
   // Trailing dots AND spaces, in any interleaving: Win32 strips the whole run.
-  const resolved = value.replace(/[. \t]+$/, '')
-  return resolved === '' || resolved === '.' || resolved === '..'
+  return value.replace(/[. \t]+$/, '') === ''
 }
 
 export function reviewFileName(phase, lens) {

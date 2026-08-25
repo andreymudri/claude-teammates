@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { runCli } from '../scripts/cli.mjs'
 import {
+  isUnsafePathComponent,
   reviewFileName,
   collectReviewResults,
   printable,
@@ -742,4 +743,41 @@ test('a component of only dots or spaces is refused', () => {
 test('a name that merely contains dots is still accepted', () => {
   assert.equal(reviewFileName(1, 'v1.2.3'), '1-v1.2.3.json')
   assert.equal(reviewFileName('phase.a', 'lens.b'), 'phase.a-lens.b.json')
+})
+
+
+// DIRECT tests for the shared rule. It had none: it was exercised only through two call sites that
+// both pre-filter non-strings, so `grep -rn isUnsafePathComponent tests/` returned nothing and
+// three separate mutations of it survived the whole suite. The release note claims one mutation
+// fails tests at BOTH call sites; that claim is only true if the rule itself is pinned.
+
+// The WINDOWS separator, in the release whose subject is Windows path-component semantics. Neither
+// test file contained a single backslash, so narrowing `/[\\/]/` to `/[/]/` left the suite green
+// at 1941 pass while `reviewFileName(1, '..\\..\\..\\etc')` stopped throwing.
+test('a backslash in a component is refused, not just a forward slash', () => {
+  for (const escape of ['..\\..\\etc', 'a\\b', '\\', '\\\\server\\share', 'C:\\Windows']) {
+    assert.equal(isUnsafePathComponent(escape), true, `${JSON.stringify(escape)} must be refused`)
+    assert.throws(() => reviewFileName(1, escape), /lens/i, `lens ${JSON.stringify(escape)} must be refused`)
+    assert.throws(() => reviewFileName(escape, 'correctness'), /phase/i, `phase ${JSON.stringify(escape)} must be refused`)
+  }
+  assert.equal(isUnsafePathComponent('a/b'), true, 'the forward slash half must stay refused too')
+})
+
+// The guard is reachable from outside the two current call sites — the function is exported — and
+// deleting it turned a clear refusal into `value.replace is not a function`.
+test('a non-string component is refused rather than crashing', () => {
+  for (const value of [null, undefined, true, 123, {}, [], Symbol('x')]) {
+    assert.equal(isUnsafePathComponent(value), true, `${String(value)} must be refused, not thrown on`)
+  }
+})
+
+// Pins the RULE, not one spelling of it: what a component resolves to after Win32 strips its
+// trailing run of dots and spaces. Every arm of the predicate has a case here.
+test('the shared component rule accepts and refuses by what a component resolves to', () => {
+  for (const ok of ['v1.2.3', 'correctness', 'phase.a', 'a.b.c', 'tests-2', '_x', 'a b']) {
+    assert.equal(isUnsafePathComponent(ok), false, `${JSON.stringify(ok)} is an ordinary name`)
+  }
+  for (const bad of ['', '.', '..', '.. ', '. ', '...', '   ', '..\t', '.  .', 'a/b']) {
+    assert.equal(isUnsafePathComponent(bad), true, `${JSON.stringify(bad)} must be refused`)
+  }
 })

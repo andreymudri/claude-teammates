@@ -1,5 +1,56 @@
 # Changelog
 
+## v1.1.6
+
+Two review passes over code that had shipped without any.
+
+- **`usage` could be made to report transcripts from anywhere on disk as this project's spend.**
+  `readdir` and `stat` both follow symlinks, so a session directory whose `subagents/` was a
+  symlink out of the store was **auto-selected with no `--session` flag**, and the walk read and
+  attributed files outside the store. The hand-written walk had closed the symlink hole for links
+  found *inside* it and left the one at its own entry point, under a comment asserting the hole was
+  shut. Reproduced live.
+
+  The first fix for it was defeated by a single symlink: it anchored containment on
+  `realpath(projectDir)`, and `projectDir` is a name derived from the root — `<projectsDir>/<slug>`
+  — which whoever writes the store can replace with a link. Containment is now an **exact match**
+  against the one path the store may be, anchored on `projectsDir`, which the caller supplies.
+  That also removes two defects of the prefix arithmetic it replaced: a legitimate session named
+  `..foo` was refused (while this module's own name check accepts it), and a store symlinked to a
+  *sibling* session was accepted and reported under the wrong session id.
+
+- **`agent-<id>.meta.json` is a derived path and passed no check at all.** It is never enumerated,
+  so neither the walk's `isFile()` filter nor the containment check ever saw it. A symlinked meta
+  file was a constrained arbitrary file read — any JSON file on disk, with two of its string fields
+  printed into the operator's table — and `mkfifo agent-<id>.meta.json` hung `usage` forever, with
+  no timeout and no `AbortSignal`, the pending read keeping the process from exiting. Guarded by
+  `lstat` + `isFile()`.
+
+- **The walk reads from the resolved store path**, not the name it checked, so no open below the
+  containment check traverses an unresolved link component. This narrows a TOCTOU window measured
+  at 16.5% of invocations under a concurrent `rename()`. It does not close it: Node cannot, without
+  fd-relative opens, and that is recorded rather than papered over.
+
+- **Three tests would have taken Windows CI red** — they build symlinks and lacked the
+  `{ skip: process.platform === 'win32' }` this suite uses elsewhere, so they threw EPERM inside
+  the fixture builder and failed rather than skipped.
+
+- **`isUnsafePathComponent` gained direct tests.** It had none: it was reachable only through two
+  call sites that pre-filter their input, so deleting the **Windows separator** from the check left
+  the whole suite green — in the release whose subject was Windows path semantics. Its dead third
+  arm (`resolved === '.' || '..'`, unreachable because the strip removes the whole trailing run) is
+  removed rather than tested, with the equivalence brute-forced over 177,155 inputs.
+
+- **The `caveman` claim was defeated a ninth and a tenth time.** Only one route was opened by the
+  previous fix — an added section carried past the byte-for-byte snapshot by `cp`-ing the fixture.
+  The other two had never been bound by any round: `agents/tm-reviewer.md`, which IS the reviewer's
+  dispatch prompt, and `CHANGELOG.md`, which states the measurement in more detail than either
+  pinned file. The
+  anchor for the skill's text is now a SHA-256 constant in the test file, which a `cp` over the
+  fixture cannot reach; `agents/tm-reviewer.md`, `agents/tm-integrator.md` and `CHANGELOG.md` are
+  bound for the first time. The prose layers are documented as change detectors rather than proofs
+  — the runtime check is the only mechanically decidable one.
+
 ## v1.1.5
 
 One path-traversal gap, closed in both places that had it.

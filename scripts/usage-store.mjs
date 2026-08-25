@@ -9,19 +9,32 @@
 // absorbed: when the store is missing this throws NAMING THE PATH, and never returns an empty
 // report, because a zero reads as "no usage" and would be a lie the reader has no way to catch.
 
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { lstat, readdir, readFile, realpath, stat } from 'node:fs/promises'
 import path from 'node:path'
 
 import { isUnsafePathComponent, printable } from './reviews.mjs'
 import { projectSlug, summarizeTranscript } from './usage.mjs'
 
-// The ONE definition of the shipped bound: `readSessionUsage` resolves `maxEntries ?? this`, so a
-// test reading this constant is reading the bound the walk actually applies. Exported because
-// injecting `maxEntries` verifies only that the truncation notice fires, never what the default is.
+// The shipped default bound. Exported because injecting `maxEntries` verifies only that the
+// truncation notice fires, never what the default is.
+//
+// READING THIS CONSTANT IS NOT READING THE BOUND THE WALK APPLIES — an earlier comment here said
+// it was, and that was false: the default is resolved from `maxEntries ?? this` at a site nothing
+// pinned, so raising it by one token (in the signature, or in the `??`) left the walk effectively
+// unbounded with the entire suite green. The applied cap is returned on the report as `cap`, and
+// that is what the test asserts against.
 export const DEFAULT_MAX_ENTRIES = 20_000
 
+// Tagged, not matched by text. The catch below has to tell THIS error apart from a raw fs error,
+// and the message it would have matched on embeds a caller-controlled path — so a session named
+// `no transcripts found` made an ENOENT from `realpath` match the regex and be rethrown verbatim,
+// losing the one sentence this module exists to print. A property cannot be spelled by a caller.
+const HARNESS_LAYOUT = Symbol('harness-layout')
+
 function missing(dir) {
-  return new Error(`no transcripts found at ${dir} — this is a harness-internal layout and may have changed`)
+  const err = new Error(`no transcripts found at ${dir} — this is a harness-internal layout and may have changed`)
+  err[HARNESS_LAYOUT] = true
+  return err
 }
 
 // A session is identified by the store it carries, not by being the newest directory. The project
@@ -41,7 +54,11 @@ async function newestSession(projectDir) {
     const dir = path.join(projectDir, entry.name)
     let store
     try {
-      store = await stat(path.join(dir, 'subagents'))
+      // lstat, NOT stat: `stat` FOLLOWS the link, so a `subagents` symlink pointing anywhere on
+      // disk answered `isDirectory()` with true and the session became a candidate — then won on
+      // mtime and was auto-selected with no `--session` given. `lstat` describes the link itself,
+      // which is not a directory, so the session is passed over here.
+      store = await lstat(path.join(dir, 'subagents'))
     } catch {
       continue
     }
@@ -79,7 +96,16 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null, ma
   // observed it being used.
   const cap = maxEntries ?? DEFAULT_MAX_ENTRIES
   if (!Number.isInteger(cap) || cap < 1) {
-    throw new Error(`maxEntries must be a positive integer, got ${JSON.stringify(maxEntries)}`)
+    // NOT `JSON.stringify` alone: it THROWS on a BigInt, so `2n` produced a serialization
+    // TypeError naming neither the argument nor the value, from the very line whose contract is
+    // that a bad cap is refused BY NAME. It also renders NaN and Infinity as `null`, so the
+    // message quoted a value the caller had not passed. `String` first for those three.
+    const shown = typeof maxEntries === 'bigint'
+      ? `${maxEntries}n`
+      : typeof maxEntries === 'number' && !Number.isFinite(maxEntries)
+        ? String(maxEntries)
+        : JSON.stringify(maxEntries) ?? String(maxEntries)
+    throw new Error(`maxEntries must be a positive integer, got ${shown}`)
   }
   const projectDir = path.join(projectsDir, projectSlug(path.resolve(root)))
   const session = sessionId ?? await newestSession(projectDir)
@@ -96,6 +122,43 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null, ma
   }
   const subagentsDir = path.join(projectDir, session, 'subagents')
 
+  // VALIDATING THE COMPONENT'S NAME CANNOT VALIDATE ITS TARGET. The check above refuses a session
+  // that spells an escape; it cannot see an ordinary name whose directory — or whose `subagents`
+  // — is a SYMLINK out of the store. `readdir`, `stat` and `readFile` all follow links, so the
+  // walk's own entry point was reachable from anywhere on disk while the comment below correctly
+  // described the links found INSIDE the walk as closed. It had closed half the hole.
+  //
+  // EXACT MATCH, ANCHORED AT `projectsDir`. Three earlier shapes of this check were defeated:
+  //
+  //   1. Comparing against `realpath(projectDir)` anchors on a DERIVED name — `<projectsDir>/
+  //      <slug>` — which whoever writes the store can replace with a symlink. `realpath` then
+  //      follows it and the attacker's store resolves "inside" the attacker's own directory, so
+  //      the pass-6 escape reopened with ONE link instead of two, auto-selected with no flag.
+  //      `projectsDir` is supplied by the caller and is the only path here nobody plants.
+  //   2. `rel.startsWith('..')` is string math on a path: it refuses a legitimate in-store session
+  //      named `..foo`, which `isUnsafePathComponent` two lines up accepts — the two checks
+  //      disagreeing about one value — while a sibling session's store (`rel` = `sess-other/
+  //      subagents`) passed and reported another session's spend under this session's id.
+  //   3. Anything prefix-based needs a separate `rel === ''` arm to stop a store resolving to the
+  //      project directory itself, which walked EVERY session into one session's report.
+  //
+  // Comparing the fully resolved store against the one path it is allowed to be removes all three
+  // classes at once: there is no prefix arithmetic to get wrong. Both sides are resolved, so a
+  // link the operator put ABOVE `projectsDir` still works (a macOS temp dir is `/var` ->
+  // `/private/var`) — and a link anywhere at or below it does not, including one that stays inside
+  // the project. That last case worked at c2d0398 and is DELIBERATELY refused now: telling a
+  // benign relocation link apart from a hostile one means trusting the directory the attacker
+  // writes to, and the layout this reads is harness-internal, not an operator-arranged one.
+  let resolvedStore
+  try {
+    const resolvedRoot = await realpath(projectsDir)
+    const expected = path.join(resolvedRoot, projectSlug(path.resolve(root)), session, 'subagents')
+    resolvedStore = await realpath(subagentsDir)
+    if (resolvedStore !== expected) throw missing(subagentsDir)
+  } catch (err) {
+    throw err?.[HARNESS_LAYOUT] ? err : missing(subagentsDir)
+  }
+
   // The walk has to RECURSE, because a workflow-dispatched run keeps its transcripts under
   // `subagents/workflows/<wf-id>/` rather than flat, and a flat read reported five real
   // transcripts as zero.
@@ -107,7 +170,10 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null, ma
   //      re-entered itself until ELOOP, multiplying every total. The session-name check above
   //      cannot help: it validates the one component this module joins, while that traversal
   //      happens inside the walk. `withFileTypes` + `isDirectory()` is false for a symlink, so a
-  //      link is neither descended nor read as a transcript.
+  //      link is neither descended nor read as a transcript. That covers links found INSIDE the
+  //      walk ONLY — the walk's ROOT is reached by the `readdir` below, which follows. The
+  //      realpath containment check above is what closes the root; neither check subsumes the
+  //      other, and this comment claimed the whole hole was shut when it had shut half of it.
   //   2. It propagates a NESTED failure to the caller. One unreadable subdirectory aborted the
   //      whole report, and the catch relabelled it "no transcripts found" — dropping a readable
   //      transcript sitting in the directory that message names, and blaming a layout change that
@@ -126,7 +192,15 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null, ma
     const relative = pending.shift()
     let entries
     try {
-      entries = await readdir(relative === '' ? subagentsDir : path.join(subagentsDir, relative), { withFileTypes: true })
+      // `resolvedStore`, not `subagentsDir`: the check above resolved a NAME and the walk then
+      // re-opened the same name, so repointing the `subagents` link between the two got a
+      // transcript from outside the store into the report — measured at 16.5% of invocations
+      // against a concurrent `rename()`. Reading from the resolved path means no open below here
+      // traverses an unresolved link component. The window is not zero — the components of the
+      // resolved path can still be swapped after `realpath` returns, which Node cannot close
+      // without fd-relative opens — but it collapses to that one call, and an attacker who can
+      // write inside the store can simply put a transcript there without racing anything.
+      entries = await readdir(relative === '' ? resolvedStore : path.join(resolvedStore, relative), { withFileTypes: true })
       readAnything = true
     } catch {
       if (relative === '') break
@@ -166,7 +240,7 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null, ma
 
   const agents = []
   for (const name of transcripts.sort()) {
-    const full = path.join(subagentsDir, name)
+    const full = path.join(resolvedStore, name)
     let body
     try {
       body = await readFile(full, 'utf8')
@@ -221,11 +295,21 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null, ma
     // with its role unknown rather than being dropped.
     let agentType = '(unknown)'
     let model = '(unknown)'
+    // DERIVED, never enumerated — so this is the one read here that passes neither the walk's
+    // `withFileTypes` + `isFile()` filter nor the containment check above, both of which only ever
+    // see paths the walk listed. Unguarded it was a constrained arbitrary file read (a symlinked
+    // `.meta.json` printed any JSON file's `agentType` and `model` into the operator's table) and
+    // a hang: `readFile` on a FIFO blocks with no writer, no timeout and no AbortSignal, and the
+    // pending read keeps the event loop alive, so `usage` never returned and the process would
+    // not exit. `lstat` describes the link or the FIFO itself, and only a regular file is read.
+    const metaPath = full.replace(/\.jsonl$/, '.meta.json')
     try {
-      const meta = JSON.parse(await readFile(full.replace(/\.jsonl$/, '.meta.json'), 'utf8'))
-      if (typeof meta.agentType === 'string') agentType = meta.agentType
-      if (typeof meta.model === 'string') model = meta.model
-    } catch { /* no meta, or unreadable: the row stays, the role does not */ }
+      const meta = await lstat(metaPath)
+      if (!meta.isFile()) throw new Error('meta is not a regular file')
+      const parsed = JSON.parse(await readFile(metaPath, 'utf8'))
+      if (typeof parsed.agentType === 'string') agentType = parsed.agentType
+      if (typeof parsed.model === 'string') model = parsed.model
+    } catch { /* no meta, not a regular file, or unreadable: the row stays, the role does not */ }
 
     agents.push({ name, agentType, model, ...summarizeTranscript(records) })
   }
@@ -240,5 +324,11 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null, ma
   // Largest per-turn tax first. Ordering by a total would bury exactly the finding this command
   // was built to surface: an agent with few turns and a large prefix.
   agents.sort((a, b) => (b.prefix * b.turns) - (a.prefix * a.turns))
-  return { sessionId: session, agents, unreadable }
+  // `cap` is RETURNED so the shipped bound is observable in a one-file store. It was two values
+  // joined at an unpinned site — the signature default and the `??` — and a test that reads
+  // DEFAULT_MAX_ENTRIES and asserts "no truncation happened" never observes either being applied:
+  // raising the effective default by one token left the whole suite green, twice over, which is
+  // the exact defect the comment on that constant claims is impossible. Reading it back closes
+  // that without building 20,001 files, which is the fixture that took macOS CI down with EMFILE.
+  return { sessionId: session, agents, unreadable, cap }
 }
