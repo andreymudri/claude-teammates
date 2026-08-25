@@ -24,6 +24,17 @@ const doc = async () => {
   return parseDoc(body, 'teammates-config/SKILL.md')
 }
 
+// The SECTION that holds the claim, not the whole document. `assertClaim` screens back-references
+// across whatever scope it is handed, so passing the document made an innocuous sentence in an
+// unrelated section fail the caveman test — with a message about caveman. Both screens belong
+// where the claim lives.
+const cavemanSection = async () => {
+  const parsed = await doc()
+  const section = parsed.sections.find((s) => /What .*caveman.* actually reaches/.test(s.title ?? ''))
+  assert.ok(section, 'the skill must keep a section stating what caveman reaches')
+  return section
+}
+
 const task = {
   id: 'T1',
   title: 'a task',
@@ -45,16 +56,52 @@ test('the skill states that caveman reaches only implementer briefs and the loca
   // `assertClaim`'s `subject` inverts that: EVERY statement in the document mentioning reviewers
   // must be the claim itself or explicitly allowed here, so a new sentence about reviewers fails
   // whatever words it uses. Adding one is then a deliberate act with a test to update.
-  assertClaim(await doc(), {
+  assertClaim(await cavemanSection(), {
     label: 'reviewers are unaffected by caveman',
     claim: /Reviewer and integrator dispatches carry no caveman path at all/,
     subject: /reviewer/i,
+    // ANCHORED. `allow` entries are substring tests, so an unanchored pattern exempts the whole
+    // statement and the inversion can simply be appended to an allow-listed sentence — measured
+    // green before this. Each pattern now has to match the sentence end to end.
     allow: [
       // Not about caveman: the enforcement-key rule happens to name `agents.reviewer.*`.
-      /enforcement key never goes in the local file/,
-      /a well-shaped value passes silently/,
+      /^An enforcement key never goes in the local file[\s\S]*exit 2[^.]*\.$/,
+      /^That makes it a real verification step[\s\S]*shape is all it checks\.[\s\S]*$/,
     ],
   })
+
+  // TWO HOLES `assertClaim` leaves open by construction, both measured green before this.
+  //
+  // First: the inventory screen excludes the claim sentence itself (`s.text !== hit.text` in
+  // md-contract), so the inverse could simply be APPENDED to it. The claim is therefore locked to
+  // its exact shape — anything added to that sentence fails.
+  const section = await cavemanSection()
+  const claim = section.statements.find((s) => /carry no caveman path at all/.test(s.text))
+  assert.match(
+    claim.text,
+    /^Reviewer and integrator dispatches carry no caveman path at all, so the reviewers[^.]*are unaffected by any value you set\.$/,
+    'the claim sentence must stand alone; the inventory screen cannot see inside it',
+  )
+
+  // Second: `scope.statements` covers paragraphs and list items, never HEADINGS — so a heading
+  // could assert the opposite in the same section and pass. Headings are screened separately.
+  const headings = section.blocks.filter((b) => b.kind === 'heading').map((b) => b.text)
+  for (const heading of headings) {
+    assert.doesNotMatch(heading, /reviewer/i,
+      `a heading naming reviewers is unscreened by the inventory lock: ${JSON.stringify(heading)}`)
+  }
+
+  // Third, and the one scoping the claim to its section OPENED: an inversion written into any
+  // OTHER section is outside that scope entirely. Appending one to a sentence in a different
+  // section was measured green. So the document as a whole is screened for the pairing that
+  // matters — a statement naming BOTH reviewers and caveman — and the claim is the only one
+  // allowed to exist. Narrower than screening every mention of reviewers, which would fire on the
+  // unrelated `agents.reviewer.*` config rules.
+  const strays = (await doc()).statements.filter(
+    (st) => /reviewer/i.test(st.text) && /caveman/i.test(st.text) && st.text !== claim.text,
+  )
+  assert.deepEqual(strays.map((st) => st.text), [],
+    'only the claim may speak about reviewers and caveman together, anywhere in this skill')
 })
 
 test('caveman never reaches a reviewer dispatch', async () => {
@@ -159,4 +206,21 @@ test('the README and CHANGELOG state the level count the code validates', async 
   const changelog = await readFile(new URL('../CHANGELOG.md', import.meta.url), 'utf8')
   assert.match(changelog, /three levels are validated/i,
     'the CHANGELOG entry stated four when the code validated three; it is corrected, not bound')
+})
+
+// The scoping is the point, so it is pinned: prose elsewhere in the skill must not fail the test
+// that speaks for the caveman section. Without this, an editor adding an unrelated paragraph gets
+// a caveman-scope failure and learns to distrust the assertion.
+test('prose in an unrelated section does not fail the caveman claim', async () => {
+  const text = await readFile(new URL('../skills/teammates-config/SKILL.md', import.meta.url), 'utf8')
+  const { body } = splitFrontmatter(text, 'teammates-config')
+  const edited = `${body}\n\n## Troubleshooting\n\nThe above requirement applies to every layer.\n`
+  const parsed = parseDoc(edited, 'teammates-config/SKILL.md (edited)')
+  const section = parsed.sections.find((s) => /What .*caveman.* actually reaches/.test(s.title ?? ''))
+  assertClaim(section, {
+    label: 'reviewers are unaffected by caveman',
+    claim: /Reviewer and integrator dispatches carry no caveman path at all/,
+    subject: /reviewer/i,
+    allow: [/enforcement key never goes in the local file/, /a well-shaped value passes silently/],
+  })
 })

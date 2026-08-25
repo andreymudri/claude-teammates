@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, readdir, rm, symlink, utimes, writeFile } from '
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import { readSessionUsage } from '../scripts/usage-store.mjs'
+import { readSessionUsage, DEFAULT_MAX_ENTRIES } from '../scripts/usage-store.mjs'
 import { projectSlug } from '../scripts/usage.mjs'
 
 // Resolved here, because the store resolves before deriving the slug. Passing the unresolved
@@ -395,6 +395,11 @@ test('an unreadable subdirectory is reported, not fatal to the whole report', { 
     assert.equal(report.agents.length, 1, 'the readable transcript must still be reported')
     assert.equal(report.unreadable.length, 1, 'the directory that could not be read must be named')
     assert.match(report.unreadable[0].name, /locked/)
+    // The PRODUCER's kind. tests/usage.test.mjs pins the renderer against hand-built literals that
+    // carry `kind` themselves, so without this neither side of the contract is bound: deleting
+    // `kind: 'directory'` here left the whole suite green and reinstated a locked directory being
+    // tallied as an unreadable transcript.
+    assert.equal(report.unreadable[0].kind, 'directory')
   } finally {
     await chmod(locked, 0o700).catch(() => {})
     await rm(dir, { recursive: true, force: true })
@@ -412,6 +417,7 @@ test('an empty transcript is reported rather than silently dropped', async () =>
     assert.equal(report.unreadable.length, 1, 'the empty one must be named, not dropped')
     assert.match(report.unreadable[0].name, /agent-empty/)
     assert.equal(report.unreadable[0].kept, 0)
+    assert.equal(report.unreadable[0].kind, 'empty', 'the producer must say which kind of gap this is')
   }, {
     files: {
       'agent-a.jsonl': line({ cache_read_input_tokens: 10 }),
@@ -485,4 +491,74 @@ test('a file symlink named like a transcript is not read', { skip: process.platf
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+
+// THE BOUNDARY. `if (budget-- <= 0) break` post-decrements, so a walk that consumed exactly
+// `maxEntries` entries and saw everything leaves `budget === 0` — indistinguishable, to a
+// `budget <= 0` test, from one that stopped short. A complete report was therefore declared
+// incomplete, which is the "notice becomes background noise" failure the companion test claims to
+// prevent; that test never caught it because it used the 20,000 default and never reached the edge.
+test('a walk that consumes exactly the cap and sees everything is not called truncated', async () => {
+  await withStore(async ({ projectsDir }) => {
+    const report = await readSessionUsage({ projectsDir, root: FAKE_ROOT, maxEntries: 2 })
+    assert.equal(report.agents.length, 2, 'both transcripts must be reported')
+    assert.equal(report.unreadable.filter((e) => e.kind === 'truncated').length, 0,
+      'a complete walk must not be declared incomplete')
+  }, {
+    files: {
+      'agent-a.jsonl': line({ cache_read_input_tokens: 10 }),
+      'agent-b.jsonl': line({ cache_read_input_tokens: 20 }),
+    },
+  })
+})
+
+// A transcript where NOTHING parsed contributes no row, so calling it "with dropped lines" asserts
+// it is in the table minus a few lines when it is absent entirely and its whole spend is missing
+// from TOTAL. That is the same misstatement the `kind` split was introduced to remove, inverted —
+// and it regressed against the base, which reported it as unreadable.
+test('a transcript where every line fails is unreadable, not partial', async () => {
+  await withStore(async ({ projectsDir }) => {
+    const report = await readSessionUsage({ projectsDir, root: FAKE_ROOT })
+    const bad = report.unreadable.find((e) => e.name.endsWith('agent-bad.jsonl'))
+    assert.ok(bad, 'the transcript must be reported')
+    assert.equal(bad.kept, 0)
+    assert.equal(bad.kind, 'unreadable', 'nothing survived, so it is not a partial read')
+  }, {
+    files: {
+      'agent-bad.jsonl': 'nope\nalso nope\nstill nope',
+      'agent-ok.jsonl': line({ cache_read_input_tokens: 10 }),
+    },
+  })
+})
+
+// The parameter is part of the module's exported surface now, and the comment advertises it for
+// injection. Unvalidated, 0 and NaN reproduced the misleading "layout may have changed" throw for
+// a perfectly readable store, and null crashed on toLocaleString.
+test('an unusable maxEntries is refused by name, not turned into a layout lie', async () => {
+  await withStore(async ({ projectsDir }) => {
+    for (const bad of [0, -1, 1.5, Number.NaN, 'x', null]) {
+      await assert.rejects(
+        () => readSessionUsage({ projectsDir, root: FAKE_ROOT, maxEntries: bad }),
+        (err) => /maxEntries/.test(err.message) && !/may have changed/.test(err.message),
+        `maxEntries: ${JSON.stringify(bad)} must be refused by name`,
+      )
+    }
+  }, { files: { 'agent-a.jsonl': line({ cache_read_input_tokens: 10 }) } })
+})
+
+
+// The injectable cap verifies the notice; the DEFAULT bound was still unpinned, so raising
+// MAX_ENTRIES to Number.MAX_SAFE_INTEGER left the suite green and the walk effectively unbounded —
+// reason 3 for hand-writing it in the first place, unverified.
+test('the default cap is a real bound, not an unreachable number', async () => {
+  await withStore(async ({ projectsDir }) => {
+    const report = await readSessionUsage({ projectsDir, root: FAKE_ROOT })
+    assert.equal(report.unreadable.filter((e) => e.kind === 'truncated').length, 0)
+    // The bound itself: a store one entry past the default must truncate. Asserted through the
+    // exported default rather than by building such a store, which is what broke macOS CI.
+    assert.equal(DEFAULT_MAX_ENTRIES, 20_000, 'the documented bound is the one that ships')
+    assert.ok(Number.isInteger(DEFAULT_MAX_ENTRIES) && DEFAULT_MAX_ENTRIES < 1e6,
+      'a bound nothing can reach is not a bound')
+  }, { files: { 'agent-a.jsonl': line({ cache_read_input_tokens: 10 }) } })
 })

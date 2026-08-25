@@ -237,7 +237,7 @@ author's; most new tests bit, and these did not:
 | low | the load-failure test's alternation was satisfied by **node's own crash dump**, so it survived the very `renderSummary` silencing its comment describes. | Asserts the reporter's own line. |
 | low | the win32 skip was a **blanket predicate** resting on a claim that contradicts the Win32 filename rule (which forbids bytes below 0x20, not U+2028/U+0085). | Now a real capability probe: it attempts the mkdir and skips only if the filesystem refuses, naming the errno. |
 | low | `HANDOFF.md` — the correction written "so it is auditable" cited `cli.mjs:2017`/`:2153`; at the tip those are a `})` and a blank line. | Line numbers dropped for subcommand names, which do not drift. |
-| low | the followups doc claimed the level count "cannot drift apart again in either direction" — **only the skill was bound**; README and CHANGELOG were unpinned and mutating either back to "four" was green. | Both now bound to `CAVEMAN_LEVELS`. |
+| low | the followups doc claimed the level count "cannot drift apart again in either direction" — **only the skill was bound**; README and CHANGELOG were unpinned and mutating either back to "four" was green. | README bound to `CAVEMAN_LEVELS`. The CHANGELOG is checked against a fixed spelling instead: binding a released entry to the live constant would make a future level change fail a test about a shipped version, which is history rewritten to keep a test green. |
 | low | `cli.mjs` — "neutralised like every other print site in this file" overstates: four sites still interpolate repo- and fs-derived values raw. | Comment corrected to name it as a gap rather than a convention. |
 | low | `docs/followups/…` — "Every value read from disk is neutralised" was false: `usage --json` still emitted U+2028 raw. | Fixed with `printableBlock` on the JSON branch. This row was omitted from an earlier version of this table while the `'.. '` row above was counted twice — the reconciliation error a per-finding record exists to prevent. |
 
@@ -245,6 +245,46 @@ The claims lens verified the 22-finding tally directly against the first pass's 
 (5+4+5+8, reconciling to 1/11/10 post-refutation) and left **7 claims unprobed**, including the
 `31,394,783` figure and the HANDOFF token measurements, which depend on stores not present in a
 scratch worktree.
+
+## Third and fourth review passes (2026-08-25)
+
+Recorded because they happened and the earlier version of this document did not mention them —
+an omission the fourth-pass claims lens caught, and the same class of gap as the two findings this
+document dropped from its own first draft.
+
+**Pass three** reviewed the round-two fixes (`08574f5..62dfa9f`) and filed **19** findings, one
+rated `high` before refutation. **Pass four** reviewed the round-three fixes
+(`62dfa9f..c5c8f6a`) and filed **10**. Every one was a defect in the preceding round of fixes or in
+the prose describing it; none was in the original inline work. What they found, in the order it
+matters:
+
+- **The caveman polarity assertion has now been defeated four times**, by four different escapes:
+  a co-occurrence match, a sentence satisfying the claim while stating its inverse, the inverse
+  appended to the claim sentence itself (which `assertClaim`'s inventory screen excludes by
+  construction, `s.text !== hit.text`), and a heading (`scope.statements` covers paragraphs and
+  list items, never headings). It now carries an exact-shape lock on the claim sentence and a
+  separate heading screen. Each escape was re-run against the fix and fails.
+- **The `MAX_ENTRIES` cap reintroduced the bug the walk was written to remove.** It stopped the
+  walk silently, so a store past it under-reported at exit 0 — reason 2 of the walk's own header,
+  reintroduced by the bound added for reason 3. Then the fix for that had an **off-by-one**:
+  `budget--` post-decrements, so a walk that consumed exactly `maxEntries` and saw everything was
+  declared incomplete. Truncation is now a flag set where the walk actually stops short.
+- **`kept: 0` was overloaded** to mean read failure, empty-but-readable, and unreadable directory,
+  and `renderUsage` called all three "transcript(s) unreadable". Then the `kind` split that fixed
+  it mis-tagged a transcript whose every line failed as `partial` — asserting it was in the table
+  minus a few lines when it was absent entirely, the same misstatement inverted.
+- **`printableBlock` was wrong for the test name**, which is a one-line splice: it preserves LF by
+  design, so a plain newline still forged a summary line while the comment claimed that forgery
+  closed. Only its U+2028 spelling had been.
+- **The macOS EMFILE break**: the cap test built 20,050 files. The bound is injectable now, and
+  the shipped default is exported and pinned separately — injecting a cap verifies the notice, not
+  the bound, and `MAX_ENTRIES = Number.MAX_SAFE_INTEGER` was green.
+- **`maxEntries` was unvalidated**: `0`, negative and `NaN` reproduced the "layout may have
+  changed" throw for a perfectly readable store; `null` crashed. Refused by name now.
+- **`assertClaim` was handed the whole document**, so its back-reference screen ran document-wide
+  and an unrelated paragraph failed the caveman test. Scoped to its own section, with a test
+  pinning that scoping.
+- **A refutation summarised more favourably than it read** — see the symlink row above, corrected.
 
 ## Not reviewed
 

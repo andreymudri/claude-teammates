@@ -186,18 +186,25 @@ test('renderUsage tallies each kind of gap as what it actually is', () => {
   const out = renderUsage({
     sessionId: 's',
     agents: [{ agentType: 'tm-a', model: 'opus', turns: 1, prefix: 1, cacheRead: 1, output: 1 }],
+    // A DISTINCT count per kind. With one entry each every count was 1, so swapping which kind fed
+    // which line satisfied every assertion — the fixture, not the code, was doing the work.
     unreadable: [
       { name: 'agent-dead.jsonl', reason: 'could not be read', kind: 'unreadable', dropped: 0, kept: 0 },
-      { name: 'agent-new.jsonl', reason: 'no records yet', kind: 'empty', dropped: 0, kept: 0 },
-      { name: 'locked', reason: 'directory could not be read', kind: 'directory', dropped: 0, kept: 0 },
-      { name: 'agent-torn.jsonl', reason: '1 of 3', kind: 'partial', dropped: 1, kept: 2 },
+      { name: 'agent-new1.jsonl', reason: 'no records yet', kind: 'empty', dropped: 0, kept: 0 },
+      { name: 'agent-new2.jsonl', reason: 'no records yet', kind: 'empty', dropped: 0, kept: 0 },
+      { name: 'locked-a', reason: 'directory could not be read', kind: 'directory', dropped: 0, kept: 0 },
+      { name: 'locked-b', reason: 'directory could not be read', kind: 'directory', dropped: 0, kept: 0 },
+      { name: 'locked-c', reason: 'directory could not be read', kind: 'directory', dropped: 0, kept: 0 },
+      { name: 'agent-t1.jsonl', reason: '1 of 3', kind: 'partial', dropped: 1, kept: 2 },
+      { name: 'agent-t2.jsonl', reason: '1 of 3', kind: 'partial', dropped: 1, kept: 2 },
+      { name: 'agent-t3.jsonl', reason: '1 of 3', kind: 'partial', dropped: 1, kept: 2 },
+      { name: 'agent-t4.jsonl', reason: '1 of 3', kind: 'partial', dropped: 1, kept: 2 },
     ],
   })
   assert.match(out, /1 transcript\(s\) unreadable/, 'only the real read failure is unreadable')
-  assert.match(out, /1 transcript\(s\) with no records yet/)
-  assert.match(out, /1 directory could not be read/)
-  assert.doesNotMatch(out, /1 directories/, 'the singular branch must be taken')
-  assert.match(out, /1 transcript\(s\) with dropped lines/)
+  assert.match(out, /2 transcript\(s\) with no records yet/)
+  assert.match(out, /3 directories could not be read/)
+  assert.match(out, /4 transcript\(s\) with dropped lines/)
 })
 
 // The walk stops at a cap. Stopping silently is the understatement this whole module exists to
@@ -211,4 +218,16 @@ test('renderUsage says so when the walk was truncated', () => {
   })
   assert.match(out, /truncated|stopped after/i, 'a truncated walk must say so')
   assert.doesNotMatch(out, /1 transcript\(s\) unreadable/, 'the cap is not a read failure')
+})
+
+// The singular branch, on its own fixture: the tally test above uses three directories so that a
+// swapped kind cannot pass, which means it no longer exercises the inflection.
+test('renderUsage inflects a single unreadable directory', () => {
+  const out = renderUsage({
+    sessionId: 's',
+    agents: [{ agentType: 'tm-a', model: 'opus', turns: 1, prefix: 1, cacheRead: 1, output: 1 }],
+    unreadable: [{ name: 'locked', reason: 'directory could not be read', kind: 'directory', dropped: 0, kept: 0 }],
+  })
+  assert.match(out, /1 directory could not be read/)
+  assert.doesNotMatch(out, /1 directories/, 'the singular branch must be taken')
 })

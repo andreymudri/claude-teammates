@@ -15,7 +15,11 @@ import path from 'node:path'
 import { printable } from './reviews.mjs'
 import { projectSlug, summarizeTranscript } from './usage.mjs'
 
-const MAX_ENTRIES = 20_000
+// Exported so a test can pin the SHIPPED bound. Injecting `maxEntries` verifies that the
+// truncation notice fires; it says nothing about the default, which could be raised to
+// Number.MAX_SAFE_INTEGER with the suite green — leaving the walk effectively unbounded, which is
+// reason 3 for hand-writing it.
+export const DEFAULT_MAX_ENTRIES = 20_000
 
 function missing(dir) {
   return new Error(`no transcripts found at ${dir} — this is a harness-internal layout and may have changed`)
@@ -60,11 +64,18 @@ async function newestSession(projectDir) {
 // 20,000 real files to exercise a bound is slow everywhere and fails outright where the open-file
 // limit is lower than the fixture — macOS CI refused it with EMFILE. A bound nothing can reach in
 // a test is a bound nothing verifies.
-export async function readSessionUsage({ projectsDir, root, sessionId = null, maxEntries = MAX_ENTRIES }) {
+export async function readSessionUsage({ projectsDir, root, sessionId = null, maxEntries = DEFAULT_MAX_ENTRIES }) {
   // `root` is resolved here rather than trusted. The CLI passes `flags.root ?? process.cwd()`
   // verbatim, so `--root .` arrives as the literal ".", whose slug is "." — and `path.join`
   // then collapses to the projects directory itself, where the newest PROJECT gets mistaken for
   // a session. Resolving is idempotent for a path that is already absolute.
+  // Refused by NAME. Unvalidated, 0 / negative / NaN left the walk unable to run and the store
+  // reported as "layout may have changed" — a lie about a perfectly readable store, and exactly
+  // the failure this module's header forbids. `null` crashed on toLocaleString, because a default
+  // applies only to `undefined`.
+  if (!Number.isInteger(maxEntries) || maxEntries < 1) {
+    throw new Error(`maxEntries must be a positive integer, got ${JSON.stringify(maxEntries)}`)
+  }
   const projectDir = path.join(projectsDir, projectSlug(path.resolve(root)))
   const session = sessionId ?? await newestSession(projectDir)
   // Checked before it is joined, and checked here rather than only at the CLI: `--session` is not
@@ -104,7 +115,8 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null, ma
   const pending = ['']
   let budget = maxEntries
   let readAnything = false
-  while (pending.length > 0 && budget > 0) {
+  let truncated = false
+  while (pending.length > 0 && !truncated) {
     const relative = pending.shift()
     let entries
     try {
@@ -116,7 +128,11 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null, ma
       continue
     }
     for (const entry of entries) {
-      if (budget-- <= 0) break
+      // Set where the walk ACTUALLY stops short, not inferred from the counter afterwards. The
+      // post-decrement leaves `budget === 0` for a walk that consumed exactly `maxEntries` and saw
+      // everything, so a `budget <= 0` test afterwards declared a complete report incomplete —
+      // telling an operator that correct totals were untrustworthy.
+      if (budget-- <= 0) { truncated = true; break }
       // Kept with `/` regardless of platform: it is a display name and a `path.join` argument,
       // and `path.join` accepts a forward slash on Windows.
       const name = relative === '' ? entry.name : `${relative}/${entry.name}`
@@ -131,7 +147,7 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null, ma
   // module exists to prevent: a store past the cap under-reported its totals at exit 0, and with
   // nothing else in it reproduced the very "layout may have changed" throw reason 2 above says
   // this walk was written to eliminate — reintroduced by the bound added for reason 3.
-  if (budget <= 0) {
+  if (truncated) {
     unreadable.push({
       name: '(walk)',
       reason: `stopped after ${maxEntries.toLocaleString('en-US')} entries; this report is incomplete`,
@@ -176,7 +192,11 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null, ma
       unreadable.push({
         name,
         reason: `${dropped} of ${dropped + records.length} line(s) did not parse`,
-        kind: 'partial',
+        // `partial` asserts the transcript IS in the table minus some lines. With nothing parsed
+        // it is absent from the table entirely and its whole spend is missing from TOTAL, so that
+        // label states the opposite of what happened — the same misstatement this `kind` split was
+        // introduced to remove, inverted.
+        kind: records.length > 0 ? 'partial' : 'unreadable',
         dropped,
         kept: records.length,
       })
