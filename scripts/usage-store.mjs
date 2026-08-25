@@ -20,8 +20,16 @@ import { projectSlug, summarizeTranscript } from './usage.mjs'
 // injecting `maxEntries` verifies only that the truncation notice fires, never what the default is.
 export const DEFAULT_MAX_ENTRIES = 20_000
 
+// Tagged, not matched by text. The catch below has to tell THIS error apart from a raw fs error,
+// and the message it would have matched on embeds a caller-controlled path — so a session named
+// `no transcripts found` made an ENOENT from `realpath` match the regex and be rethrown verbatim,
+// losing the one sentence this module exists to print. A property cannot be spelled by a caller.
+const HARNESS_LAYOUT = Symbol('harness-layout')
+
 function missing(dir) {
-  return new Error(`no transcripts found at ${dir} — this is a harness-internal layout and may have changed`)
+  const err = new Error(`no transcripts found at ${dir} — this is a harness-internal layout and may have changed`)
+  err[HARNESS_LAYOUT] = true
+  return err
 }
 
 // A session is identified by the store it carries, not by being the newest directory. The project
@@ -102,19 +110,39 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null, ma
 
   // VALIDATING THE COMPONENT'S NAME CANNOT VALIDATE ITS TARGET. The check above refuses a session
   // that spells an escape; it cannot see an ordinary name whose directory — or whose `subagents`
-  // — is a SYMLINK out of the store. Both `readdir` and `stat` follow links, so the walk's own
-  // entry point was reachable from anywhere on disk while the comment below correctly described
-  // the links found INSIDE the walk as closed. The test is therefore on what the store path
-  // RESOLVES to, compared against the resolved project directory: a link the operator put higher
-  // up the path is fine (a macOS temp dir is `/var` -> `/private/var`), a link that leaves is not.
+  // — is a SYMLINK out of the store. `readdir`, `stat` and `readFile` all follow links, so the
+  // walk's own entry point was reachable from anywhere on disk while the comment below correctly
+  // described the links found INSIDE the walk as closed. It had closed half the hole.
+  //
+  // EXACT MATCH, ANCHORED AT `projectsDir`. Three earlier shapes of this check were defeated:
+  //
+  //   1. Comparing against `realpath(projectDir)` anchors on a DERIVED name — `<projectsDir>/
+  //      <slug>` — which whoever writes the store can replace with a symlink. `realpath` then
+  //      follows it and the attacker's store resolves "inside" the attacker's own directory, so
+  //      the pass-6 escape reopened with ONE link instead of two, auto-selected with no flag.
+  //      `projectsDir` is supplied by the caller and is the only path here nobody plants.
+  //   2. `rel.startsWith('..')` is string math on a path: it refuses a legitimate in-store session
+  //      named `..foo`, which `isUnsafePathComponent` two lines up accepts — the two checks
+  //      disagreeing about one value — while a sibling session's store (`rel` = `sess-other/
+  //      subagents`) passed and reported another session's spend under this session's id.
+  //   3. Anything prefix-based needs a separate `rel === ''` arm to stop a store resolving to the
+  //      project directory itself, which walked EVERY session into one session's report.
+  //
+  // Comparing the fully resolved store against the one path it is allowed to be removes all three
+  // classes at once: there is no prefix arithmetic to get wrong. Both sides are resolved, so a
+  // link the operator put ABOVE `projectsDir` still works (a macOS temp dir is `/var` ->
+  // `/private/var`) — and a link anywhere at or below it does not, including one that stays inside
+  // the project. That last case worked at c2d0398 and is DELIBERATELY refused now: telling a
+  // benign relocation link apart from a hostile one means trusting the directory the attacker
+  // writes to, and the layout this reads is harness-internal, not an operator-arranged one.
   let resolvedStore
   try {
+    const resolvedRoot = await realpath(projectsDir)
+    const expected = path.join(resolvedRoot, projectSlug(path.resolve(root)), session, 'subagents')
     resolvedStore = await realpath(subagentsDir)
-    const resolvedProject = await realpath(projectDir)
-    const rel = path.relative(resolvedProject, resolvedStore)
-    if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) throw missing(subagentsDir)
+    if (resolvedStore !== expected) throw missing(subagentsDir)
   } catch (err) {
-    throw err instanceof Error && /no transcripts found/.test(err.message) ? err : missing(subagentsDir)
+    throw err?.[HARNESS_LAYOUT] ? err : missing(subagentsDir)
   }
 
   // The walk has to RECURSE, because a workflow-dispatched run keeps its transcripts under
@@ -150,7 +178,15 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null, ma
     const relative = pending.shift()
     let entries
     try {
-      entries = await readdir(relative === '' ? subagentsDir : path.join(subagentsDir, relative), { withFileTypes: true })
+      // `resolvedStore`, not `subagentsDir`: the check above resolved a NAME and the walk then
+      // re-opened the same name, so repointing the `subagents` link between the two got a
+      // transcript from outside the store into the report — measured at 16.5% of invocations
+      // against a concurrent `rename()`. Reading from the resolved path means no open below here
+      // traverses an unresolved link component. The window is not zero — the components of the
+      // resolved path can still be swapped after `realpath` returns, which Node cannot close
+      // without fd-relative opens — but it collapses to that one call, and an attacker who can
+      // write inside the store can simply put a transcript there without racing anything.
+      entries = await readdir(relative === '' ? resolvedStore : path.join(resolvedStore, relative), { withFileTypes: true })
       readAnything = true
     } catch {
       if (relative === '') break
@@ -190,7 +226,7 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null, ma
 
   const agents = []
   for (const name of transcripts.sort()) {
-    const full = path.join(subagentsDir, name)
+    const full = path.join(resolvedStore, name)
     let body
     try {
       body = await readFile(full, 'utf8')
@@ -245,11 +281,21 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null, ma
     // with its role unknown rather than being dropped.
     let agentType = '(unknown)'
     let model = '(unknown)'
+    // DERIVED, never enumerated — so this is the one read here that passes neither the walk's
+    // `withFileTypes` + `isFile()` filter nor the containment check above, both of which only ever
+    // see paths the walk listed. Unguarded it was a constrained arbitrary file read (a symlinked
+    // `.meta.json` printed any JSON file's `agentType` and `model` into the operator's table) and
+    // a hang: `readFile` on a FIFO blocks with no writer, no timeout and no AbortSignal, and the
+    // pending read keeps the event loop alive, so `usage` never returned and the process would
+    // not exit. `lstat` describes the link or the FIFO itself, and only a regular file is read.
+    const metaPath = full.replace(/\.jsonl$/, '.meta.json')
     try {
-      const meta = JSON.parse(await readFile(full.replace(/\.jsonl$/, '.meta.json'), 'utf8'))
-      if (typeof meta.agentType === 'string') agentType = meta.agentType
-      if (typeof meta.model === 'string') model = meta.model
-    } catch { /* no meta, or unreadable: the row stays, the role does not */ }
+      const meta = await lstat(metaPath)
+      if (!meta.isFile()) throw new Error('meta is not a regular file')
+      const parsed = JSON.parse(await readFile(metaPath, 'utf8'))
+      if (typeof parsed.agentType === 'string') agentType = parsed.agentType
+      if (typeof parsed.model === 'string') model = parsed.model
+    } catch { /* no meta, not a regular file, or unreadable: the row stays, the role does not */ }
 
     agents.push({ name, agentType, model, ...summarizeTranscript(records) })
   }

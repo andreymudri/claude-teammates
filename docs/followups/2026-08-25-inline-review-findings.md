@@ -341,16 +341,29 @@ unscreened; `Array.find` instead of `doc.section()`, so a duplicate-titled decoy
 the pairing screen skipping code blocks; `kind === 'partial'` unpinned; `DEFAULT_MAX_ENTRIES`
 asserted as a value but never observed being applied.
 
-Two of its findings were carried unresolved into the sixth pass and are closed only now: the
-`| low |` severity row corrected above, and `skills/phase-gate/SKILL.md:207`, whose solo-gate
-paragraph is bound by no assertion. **The phase-gate one remains open** — see below.
+Two of its findings were carried unresolved into the sixth pass. One is closed now: the `| low |`
+severity row corrected above. **The other is still open:** `skills/phase-gate/SKILL.md:207`, whose
+rewritten solo-gate paragraph — the two rules it says "still bind", and its `--run` persistence
+claim — is bound by no assertion, so its exact negation would pass the suite. It is carried, not
+closed, and nothing below addresses it. (An earlier version of this paragraph declared both closed
+and then, one clause later, declared this one open, and pointed at a "below" that did not exist.)
 
 ## Sixth review pass — the release commits (2026-08-25)
 
-**The five passes above covered `95a4b03..be9f093`. Four commits landed after them and were
-reviewed by nobody:** `f38e868`, the merge `21f0a88`, and the two release commits `c0c9666`
-(v1.1.4) and `c2d0398` (v1.1.5). The recorded gate PASS is stamped 19:20; v1.1.4 and v1.1.5 pushed
-at 19:43 and 19:58, so it cannot speak to either. `c2d0398` shipped **`isUnsafePathComponent`** —
+**The five passes above covered `95a4b03..f1626e3`. FIVE commits landed after them and were
+reviewed by nobody:** `be9f093`, `f38e868`, the merge `21f0a88`, and the two release commits
+`c0c9666` (v1.1.4) and `c2d0398` (v1.1.5).
+
+*(Corrected, and the correction is itself an error worth keeping. An earlier version of this
+paragraph said the passes covered `95a4b03..be9f093` — pass five's stamp actually ends at
+`f1626e3` — and then took `be9f093` as the sixth pass's BASE. Since `A..B` excludes `A`, that
+choice left `be9f093` reviewed by nobody, and it changes shipped source: `scripts/usage-store.mjs
++21/-4`. **It is still unreviewed.** Fixing an off-by-one range by introducing another one, in the
+same paragraph, is the sharpest illustration in this document of why the counts get recomputed
+from the JSON rather than read from prose.)* The recorded gate PASS is stamped 19:20:18 UTC; the v1.1.4 and
+v1.1.5 commits are timed 19:43 and 19:58 UTC — 16:20, 16:43 and 16:58 as `git log` renders them
+here at -0300, and they are commit times, not push times. The gate predates both releases by 23
+and 38 minutes and cannot speak to either. `c2d0398` shipped **`isUnsafePathComponent`** —
 the sole path-component gate for two `path.join` sites — tagged and released with no adversarial
 review, while the handoff's "Still open" named only the test-only commit.
 
@@ -372,7 +385,7 @@ Validating the component's *name* can never validate its *target*. Fixed with `l
 resolved project directory — so a link the operator put higher up the path still works (a macOS
 temp dir is `/var` → `/private/var`) and a link that leaves the store does not.
 
-### The caveman claim was defeated a NINTH way, by the fix for the eighth (high ×2; fixed)
+### The caveman claim was defeated a NINTH way, by the fix for the eighth (high ×1 + medium ×1; fixed)
 
 `f38e868` pinned the caveman section as an exact snapshot and replaced the doc-wide heading screen
 with a line filter for the literal token `caveman`. Two lenses found the consequences independently:
@@ -418,18 +431,32 @@ enumeration found zero inputs reaching either arm and zero where the three-arm a
 predicates disagree. Two thirds of the predicate that read as the substance of the rule was
 unkillable by construction. It now has one arm, and the comment says why.
 
-CHANGELOG.md and HANDOFF.md both claimed "one mutation of it fails tests at both call sites". That
-claim was false when written and is true now.
+CHANGELOG.md and HANDOFF.md both claim "one mutation of it fails tests at both call sites".
+
+**That claim was TRUE when written, and an earlier version of this section said it was false.** At
+`c2d0398`, replacing the whole body of `isUnsafePathComponent` with `return false` — one mutation —
+fails 10 tests across both call-site files. The existential claim the release note actually makes
+was correct. What the sixth pass found is narrower and still worth fixing: three SPECIFIC mutations
+survived, including deletion of the Windows separator. That is a coverage gap, not a false release
+note, and stating the stronger version was the same overreach this document keeps recording.
 
 ### What the claims lens found in the handoff itself
 
 `HANDOFF.md` was essentially rewritten in this range and carried three highs and four mediums —
-the reviewed range stated as `95a4b03..master` when the passes ended at `be9f093`; "Still open"
+the reviewed range stated as `95a4b03..master` when the passes ended at `f1626e3`; "Still open"
 omitting `c2d0398`; "all eight escapes fail"; the gate-caveat sentence pointing at a persisted
 record that carries no `results` key at all; "only pass 1 found a user-facing bug", falsified by
-the `'.. '` traversal that pass 2 filed against code predating the repair work; and the 97/11 tally
+the `'.. '` traversal that pass 2 filed against code predating the repair work; the 97/11 tally
 naming the refutations as co-filers of a total they did not contribute to, using a high count they
-had themselves invalidated. All are corrected in the rewritten handoff.
+had themselves invalidated; and — the seventh, dropped from an earlier version of this very
+enumeration, which said "three highs and four mediums" and then listed six — `HANDOFF.md:38`'s
+"All are closed or accepted with the reasoning recorded", which was false while pass five had no
+record at all.
+
+They were corrected in the handoff rewrite, which happened in the commit AFTER the one this
+section describes. An earlier version of this sentence said "All are corrected in the rewritten
+handoff" while `HANDOFF.md` was untouched by the commit carrying that sentence — a claim about
+work that had not been done yet, filed as a `high` by the seventh pass.
 
 **The refutation files re-file the finding they adjudicate; they do not add new sites.** The honest
 tally of the first five passes is therefore **97 lens findings, 11 `high` pre-refutation, 8 `high`
@@ -437,10 +464,83 @@ post-refutation**. Any of those three numbers is defensible; stating one without
 the error.
 
 
+## Seventh review pass — the sixth pass's own repairs (2026-08-25)
+
+Four lenses over the repair commit filed **29 findings, 11 `high`** — 8 tests, 9 claims,
+7 correctness, 5 security. **More findings, and nearly twice the highs, than the pass it was
+repairing.** Seven consecutive rounds have now found defects in the previous round's fixes, and
+this was the worst of them.
+
+### What the repairs got wrong
+
+- **The containment fix was defeated by one symlink.** It anchored on `realpath(projectDir)` —
+  and `projectDir` is `<projectsDir>/<slug>`, a DERIVED name whoever writes the store can replace
+  with a link. Reproduced end-to-end through the CLI at exit 0. Now anchored on `projectsDir`, the
+  only path in the function nobody plants, and compared by EXACT MATCH rather than prefix
+  arithmetic — which also removes the `..foo` false positive (a legitimate session the module's own
+  name check accepts, refused by `rel.startsWith('..')`) and the sibling-session misattribution
+  (`rel` = `sess-other/subagents` has no `..` and passed).
+- **It was TOCTOU and did not use its own result.** `resolvedStore` was computed and never read;
+  the walk re-opened the unresolved name. Measured at **16.5% of invocations** returning an
+  attacker-chosen report against a concurrent `rename()`. The walk now reads from the resolved
+  path.
+- **`lstat` → `stat` was a surviving mutation.** The test named for it asserted only that the call
+  *rejects*, which the containment check does alone — so it passed with the half of the fix it was
+  named for reverted. Now pinned by observing WHICH session is selected, against a decoy that wins
+  on mtime.
+- **Three new tests would have taken Windows CI red.** They build symlinks with no
+  `{ skip: process.platform === 'win32' }`, against this file's own convention three lines away —
+  EPERM inside the fixture builder, so they FAIL rather than skip.
+- **`.meta.json` is a derived path and passed no filter at all** — not the walk's `isFile()`, not
+  the containment check, because both only see paths the walk listed. A symlinked meta file was a
+  constrained arbitrary file read; `mkfifo agent-x.meta.json` hung `usage` forever with no timeout,
+  and the pending read kept the process from exiting. Guarded by `lstat` + `isFile()`.
+
+### The caveman claim, defeated a tenth time — and the layer that finally closes it
+
+Escape #10 had three routes, found by two lenses independently: an ADDED section stating the
+inverse, carried past the byte-for-byte snapshot by `cp`-ing the fixture in the same commit; the
+runtime claim being bound only by `review-gen.mjs`, while `agents/tm-reviewer.md` — the reviewer's
+actual dispatch prompt — was bound by nothing; and `CHANGELOG.md` carrying the measurement in more
+detail than either pinned file, bound by nothing, byte-for-byte the hole just closed on README.
+
+**A presence check is not a negative.** `includes()` asserts the claim is still THERE, never that
+nothing contradicts it — escape #3's shape, re-shipped as the fix for escape #9. Re-running the
+battery after adding five layers showed escape #7 STILL green: a contradicting sentence added
+inside an EXISTING section, naming neither "reviewer" nor "caveman", with the fixture copied.
+
+The fixture is the weak link in any snapshot, because `cp` updates it in one motion. **The anchor
+is now a SHA-256 constant in the test file**, which no copy from the skill can reach, so any byte
+change fails there first. Eight escape routes were re-run against the finished instrument and all
+eight are red, escape #7 included. The other layers survive because they turn "the digest changed"
+into a message naming which kind of change it was, and because the heading and caveman-line
+inventories also live in the test file rather than the fixture.
+
+**Stated plainly, because six rounds of not stating it produced this section: none of the prose
+layers is a proof.** An author who edits the fixture, the digest and the inventories can make the
+skill say anything. What they buy is that every route requires a deliberate edit to a test file —
+a line in a diff a reviewer can question. The one layer that IS a proof is the runtime check, now
+covering `review-gen.mjs`, `agents/tm-reviewer.md` and `agents/tm-integrator.md`, because that is
+mechanically decidable.
+
+### One mutation deliberately left alive
+
+Reverting the walk to read from the unresolved name (`subagentsDir` instead of `resolvedStore`)
+**survives the whole suite**, and no test here kills it. The difference is observable only under a
+race, and the containment check forces the two paths to be equal in every state a test can
+construct. Rather than write a flaky timing test or imply coverage that does not exist, it is
+recorded: the resolved-path walk is hardening whose benefit is a narrower TOCTOU window, and the
+window is not zero — Node cannot close it without fd-relative opens. An attacker who can write
+inside the store does not need to win a race to put a transcript there; the race only buys reaching
+files OUTSIDE it.
+
 ## Not reviewed
 
-The claims lens reached its mutation cap with **9 claims enumerated but unprobed**, and said so
-rather than inflating the pass. Carried forward:
+Three passes recorded claims they enumerated but did not probe. Earlier versions of this section
+carried only the first pass's nine, which is the same omission — a lens file dropped from the
+record — that this document has now corrected three times at three different levels.
+
+**Pass one** reached its mutation cap with **9 claims enumerated but unprobed**:
 
 - `review-gen.mjs`'s `if (effort) dispatch.effort = effort` — the "unset effort falls back by
   omission" rule (read-verified, not mutated).
@@ -450,6 +550,23 @@ rather than inflating the pass. Carried forward:
 - Five of the six phase-4 "enumerated but never reached" claims; only `cli.mjs:2959` was probed.
 - `tests/skill-config.test.mjs`'s "pins each claim twice" — completeness across every sentence.
 - `usage --json` payload shape and `CLAUDE_CONFIG_DIR` honouring (read-verified, not mutated).
+
+**Pass five** carried nine of its own, and **pass six** six unprobed plus four it could not verify.
+Two of the sixth pass's are load-bearing here and are carried forward explicitly:
+
+- **The three mutation tables in this document** (the `mutation | killed by` tables above) assert
+  that specific mutants are killed by specific tests. They have **not been re-run** since they were
+  written. Only the v1.1.5 validator table was re-verified, by the seventh pass.
+- **`skills/teammates-config/SKILL.md`'s "larger by about 3%"** — the direction is pinned by a
+  test; the magnitude is pinned by nothing and has not been measured since it was written.
+
+**Pass seven** carried four unprobed, of which one matters: the nine-escape enumeration in
+`tests/skill-config.test.mjs`'s comment is a HISTORY, and no pass has walked the six earlier
+rounds' commits to confirm which escape belonged to which round. The escapes were re-run as
+BEHAVIOUR against the current tip, which is a different claim.
+
+**And the commit `be9f093` has been reviewed by no pass at all** — see the correction in the sixth
+pass section. It changes `scripts/usage-store.mjs`.
 
 ## A gap in the gate itself
 
