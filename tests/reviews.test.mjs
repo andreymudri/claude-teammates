@@ -718,3 +718,28 @@ test('neutralising a printed value does not change what reviewStale compares', (
     /judged/,
   )
 })
+
+// WINDOWS STRIPS TRAILING SPACES AND DOTS from a path component, so `'.. '` reaches the filesystem
+// as `..` and `'. '` as `.` — the two values these checks exist to refuse, wearing a suffix that
+// `=== '..'` does not see. Reported against `usage-store.mjs` and left open because this function
+// carried the identical gap and fixing one alone would have been worse than fixing neither.
+test('a component that Windows would strip back to . or .. is refused', () => {
+  for (const escape of ['.. ', '..  ', '...', '. ', '..\t', ' ..', '.. . ']) {
+    assert.throws(() => reviewFileName(1, escape), /lens/i, `lens ${JSON.stringify(escape)} must be refused`)
+    assert.throws(() => reviewFileName(escape, 'correctness'), /phase/i, `phase ${JSON.stringify(escape)} must be refused`)
+  }
+})
+
+// A component that is only spaces or dots collapses to nothing on Windows, which is the empty
+// name these checks already refuse in its other spelling.
+test('a component of only dots or spaces is refused', () => {
+  for (const escape of ['.', '..', '   ', '.  .', '....']) {
+    assert.throws(() => reviewFileName(1, escape), /lens/i, `lens ${JSON.stringify(escape)} must be refused`)
+  }
+})
+
+// Ordinary names keep working: the rule is about what a component RESOLVES to, not a ban on dots.
+test('a name that merely contains dots is still accepted', () => {
+  assert.equal(reviewFileName(1, 'v1.2.3'), '1-v1.2.3.json')
+  assert.equal(reviewFileName('phase.a', 'lens.b'), 'phase.a-lens.b.json')
+})

@@ -12,7 +12,7 @@
 import { readdir, readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
 
-import { printable } from './reviews.mjs'
+import { isUnsafePathComponent, printable } from './reviews.mjs'
 import { projectSlug, summarizeTranscript } from './usage.mjs'
 
 // The ONE definition of the shipped bound: `readSessionUsage` resolves `maxEntries ?? this`, so a
@@ -88,9 +88,10 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null, ma
   // joined again, so a directory an attacker can create under the projects directory is the same
   // primitive. Unvalidated, `../` walked out of the store entirely and read .jsonl files
   // elsewhere on disk, disclosing the first bytes of one through a parse-error line.
-  // `reviewFileName` (scripts/reviews.mjs) refuses a lens on exactly these grounds; this is that
-  // rule applied to the one component this module joins.
-  if (typeof session !== 'string' || session === '' || /[\\/]/.test(session) || session === '.' || session === '..') {
+  // The SAME function `reviewFileName` uses, not a second copy of its rule. The two were separate
+  // implementations and drifted: both missed that Windows strips trailing spaces and dots, so
+  // `'.. '` reached the filesystem as `..`.
+  if (isUnsafePathComponent(session)) {
     throw new Error(`a session must be a non-empty name with no path separators, got ${JSON.stringify(printable(session))}`)
   }
   const subagentsDir = path.join(projectDir, session, 'subagents')

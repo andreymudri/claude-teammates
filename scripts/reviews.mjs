@@ -83,14 +83,31 @@ export function printableBlock(value) {
 // whitespace-only value readable, but it is not the neutralisation: it escapes quotes and the C0
 // range and leaves the C1 range and U+2028/U+2029 alone. `printable` runs first, on the value, so
 // what `JSON.stringify` quotes already carries no control character at all.
+// The one rule for any value that becomes a single path component. Exported because it had two
+// implementations — here and in `usage-store.mjs` — and they drifted: a review found the trailing
+// space/dot gap in one and it was left open precisely because the other shared it, so fixing one
+// alone would have been worse than fixing neither.
+//
+// WINDOWS STRIPS TRAILING SPACES AND DOTS from a path component, so `'.. '` reaches the filesystem
+// as `..` and `'. '` as `.` — the two values this refuses, wearing a suffix that `=== '..'` cannot
+// see. The test is therefore on what the component RESOLVES to, not on the literal: a name that
+// merely contains dots (`v1.2.3`) is fine, and one that collapses to nothing, `.` or `..` is not.
+export function isUnsafePathComponent(value) {
+  if (typeof value !== 'string' || value === '') return true
+  if (/[\\/]/.test(value)) return true
+  // Trailing dots AND spaces, in any interleaving: Win32 strips the whole run.
+  const resolved = value.replace(/[. \t]+$/, '')
+  return resolved === '' || resolved === '.' || resolved === '..'
+}
+
 export function reviewFileName(phase, lens) {
-  if (typeof lens !== 'string' || lens === '' || /[\\/]/.test(lens) || lens === '.' || lens === '..') {
+  if (isUnsafePathComponent(lens)) {
     throw new Error(`a lens must be a non-empty name with no path separators, got ${JSON.stringify(printable(lens))}`)
   }
   // `phaseName` is what gets validated, so `phaseName` is what gets quoted and what gets joined:
   // re-coercing `phase` a second time would let the checked value and the used value differ.
   const phaseName = String(phase)
-  if (phaseName === '' || /[\\/]/.test(phaseName) || phaseName === '.' || phaseName === '..') {
+  if (isUnsafePathComponent(phaseName)) {
     throw new Error(`a phase must be a non-empty name with no path separators, got ${JSON.stringify(printable(phaseName))}`)
   }
   return `${phaseName}-${lens}.json`

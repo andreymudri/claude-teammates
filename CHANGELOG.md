@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.1.5
+
+One path-traversal gap, closed in both places that had it.
+
+Windows strips trailing spaces and dots from a path component, so `'.. '` reaches the filesystem as
+`..` — the value `reviewFileName` and the `usage` session check both existed to refuse, wearing a
+suffix that `=== '..'` cannot see. Reported against one of them and deliberately carried across
+v1.1.4, because the two were separate implementations of a single rule: fixing either alone would
+have left the other, and left a comment claiming a shared rule that was not shared.
+
+They are one exported function now, `isUnsafePathComponent`. It tests what a component *resolves*
+to rather than its literal, so a name that merely contains dots (`v1.2.3`) still works, while
+anything collapsing to nothing, `.` or `..` is refused. A single mutation of that function fails
+tests at both call sites, which is what the shared rule buys.
+
 ## v1.1.4
 
 `usage` reported a workflow-dispatched run as costing nothing. Bug fixes and the tests that pin

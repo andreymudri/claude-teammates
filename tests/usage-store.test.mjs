@@ -586,3 +586,20 @@ test('a transcript that lost some lines but kept others is partial, not unreadab
       'a partial transcript still contributes its row, which is what makes it partial')
   }, { files: { 'agent-torn.jsonl': `${line({ cache_read_input_tokens: 10 })}\n{"broken` } })
 })
+
+
+// The Windows half of the traversal rule, at the site the finding was reported against. Windows
+// strips trailing spaces and dots from a path component, so `'.. '` reaches the filesystem as
+// `..`. This was left open across a release BECAUSE `reviewFileName` shared the gap — the two
+// checks were separate implementations of one rule. They are the same function now.
+test('a session name Windows would strip back to .. is refused', async () => {
+  await withStore(async ({ projectsDir }) => {
+    for (const escape of ['.. ', '...', '. ', '..\t', '   ']) {
+      await assert.rejects(
+        () => readSessionUsage({ projectsDir, root: FAKE_ROOT, sessionId: escape }),
+        (err) => /no path separators/.test(err.message) && !/no transcripts found/.test(err.message),
+        `session ${JSON.stringify(escape)} must be refused by name`,
+      )
+    }
+  }, { files: { 'agent-a.jsonl': line({ cache_read_input_tokens: 10 }) } })
+})

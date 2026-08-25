@@ -1,6 +1,6 @@
 # Handoff — 2026-08-25, end of session
 
-Everything is on `master` and pushed. `v1.1.4` is tagged at `master`; nothing is unreleased.
+Everything is on `master` and pushed. `v1.1.5` is tagged at `master`; nothing is unreleased.
 
 ## Read this first
 
@@ -17,8 +17,8 @@ measuring any such change, check `claude plugin list` against `.claude-plugin/pl
 
     claude plugin update claude-teammates@claude-teammates   # bare name fails; @marketplace is required
 
-and restart. An unbumped version makes the update a no-op — which is why `v1.1.4` exists rather
-than leaving the fixes on `master` untagged.
+and restart. An unbumped version makes the update a no-op — which is why `v1.1.4` and `v1.1.5`
+exist rather than leaving the fixes on `master` untagged.
 
 ## What this session did
 
@@ -85,19 +85,24 @@ should.
 
 ## Verify before trusting anything above
 
-    npm test                              # expect 1937 tests, 1934 pass, 0 fail, 3 skipped
+    npm test                              # expect 1941 tests, 1938 pass, 0 fail, 3 skipped
     gh run list --limit 1                 # green on Linux, macOS and Windows
     node scripts/cli.mjs usage --root .   # the command this release fixes
 
 CI was green on all three platforms at `f38e868`, the tip merged as `21f0a88`.
 
+## Closed in v1.1.5
+
+- **`'.. '` passed both path-component validators.** Windows strips trailing spaces and dots, so
+  `'.. '` reached the filesystem as `..` — the value both checks existed to refuse, wearing a
+  suffix that `=== '..'` could not see. It was carried across a release **by decision**, because
+  `usage-store.mjs` and `reviewFileName` were separate implementations of one rule and fixing
+  either alone would have left the other. They are now the same exported function
+  (`isUnsafePathComponent`), which tests on what a component *resolves* to rather than its
+  literal — so `v1.2.3` still works — and one mutation of it fails tests at both call sites.
+
 ## Still open
 
-- **`'.. '` passes the session-name validator.** Windows strips trailing spaces and dots from a
-  path component, so `'.. '` resolves to `..`. Left open **by decision**: it is a single component
-  with a fixed last segment, it is unverified on Windows, and `reviewFileName`
-  (`scripts/reviews.mjs`) has the identical gap — fixing one while its model keeps the other is
-  worse than fixing neither. Fix both together or neither.
 - **The final commit of the branch (`f38e868`) is self-verified by mutation but not lens-reviewed.**
   Every unreviewed commit on that branch turned out to contain something. The gate's `review` check
   records this in its `output` rather than implying full coverage.
