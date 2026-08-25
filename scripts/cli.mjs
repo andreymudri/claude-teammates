@@ -1811,9 +1811,14 @@ export async function runCli(argv, io = { out: console.log }) {
       // These commands filter tasks and count fix rounds by numeric phase, so a phase with no
       // task set has nothing to retry: its findings are fixed directly rather than by
       // redispatching a teammate. Stated as the boundary it is.
+      // Every OTHER missing flag is listed alongside. Returning on the phase alone bounced the
+      // operator a second time for something this call already knew was absent.
+      const alsoMissing = missing.filter((m) => m !== NAMED_PHASE_REFUSAL)
       io.out(`${command} takes --phase <integer> and got ${printable(flags.phase)}: a named phase `
         + 'has no task set to adjudicate. A --no-fleet gate produces one, and its findings are '
-        + `fixed directly rather than by redispatching a task.\n\n${USAGE}`)
+        + 'fixed directly rather than by redispatching a task.'
+        + (alsoMissing.length > 0 ? ` Also missing: ${alsoMissing.join(', ')}.` : '')
+        + `\n\n${USAGE}`)
       return 2
     }
     if (missing.length > 0) {
@@ -3042,7 +3047,13 @@ export async function runCli(argv, io = { out: console.log }) {
         root,
         sessionId: typeof flags.session === 'string' && flags.session !== '' ? flags.session : null,
       })
-      io.out(flags.json === true ? JSON.stringify(report, null, 2) : renderUsage(report))
+      // The JSON branch does not pass through `renderUsage`, so neutralising the table left this
+      // one raw: `JSON.stringify` escapes the C0 range and leaves C1 and U+2028/U+2029 alone, and
+      // U+009B is CSI to a terminal decoding C1. The values are read from a meta.json an agent can
+      // write and from a session directory name, so they are neutralised here too. `printableBlock`
+      // rather than `printable`: the pretty-printer's own newlines are structure, and neutralising
+      // them leaves a document that no longer parses.
+      io.out(flags.json === true ? printableBlock(JSON.stringify(report, null, 2)) : renderUsage(report))
       return 0
     } catch (err) {
       // Neutralised like every other print site in this file. The value is not the operator's own

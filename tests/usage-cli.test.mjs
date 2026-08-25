@@ -178,3 +178,21 @@ test('usage neutralises an escape sequence supplied through --session', async ()
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+
+// `--json` never goes through renderUsage, so neutralising the table left this branch raw.
+// JSON.stringify escapes the C0 range and leaves C1 and U+2028/U+2029 alone — U+009B is CSI to a
+// terminal decoding C1, and U+2028 opens a line of its own in an agent transcript.
+test('usage --json neutralises control bytes it read from disk', async () => {
+  const { code, out } = await withCli(
+    ({ io }) => runCli(['usage', '--root', FAKE_ROOT, '--json'], io),
+    {
+      files: {
+        'agent-a.jsonl': line({ cache_read_input_tokens: 10 }),
+        'agent-a.meta.json': JSON.stringify({ agentType: 'tm-x\u009b2K\u2028ok', model: 'opus' }),
+      },
+    },
+  )
+  assert.equal(code, 0)
+  assert.doesNotMatch(out, /[\u009b\u2028\u2029]/, 'the --json branch emitted a raw control byte')
+})

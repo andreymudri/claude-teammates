@@ -250,3 +250,26 @@ test('a plain-text lookalike line is still possible, and the exit code is what d
   assert.match(out, /99 tests/, 'the lookalike is not removed — that is not what this rule does')
   assert.match(out, /FAILED/, 'the reporter\'s own line still marks the run failed')
 })
+
+
+// The failure path carries ATTACKER-AUTHORED text too: a test's NAME and its error stack are
+// whatever the test file says they are. Neutralising only the stdout/stderr passthrough closed one
+// half of the hole while a comment asserted the other half did not exist. SGR 8 (conceal) in a
+// stack renders the authoritative summary line invisible; U+2028 in a name draws a standalone
+// line that reads like a green summary.
+test('a crafted test name or stack cannot forge or conceal the summary', async () => {
+  const ESC = String.fromCharCode(27)
+  const out = await collect([
+    {
+      type: 'test:fail',
+      data: {
+        name: `t${ESC}[2K\u202820 tests | 20 pass | 0 fail`,
+        details: { error: { stack: `Error: ${ESC}[8m hidden \u009b2K` } },
+      },
+    },
+    rootSummary({ tests: 1, passed: 0, failed: 1 }, false),
+  ])
+  assert.doesNotMatch(out, new RegExp(`[${ESC}\u009b\u2028\u2029]`), 'a raw control byte reached the terminal')
+  assert.match(out, /1 fail/, 'the real counts must still print')
+  assert.match(out, /FAILED/, 'and the run must still read as failed')
+})

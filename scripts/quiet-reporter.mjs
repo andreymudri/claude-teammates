@@ -20,7 +20,12 @@ import { printableBlock } from './reviews.mjs'
 function renderFailure(data) {
   const error = data.details?.error
   const body = error?.stack ?? error?.message ?? String(error)
-  return `✖ ${data.name}\n${body}\n\n`
+  // Neutralised, because BOTH halves are attacker-authored: a test's name and its thrown error are
+  // whatever the test file says. Raw, a stack carrying SGR 8 (conceal) rendered the authoritative
+  // summary line invisible, and a U+2028 in a name drew a standalone line that read like a green
+  // summary. `printableBlock` keeps the newlines and tabs a stack needs to stay legible, so
+  // nothing about failure readability is traded away.
+  return `✖ ${printableBlock(data.name)}\n${printableBlock(body)}\n\n`
 }
 
 // Printed on green AND red. It is what satisfies this project's evidence rule — a claim that
@@ -60,8 +65,11 @@ export default async function* quietReporter(source) {
     // neutralises every other control byte.
     //
     // This does not cost failure readability, which is the thing this reporter exists to protect:
-    // `renderFailure` reads the stack from the `test:fail` event, never from these two streams.
-    // What it cannot do is stop a test printing a line that merely LOOKS like the summary; the
+    // `printableBlock` keeps newlines and tabs. An earlier version of this comment argued the fix
+    // was COMPLETE because `renderFailure` reads its text from the `test:fail` event rather than
+    // from these streams — which was wrong twice over: that payload is attacker-authored too, so
+    // the event being a different source made it no safer. `renderFailure` neutralises separately.
+    // What neither can do is stop a test printing a line that merely LOOKS like the summary; the
     // exit code remains the authority, and `scripts/gate-runner.mjs` reads that, never this text.
     if (event.type === 'test:stderr' || event.type === 'test:stdout') {
       yield printableBlock(event.data.message)

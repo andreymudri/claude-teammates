@@ -11081,6 +11081,20 @@ test('fix explains that a named-phase verdict has no task set to adjudicate', as
   })
 })
 
+// The named-phase refusal returned before the generic line, so every OTHER missing flag on the
+// same invocation went unreported and the operator was bounced a second time for something the
+// CLI already knew was absent. Both are said at once.
+test('the named-phase refusal still lists the other missing arguments', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    lines.length = 0
+    const code = await runCli(['workflow', '--phase', 'default', '--root', root], io)
+    assert.equal(code, 2)
+    const message = lines.join('\n').split('\n\n')[0]
+    assert.match(message, /no task set|named phase/i, 'the phase boundary must still be explained')
+    assert.match(message, /--run/, 'the other missing argument must not be swallowed')
+  })
+})
+
 // The other side: when the two sources agree, the report says nothing extra. An advisory that
 // fires on every run is one an operator learns to ignore.
 test('finish says nothing about staleness when plan.json matches the plan at the anchor', async () => {

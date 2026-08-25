@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rm, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -340,4 +340,85 @@ test('a store whose transcripts are all unreadable reports them rather than thro
     assert.equal(report.agents.length, 0)
     assert.equal(report.unreadable.length, 1, 'the unreadable transcript must still be named')
   }, { files: { 'agent-bad.jsonl': 'not json at all' } })
+})
+
+
+// SYMLINKS ARE NOT FOLLOWED. Making the walk recursive also made it follow directory symlinks, so
+// one planted link inside the store made `usage` read and report agent-*.jsonl from anywhere on
+// disk — and the walk re-entered itself until ELOOP, multiplying every total. The session-name
+// validator does not help: it checks the one component this module joins, while this traversal
+// happens inside the walk. Skipped on Windows, where creating a symlink needs a privilege CI does
+// not grant; the behaviour under test is platform-independent.
+test('a directory symlink inside the store is not followed', { skip: process.platform === 'win32' }, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-usage-link-'))
+  try {
+    const subagents = path.join(dir, projectSlug(FAKE_ROOT), 'sess-1', 'subagents')
+    await mkdir(subagents, { recursive: true })
+    await writeFile(path.join(subagents, 'agent-a.jsonl'), line({ cache_read_input_tokens: 10 }), 'utf8')
+
+    const outside = path.join(dir, 'outside')
+    await mkdir(outside, { recursive: true })
+    await writeFile(path.join(outside, 'agent-secret.jsonl'), line({ cache_read_input_tokens: 999 }), 'utf8')
+    await symlink(outside, path.join(subagents, 'peek'), 'dir')
+
+    const report = await readSessionUsage({ projectsDir: dir, root: FAKE_ROOT })
+    assert.equal(report.agents.length, 1, 'only the transcript inside the store may be reported')
+    assert.equal(report.agents[0].cacheRead, 10)
+    assert.doesNotMatch(JSON.stringify(report), /agent-secret/, 'the walk left the store')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+// One unreadable subdirectory must not abort the whole report. The recursive readdir propagated a
+// nested EACCES to the top-level catch, which threw "no transcripts found" — dropping a readable
+// transcript sitting in the very directory the message named, and blaming a harness layout change
+// that had not happened. A workflow directory removed mid-walk (ENOENT) does the same, during
+// exactly the live run an operator reports on.
+test('an unreadable subdirectory is reported, not fatal to the whole report', { skip: process.platform === 'win32' }, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-usage-eacces-'))
+  const locked = path.join(dir, projectSlug(FAKE_ROOT), 'sess-1', 'subagents', 'locked')
+  try {
+    const subagents = path.join(dir, projectSlug(FAKE_ROOT), 'sess-1', 'subagents')
+    await mkdir(locked, { recursive: true })
+    await writeFile(path.join(subagents, 'agent-a.jsonl'), line({ cache_read_input_tokens: 10 }), 'utf8')
+    await chmod(locked, 0o000)
+
+    const report = await readSessionUsage({ projectsDir: dir, root: FAKE_ROOT })
+    assert.equal(report.agents.length, 1, 'the readable transcript must still be reported')
+    assert.equal(report.unreadable.length, 1, 'the directory that could not be read must be named')
+    assert.match(report.unreadable[0].name, /locked/)
+  } finally {
+    await chmod(locked, 0o700).catch(() => {})
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+// A transcript that parsed to zero records with zero parse errors — an empty or whitespace-only
+// agent-*.jsonl, the ordinary state between a dispatch creating the file and the first turn being
+// appended — was dropped with no row AND no unreadable entry. Alone in a store it tripped the
+// empty-report throw and blamed the layout; beside a good one it vanished from the count.
+test('an empty transcript is reported rather than silently dropped', async () => {
+  await withStore(async ({ projectsDir }) => {
+    const report = await readSessionUsage({ projectsDir, root: FAKE_ROOT })
+    assert.equal(report.agents.length, 1, 'the transcript with records still produces a row')
+    assert.equal(report.unreadable.length, 1, 'the empty one must be named, not dropped')
+    assert.match(report.unreadable[0].name, /agent-empty/)
+    assert.equal(report.unreadable[0].kept, 0)
+  }, {
+    files: {
+      'agent-a.jsonl': line({ cache_read_input_tokens: 10 }),
+      'agent-empty.jsonl': '   \n  \n',
+    },
+  })
+})
+
+// And alone, an empty transcript is a store that yielded nothing readable — but it is NOT the
+// "layout has changed" case, because the file is present and correctly named.
+test('a store holding only an empty transcript reports it rather than blaming the layout', async () => {
+  await withStore(async ({ projectsDir }) => {
+    const report = await readSessionUsage({ projectsDir, root: FAKE_ROOT })
+    assert.equal(report.agents.length, 0)
+    assert.equal(report.unreadable.length, 1)
+  }, { files: { 'agent-empty.jsonl': '' } })
 })

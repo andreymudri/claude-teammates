@@ -193,6 +193,32 @@ The limit is stated in the code and pinned by a test rather than left implied: t
 test printing a line that merely *looks* like the summary. The exit code remains the authority,
 and `scripts/gate-runner.mjs:26` reads that, never this text.
 
+## Second review pass — the fixes reviewed (2026-08-25)
+
+The verdict recorded above judged a tree that no longer existed once the fixes landed, so four
+fresh lenses were dispatched over `6a9edff..08574f5` — the fix branch itself — each told that the
+author's own mutation claims were not to be taken on trust. It found seven more, six of them
+defects in the fixes. Recorded because a fix pass that reviews itself and finds nothing is the
+outcome to distrust.
+
+| sev | site | finding | resolution |
+|---|---|---|---|
+| high → **low** | `usage-store.mjs` recursive `readdir` follows directory symlinks | A link planted in the store made `usage` read transcripts anywhere on disk, and a self-referential link multiplied every total until ELOOP. | **Refuted down to low, and fixed anyway.** The refuter ran the BASE commit and got the identical foreign row: `readFile` follows symlinks and the base filter had no `agent-` prefix, so the base accepted a symlinked transcript under any name. Not a regression. It also disproved the finding's `fixed prefix = N%` claim — that ratio is scale-invariant under uniform duplication. |
+| medium | `usage-store.mjs` — nested `readdir` failure fatal | One unreadable subdirectory aborted the whole report, and the catch relabelled it "no transcripts found", dropping a readable transcript in the directory that message names. A directory removed mid-walk does the same, during exactly the live run an operator reports on. | Fixed by the same walk. |
+| medium | `cli.mjs` — `--json` never neutralised | That branch does not pass through `renderUsage`, and `JSON.stringify` escapes C0 while leaving C1 and U+2028/U+2029 raw. One branch of a ternary was neutralised and a comment claimed the command was covered. | Fixed with `printableBlock` — `printable` would destroy the pretty-printer's own newlines and leave a document that no longer parses. |
+| medium | `quiet-reporter.mjs` — `renderFailure` unwrapped | A test's NAME and its error stack are attacker-authored too. SGR 8 in a stack renders the summary line invisible; U+2028 in a name draws a standalone line reading like a green summary. | Fixed. **The comment justifying the earlier fix was wrong** and is retracted in place: it argued the fix was complete *because* `renderFailure` reads from the `test:fail` event — but a different source is not a safer one. |
+| low | `cli.mjs` — named-phase refusal swallowed other missing args | `workflow --phase default` reported only the phase, never the missing `--run`, bouncing the operator twice. | Fixed; both are said at once. |
+| low | `usage-store.mjs` — empty transcript vanished | A transcript parsing to zero records with zero errors got no row and no `unreadable` entry — the ordinary state between a dispatch creating the file and the first turn being appended. Alone in a store it tripped the empty-report throw and blamed the layout. | Fixed. |
+| low | `usage-store.mjs` — `'.. '` passes the validator | Windows strips trailing spaces and dots from a path component, so `'.. '` resolves to `..`. **Unverified on Windows**, and `reviewFileName` has the identical gap. | **Open.** Recorded rather than fixed: single component, fixed last segment, and fixing it in one place while its model keeps the gap would be worse than fixing neither. |
+
+The correctness lens also fuzzed `renderUsage` over 4,000 random reports asserting header, rows,
+separator and TOTAL all share one width — zero mismatches — and confirmed the `agent-` filter and
+the per-line parse against the real store.
+
+One thing it declined to file, correctly: the `model` column renders `(unknown)` as `(unknow…`.
+The base does the same, so the branch did not introduce it — though it is the same argument the
+numeric-width fix rests on, applied to a value this codebase generates itself.
+
 ## Not reviewed
 
 The claims lens reached its mutation cap with **9 claims enumerated but unprobed**, and said so
