@@ -345,3 +345,30 @@ test('renderPlanNotes does not add a tail when the list fits under the cap', () 
   assert.doesNotMatch(out, /more/)
   assert.equal(out.split('\n').length, 4)
 })
+
+
+// The singular branch of the notice. Every fixture above drops four entries, so `entry` vs
+// `entries` was never exercised and the ternary could be collapsed either way with the suite
+// green — a report that says "1 unreadable entries" reads as a template that was never checked.
+test('renderPlanNotes says "entry" when exactly one is unreadable', () => {
+  const out = renderPlanNotes({
+    notYetSpecified: [
+      { text: 'A real question?', line: 1 },
+      null,
+    ],
+  })
+  assert.match(out, /1 unreadable entry\b/)
+  assert.doesNotMatch(out, /1 unreadable entries/, 'the singular branch was not taken')
+})
+
+
+// The mirror of the test above, and the reason one alone is not enough: pinning only the singular
+// let the ternary be collapsed to always-`entry`, which reads "4 unreadable entry". Both branches
+// have to be pinned, or the fix for an unfalsifiable test is itself unfalsifiable in one direction.
+test('renderPlanNotes says "entries" when more than one is unreadable', () => {
+  const out = renderPlanNotes({
+    notYetSpecified: [{ text: 'A real question?', line: 1 }, null, 'a bare string'],
+  })
+  assert.match(out, /2 unreadable entries\b/)
+  assert.doesNotMatch(out, /2 unreadable entry\b/, 'the plural branch was not taken')
+})

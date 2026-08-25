@@ -10975,6 +10975,129 @@ test('finish marks plan notes as stale when the plan at the anchor has moved on'
   })
 })
 
+// Drift in the WORDING of a fog entry, at an unchanged count. The two tests above both change the
+// LENGTH of the list, so `recorded.length === current.length` alone satisfied them and deleting
+// the per-entry text comparison in `samePlanNotes` left them green — a question rewritten to ask
+// something else read as unchanged. Found by mutation.
+test('finish marks plan notes as stale when a fog entry is reworded but the count is the same', async () => {
+  await withRepo(async ({ root, io, lines, git: g }) => {
+    const planPath = path.join(root, 'foggy-plan.md')
+    g(['checkout', '--quiet', 'main'])
+    await writeFile(planPath, PLAN_WITH_DESTINATION_AND_FOG, 'utf8')
+    g(['add', '.'])
+    g(['commit', '--quiet', '-m', 'add foggy plan'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--quiet', 'main'])
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      lens: ['correctness'],
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+
+    // One entry before, one entry after — only the words differ, and they ask a different thing.
+    g(['checkout', '--quiet', 'main'])
+    await writeFile(planPath, PLAN_WITH_DESTINATION_AND_FOG.replace(
+      '- Where does a resolved fog entry go once someone decides it?',
+      '- Who owns the run branch after the integrator has merged the last phase?',
+    ), 'utf8')
+    g(['add', '.'])
+    g(['commit', '--quiet', '-m', 'reword the fog entry'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--quiet', 'main'])
+
+    lines.length = 0
+    await runCli(['finish', '--run', 'r1', '--plan', 'foggy-plan.md', '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    assert.match(out, /stale|out of date|no longer match/i, 'a reworded entry at the same count read as unchanged')
+  })
+})
+
+// The advisory's remedy has a direction. `init-run` records from the WORKING TREE plan, while the
+// anchor is the plan committed at merge-base(base, run) — so when plan.json is AHEAD, re-running
+// init-run rewrites the identical plan.json and the advisory fires again, forever. It must not
+// send the operator round a loop; it has to name the case where the edit simply has not reached
+// the anchor yet.
+test('the staleness advisory names the remedy for plan.json being ahead of the anchor', async () => {
+  await withRepo(async ({ root, io, lines, git: g }) => {
+    const planPath = path.join(root, 'foggy-plan.md')
+    g(['checkout', '--quiet', 'main'])
+    await writeFile(planPath, PLAN_WITH_DESTINATION_AND_FOG, 'utf8')
+    g(['add', '.'])
+    g(['commit', '--quiet', '-m', 'add foggy plan'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--quiet', 'main'])
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      lens: ['correctness'],
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+
+    // Amend the plan and re-record it, WITHOUT the edit reaching the base branch. plan.json is now
+    // ahead of the anchor, which is the direction re-running init-run cannot fix.
+    await writeFile(planPath, PLAN_WITH_DESTINATION_AND_FOG.replace(
+      '- Where does a resolved fog entry go once someone decides it?',
+      '- Where does a resolved fog entry go?\n- Who owns the run branch at the end?',
+    ), 'utf8')
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+
+    lines.length = 0
+    await runCli(['finish', '--run', 'r1', '--plan', 'foggy-plan.md', '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    assert.match(out, /stale|no longer match/i, 'the two sources do differ, so the advisory must fire')
+    assert.match(out, /base branch|reached the anchor|has not reached/i,
+      'the advisory must name the ahead case, not only tell the operator to re-run init-run')
+  })
+})
+
+// A `--no-fleet` gate names its phase from the manifest — `default` here — and emits a verdict
+// carrying `phaseName` with no integer `phase`. `fix` requires `--phase <integer>` because its
+// task filter and round counter are numeric, so such a verdict can never be adjudicated by it.
+// That is a real boundary and not a typo, but the refusal read as one: a bare "missing required
+// argument" is what a mistyped flag gets, so an operator following the phase-gate skill end to
+// end was told nothing about why. Found by running gate and fix back to back.
+test('fix explains that a named-phase verdict has no task set to adjudicate', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const verdictPath = path.join(root, 'verdict.json')
+    await writeFile(verdictPath, JSON.stringify({
+      verdict: 'FAIL', failed: ['review'], phaseName: 'default', results: [],
+    }), 'utf8')
+    lines.length = 0
+    const code = await runCli(
+      ['fix', '--run', 'r1', '--phase', 'default', '--verdict', verdictPath, '--root', root],
+      io,
+    )
+    assert.equal(code, 2)
+    // The MESSAGE line only. Asserting against the whole output passed against the old refusal,
+    // because `USAGE` is dumped beneath it and the usage text itself contains `--no-fleet`.
+    const message = lines.join('\n').split('\n\n')[0]
+    assert.match(message, /keyed by numeric phase|no task branches/i,
+      'the refusal must name the case rather than reading as a mistyped flag')
+    // And must NOT claim a named phase has no task set: `tasksOfPhase` returns every task of the
+    // run for a non-integer name. An earlier wording said exactly that and was false.
+    assert.doesNotMatch(message, /named phase has no task set/i, 'the refusal overstates')
+    assert.doesNotMatch(message, /^missing required argument/,
+      'a real boundary must not be reported as a typo')
+  })
+})
+
+// The named-phase refusal returned before the generic line, so every OTHER missing flag on the
+// same invocation went unreported and the operator was bounced a second time for something the
+// CLI already knew was absent. Both are said at once.
+test('the named-phase refusal still lists the other missing arguments', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    lines.length = 0
+    const code = await runCli(['workflow', '--phase', 'default', '--root', root], io)
+    assert.equal(code, 2)
+    const message = lines.join('\n').split('\n\n')[0]
+    assert.match(message, /keyed by numeric phase/i, 'the phase boundary must still be explained')
+    assert.match(message, /--run/, 'the other missing argument must not be swallowed')
+  })
+})
+
 // The other side: when the two sources agree, the report says nothing extra. An advisory that
 // fires on every run is one an operator learns to ignore.
 test('finish says nothing about staleness when plan.json matches the plan at the anchor', async () => {

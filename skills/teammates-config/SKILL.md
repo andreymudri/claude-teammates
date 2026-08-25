@@ -45,7 +45,7 @@ The caveman brief is **larger** than the default, by about 3%. Compressing the c
 saves less than the added STYLE block costs, and a brief sits in the agent's prefix, so that cost
 is re-read on every turn.
 
-The four levels are validated but not honoured by this plugin's own code: `digest` reads only
+The three levels are validated but not honoured by this plugin's own code: `digest` reads only
 whether the value is truthy, and the brief passes the level through to an external
 `caveman:caveman` skill, telling the agent to apply the style directly when that skill is absent.
 

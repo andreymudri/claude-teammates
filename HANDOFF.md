@@ -13,7 +13,7 @@ same agent from the pinned snapshot that lacked the line — **17,889 tokens per
 
 Higher than the ~7,900 the previous session predicted, and the prediction was the wrong shape
 rather than the measurement being off: 7,900 came from `tm-reviewer`, which declares five tools
-to `tm-implementer`'s seven and has a shorter definition. The number to carry forward is the
+to `tm-implementer`'s six and has a shorter definition. The number to carry forward is the
 **delta**, not either absolute.
 
 The cache is at `1.1.1`, pinned at `c3c6937` — `master` at the time of the refresh — and
@@ -94,10 +94,18 @@ Measured composition of the 27,499-token prefix:
 On the last row — **measured 2026-08-25, and the answer is no.** Four facts, each read from code
 or from the real transcripts in session `314b4caf`, not estimated:
 
-1. `caveman` is read only by `composeBrief` (`scripts/brief.mjs`), called only from
-   `scripts/workflow-gen.mjs` for **implementer** dispatches. `scripts/review-gen.mjs` has no
-   caveman path, so the `claims` reviewer that emitted 22,900 output tokens — the whole
-   motivating example — never receives the instruction at all.
+1. `caveman` has two readers, and `composeBrief` (`scripts/brief.mjs`) has two call sites —
+   `scripts/workflow-gen.mjs` and the `brief` subcommand in `scripts/cli.mjs` — but **both
+   produce implementer briefs**. The second reader, `renderDigest` (`scripts/digest.mjs`, called by
+   the `digest` subcommand), shortens the digest this CLI prints to the operator; it reaches no agent's
+   output at all. What carries the argument is unchanged: `scripts/review-gen.mjs` has no caveman
+   path, so the `claims` reviewer that emitted 22,900 output tokens — the whole motivating example
+   — never receives the instruction.
+
+   *(Corrected 2026-08-25. The original read "read only by `composeBrief`, called only from
+   `workflow-gen.mjs`"; both halves were false, found by a `claims` reviewer. The conclusion below
+   survives the correction, because it rests on `review-gen.mjs` having no caveman path, which
+   holds.)*
 2. The terse brief's STYLE block scopes the style to "summary and blockers": the returned result,
    not intermediate turns and not thinking.
 3. That summary is the **last** assistant message — turn 49/49 and 46/46 in the two real

@@ -196,6 +196,20 @@ a mismatch exits 2 rather than adjudicating the wrong phase's findings, and so d
 read: an argument error, not a decision. Exit 0 covers `none`, `retry`, and `escalate` alike, so
 the exit status never tells them apart — only the `decision` field does.
 
+**`fix` does not apply to a `--no-fleet` gate, and this whole section does not either.** `--phase`
+here must be an INTEGER, because tasks and fix rounds are keyed by numeric phase. A `--no-fleet`
+gate names its phase from the manifest instead — `default`, typically — and emits a verdict
+carrying `phaseName` with no integer `phase`, so handing it to `fix` exits 2 (a third cause,
+alongside the phase mismatch and the malformed manifest). That is not a defect to work around:
+`--no-fleet` builds no preview and has no task branches, so there is no teammate to redispatch and
+nothing for a decision engine to attribute a finding to. **Fix the findings directly, then re-run
+the gate from scratch for a fresh verdict.** Everything below about `retry`, `escalate` and the
+round budget presumes a fleet phase with task branches. Two rules still bind on a solo gate, and both are restated here in full rather than cross-referenced:
+**a PASS reached after N rounds of fixes is reported as such, never as a clean first-pass PASS**,
+and **a check that was skipped is reported as skipped, every time**. A solo gate writes a verdict
+into `status.json` only when the caller passes `--run`, and a solo gate invoked without `--run`
+writes no verdict anywhere.
+
 **The verdict you hand it must be the JSON this gate printed in this same pass, and must never be
 read back from `.teammates/`.** The only verdict persisted on disk lives in
 `status.gates[<phase>]` inside `.teammates/<run>/status.json`, written by the very agents this
