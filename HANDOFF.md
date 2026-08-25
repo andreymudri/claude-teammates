@@ -13,7 +13,7 @@ same agent from the pinned snapshot that lacked the line — **17,889 tokens per
 
 Higher than the ~7,900 the previous session predicted, and the prediction was the wrong shape
 rather than the measurement being off: 7,900 came from `tm-reviewer`, which declares five tools
-to `tm-implementer`'s seven and has a shorter definition. The number to carry forward is the
+to `tm-implementer`'s six and has a shorter definition. The number to carry forward is the
 **delta**, not either absolute.
 
 The cache is at `1.1.1`, pinned at `c3c6937` — `master` at the time of the refresh — and

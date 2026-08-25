@@ -281,6 +281,12 @@ function unknownFlags(command, flags) {
 // Commands whose `--phase` names a numeric plan phase, not a manifest phase key. `gate` is
 // deliberately absent: its `--phase` is a NAME (`default`, `integration`) that selects a
 // block of checks from teammates.gate.json.
+// Not a missing argument in the sense the generic line means, so it does not get that line's
+// lead. A `--no-fleet` gate names its phase from the manifest and emits a verdict carrying
+// `phaseName` with no integer `phase` — reported as a typo, that told an operator following the
+// phase-gate skill end to end nothing about why the two commands do not compose.
+const NAMED_PHASE_REFUSAL = '__named_phase__'
+
 const NUMERIC_PHASE_COMMANDS = new Set(['workflow', 'fix', 'record-fix-round'])
 
 // Every command that accepts caller-supplied check results. `gate` takes a flat list for the one
@@ -559,7 +565,12 @@ function missingArgs(command, flags, positional) {
   // is the exact token `gate --phase` takes when omitted, and an operator carries it across.
   if (NUMERIC_PHASE_COMMANDS.has(command)
     && flags.phase && flags.phase !== true && !Number.isInteger(Number(flags.phase))) {
-    missing.push('--phase <integer>')
+    // A `--no-fleet` gate names its phase from the manifest and emits a verdict carrying
+    // `phaseName` with no integer `phase`, so this refusal is the whole of what an operator
+    // following the phase-gate skill end to end sees. Reported as a boundary rather than as a
+    // typo: these commands filter tasks and count fix rounds by numeric phase, and a phase with
+    // no task set has nothing to retry — the findings are addressed directly instead.
+    missing.push(NAMED_PHASE_REFUSAL)
   }
   // `--results` is optional, so it is not in REQUIRED — but once given it takes a value, and
   // a bare `--results` parses as `true` (parseFlags's boolean-switch reading). Left alone,
@@ -1796,6 +1807,15 @@ export async function runCli(argv, io = { out: console.log }) {
 
   if (REQUIRED[command]) {
     const missing = missingArgs(command, flags, positional)
+    if (missing.includes(NAMED_PHASE_REFUSAL)) {
+      // These commands filter tasks and count fix rounds by numeric phase, so a phase with no
+      // task set has nothing to retry: its findings are fixed directly rather than by
+      // redispatching a teammate. Stated as the boundary it is.
+      io.out(`${command} takes --phase <integer> and got ${printable(flags.phase)}: a named phase `
+        + 'has no task set to adjudicate. A --no-fleet gate produces one, and its findings are '
+        + `fixed directly rather than by redispatching a task.\n\n${USAGE}`)
+      return 2
+    }
     if (missing.length > 0) {
       io.out(`missing required argument: ${missing.join(', ')}\n\n${USAGE}`)
       return 2
@@ -2951,8 +2971,15 @@ export async function runCli(argv, io = { out: console.log }) {
         // one an operator learns to skip past.
         const anchored = await planSectionsAtAnchor(ctx, plan?.planPath)
         if (anchored && !samePlanNotes(plan, anchored)) {
+          // The remedy has a direction, and naming only one sent the operator round a loop.
+          // `init-run` records from the WORKING TREE plan; the anchor is the plan committed at
+          // merge-base(base, run). So when plan.json is AHEAD, re-running init-run rewrites the
+          // identical plan.json and this advisory fires again, with no action available to clear
+          // it. Both cases are named so the reader can tell which one they are in.
           io.out('  (these notes are from plan.json and no longer match the plan at the anchor; '
-            + 're-run init-run to refresh them — the verdict above is computed from the anchor, not from this)')
+            + 'the verdict above is computed from the anchor, not from this. If the plan moved on '
+            + 'after the run started, re-run init-run; if plan.json is already ahead, the edit has '
+            + 'not reached the anchor — land it on the base branch and merge)')
         }
       }
     } catch {
@@ -3018,7 +3045,11 @@ export async function runCli(argv, io = { out: console.log }) {
       io.out(flags.json === true ? JSON.stringify(report, null, 2) : renderUsage(report))
       return 0
     } catch (err) {
-      io.out(err.message)
+      // Neutralised like every other print site in this file. The value is not the operator's own
+      // typing: `missing()` splices the store path into the message, and that path carries a
+      // session DIRECTORY name discovered on disk — so a directory an agent can create reaches
+      // this line with no flag typed at all. The sibling handler below wraps for the same reason.
+      io.out(printable(err.message))
       return 1
     }
   }

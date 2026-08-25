@@ -86,17 +86,23 @@ test('renderUsage names every unreadable transcript and counts them', () => {
   assert.match(out, /1 transcript\(s\) unreadable/)
 })
 
-// A fully-qualified agent type is 30 characters. Padding alone let it run into the model column,
-// so the table became unreadable in exactly the case it is used for.
-test('renderUsage keeps columns apart when an agentType is long', () => {
+// A fixture WIDER than its column, so the truncation branch actually runs. The old fixture was
+// `claude-teammates:tm-integrator` — 30 characters against a 32-wide column — so `padEnd` alone
+// satisfied every assertion and deleting the truncation entirely left the suite green. Found by
+// mutation; the comment claimed the opposite of what the fixture did.
+test('renderUsage truncates an agentType wider than its column', () => {
+  const long = 'claude-teammates:tm-implementer-with-a-very-long-suffix'
   const out = renderUsage({
     sessionId: 's',
-    agents: [{ agentType: 'claude-teammates:tm-integrator', model: 'sonnet', turns: 1, prefix: 1, cacheRead: 1, output: 1 }],
+    agents: [{ agentType: long, model: 'sonnet', turns: 1, prefix: 1, cacheRead: 1, output: 1 }],
     unreadable: [],
   })
-  const row = out.split('\n').find((l) => l.includes('tm-integrator'))
-  assert.ok(row.includes(' sonnet') || row.includes('sonnet'), 'the model must still be present')
-  assert.doesNotMatch(row, /integratorsonnet/, 'the agentType column ran into the model column')
+  const row = out.split('\n').find((l) => l.includes('claude-teammates:tm-impl'))
+  assert.ok(row, 'the row must be present')
+  assert.ok(row.length < long.length + 40, 'the oversized cell must be truncated, not printed whole')
+  assert.match(row, /…/, 'a truncated cell is marked, so the reader can see it was cut')
+  assert.match(row, /sonnet/, 'the model must still be present')
+  assert.doesNotMatch(row, /suffix/, 'the tail of an oversized cell must not survive into the row')
 })
 
 // A partially-parsed transcript still produced its row, so counting it under "unreadable" states
@@ -113,4 +119,39 @@ test('renderUsage distinguishes a dropped line from an unreadable transcript', (
   })
   assert.match(out, /1 transcript\(s\) unreadable/, 'only the transcript with no records is unreadable')
   assert.match(out, /1 transcript\(s\) with dropped lines/, 'the partial one is counted apart')
+})
+
+// The headline number of a token report is not a value to truncate. `fit` applied its rule to
+// numeric cells too, so a cache_rd of 1,000,000,000 rendered as `1,000,000,…` in a 12-wide
+// column — and a long fleet run reaches 10^9 comfortably. Numeric columns widen instead.
+test('renderUsage never truncates a numeric cell', () => {
+  const out = renderUsage({
+    sessionId: 's',
+    agents: [{ agentType: 'tm-reviewer', model: 'opus', turns: 1, prefix: 1, cacheRead: 1_000_000_000, output: 1 }],
+    unreadable: [],
+  })
+  assert.match(out, /1,000,000,000/, 'the full number must survive')
+  assert.doesNotMatch(out, /1,000,000,…|1,000,00…/, 'a token count must never be shown truncated')
+})
+
+// Every other render module in scripts/ neutralises what it prints; this one had no printable()
+// call at all. `fit` pads by String.length, so a literal newline counts as one character — a
+// crafted meta.json needed no escape sequence to draw an extra line that reads like real output.
+test('renderUsage neutralises control bytes in values read from disk', () => {
+  const out = renderUsage({
+    sessionId: 'sess\u001b[2K\u001b[G forged',
+    agents: [{ agentType: 'x\nTOTAL 0 0 0', model: 'opus\u2028', turns: 1, prefix: 1, cacheRead: 1, output: 1 }],
+    unreadable: [{ name: 'agent-a\u001b[2K.jsonl', reason: 'r\u0085x', dropped: 1, kept: 1 }],
+  })
+  assert.doesNotMatch(out, /\u001b|\u2028|\u0085/, 'no raw control byte may reach the terminal')
+  // One line per row. A newline inside a cell must not open a line of its own — `fit` pads by
+  // String.length, so it counted as a single character and the forged line looked like output
+  // this CLI printed. Compared against a benign render rather than by counting a substring: the
+  // genuine TOTAL row contains the same word the payload does.
+  const benign = renderUsage({
+    sessionId: 's',
+    agents: [{ agentType: 'x', model: 'opus', turns: 1, prefix: 1, cacheRead: 1, output: 1 }],
+    unreadable: [{ name: 'agent-a.jsonl', reason: 'r', dropped: 1, kept: 1 }],
+  })
+  assert.equal(out.split('\n').length, benign.split('\n').length, 'a newline in a cell forged a row')
 })

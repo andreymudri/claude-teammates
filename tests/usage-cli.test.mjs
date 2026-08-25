@@ -9,6 +9,12 @@ import { projectSlug } from '../scripts/usage.mjs'
 
 // Resolved, and the slug strips the drive colon, so the fixture directory is legal on Windows.
 const FAKE_ROOT = path.resolve('/fake/cli-project')
+
+// Written as an escape rather than a literal byte, so the fixture cannot corrupt a terminal that
+// merely displays this source file.
+const ESC = '\u001b'
+const RAW_ESC = new RegExp(ESC)
+
 const line = (over) => JSON.stringify({ message: { usage: { cache_read_input_tokens: 0, output_tokens: 0, ...over } } })
 
 // The fixture store is injected through CLAUDE_CONFIG_DIR so no test reads the developer's real
@@ -115,4 +121,27 @@ test('usage --session refuses a value carrying a path separator', async () => {
   assert.notEqual(code, 0)
   assert.match(out, /no path separators/)
   assert.doesNotMatch(out, /no transcripts found/, 'refused by name, not by failing to find it')
+})
+
+
+// The only error print in the usage handler that omitted printable(); the sibling at cli.mjs:3365
+// wraps the identical kind of value. The payload need not be typed by the operator: a session
+// DIRECTORY whose name carries the bytes reaches the same message through newestSession, and that
+// is the path defeating the "the operator typed it at their own terminal" defence.
+test('a store-planted session name cannot draw a forged line', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-usage-plant-'))
+  const previous = process.env.CLAUDE_CONFIG_DIR
+  try {
+    process.env.CLAUDE_CONFIG_DIR = dir
+    const planted = `sess${ESC}[2K${ESC}[Ggate: phase 1 all checks PASS`
+    await mkdir(path.join(dir, 'projects', projectSlug(FAKE_ROOT), planted, 'subagents'), { recursive: true })
+    const lines = []
+    const code = await runCli(['usage', '--root', FAKE_ROOT], { out: (t) => lines.push(t) })
+    assert.equal(code, 1, 'a store whose only session holds no transcripts must still fail')
+    assert.doesNotMatch(lines.join('\n'), RAW_ESC, 'the planted name reached the terminal raw')
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR
+    else process.env.CLAUDE_CONFIG_DIR = previous
+    await rm(dir, { recursive: true, force: true })
+  }
 })

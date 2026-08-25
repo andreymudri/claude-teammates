@@ -14,9 +14,11 @@ Four `tm-reviewer` lenses at the fixed `capable` tier (`agents.reviewer.tier` an
     recorded in .teammates/usage/status.json under `solo:default`
     findings in .teammates/inline-review/reviews/
 
-**Post-refutation tally: 1 high, 11 medium, 10 low.** Ten are fixed — the high, eight mediums and
-one low, each in its own section below. The remaining 12 are recorded rather than fixed, and
-nothing in this document is closed by having been written down.
+**Post-refutation tally: 1 high, 11 medium, 10 low — all 22 addressed.** Twenty-one are fixed;
+one is accepted with its reasoning recorded, not quietly dropped. Two of the 22 were missing from
+this document's own first draft (`cli.mjs:2955` and `quiet-reporter.mjs:54`) — a silent drop of
+exactly the kind the reviews exist to catch, found when re-reading the lens files against the
+record.
 
 ## Fixed
 
@@ -158,44 +160,35 @@ Verified rather than inherited: mutating `scripts/cli.mjs`'s `catch { /* Swallow
 nothing */ }` to print a line leaves the suite at **1894 tests, 1891 pass, 0 fail** — so that
 claim is confirmed still unpinned, first-hand.
 
-## Open — `usage`, the largest unreviewed surface
+## Closed in the final pass
 
-| sev | site | finding |
-|---|---|---|
-| low | `cli.mjs:3021`, `usage.mjs:53`, `:75`, `:104` | The **only** render module in `scripts/` with zero `printable()` references (doctor 9, digest 9, liveness 3, plan-drift 5, finish 14). `fit()` pads by `String.length` and neutralises nothing, and **a literal newline needs no escape sequence at all** — a three-file fixture printed three fully forged lines with zero `0x1B` bytes, surviving a pager or a plain log. `--json` is not a mitigation: `0x9B`, U+2028 and U+202E all survive `JSON.stringify` raw. Not covered by the accepted bidi exposure, which asserts at `2026-08-22-fog-open-findings.md:104-112` that C1/CR/U+2028 render as tokens — false here. `usage.mjs` landed two days after the audit that set that convention: oversight, not decision. Rated low only because nothing automated consumes the output — `usage` appears in no skill, agent, hook, command, template or gate manifest. |
-| low | `usage.mjs:70` | `fit()` truncates numeric cells: `1,000,000,000` renders as `1,000,000,…` in a 12-wide `cache_rd` column. A single reviewer in this session already carries 1.7M cache reads; a long fleet run reaches 10⁹. The headline number of a token report is not a value to truncate. |
+| finding | what changed |
+|---|---|
+| `usage.mjs:53/:75/:104`, `cli.mjs:3021` — no `printable()` | Every value read from disk is neutralised. `fit` pads by `String.length`, so a literal newline counted as one character and forged a row with no escape sequence at all; that is pinned by comparing line counts against a benign render, not by matching a substring. |
+| `usage.mjs:70` — numeric cells truncated | Numeric columns now **widen** to their widest value; only text columns are capped. `1,000,000,000` no longer renders as `1,000,000,…`. |
+| `tests/usage.test.mjs:91` — truncation test could not fail | Fixture is now wider than its column, so the truncation branch actually runs. The old one was 30 chars against a 32-wide column. |
+| `tests/usage-store.test.mjs:63` — empty store untested | An existing-but-empty `subagents/` now **throws** instead of rendering zeros at exit 0 — the second route to the forbidden empty report. A store whose transcripts are all *unreadable* still reports, because naming what it could not read is the opposite failure. |
+| `tests/cli.test.mjs:11007` — `samePlanNotes` text unpinned | Drift is now tested at an **unchanged count** — a reworded question. Both prior tests changed the list length, so the length check alone satisfied them. |
+| `tests/finish.test.mjs:287` — singular branch | `1 unreadable entry` is pinned; every prior fixture dropped four. |
+| `tests/quiet-reporter.test.mjs:94` — `cancelled`/`todo` | Both branches pinned in each direction, plus the `FAILED` marker, the missing-root-summary path, and the per-file-summary-alone case. |
+| `docs/specs/2026-08-24-quiet-test-reporter-design.md:119` — spec named a test that did not exist | The `load failure` test is written rather than the spec weakened: a file throwing at import emits no root summary, so a naive reporter prints nothing and the run reads as clean. |
+| `CHANGELOG.md:50`, `HANDOFF.md:16` — "seven tools" | Corrected to **six**. `tm-implementer` declares Read, Write, Edit, Bash, Grep, Glob. |
+| `cli.mjs:2955` — staleness advisory looped | The remedy has a direction. `init-run` records from the working tree; the anchor is the plan at `merge-base(base, run)`. When plan.json is **ahead**, re-running `init-run` rewrote the identical file and the advisory fired forever. Both cases are now named. |
+| the `gate`/`fix` gap | A `--no-fleet` verdict carries `phaseName` with no integer `phase`, so `fix` refused it as a **missing argument** — a typo's error for a real boundary. It now states that a named phase has no task set to adjudicate and its findings are fixed directly. |
 
-## Open — tests that cannot fail
+### Accepted, not fixed — `quiet-reporter.mjs:54` (low)
 
-All five confirmed by mutation. These are not coverage gaps in the abstract; each names a mutation
-that leaves the suite green.
+Test-authored stdout is passed through verbatim, so a test can print a line byte-identical to the
+reporter's own summary. **Not fixed, deliberately.** The only way to close it is to neutralise or
+mark passed-through output, and the reporter exists precisely to keep failure output readable —
+its header says a reporter that made a failing run harder to read would have traded the only
+output anyone reads for the output nobody does. Neutralising escape sequences in a stack trace
+does exactly that.
 
-| sev | site | mutation that survives |
-|---|---|---|
-| medium | `tests/usage.test.mjs:91` | The truncation test uses a 30-char fixture against a 32-wide column, so `padEnd` alone satisfies it and the truncation branch never executes. Its comment claims the opposite. |
-| medium | `tests/usage-store.test.mjs:63` | The existing-but-empty `subagents/` case is untested — a **second route** to the empty report the header forbids, independent of the recursion bug fixed above. Still open. |
-| low | `tests/cli.test.mjs:11007` | `samePlanNotes`' entry-text comparison survives deletion: fog drift is only tested by removing an entry, which changes the count, so a reworded question of the same count is never detected. |
-| low | `tests/finish.test.mjs:287` | The singular branch of the unreadable-entry notice is unreachable from the fixtures, which always drop four. |
-| low | `tests/quiet-reporter.test.mjs:94` | The `cancelled`/`todo` summary branches survive deletion, though both were confirmed reachable with `--test-timeout` and `{ todo: true }`. |
-
-Verified accurate and **not** findings: the suite really is 1882/1879/0 fail/3 skipped at
-`6a9edff`, and the 3 skips are pre-existing legitimate capability skips in `tests/state.test.mjs`
-(two win32-only, one runtime UNC-symlink skip), not disabled work. No vacuous assertion, no
-non-deterministic fixture ordering, no unawaited async assertion, and no new test asserting POSIX
-semantics — the Windows-hostile spots were handled deliberately.
-
-## Open — claims the code does not deliver
-
-| sev | site | finding |
-|---|---|---|
-| low | `CHANGELOG.md:50`, `HANDOFF.md:16` | "`tm-implementer` declares seven tools" — it declares **six**, and `CHANGELOG.md:110` says six. |
-| low | `docs/specs/2026-08-24-quiet-test-reporter-design.md:119` | The Testing table lists a `load failure` test that does not exist. The behaviour itself is correct and was executed. |
-
-Ten mutations confirmed the diff's own closure records **do** hold — including the `printable`
-neutralisation of a quoted Out of Scope entry, the `rebuild-state` recovery path, the continuation
-lookahead, the section-defect ordering, the staleness advisory, the reviewer's fixed `capable`
-tier, and the three-level `CAVEMAN_LEVELS` constant. `config get`/`config set` were exercised
-directly across every documented tier/effort path: skills, README table and code agree.
+Recorded like the bidi exposure: the exit code is the authority (`scripts/gate-runner.mjs:26`
+reads it, never the text), gate-captured output is re-wrapped by `printableBlock`, and the
+exposure is to a human reading a raw terminal. A plain-text lookalike line remains possible and
+always will be.
 
 ## Not reviewed
 

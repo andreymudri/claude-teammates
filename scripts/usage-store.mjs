@@ -146,6 +146,13 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null }) 
     agents.push({ name, agentType, model, ...summarizeTranscript(records) })
   }
 
+  // The invariant the header states, enforced at the one place it can be: a store that yielded no
+  // transcript AND no unreadable file is not a session that cost nothing, it is a session whose
+  // transcripts are not where this module looked. Returning `agents: []` rendered a table of zeros
+  // at exit 0 — the lie the reader has no way to catch. A report carrying unreadable entries is
+  // NOT empty: it names what it could not read, which is the whole point of carrying them.
+  if (agents.length === 0 && unreadable.length === 0) throw missing(subagentsDir)
+
   // Largest per-turn tax first. Ordering by a total would bury exactly the finding this command
   // was built to surface: an agent with few turns and a large prefix.
   agents.sort((a, b) => (b.prefix * b.turns) - (a.prefix * a.turns))

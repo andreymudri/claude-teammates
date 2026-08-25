@@ -314,3 +314,30 @@ test('a session name with a path separator is refused before it is joined', asyn
     )
   }, { files: { 'agent-a.jsonl': line({ cache_read_input_tokens: 10 }) } })
 })
+
+
+// The second route to the empty report the module header forbids, independent of the recursion
+// bug: `subagents/` exists but holds no transcript at all, so newestSession accepted the session,
+// readdir succeeded, and the command rendered a table of zeros at exit 0.
+test('a session whose store holds no transcript throws rather than reporting zeros', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-usage-bare-'))
+  try {
+    await mkdir(path.join(dir, projectSlug(FAKE_ROOT), 'sess-1', 'subagents'), { recursive: true })
+    await assert.rejects(
+      () => readSessionUsage({ projectsDir: dir, root: FAKE_ROOT }),
+      (err) => /no transcripts found/.test(err.message),
+    )
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+// ...but a store whose every transcript is unreadable is NOT an empty report. It names what it
+// could not read, and dropping that would understate the totals silently — the opposite failure.
+test('a store whose transcripts are all unreadable reports them rather than throwing', async () => {
+  await withStore(async ({ projectsDir }) => {
+    const report = await readSessionUsage({ projectsDir, root: FAKE_ROOT })
+    assert.equal(report.agents.length, 0)
+    assert.equal(report.unreadable.length, 1, 'the unreadable transcript must still be named')
+  }, { files: { 'agent-bad.jsonl': 'not json at all' } })
+})

@@ -47,7 +47,7 @@ A `usage` bugfix, and the measurement v1.1.1 shipped unconfirmed is now taken.
 
 - **Measured: 27,499 → 9,610 tokens of fixed prefix per `tm-implementer` turn**, a saving of
   **17,889 per turn**, re-paid on every turn. v1.1.1 predicted ~7,900 by extrapolating from
-  `tm-reviewer`; the extrapolation was the wrong shape, since `tm-implementer` declares seven
+  `tm-reviewer`; the extrapolation was the wrong shape, since `tm-implementer` declares six
   tools to the reviewer's five and has a longer definition. The delta is the number that carries,
   not either absolute.
 - **v1.1.1 said the declarations "could not take effect in the session that measured them"

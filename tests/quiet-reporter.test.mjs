@@ -141,3 +141,70 @@ test('the reporter drives a real run and preserves exit codes', async () => {
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+
+// The summary's cancelled and todo branches are conditional, so deleting either left the suite
+// green. Both are reachable in a real run — `--test-timeout` cancels, `{ todo: true }` marks todo
+// — and both belong in the one line this project's evidence rule reads.
+test('the summary names cancelled and todo counts when there are any', async () => {
+  const out = await collect([rootSummary({ tests: 4, passed: 1, cancelled: 2, todo: 1 })])
+  assert.match(out, /2 cancelled/)
+  assert.match(out, /1 todo/)
+})
+
+test('the summary omits cancelled and todo when there are none', async () => {
+  const out = await collect([rootSummary({ tests: 1, passed: 1 })])
+  assert.doesNotMatch(out, /cancelled|todo/, 'a zero count must not clutter the line it is read from')
+})
+
+// A failing run must say so in the text as well as the exit code, or a reader quoting the summary
+// alone cannot tell the two apart.
+test('a failing summary is marked FAILED', async () => {
+  const out = await collect([rootSummary({ tests: 2, passed: 1, failed: 1 }, false)])
+  assert.match(out, /FAILED/)
+})
+
+// The spec's Testing table names this case ("load failure — non-zero exit and a visible reason")
+// and no test existed for it: a file that throws at import time never emits a root summary, so a
+// naive reporter prints nothing and the run reads as clean. Driven through a real runner, because
+// the exit code is half the contract.
+test('a file that throws at import fails loudly rather than printing nothing', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-quiet-load-'))
+  try {
+    const bad = path.join(dir, 'load.test.mjs')
+    await writeFile(bad, "throw new Error('boom at import time')\n", 'utf8')
+    const env = { ...process.env }
+    delete env.NODE_TEST_CONTEXT
+    let status = 0
+    let stdout = ''
+    try {
+      stdout = execFileSync('node', ['--test', '--test-reporter', reporterUrl, bad], { encoding: 'utf8', env })
+    } catch (err) {
+      status = err.status
+      stdout = err.stdout ?? ''
+    }
+    assert.notEqual(status, 0, 'a file that cannot be loaded must not exit 0')
+    assert.match(stdout, /boom at import time|1 fail|no test summary/, 'the reason must be visible')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+
+// A run that crashed before emitting a root summary must not produce clean-looking output with no
+// counts in it, which reads exactly like a pass. The reporter's header states this; nothing
+// pinned it, and returning '' instead left the whole suite green.
+test('a run with no root summary is reported as failed, never as silence', async () => {
+  const out = await collect([])
+  assert.notEqual(out.trim(), '', 'silence reads as a pass')
+  assert.match(out, /no test summary|failed/i, 'the reader must be told the run cannot be trusted')
+})
+
+// The per-file summary must not be mistaken for the root one — only the root aggregates, and a
+// file summary arriving with no root summary after it is still a run with no counts.
+test('a per-file summary alone does not stand in for the root summary', async () => {
+  const out = await collect([
+    { type: 'test:summary', data: { success: true, file: '/x.test.mjs', counts: counts({ tests: 3, passed: 3 }) } },
+  ])
+  assert.match(out, /no test summary|failed/i, 'a file summary was mistaken for the root summary')
+})

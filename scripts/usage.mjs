@@ -9,6 +9,8 @@
 // a totals-only report hid it completely: the integrator looked cheapest by cache reads while
 // carrying a 5x larger prefix than a reviewer whose prompt was longer.
 
+import { printable } from './reviews.mjs'
+
 // The harness's directory name for a project: its absolute path with the separators replaced.
 // Both separator kinds are replaced rather than `path.sep` alone, because the answer must not
 // depend on which platform is asking about which path.
@@ -47,48 +49,68 @@ export function summarizeTranscript(records) {
 
 const n = (value) => Number(value ?? 0).toLocaleString('en-US')
 
+// Every value below `p()` wraps is read from disk — a meta.json an agent can write, a filename, a
+// session directory name. This was the only render module in scripts/ with no neutralisation at
+// all, and `fit` pads by String.length, so a literal newline counted as one character: a forged
+// row needed no escape sequence to appear. See scripts/reviews.mjs for what `printable` covers
+// and what it deliberately does not (bidi and format controls pass through, a recorded decision).
+const p = (value) => printable(String(value))
+
 export function renderUsage(report) {
   const agents = report?.agents ?? []
   const unreadable = report?.unreadable ?? []
-  const lines = [`run ${report?.sessionId ?? '(unknown)'}  (${agents.length} subagent${agents.length === 1 ? '' : 's'})`, '']
+  const lines = [`run ${p(report?.sessionId ?? '(unknown)')}  (${agents.length} subagent${agents.length === 1 ? '' : 's'})`, '']
 
   const cols = [
-    ['agentType', 32, (a) => a.agentType ?? '(unknown)', false],
-    ['model', 9, (a) => a.model ?? '(unknown)', false],
+    ['agentType', 32, (a) => p(a.agentType ?? '(unknown)'), false],
+    ['model', 9, (a) => p(a.model ?? '(unknown)'), false],
     ['turns', 7, (a) => n(a.turns), true],
     ['prefix', 9, (a) => n(a.prefix), true],
     ['prefix×turns', 14, (a) => n((a.prefix ?? 0) * (a.turns ?? 0)), true],
     ['cache_rd', 12, (a) => n(a.cacheRead), true],
     ['output', 9, (a) => n(a.output), true],
   ]
+
+  const prefixTurns = agents.reduce((sum, a) => sum + (a.prefix ?? 0) * (a.turns ?? 0), 0)
+  const cacheRead = agents.reduce((sum, a) => sum + (a.cacheRead ?? 0), 0)
+  const totalRow = [
+    'TOTAL', '',
+    n(agents.reduce((s, a) => s + (a.turns ?? 0), 0)), '',
+    n(prefixTurns), n(cacheRead),
+    n(agents.reduce((s, a) => s + (a.output ?? 0), 0)),
+  ]
+
+  // A numeric column GROWS to fit its widest value; only a text column is capped. `fit` applied
+  // one rule to both, so a cache_rd of 1,000,000,000 rendered as `1,000,000,…` — and a long fleet
+  // run reaches 10^9 comfortably. The headline number of a token report is not a value to
+  // truncate, and a reader cannot tell a truncated count from a smaller one.
+  const widths = cols.map(([title, width, read, right], i) => {
+    if (!right) return width
+    const longest = Math.max(
+      title.length,
+      totalRow[i].length,
+      ...agents.map((a) => read(a).length),
+    )
+    return Math.max(width, longest + 1)
+  })
+
   // Truncated, not just padded. A value wider than its column runs into the next one and the
   // table stops being readable in exactly the case that matters — a fully-qualified agent type
   // like `claude-teammates:tm-integrator` is 30 characters. One trailing space keeps a truncated
   // cell from touching its neighbour.
   const fit = (text, width, right) => {
     const value = String(text)
+    if (right) return value.padStart(width)
     const cell = value.length > width - 1 ? `${value.slice(0, width - 2)}…` : value
-    return right ? cell.padStart(width) : cell.padEnd(width)
+    return cell.padEnd(width)
   }
-  lines.push(cols.map(([title, width, , right]) => fit(title, width, right)).join(''))
-  for (const agent of agents) {
-    lines.push(cols.map(([, width, read, right]) => fit(read(agent), width, right)).join(''))
-  }
+  const row = (cells) => cells.map((cell, i) => fit(cell, widths[i], cols[i][3])).join('')
 
-  const totalWidth = cols.reduce((sum, [, width]) => sum + width, 0)
-  lines.push('─'.repeat(totalWidth))
+  lines.push(row(cols.map(([title]) => title)))
+  for (const agent of agents) lines.push(row(cols.map(([, , read]) => read(agent))))
 
-  const prefixTurns = agents.reduce((sum, a) => sum + (a.prefix ?? 0) * (a.turns ?? 0), 0)
-  const cacheRead = agents.reduce((sum, a) => sum + (a.cacheRead ?? 0), 0)
-  lines.push([
-    fit('TOTAL', cols[0][1], false),
-    fit('', cols[1][1], false),
-    fit(n(agents.reduce((s, a) => s + (a.turns ?? 0), 0)), cols[2][1], true),
-    fit('', cols[3][1], true),
-    fit(n(prefixTurns), cols[4][1], true),
-    fit(n(cacheRead), cols[5][1], true),
-    fit(n(agents.reduce((s, a) => s + (a.output ?? 0), 0)), cols[6][1], true),
-  ].join(''))
+  lines.push('─'.repeat(widths.reduce((sum, w) => sum + w, 0)))
+  lines.push(row(totalRow))
 
   // Guarded rather than computed blind: with no cache reads recorded the share is undefined, and
   // printing NaN or Infinity in the one line a reader takes a decision from is worse than saying
@@ -101,7 +123,7 @@ export function renderUsage(report) {
   // total is how this tool would appear to prove a saving nobody made.
   if (unreadable.length > 0) {
     lines.push('')
-    for (const entry of unreadable) lines.push(`  ! ${entry.name}: ${entry.reason}`)
+    for (const entry of unreadable) lines.push(`  ! ${p(entry.name)}: ${p(entry.reason)}`)
     // Counted apart, because a transcript that lost one line still contributed its row and every
     // other record in it. Filing that under "unreadable" states the opposite of what happened, in
     // the one line a reader takes the totals' trustworthiness from. A missing `kept` is the older
