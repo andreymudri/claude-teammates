@@ -83,12 +83,20 @@ test('the skill states that caveman reaches only implementer briefs and the loca
     'the claim sentence must stand alone; the inventory screen cannot see inside it',
   )
 
-  // Second: `scope.statements` covers paragraphs and list items, never HEADINGS — so a heading
-  // could assert the opposite in the same section and pass. Headings are screened separately.
-  const headings = section.blocks.filter((b) => b.kind === 'heading').map((b) => b.text)
-  for (const heading of headings) {
-    assert.doesNotMatch(heading, /reviewer/i,
-      `a heading naming reviewers is unscreened by the inventory lock: ${JSON.stringify(heading)}`)
+  // Second: `parseDoc` builds `statements` from paragraphs and list items only, so NO heading is
+  // ever screened by the inventory lock. Screened here across the WHOLE document, not the section:
+  // `makeSection` is handed `blocks.slice(i + 1, end)`, so a section never contains its own
+  // heading, and a same-level `##` opens a new section entirely — so a section-scoped heading loop
+  // missed both the section's own heading and any heading appended to the document. Both shipped
+  // green while a comment claimed the escape was closed.
+  const parsed = await doc()
+  const allHeadings = parsed.blocks.filter((b) => b.kind === 'heading').map((b) => b.text)
+  for (const heading of allHeadings) {
+    assert.ok(
+      !(/reviewer/i.test(heading) && /caveman|level/i.test(heading)),
+      `a heading pairs reviewers with caveman, which no heading is screened for by any other `
+        + `assertion here: ${JSON.stringify(heading)}`,
+    )
   }
 
   // Third, and the one scoping the claim to its section OPENED: an inversion written into any

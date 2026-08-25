@@ -15,10 +15,9 @@ import path from 'node:path'
 import { printable } from './reviews.mjs'
 import { projectSlug, summarizeTranscript } from './usage.mjs'
 
-// Exported so a test can pin the SHIPPED bound. Injecting `maxEntries` verifies that the
-// truncation notice fires; it says nothing about the default, which could be raised to
-// Number.MAX_SAFE_INTEGER with the suite green — leaving the walk effectively unbounded, which is
-// reason 3 for hand-writing it.
+// The ONE definition of the shipped bound: `readSessionUsage` resolves `maxEntries ?? this`, so a
+// test reading this constant is reading the bound the walk actually applies. Exported because
+// injecting `maxEntries` verifies only that the truncation notice fires, never what the default is.
 export const DEFAULT_MAX_ENTRIES = 20_000
 
 function missing(dir) {
@@ -64,7 +63,7 @@ async function newestSession(projectDir) {
 // 20,000 real files to exercise a bound is slow everywhere and fails outright where the open-file
 // limit is lower than the fixture — macOS CI refused it with EMFILE. A bound nothing can reach in
 // a test is a bound nothing verifies.
-export async function readSessionUsage({ projectsDir, root, sessionId = null, maxEntries = DEFAULT_MAX_ENTRIES }) {
+export async function readSessionUsage({ projectsDir, root, sessionId = null, maxEntries = null }) {
   // `root` is resolved here rather than trusted. The CLI passes `flags.root ?? process.cwd()`
   // verbatim, so `--root .` arrives as the literal ".", whose slug is "." — and `path.join`
   // then collapses to the projects directory itself, where the newest PROJECT gets mistaken for
@@ -73,7 +72,13 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null, ma
   // reported as "layout may have changed" — a lie about a perfectly readable store, and exactly
   // the failure this module's header forbids. `null` crashed on toLocaleString, because a default
   // applies only to `undefined`.
-  if (!Number.isInteger(maxEntries) || maxEntries < 1) {
+  // Resolved from the constant HERE rather than as a default parameter, so the bound this function
+  // applies and the bound a test can read are the same value. As a default parameter they were two:
+  // changing the signature to Number.MAX_SAFE_INTEGER left the walk unbounded in production with
+  // the suite green, because the only assertion about the default read the constant and never
+  // observed it being used.
+  const cap = maxEntries ?? DEFAULT_MAX_ENTRIES
+  if (!Number.isInteger(cap) || cap < 1) {
     throw new Error(`maxEntries must be a positive integer, got ${JSON.stringify(maxEntries)}`)
   }
   const projectDir = path.join(projectsDir, projectSlug(path.resolve(root)))
@@ -113,7 +118,7 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null, ma
   const transcripts = []
   const unreadable = []
   const pending = ['']
-  let budget = maxEntries
+  let budget = cap
   let readAnything = false
   let truncated = false
   while (pending.length > 0 && !truncated) {
@@ -150,7 +155,7 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null, ma
   if (truncated) {
     unreadable.push({
       name: '(walk)',
-      reason: `stopped after ${maxEntries.toLocaleString('en-US')} entries; this report is incomplete`,
+      reason: `stopped after ${cap.toLocaleString('en-US')} entries; this report is incomplete`,
       kind: 'truncated',
       dropped: 0,
       kept: 0,

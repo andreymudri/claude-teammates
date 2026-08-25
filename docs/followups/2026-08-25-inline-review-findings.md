@@ -252,18 +252,36 @@ Recorded because they happened and the earlier version of this document did not 
 an omission the fourth-pass claims lens caught, and the same class of gap as the two findings this
 document dropped from its own first draft.
 
-**Pass three** reviewed the round-two fixes (`08574f5..62dfa9f`) and filed **19** findings, one
-rated `high` before refutation. **Pass four** reviewed the round-three fixes
-(`62dfa9f..c5c8f6a`) and filed **10**. Every one was a defect in the preceding round of fixes or in
-the prose describing it; none was in the original inline work. What they found, in the order it
+**Pass three** reviewed the round-two fixes (`08574f5..62dfa9f`) and filed **19** — 7 claims,
+5 correctness, 7 tests — including one `high` that no refutation was dispatched against; it was
+re-filed at `high` by pass four and closed only later. **Pass four** reviewed the round-three fixes
+(`62dfa9f..c5c8f6a`) and filed **18**: 6 claims, 4 correctness, 8 tests, of which **2 were `high`**,
+both in the tests lens.
+
+*(Corrected. An earlier version of this paragraph said pass four filed "10" — claims plus
+correctness, omitting the tests file entirely, which is the file carrying both highs. So the record
+said pass four had no highs. This section exists **because** the fourth-pass claims lens found no
+record of pass three at all; writing it and dropping a lens file is the same omission one level
+down. The counts above are taken from `.teammates/inline-review/reviews3/` and `reviews4/`, which
+are in the repo and can be recounted.)*
+
+Almost every finding was a defect in the preceding round of fixes or in the prose describing it.
+Not all: pass four's `tests/md-contract.mjs` finding names blind spots in shared test
+infrastructure that predate this branch by three weeks, so the branch inherited that one rather
+than introducing it. What they found, in the order it
 matters:
 
 - **The caveman polarity assertion has now been defeated four times**, by four different escapes:
   a co-occurrence match, a sentence satisfying the claim while stating its inverse, the inverse
   appended to the claim sentence itself (which `assertClaim`'s inventory screen excludes by
   construction, `s.text !== hit.text`), and a heading (`scope.statements` covers paragraphs and
-  list items, never headings). It now carries an exact-shape lock on the claim sentence and a
-  separate heading screen. Each escape was re-run against the fix and fails.
+  list items, never headings), the inverse appended to an allow-listed sentence, an inversion in
+  another section once the claim was scoped to its own — and, after all of that, **a heading
+  again**: the heading screen written for escape 3 read `section.blocks`, which never contains the
+  section's own heading, and a same-level `##` opens a new section outside the scope entirely. An
+  earlier version of this bullet claimed every escape had been re-run and failed; the heading one
+  had not been re-run and still passed. Headings are now screened across the whole document, and
+  all five escapes were re-run against that and fail.
 - **The `MAX_ENTRIES` cap reintroduced the bug the walk was written to remove.** It stopped the
   walk silently, so a store past it under-reported at exit 0 — reason 2 of the walk's own header,
   reintroduced by the bound added for reason 3. Then the fix for that had an **off-by-one**:

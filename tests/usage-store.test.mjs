@@ -537,13 +537,19 @@ test('a transcript where every line fails is unreadable, not partial', async () 
 // a perfectly readable store, and null crashed on toLocaleString.
 test('an unusable maxEntries is refused by name, not turned into a layout lie', async () => {
   await withStore(async ({ projectsDir }) => {
-    for (const bad of [0, -1, 1.5, Number.NaN, 'x', null]) {
+    for (const bad of [0, -1, 1.5, Number.NaN, 'x', {}, true]) {
       await assert.rejects(
         () => readSessionUsage({ projectsDir, root: FAKE_ROOT, maxEntries: bad }),
         (err) => /maxEntries/.test(err.message) && !/may have changed/.test(err.message),
         `maxEntries: ${JSON.stringify(bad)} must be refused by name`,
       )
     }
+    // `null` is not a bad value: it means "use the shipped default", which is how the CLI reaches
+    // this function. It crashed before the bound was resolved from the constant rather than from a
+    // default parameter, which applies only to `undefined`.
+    const report = await readSessionUsage({ projectsDir, root: FAKE_ROOT, maxEntries: null })
+    assert.equal(report.agents.length, 1)
+    assert.equal(report.unreadable.filter((e) => e.kind === 'truncated').length, 0)
   }, { files: { 'agent-a.jsonl': line({ cache_read_input_tokens: 10 }) } })
 })
 
