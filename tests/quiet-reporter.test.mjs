@@ -73,7 +73,7 @@ test('a failing run prints the failure and still prints the summary', async () =
   assert.match(out, /FAILED/)
 })
 
-test('stderr and stdout pass through verbatim', async () => {
+test('stderr and stdout pass through with their layout intact', async () => {
   const out = await collect([
     { type: 'test:stderr', data: { message: 'a real warning\n' } },
     { type: 'test:stdout', data: { message: 'printed by a test\n' } },

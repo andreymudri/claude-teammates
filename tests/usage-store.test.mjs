@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmod, mkdir, mkdtemp, rm, symlink, utimes, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -375,7 +375,7 @@ test('a directory symlink inside the store is not followed', { skip: process.pla
 // transcript sitting in the very directory the message named, and blaming a harness layout change
 // that had not happened. A workflow directory removed mid-walk (ENOENT) does the same, during
 // exactly the live run an operator reports on.
-test('an unreadable subdirectory is reported, not fatal to the whole report', { skip: process.platform === 'win32' }, async () => {
+test('an unreadable subdirectory is reported, not fatal to the whole report', { skip: process.platform === 'win32' }, async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'tm-usage-eacces-'))
   const locked = path.join(dir, projectSlug(FAKE_ROOT), 'sess-1', 'subagents', 'locked')
   try {
@@ -383,6 +383,13 @@ test('an unreadable subdirectory is reported, not fatal to the whole report', { 
     await mkdir(locked, { recursive: true })
     await writeFile(path.join(subagents, 'agent-a.jsonl'), line({ cache_read_input_tokens: 10 }), 'utf8')
     await chmod(locked, 0o000)
+    // chmod is not a permission check for uid 0, which reads the directory regardless — so the
+    // fixture would silently test nothing in a root container. Probed, not assumed.
+    try {
+      await readdir(locked)
+      t.skip('this user can read a 0o000 directory (running as root?), so the fixture cannot be built')
+      return
+    } catch { /* refused, as intended: the fixture is real */ }
 
     const report = await readSessionUsage({ projectsDir: dir, root: FAKE_ROOT })
     assert.equal(report.agents.length, 1, 'the readable transcript must still be reported')
@@ -441,6 +448,31 @@ test('a truncated walk says so rather than under-reporting silently', async () =
     const truncated = report.unreadable.filter((e) => e.kind === 'truncated')
     assert.equal(truncated.length, 1, 'a truncated walk must be reported, never silent')
     assert.match(truncated[0].reason, /incomplete/i)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+
+// The other half of the symlink rule, and it was unpinned: `entry.isFile()` is false for a symlink
+// to a file, so a link named `agent-x.jsonl` is not read — but deleting that guard left the whole
+// suite green, and the symlink test above covers only DIRECTORY links. Off-store reads re-open
+// through a file link exactly as through a directory one.
+test('a file symlink named like a transcript is not read', { skip: process.platform === 'win32' }, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-usage-flink-'))
+  try {
+    const subagents = path.join(dir, projectSlug(FAKE_ROOT), 'sess-1', 'subagents')
+    await mkdir(subagents, { recursive: true })
+    await writeFile(path.join(subagents, 'agent-a.jsonl'), line({ cache_read_input_tokens: 10 }), 'utf8')
+
+    const outside = path.join(dir, 'outside.jsonl')
+    await writeFile(outside, line({ cache_read_input_tokens: 999 }), 'utf8')
+    await symlink(outside, path.join(subagents, 'agent-secret.jsonl'), 'file')
+
+    const report = await readSessionUsage({ projectsDir: dir, root: FAKE_ROOT })
+    assert.equal(report.agents.length, 1, 'only the real transcript may be read')
+    assert.equal(report.agents[0].cacheRead, 10)
+    assert.doesNotMatch(JSON.stringify(report), /agent-secret/, 'a file symlink was followed')
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

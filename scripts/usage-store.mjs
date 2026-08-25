@@ -74,7 +74,8 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null }) 
   const subagentsDir = path.join(projectDir, session, 'subagents')
 
   // The walk has to RECURSE, because a workflow-dispatched run keeps its transcripts under
-  // `subagents/<wf-id>/` rather than flat, and a flat read reported five real transcripts as zero.
+  // `subagents/workflows/<wf-id>/` rather than flat, and a flat read reported five real
+  // transcripts as zero.
   // It is written out by hand rather than using `readdir(..., { recursive: true })`, for three
   // reasons — each found by review after the recursive read shipped:
   //

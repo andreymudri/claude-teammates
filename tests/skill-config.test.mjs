@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises'
 import { composeBrief } from '../scripts/brief.mjs'
 import { renderDigest } from '../scripts/digest.mjs'
 import { CAVEMAN_LEVELS } from '../scripts/config.mjs'
-import { parseDoc, splitFrontmatter, assertStatement, assertNoStatement } from './md-contract.mjs'
+import { parseDoc, splitFrontmatter, assertStatement, assertNoStatement, assertClaim } from './md-contract.mjs'
 
 // WHY THIS FILE EXISTS
 // --------------------
@@ -38,25 +38,23 @@ test('the skill states that caveman reaches only implementer briefs and the loca
     /caveman[\s\S]*implementer/i,
     'teammates-config must say caveman reaches implementer briefs',
   )
-  // Polarity, not co-occurrence. Requiring only that both terms appear in one statement let the
-  // sentence be rewritten to its exact opposite — "Reviewer dispatches also apply caveman, so the
-  // reviewers obey any value you set" — with the suite green. Found by mutation.
-  // `caveman` AND the negation must both be in the statement. `/reviewer.*unaffected/` alone let
-  // the sentence say reviewers are unaffected by something else entirely while a neighbouring one
-  // said they DO receive the level — a reviewer rewrote the paragraph that way and the whole suite
-  // stayed green.
-  assertStatement(
-    await doc(),
-    /reviewer[\s\S]*caveman[\s\S]*(no caveman path|unaffected)|reviewer[\s\S]*(carry no caveman|no caveman path)/i,
-    'teammates-config must say reviewer dispatches are unaffected by caveman',
-  )
-  // And the inversion is refused outright, so a future edit cannot satisfy the assertion above in
-  // one sentence while asserting the opposite in another.
-  assertNoStatement(
-    await doc(),
-    /reviewer[\s\S]*\b(obeys?|apply|applies|applied|receives?|received|given|gets?|honou?rs?|use[sd]?)\b[\s\S]*caveman|caveman[\s\S]*reviewer[\s\S]*\b(obeys?|applies|applied|given|gets?|honou?rs|use[sd]?)\b/i,
-    'teammates-config must not claim reviewers apply caveman',
-  )
+  // An INVENTORY LOCK, not a pattern match. Two rounds of tightening regexes both failed the same
+  // way: a reviewer wrote one sentence that satisfied the required claim AND stated its inverse
+  // ("carry no caveman path in the `digest`, but the reviewer brief does carry whatever level you
+  // set"), because a forbid-list can only ever name the phrasings someone already thought of.
+  // `assertClaim`'s `subject` inverts that: EVERY statement in the document mentioning reviewers
+  // must be the claim itself or explicitly allowed here, so a new sentence about reviewers fails
+  // whatever words it uses. Adding one is then a deliberate act with a test to update.
+  assertClaim(await doc(), {
+    label: 'reviewers are unaffected by caveman',
+    claim: /Reviewer and integrator dispatches carry no caveman path at all/,
+    subject: /reviewer/i,
+    allow: [
+      // Not about caveman: the enforcement-key rule happens to name `agents.reviewer.*`.
+      /enforcement key never goes in the local file/,
+      /a well-shaped value passes silently/,
+    ],
+  })
 })
 
 test('caveman never reaches a reviewer dispatch', async () => {
@@ -144,7 +142,11 @@ test('the README and CHANGELOG state the level count the code validates', async 
   // could never both hold — so the test was unsatisfiable the moment CAVEMAN_LEVELS changed to one
   // of them, which is precisely when it needed to work.
   const wrong = WORDS.filter((w) => w !== correct).join('|')
-  for (const file of ['../README.md', '../CHANGELOG.md']) {
+  // README ONLY. CHANGELOG.md is a record of what a release said, so binding it to the LIVE
+  // constant would make a future level change fail a test about a shipped version — history
+  // rewritten to keep a test green. Its entry is checked against a fixed spelling below instead:
+  // it was wrong when written, which is a different fault from drifting later.
+  for (const file of ['../README.md']) {
     const text = await readFile(new URL(file, import.meta.url), 'utf8')
     // NO `continue` guard. Skipping when the sentence is absent let the binding evaporate on the
     // exact reword it exists to catch: delete the claim and the file stops being checked at all.
@@ -153,4 +155,8 @@ test('the README and CHANGELOG state the level count the code validates', async 
     assert.doesNotMatch(text, new RegExp(`\\b(${wrong}) levels are validated`, 'i'),
       `${file} names a level count the code does not validate`)
   }
+
+  const changelog = await readFile(new URL('../CHANGELOG.md', import.meta.url), 'utf8')
+  assert.match(changelog, /three levels are validated/i,
+    'the CHANGELOG entry stated four when the code validated three; it is corrected, not bound')
 })

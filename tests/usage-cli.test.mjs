@@ -157,6 +157,10 @@ test('a store-planted session name cannot draw a forged line', async (t) => {
     try {
       await mkdir(path.join(dir, 'projects', projectSlug(FAKE_ROOT), planted, 'subagents'), { recursive: true })
     } catch (err) {
+      // Narrow: only the errnos a filesystem uses to REFUSE the name. Catching everything would
+      // turn a genuine bug in the fixture — a bad path, a full disk — into a silent skip, and a
+      // skip nobody notices is worse than a red test.
+      if (!['ENOENT', 'EINVAL', 'ERR_INVALID_ARG_VALUE'].includes(err.code)) throw err
       t.skip(`this filesystem refuses a directory name carrying a format character: ${err.code}`)
       return
     }

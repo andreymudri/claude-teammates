@@ -204,8 +204,11 @@ alongside the phase mismatch and the malformed manifest). That is not a defect t
 `--no-fleet` builds no preview and has no task branches, so there is no teammate to redispatch and
 nothing for a decision engine to attribute a finding to. **Fix the findings directly, then re-run
 the gate from scratch for a fresh verdict.** Everything below about `retry`, `escalate` and the
-round budget presumes a fleet phase with task branches; on a solo gate, only the reporting rule at
-the end of this skill applies — a PASS reached after N rounds of fixes is still reported as such.
+round budget presumes a fleet phase with task branches. On a solo gate two rules still bind, and
+they are stated here because the one at the end of this skill does NOT apply: it requires a
+recorded PASS in `status.json`, and a solo gate run without `--run` records nothing at all.
+Instead: **a PASS reached after N rounds of fixes is reported as such, never as a clean first-pass
+PASS**, and **a check that was skipped is reported as skipped, every time**.
 
 **The verdict you hand it must be the JSON this gate printed in this same pass, and must never be
 read back from `.teammates/`.** The only verdict persisted on disk lives in
