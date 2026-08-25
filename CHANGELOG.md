@@ -1,5 +1,68 @@
 # Changelog
 
+## v1.1.4
+
+`usage` reported a workflow-dispatched run as costing nothing. Bug fixes and the tests that pin
+them; no new commands, no changed contracts.
+
+### `usage` reported a whole run as zero
+
+`readdir` on `subagents/` did not recurse, and a workflow-dispatched run keeps its transcripts
+under `subagents/workflows/<wf-id>/`. So the command matched no `.jsonl` at all, printed
+`(0 subagents)`, a table of zeros, and **exit 0**. Against a real store that concealed five
+transcripts and **31,394,783 cache reads**.
+
+That is the outcome `scripts/usage-store.mjs` and `scripts/cli.mjs` each independently state must
+never happen — "a zero reads as *no usage*, and would be a lie the reader has no way to catch".
+The nesting is caused by workflow dispatch, not by harness age: the only session with a nested
+store was the only session that had run a workflow, and this plugin ships `workflow-gen.mjs`.
+
+The store is now walked explicitly rather than with `readdir({recursive: true})`, which follows
+directory symlinks, propagates a nested failure to the caller, and is unbounded. The walk skips
+symlinks, records a directory it cannot enter and carries on, and reports when it stops at its cap
+instead of truncating silently.
+
+### `usage` told other lies about the same store, and no longer does
+
+- **A torn last line discarded the whole transcript.** The parse was all-or-nothing, and a
+  transcript is appended to while its session runs — exactly when an operator reports on one. A
+  fixture lost 1.7M cache reads while the headline still read `fixed prefix = 100%`. Parsed per
+  line now; the bad line is dropped and counted.
+- **Parse errors quoted the transcript back.** `JSON.parse` messages embed the offending source,
+  and the source is the operator's own conversation. Reasons are built from line counts now.
+- **`--session` was joined into the store path unvalidated**, so `../../../outside` read `.jsonl`
+  files elsewhere on disk. Refused by name, on the rule `reviewFileName` already applies.
+- **Nothing printed by `usage` was neutralised** — the only render module in `scripts/` with no
+  `printable` at all. A crafted `meta.json` could draw a line that read like real output, needing
+  no escape sequence: a literal newline counted as one character to the column fitter. Table,
+  error path and `--json` are all neutralised now.
+- **Numeric columns truncated.** `1,000,000,000` rendered as `1,000,000,…`. They widen instead;
+  only text columns are capped.
+- **A session was picked by mtime with no test behind it.** The v1.1.2 selection fix was unpinned:
+  inverting the sort to choose the *oldest* session left the suite green.
+
+### The quiet reporter could be made to lie about its own run
+
+Test-authored text — stdout, stderr, a test's name, its error stack — was passed through raw. An
+escape sequence in any of them could erase the reporter's summary line and draw another, or conceal
+it outright with SGR 8, so a failing run read as green. All four are neutralised with the content's
+own newlines and tabs kept, so failure detail loses nothing. The exit code remains the authority.
+
+### Documented claims that the code did not deliver
+
+`caveman` was documented with **four** levels; `CAVEMAN_LEVELS` has three. `tm-implementer` was
+documented as declaring **seven** tools; it declares six. A `finish` advisory named a remedy that
+could not work in one direction, so following it looped forever. `fix` reported a real boundary — a
+`--no-fleet` verdict names its phase from the manifest and has no numeric phase — as a missing
+argument, which reads as a typo.
+
+### Under the hood
+
+Every fix above is pinned by a test verified to fail when the fix is reverted. The claim that
+reviewer dispatches are unaffected by `caveman` is now pinned by an exact snapshot of the section
+that states it, after eight distinct ways of asserting the opposite survived successive
+pattern-matching attempts.
+
 ## v1.1.3
 
 Documentation only, plus the test file that binds it. `caveman` was measured and is not the lever

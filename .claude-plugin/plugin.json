@@ -1,6 +1,6 @@
 {
   "name": "claude-teammates",
-  "version": "1.1.3",
+  "version": "1.1.4",
   "description": "Fleet orchestration, worktree-isolated parallel execution, automated phase gates, and supervision for Claude Code teammates.",
   "author": {
     "name": "Andrey Mudri",
