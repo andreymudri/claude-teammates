@@ -9,7 +9,7 @@
 // absorbed: when the store is missing this throws NAMING THE PATH, and never returns an empty
 // report, because a zero reads as "no usage" and would be a lie the reader has no way to catch.
 
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { lstat, readdir, readFile, realpath, stat } from 'node:fs/promises'
 import path from 'node:path'
 
 import { isUnsafePathComponent, printable } from './reviews.mjs'
@@ -41,7 +41,11 @@ async function newestSession(projectDir) {
     const dir = path.join(projectDir, entry.name)
     let store
     try {
-      store = await stat(path.join(dir, 'subagents'))
+      // lstat, NOT stat: `stat` FOLLOWS the link, so a `subagents` symlink pointing anywhere on
+      // disk answered `isDirectory()` with true and the session became a candidate — then won on
+      // mtime and was auto-selected with no `--session` given. `lstat` describes the link itself,
+      // which is not a directory, so the session is passed over here.
+      store = await lstat(path.join(dir, 'subagents'))
     } catch {
       continue
     }
@@ -96,6 +100,23 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null, ma
   }
   const subagentsDir = path.join(projectDir, session, 'subagents')
 
+  // VALIDATING THE COMPONENT'S NAME CANNOT VALIDATE ITS TARGET. The check above refuses a session
+  // that spells an escape; it cannot see an ordinary name whose directory — or whose `subagents`
+  // — is a SYMLINK out of the store. Both `readdir` and `stat` follow links, so the walk's own
+  // entry point was reachable from anywhere on disk while the comment below correctly described
+  // the links found INSIDE the walk as closed. The test is therefore on what the store path
+  // RESOLVES to, compared against the resolved project directory: a link the operator put higher
+  // up the path is fine (a macOS temp dir is `/var` -> `/private/var`), a link that leaves is not.
+  let resolvedStore
+  try {
+    resolvedStore = await realpath(subagentsDir)
+    const resolvedProject = await realpath(projectDir)
+    const rel = path.relative(resolvedProject, resolvedStore)
+    if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) throw missing(subagentsDir)
+  } catch (err) {
+    throw err instanceof Error && /no transcripts found/.test(err.message) ? err : missing(subagentsDir)
+  }
+
   // The walk has to RECURSE, because a workflow-dispatched run keeps its transcripts under
   // `subagents/workflows/<wf-id>/` rather than flat, and a flat read reported five real
   // transcripts as zero.
@@ -107,7 +128,10 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null, ma
   //      re-entered itself until ELOOP, multiplying every total. The session-name check above
   //      cannot help: it validates the one component this module joins, while that traversal
   //      happens inside the walk. `withFileTypes` + `isDirectory()` is false for a symlink, so a
-  //      link is neither descended nor read as a transcript.
+  //      link is neither descended nor read as a transcript. That covers links found INSIDE the
+  //      walk ONLY — the walk's ROOT is reached by the `readdir` below, which follows. The
+  //      realpath containment check above is what closes the root; neither check subsumes the
+  //      other, and this comment claimed the whole hole was shut when it had shut half of it.
   //   2. It propagates a NESTED failure to the caller. One unreadable subdirectory aborted the
   //      whole report, and the catch relabelled it "no transcripts found" — dropping a readable
   //      transcript sitting in the directory that message names, and blaming a layout change that

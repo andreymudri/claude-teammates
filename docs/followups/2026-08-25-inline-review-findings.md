@@ -209,7 +209,7 @@ outcome to distrust.
 | medium | `quiet-reporter.mjs` — `renderFailure` unwrapped | A test's NAME and its error stack are attacker-authored too. SGR 8 in a stack renders the summary line invisible; U+2028 in a name draws a standalone line reading like a green summary. | Fixed. **The comment justifying the earlier fix was wrong** and is retracted in place: it argued the fix was complete *because* `renderFailure` reads from the `test:fail` event — but a different source is not a safer one. |
 | low | `cli.mjs` — named-phase refusal swallowed other missing args | `workflow --phase default` reported only the phase, never the missing `--run`, bouncing the operator twice. | Fixed; both are said at once. |
 | low | `usage-store.mjs` — empty transcript vanished | A transcript parsing to zero records with zero errors got no row and no `unreadable` entry — the ordinary state between a dispatch creating the file and the first turn being appended. Alone in a store it tripped the empty-report throw and blamed the layout. | Fixed. |
-| low | `usage-store.mjs` — `'.. '` passes the validator | Windows strips trailing spaces and dots from a path component, so `'.. '` resolves to `..`. **Unverified on Windows**, and `reviewFileName` has the identical gap. | **Open.** Recorded rather than fixed: single component, fixed last segment, and fixing it in one place while its model keeps the gap would be worse than fixing neither. |
+| low | `usage-store.mjs` — `'.. '` passes the validator | Windows strips trailing spaces and dots from a path component, so `'.. '` resolves to `..`. **Unverified on Windows**, and `reviewFileName` has the identical gap. | **Closed in v1.1.5**, one release later and deliberately: the two checks became one exported `isUnsafePathComponent`, so the gap could not be fixed in one place and left in the other. Carried as open for exactly one release, which is recorded here rather than backdated. |
 
 The correctness lens also fuzzed `renderUsage` over 4,000 random reports asserting header, rows,
 separator and TOTAL all share one width — zero mismatches — and confirmed the `agent-` filter and
@@ -239,7 +239,7 @@ author's; most new tests bit, and these did not:
 | low | `HANDOFF.md` — the correction written "so it is auditable" cited `cli.mjs:2017`/`:2153`; at the tip those are a `})` and a blank line. | Line numbers dropped for subcommand names, which do not drift. |
 | low | the followups doc claimed the level count "cannot drift apart again in either direction" — **only the skill was bound**; README and CHANGELOG were unpinned and mutating either back to "four" was green. | README bound to `CAVEMAN_LEVELS`. The CHANGELOG is checked against a fixed spelling instead: binding a released entry to the live constant would make a future level change fail a test about a shipped version, which is history rewritten to keep a test green. |
 | low | `cli.mjs` — "neutralised like every other print site in this file" overstates: four sites still interpolate repo- and fs-derived values raw. | Comment corrected to name it as a gap rather than a convention. |
-| low | `docs/followups/…` — "Every value read from disk is neutralised" was false: `usage --json` still emitted U+2028 raw. | Fixed with `printableBlock` on the JSON branch. This row was omitted from an earlier version of this table while the `'.. '` row above was counted twice — the reconciliation error a per-finding record exists to prevent. |
+| medium | `docs/followups/…` — "Every value read from disk is neutralised" was false: `usage --json` still emitted U+2028 raw. | Fixed with `printableBlock` on the JSON branch. This row was omitted from an earlier version of this table while the `'.. '` row above was counted twice — the reconciliation error a per-finding record exists to prevent. Severity corrected from `low` to `medium` to match `reviews2/default-claims.json`, the file that filed it — a mismatch the fifth pass filed and the fifth pass's own findings then went unrecorded, which is the same error one level further down. |
 
 The claims lens verified the 22-finding tally directly against the first pass's findings files
 (5+4+5+8, reconciling to 1/11/10 post-refutation) and left **7 claims unprobed**, including the
@@ -263,7 +263,10 @@ correctness, omitting the tests file entirely, which is the file carrying both h
 said pass four had no highs. This section exists **because** the fourth-pass claims lens found no
 record of pass three at all; writing it and dropping a lens file is the same omission one level
 down. The counts above are taken from `.teammates/inline-review/reviews3/` and `reviews4/`, which
-are in the repo and can be recounted.)*
+are **gitignored** (`.gitignore:2`) and therefore exist only on the machine that ran the passes —
+so on any other clone they cannot be recounted at all, and this document is the only surviving
+record. An earlier version of this parenthesis said they "are in the repo and can be recounted",
+which is the same class of unchecked claim the paragraph above it exists to correct.)*
 
 Almost every finding was a defect in the preceding round of fixes or in the prose describing it.
 Not all: pass four's `tests/md-contract.mjs` finding names blind spots in shared test
@@ -287,8 +290,12 @@ matters:
   now pinned **exactly**, as a snapshot, with a hand-maintained inventory of every other mention of
   `caveman` in the skill — headings, code blocks and frontmatter included, none of which `parseDoc`
   reaches. Any edit fails the test, which is the intent: this measurement is load-bearing, and
-  changing it should be a deliberate act that updates the fixture in the same commit. All eight
-  escapes were re-run against the snapshot and all eight fail.
+  changing it should be a deliberate act that updates the fixture in the same commit.
+
+  **This paragraph was wrong, and a sixth pass proved it.** It claimed all eight escapes were
+  re-run against the section snapshot and all eight fail. Two of them did not: escape #7, re-run
+  verbatim, passed, and the heading escape stopped being caught at all — because the same commit
+  deleted the doc-wide heading screen that had covered it. See the sixth pass below.
 
 - **The `MAX_ENTRIES` cap reintroduced the bug the walk was written to remove.** It stopped the
   walk silently, so a store past it under-reported at exit 0 — reason 2 of the walk's own header,
@@ -311,6 +318,124 @@ matters:
   and an unrelated paragraph failed the caveman test. Scoped to its own section, with a test
   pinning that scoping.
 - **A refutation summarised more favourably than it read** — see the symlink row above, corrected.
+
+## Fifth review pass (2026-08-25)
+
+Recorded here because the earlier version of this document stopped at the fourth pass — the same
+omission the fourth-pass claims lens had already caught one level up, repeated. Pass five reviewed
+the round-four fixes and filed **18**: 7 claims, 11 tests, **4 of them `high`**. It is the pass with
+the most highs of the five, and it had no record at all.
+
+Its two claims highs were both about *this document*: that "each escape was re-run against the fix
+and fails" was false (the heading escape was still green), and that "pass four filed **10**"
+undercounted by 8 by dropping the tests-lens file — the file carrying both of pass four's highs.
+Both are corrected above.
+
+Its two tests highs were the fifth and sixth defeats of the caveman polarity lock: the inverse
+stated in ordinary prose using a *synonym* for "reviewer", and the exact-shape regex's unbounded
+`[^.]*` letting the claim sentence assert its own inverse and still match.
+
+Its mediums named structural blind spots in the test file rather than single escapes — `doc()`
+discarding the frontmatter, so the `description` an agent actually loads the skill from was
+unscreened; `Array.find` instead of `doc.section()`, so a duplicate-titled decoy was reachable;
+the pairing screen skipping code blocks; `kind === 'partial'` unpinned; `DEFAULT_MAX_ENTRIES`
+asserted as a value but never observed being applied.
+
+Two of its findings were carried unresolved into the sixth pass and are closed only now: the
+`| low |` severity row corrected above, and `skills/phase-gate/SKILL.md:207`, whose solo-gate
+paragraph is bound by no assertion. **The phase-gate one remains open** — see below.
+
+## Sixth review pass — the release commits (2026-08-25)
+
+**The five passes above covered `95a4b03..be9f093`. Four commits landed after them and were
+reviewed by nobody:** `f38e868`, the merge `21f0a88`, and the two release commits `c0c9666`
+(v1.1.4) and `c2d0398` (v1.1.5). The recorded gate PASS is stamped 19:20; v1.1.4 and v1.1.5 pushed
+at 19:43 and 19:58, so it cannot speak to either. `c2d0398` shipped **`isUnsafePathComponent`** —
+the sole path-component gate for two `path.join` sites — tagged and released with no adversarial
+review, while the handoff's "Still open" named only the test-only commit.
+
+Four lenses over `be9f093..master` filed **28 findings, 6 `high`** — 14 claims, 6 tests,
+4 security, 4 correctness. The count went **up** against the 22/20/19/18/18 of the earlier passes,
+because this range was genuinely unreviewed production code rather than a round of repairs.
+
+### The symlink escape at the walk's own entry point (high, security; fixed)
+
+`readdir` and `stat` both FOLLOW symlinks. The hand-written walk closed the symlink hole for links
+found *inside* it — `withFileTypes` + `isDirectory()` is false for a link — and left the one at its
+root, under a comment asserting the hole was shut. `newestSession` used `stat`, so a session whose
+`subagents` was a symlink answered `isDirectory()` with true, won on mtime, and was **auto-selected
+with no `--session` given**; the walk then read transcripts from anywhere on disk and attributed
+them to this project. Reproduced live on Linux, no flag required.
+
+Validating the component's *name* can never validate its *target*. Fixed with `lstat` in
+`newestSession` plus a `realpath` containment check on the store path, compared against the
+resolved project directory — so a link the operator put higher up the path still works (a macOS
+temp dir is `/var` → `/private/var`) and a link that leaves the store does not.
+
+### The caveman claim was defeated a NINTH way, by the fix for the eighth (high ×2; fixed)
+
+`f38e868` pinned the caveman section as an exact snapshot and replaced the doc-wide heading screen
+with a line filter for the literal token `caveman`. Two lenses found the consequences independently:
+
+- **Escape #7, re-run verbatim, passed.** Any sentence contradicting the claim while avoiding the
+  token `caveman` is unscreened anywhere outside the pinned section. So "all eight escapes fail
+  against it" was false when it was written.
+- **The commit was a net loss of coverage.** The deleted screen tested
+  `/reviewer/i && /caveman|level/i` over every heading; the replacement keys on `caveman` alone, so
+  a heading pairing "reviewer" with "level" is no longer caught. Measured both ways: green at
+  `master`, and red (`1940 | 1 fail`) with only the pre-`f38e868` test file restored.
+
+**The lesson repeats one level up: any boundary drawn inside the file leaves the rest of the file
+to be a word-matching problem again.** The whole file is now pinned byte-for-byte against
+`tests/fixtures/teammates-config.SKILL.md`, with two further layers a snapshot alone cannot
+provide: a semantic guard asserting the claim sentence survives verbatim (a fixture updated by
+`cp` would otherwise carry an inversion into both files and go green), and an exact-sentence pin on
+the README, which carried the same claim bound by nothing. All ten escapes — the nine plus a
+trailing space inside the pinned section — were re-run and every one is red; the `cp`-the-fixture
+path and a README-only inversion were each verified to fail their own layer.
+
+The cost is deliberate: every edit to that skill now fails a test until the fixture is updated in
+the same commit. That is a visible line in a diff a reviewer can question.
+
+### Three surviving mutations in the v1.1.5 validator (high ×1, medium ×1, low ×1; fixed)
+
+`isUnsafePathComponent` had **no direct test** — `grep -rn isUnsafePathComponent tests/` returned
+nothing. It was exercised only through two call sites that both pre-filter their input, so:
+
+| mutation | before | after |
+|---|---|---|
+| `/[\\/]/` → `/[/]/` — deletes the **Windows separator** | survived, suite green | killed |
+| `typeof value !== 'string'` guard deleted | survived, suite green | killed |
+| `resolved === '.' \|\| resolved === '..'` deleted | survived — **equivalent mutant** | removed as dead code |
+
+The first is the serious one: the backslash half was uncovered in the release whose entire subject
+is Windows path-component semantics, and neither test file contained a single backslash. With it
+gone `reviewFileName(1, '..\..\..\etc')` stops throwing.
+
+The third is not a test gap but dead code. The strip removes the whole trailing run of `[. \t]`, so
+`.` and `..` are nothing but dots and collapse to `''` before any second comparison — exhaustive
+enumeration found zero inputs reaching either arm and zero where the three-arm and one-arm
+predicates disagree. Two thirds of the predicate that read as the substance of the rule was
+unkillable by construction. It now has one arm, and the comment says why.
+
+CHANGELOG.md and HANDOFF.md both claimed "one mutation of it fails tests at both call sites". That
+claim was false when written and is true now.
+
+### What the claims lens found in the handoff itself
+
+`HANDOFF.md` was essentially rewritten in this range and carried three highs and four mediums —
+the reviewed range stated as `95a4b03..master` when the passes ended at `be9f093`; "Still open"
+omitting `c2d0398`; "all eight escapes fail"; the gate-caveat sentence pointing at a persisted
+record that carries no `results` key at all; "only pass 1 found a user-facing bug", falsified by
+the `'.. '` traversal that pass 2 filed against code predating the repair work; and the 97/11 tally
+naming the refutations as co-filers of a total they did not contribute to, using a high count they
+had themselves invalidated. All are corrected in the rewritten handoff.
+
+**The refutation files re-file the finding they adjudicate; they do not add new sites.** The honest
+tally of the first five passes is therefore **97 lens findings, 11 `high` pre-refutation, 8 `high`
+post-refutation**. Any of those three numbers is defensible; stating one without saying which is
+the error.
+
 
 ## Not reviewed
 

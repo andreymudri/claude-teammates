@@ -43,9 +43,9 @@ const task = {
 }
 const brief = (caveman) => composeBrief({ task, runId: 'r1', planPath: 'p.md', baseBranch: 'main', caveman })
 
-// WHY THIS IS A SNAPSHOT AND NOT A PATTERN.
+// WHY THIS IS A WHOLE-FILE SNAPSHOT AND NOT A PATTERN, AND NOT A SECTION SNAPSHOT EITHER.
 //
-// This claim has now been defeated FIVE times, and every fix opened the next hole: co-occurrence
+// This claim has now been defeated NINE times, and every fix opened the next hole: co-occurrence
 // matching; one sentence satisfying the claim while stating its inverse; the inverse appended to
 // the claim sentence, which `assertClaim` exempts by construction; a heading, which `parseDoc`
 // never turns into a statement; the inverse appended to an allow-listed sentence; an inversion in
@@ -54,41 +54,60 @@ const brief = (caveman) => composeBrief({ task, runId: 'r1', planPath: 'p.md', b
 // instrument defeating itself — an aside spliced INSIDE the claim sentence, through the `[^.]*`
 // in the exact-shape regex, which both inventory screens then skip because it IS the claim.
 //
-// The lesson is structural, not a matter of a better regex. A word-matcher over prose can only
-// forbid the phrasings its author imagined, and prose has unbounded ways to say the opposite. So
-// the section that carries the claim is pinned EXACTLY. Any edit to it fails this test, which is
-// the point: the measurement it records is load-bearing, and changing it should be a deliberate
-// act that updates this fixture in the same commit.
-const CAVEMAN_SECTION = "## What `caveman` actually reaches\n\nMeasured 2026-08-25 against real subagent transcripts. `caveman` is a much narrower knob than its\nposition beside `maxParallel` suggests, and the measurement contradicts the name, so state its\nscope rather than letting an operator infer it.\n\n`caveman` has exactly two consumers: it rewrites the **implementer** brief, and it renders the\nlocal `digest` output terse. Reviewer and integrator dispatches carry no caveman path at all, so the\nreviewers \u2014 the largest emitters in a run \u2014 are unaffected by any value you set.\n\nWithin the implementer brief its instruction is scoped to the returned summary and blockers, not\nto intermediate turns. That summary is the last message an agent emits, so it is re-read zero\ntimes by the agent that wrote it.\n\nThe caveman brief is **larger** than the default, by about 3%. Compressing the connective prose\nsaves less than the added STYLE block costs, and a brief sits in the agent's prefix, so that cost\nis re-read on every turn.\n\nThe three levels are validated but not honoured by this plugin's own code: `digest` reads only\nwhether the value is truthy, and the brief passes the level through to an external\n`caveman:caveman` skill, telling the agent to apply the style directly when that skill is absent.\n\nReach for `agents.<role>.effort` instead when a run's output cost is the problem. Thinking is\n72-76% of an agent's output tokens, `effort` is the control for thinking, and no style\ninstruction can touch it. Lowering it is a real quality trade-off, so raise it with the operator\nrather than setting it quietly.\n"
+// The ninth was opened BY the fix for the eighth. Pinning only the caveman section left every
+// other byte of the skill unbound, screened by a line filter for the literal token `caveman` — so
+// escape #7, re-run verbatim, passed again, and a heading pairing "reviewer" with "level" stopped
+// being caught at all because that fix deleted the doc-wide heading screen that had covered it.
+// Two independent review lenses found it, by different routes, in the commit that claimed to have
+// ended the fight.
+//
+// The lesson is structural, not a matter of a better regex or a wider snapshot boundary. A
+// word-matcher over prose can only forbid the phrasings its author imagined, and prose has
+// unbounded ways to say the opposite; ANY boundary drawn inside the file leaves the rest of the
+// file to be a word-matching problem again. So the WHOLE FILE is pinned, byte for byte.
+//
+// The cost is deliberate and is the point: every edit to this skill — including one that has
+// nothing to do with caveman — fails this test until the fixture is updated in the same commit.
+// The measurement is load-bearing, and a fixture update is a visible line in a diff that a
+// reviewer can see and question. If you need a looser instrument, that is a decision to take
+// knowingly, against nine rounds of evidence that looser instruments lose.
+const SKILL_URL = new URL('../skills/teammates-config/SKILL.md', import.meta.url)
+const SKILL_FIXTURE_URL = new URL('./fixtures/teammates-config.SKILL.md', import.meta.url)
 
-test('the caveman section is exactly what was measured', async () => {
-  const text = await readFile(new URL('../skills/teammates-config/SKILL.md', import.meta.url), 'utf8')
-  const i = text.indexOf('## What `caveman` actually reaches')
-  assert.notEqual(i, -1, 'the skill must keep a section stating what caveman reaches')
-  assert.equal(text.indexOf('## What `caveman` actually reaches', i + 1), -1,
-    'exactly one such section: a duplicate-titled decoy would absorb every assertion below')
-  const j = text.indexOf('\n## ', i + 10)
-  assert.equal(text.slice(i, j === -1 ? undefined : j), CAVEMAN_SECTION,
-    'the caveman section changed; if the measurement changed, update CAVEMAN_SECTION deliberately')
+test('the teammates-config skill is exactly the reviewed text, byte for byte', async () => {
+  const [text, fixture] = await Promise.all([
+    readFile(SKILL_URL, 'utf8'),
+    readFile(SKILL_FIXTURE_URL, 'utf8'),
+  ])
+  assert.equal(text, fixture,
+    'skills/teammates-config/SKILL.md changed; if the change is intended, update ' +
+    'tests/fixtures/teammates-config.SKILL.md in the SAME commit and say why in the message')
 })
 
-// The section is pinned, so the remaining surface is every OTHER mention of caveman in the skill —
-// including headings, code blocks and the frontmatter, none of which `parseDoc` turns into a
-// statement, and each of which carried a working escape. Every such site is inventoried by hand.
-test('every mention of caveman outside the pinned section is accounted for', async () => {
-  const text = await readFile(new URL('../skills/teammates-config/SKILL.md', import.meta.url), 'utf8')
-  const i = text.indexOf('## What `caveman` actually reaches')
-  const j = text.indexOf('\n## ', i + 10)
-  const outside = text.slice(0, i) + (j === -1 ? '' : text.slice(j))
-  const lines = outside.split('\n').filter((l) => /caveman/i.test(l))
-  const ALLOWED = [
-    /^`config` manages the \*\*ergonomics\*\* keys only: `maxParallel`, `caveman`, and$/,
-    /^\s*caveman: false \| lite \| full \| ultra$/,
-    /^- `caveman` — `false`, or one of `lite`, `full`, `ultra`\. See below for what it reaches\.$/,
-  ]
-  const strays = lines.filter((l) => !ALLOWED.some((a) => a.test(l.trim())))
-  assert.deepEqual(strays, [],
-    'a mention of caveman outside the pinned section is unreviewed; add it here deliberately')
+// The snapshot pins the bytes; this pins that the bytes still SAY the thing. A fixture updated by
+// `cp` would carry an inversion into both files at once and the snapshot alone would go green.
+test('the pinned skill still states that reviewers are unaffected by caveman', async () => {
+  const text = await readFile(SKILL_URL, 'utf8')
+  assert.ok(
+    text.includes('Reviewer and integrator dispatches carry no caveman path at all, so the\nreviewers — the largest emitters in a run — are unaffected by any value you set.'),
+    'the load-bearing sentence must survive verbatim in the skill',
+  )
+  assert.ok(
+    text.includes('The caveman brief is **larger** than the default, by about 3%.'),
+    'the measurement that motivates the claim must survive verbatim',
+  )
+})
+
+// The README is the operator-facing surface for the same measurement and was bound by NOTHING:
+// it could be inverted with the whole suite green, while the skill beside it said the opposite.
+// Pinned as an exact sentence rather than a whole-file snapshot, because the README is long and
+// edited often for reasons that have nothing to do with this claim.
+test('the README states the same thing about reviewers as the skill', async () => {
+  const text = await readFile(new URL('../README.md', import.meta.url), 'utf8')
+  assert.ok(
+    text.includes('Reviewer and integrator dispatches carry no caveman path, so the\nreviewers — the largest emitters in a run — are unaffected by any value you set.'),
+    'README.md must carry the claim verbatim; it is the operator-facing copy of the same measurement',
+  )
 })
 
 

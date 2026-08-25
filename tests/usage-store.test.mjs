@@ -603,3 +603,69 @@ test('a session name Windows would strip back to .. is refused', async () => {
     }
   }, { files: { 'agent-a.jsonl': line({ cache_read_input_tokens: 10 }) } })
 })
+
+
+// The walk's ROOT is reached by `readdir()`/`stat()`, and both FOLLOW symlinks. The hand-written
+// walk closed the symlink hole for links found INSIDE it — `withFileTypes` + `isDirectory()` is
+// false for a link — and left the one at its own entry point, under a comment asserting the hole
+// was closed. Validating the session COMPONENT cannot help: the name is ordinary, only its target
+// escapes. The test is therefore on what the store path RESOLVES to.
+async function withRawStore(fn, build) {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-usage-sym-'))
+  try {
+    await fn({ projectsDir: dir, projectDir: path.join(dir, projectSlug(FAKE_ROOT)), ...(await build(dir) ?? {}) })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+}
+
+test('a session whose subagents/ is a symlink out of the store is not auto-selected', async () => {
+  await withRawStore(async ({ projectsDir }) => {
+    await assert.rejects(
+      () => readSessionUsage({ projectsDir, root: FAKE_ROOT }),
+      (err) => /no transcripts found/.test(err.message),
+      'a store reached through a link must not be walked, and must not be reported as this project',
+    )
+  }, async (dir) => {
+    const outside = path.join(dir, 'outside', 'subagents')
+    await mkdir(outside, { recursive: true })
+    await writeFile(path.join(outside, 'agent-outside.jsonl'), line({ cache_read_input_tokens: 999999 }), 'utf8')
+    const session = path.join(dir, projectSlug(FAKE_ROOT), 'sess-plausible')
+    await mkdir(session, { recursive: true })
+    await symlink(outside, path.join(session, 'subagents'), 'dir')
+  })
+})
+
+test('an explicitly named session that is itself a symlink is refused', async () => {
+  await withRawStore(async ({ projectsDir }) => {
+    await assert.rejects(
+      () => readSessionUsage({ projectsDir, root: FAKE_ROOT, sessionId: 'sess-linked' }),
+      (err) => /no transcripts found/.test(err.message),
+      'the component name is ordinary; only its target escapes, so the name check cannot catch it',
+    )
+  }, async (dir) => {
+    const outside = path.join(dir, 'elsewhere')
+    await mkdir(path.join(outside, 'subagents'), { recursive: true })
+    await writeFile(path.join(outside, 'subagents', 'agent-leak.jsonl'), line({ cache_read_input_tokens: 999999 }), 'utf8')
+    const project = path.join(dir, projectSlug(FAKE_ROOT))
+    await mkdir(project, { recursive: true })
+    await symlink(outside, path.join(project, 'sess-linked'), 'dir')
+  })
+})
+
+// The containment check must not refuse a LEGITIMATE store, including one reached through a link
+// higher up the path that the operator themselves chose — a temp directory on macOS is `/var/...`,
+// itself a symlink to `/private/var`, so comparing unresolved paths would refuse every store there.
+test('a real store is still read when the projects directory itself is reached through a link', async () => {
+  await withRawStore(async ({ projectsDir }) => {
+    const report = await readSessionUsage({ projectsDir, root: FAKE_ROOT })
+    assert.equal(report.sessionId, 'sess-1')
+    assert.equal(report.agents.length, 1)
+  }, async (dir) => {
+    const real = path.join(dir, 'real', projectSlug(FAKE_ROOT), 'sess-1', 'subagents')
+    await mkdir(real, { recursive: true })
+    await writeFile(path.join(real, 'agent-a.jsonl'), line({ cache_read_input_tokens: 10 }), 'utf8')
+    await symlink(path.join(dir, 'real'), path.join(dir, 'link'), 'dir')
+    return { projectsDir: path.join(dir, 'link') }
+  })
+})
