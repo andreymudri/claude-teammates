@@ -568,3 +568,21 @@ test('the default cap is a real bound, not an unreachable number', async () => {
       'a bound nothing can reach is not a bound')
   }, { files: { 'agent-a.jsonl': line({ cache_read_input_tokens: 10 }) } })
 })
+
+
+// The `partial` SIBLING. A test pins that nothing-parsed is `unreadable`, but nothing pinned the
+// other branch, so `records.length > 0 ? 'partial' : 'unreadable'` collapsed to plain
+// `'unreadable'` with the suite green — reinstating the misstatement that a transcript which DID
+// contribute a row was a read failure.
+test('a transcript that lost some lines but kept others is partial, not unreadable', async () => {
+  await withStore(async ({ projectsDir }) => {
+    const report = await readSessionUsage({ projectsDir, root: FAKE_ROOT })
+    const torn = report.unreadable.find((e) => e.name.endsWith('agent-torn.jsonl'))
+    assert.ok(torn, 'the drop must be reported')
+    assert.equal(torn.kind, 'partial', 'records survived, so this is not a read failure')
+    assert.equal(torn.kept, 1)
+    assert.equal(torn.dropped, 1)
+    assert.ok(report.agents.some((a) => a.name.endsWith('agent-torn.jsonl')),
+      'a partial transcript still contributes its row, which is what makes it partial')
+  }, { files: { 'agent-torn.jsonl': `${line({ cache_read_input_tokens: 10 })}\n{"broken` } })
+})

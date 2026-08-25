@@ -43,74 +43,54 @@ const task = {
 }
 const brief = (caveman) => composeBrief({ task, runId: 'r1', planPath: 'p.md', baseBranch: 'main', caveman })
 
-test('the skill states that caveman reaches only implementer briefs and the local digest', async () => {
-  assertStatement(
-    await doc(),
-    /caveman[\s\S]*implementer/i,
-    'teammates-config must say caveman reaches implementer briefs',
-  )
-  // An INVENTORY LOCK, not a pattern match. Two rounds of tightening regexes both failed the same
-  // way: a reviewer wrote one sentence that satisfied the required claim AND stated its inverse
-  // ("carry no caveman path in the `digest`, but the reviewer brief does carry whatever level you
-  // set"), because a forbid-list can only ever name the phrasings someone already thought of.
-  // `assertClaim`'s `subject` inverts that: EVERY statement in the document mentioning reviewers
-  // must be the claim itself or explicitly allowed here, so a new sentence about reviewers fails
-  // whatever words it uses. Adding one is then a deliberate act with a test to update.
-  assertClaim(await cavemanSection(), {
-    label: 'reviewers are unaffected by caveman',
-    claim: /Reviewer and integrator dispatches carry no caveman path at all/,
-    subject: /reviewer/i,
-    // ANCHORED. `allow` entries are substring tests, so an unanchored pattern exempts the whole
-    // statement and the inversion can simply be appended to an allow-listed sentence — measured
-    // green before this. Each pattern now has to match the sentence end to end.
-    allow: [
-      // Not about caveman: the enforcement-key rule happens to name `agents.reviewer.*`.
-      /^An enforcement key never goes in the local file[\s\S]*exit 2[^.]*\.$/,
-      /^That makes it a real verification step[\s\S]*shape is all it checks\.[\s\S]*$/,
-    ],
-  })
+// WHY THIS IS A SNAPSHOT AND NOT A PATTERN.
+//
+// This claim has now been defeated FIVE times, and every fix opened the next hole: co-occurrence
+// matching; one sentence satisfying the claim while stating its inverse; the inverse appended to
+// the claim sentence, which `assertClaim` exempts by construction; a heading, which `parseDoc`
+// never turns into a statement; the inverse appended to an allow-listed sentence; an inversion in
+// another section once the claim was scoped to its own; a sentence naming neither "reviewer" nor
+// "caveman" ("the grading lenses ... do receive the level in full"); and — the round-four
+// instrument defeating itself — an aside spliced INSIDE the claim sentence, through the `[^.]*`
+// in the exact-shape regex, which both inventory screens then skip because it IS the claim.
+//
+// The lesson is structural, not a matter of a better regex. A word-matcher over prose can only
+// forbid the phrasings its author imagined, and prose has unbounded ways to say the opposite. So
+// the section that carries the claim is pinned EXACTLY. Any edit to it fails this test, which is
+// the point: the measurement it records is load-bearing, and changing it should be a deliberate
+// act that updates this fixture in the same commit.
+const CAVEMAN_SECTION = "## What `caveman` actually reaches\n\nMeasured 2026-08-25 against real subagent transcripts. `caveman` is a much narrower knob than its\nposition beside `maxParallel` suggests, and the measurement contradicts the name, so state its\nscope rather than letting an operator infer it.\n\n`caveman` has exactly two consumers: it rewrites the **implementer** brief, and it renders the\nlocal `digest` output terse. Reviewer and integrator dispatches carry no caveman path at all, so the\nreviewers \u2014 the largest emitters in a run \u2014 are unaffected by any value you set.\n\nWithin the implementer brief its instruction is scoped to the returned summary and blockers, not\nto intermediate turns. That summary is the last message an agent emits, so it is re-read zero\ntimes by the agent that wrote it.\n\nThe caveman brief is **larger** than the default, by about 3%. Compressing the connective prose\nsaves less than the added STYLE block costs, and a brief sits in the agent's prefix, so that cost\nis re-read on every turn.\n\nThe three levels are validated but not honoured by this plugin's own code: `digest` reads only\nwhether the value is truthy, and the brief passes the level through to an external\n`caveman:caveman` skill, telling the agent to apply the style directly when that skill is absent.\n\nReach for `agents.<role>.effort` instead when a run's output cost is the problem. Thinking is\n72-76% of an agent's output tokens, `effort` is the control for thinking, and no style\ninstruction can touch it. Lowering it is a real quality trade-off, so raise it with the operator\nrather than setting it quietly.\n"
 
-  // TWO HOLES `assertClaim` leaves open by construction, both measured green before this.
-  //
-  // First: the inventory screen excludes the claim sentence itself (`s.text !== hit.text` in
-  // md-contract), so the inverse could simply be APPENDED to it. The claim is therefore locked to
-  // its exact shape — anything added to that sentence fails.
-  const section = await cavemanSection()
-  const claim = section.statements.find((s) => /carry no caveman path at all/.test(s.text))
-  assert.match(
-    claim.text,
-    /^Reviewer and integrator dispatches carry no caveman path at all, so the reviewers[^.]*are unaffected by any value you set\.$/,
-    'the claim sentence must stand alone; the inventory screen cannot see inside it',
-  )
-
-  // Second: `parseDoc` builds `statements` from paragraphs and list items only, so NO heading is
-  // ever screened by the inventory lock. Screened here across the WHOLE document, not the section:
-  // `makeSection` is handed `blocks.slice(i + 1, end)`, so a section never contains its own
-  // heading, and a same-level `##` opens a new section entirely — so a section-scoped heading loop
-  // missed both the section's own heading and any heading appended to the document. Both shipped
-  // green while a comment claimed the escape was closed.
-  const parsed = await doc()
-  const allHeadings = parsed.blocks.filter((b) => b.kind === 'heading').map((b) => b.text)
-  for (const heading of allHeadings) {
-    assert.ok(
-      !(/reviewer/i.test(heading) && /caveman|level/i.test(heading)),
-      `a heading pairs reviewers with caveman, which no heading is screened for by any other `
-        + `assertion here: ${JSON.stringify(heading)}`,
-    )
-  }
-
-  // Third, and the one scoping the claim to its section OPENED: an inversion written into any
-  // OTHER section is outside that scope entirely. Appending one to a sentence in a different
-  // section was measured green. So the document as a whole is screened for the pairing that
-  // matters — a statement naming BOTH reviewers and caveman — and the claim is the only one
-  // allowed to exist. Narrower than screening every mention of reviewers, which would fire on the
-  // unrelated `agents.reviewer.*` config rules.
-  const strays = (await doc()).statements.filter(
-    (st) => /reviewer/i.test(st.text) && /caveman/i.test(st.text) && st.text !== claim.text,
-  )
-  assert.deepEqual(strays.map((st) => st.text), [],
-    'only the claim may speak about reviewers and caveman together, anywhere in this skill')
+test('the caveman section is exactly what was measured', async () => {
+  const text = await readFile(new URL('../skills/teammates-config/SKILL.md', import.meta.url), 'utf8')
+  const i = text.indexOf('## What `caveman` actually reaches')
+  assert.notEqual(i, -1, 'the skill must keep a section stating what caveman reaches')
+  assert.equal(text.indexOf('## What `caveman` actually reaches', i + 1), -1,
+    'exactly one such section: a duplicate-titled decoy would absorb every assertion below')
+  const j = text.indexOf('\n## ', i + 10)
+  assert.equal(text.slice(i, j === -1 ? undefined : j), CAVEMAN_SECTION,
+    'the caveman section changed; if the measurement changed, update CAVEMAN_SECTION deliberately')
 })
+
+// The section is pinned, so the remaining surface is every OTHER mention of caveman in the skill —
+// including headings, code blocks and the frontmatter, none of which `parseDoc` turns into a
+// statement, and each of which carried a working escape. Every such site is inventoried by hand.
+test('every mention of caveman outside the pinned section is accounted for', async () => {
+  const text = await readFile(new URL('../skills/teammates-config/SKILL.md', import.meta.url), 'utf8')
+  const i = text.indexOf('## What `caveman` actually reaches')
+  const j = text.indexOf('\n## ', i + 10)
+  const outside = text.slice(0, i) + (j === -1 ? '' : text.slice(j))
+  const lines = outside.split('\n').filter((l) => /caveman/i.test(l))
+  const ALLOWED = [
+    /^`config` manages the \*\*ergonomics\*\* keys only: `maxParallel`, `caveman`, and$/,
+    /^\s*caveman: false \| lite \| full \| ultra$/,
+    /^- `caveman` — `false`, or one of `lite`, `full`, `ultra`\. See below for what it reaches\.$/,
+  ]
+  const strays = lines.filter((l) => !ALLOWED.some((a) => a.test(l.trim())))
+  assert.deepEqual(strays, [],
+    'a mention of caveman outside the pinned section is unreviewed; add it here deliberately')
+})
+
 
 test('caveman never reaches a reviewer dispatch', async () => {
   const source = await readFile(new URL('../scripts/review-gen.mjs', import.meta.url), 'utf8')

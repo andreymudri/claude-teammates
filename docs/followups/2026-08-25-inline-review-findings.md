@@ -271,17 +271,25 @@ infrastructure that predate this branch by three weeks, so the branch inherited 
 than introducing it. What they found, in the order it
 matters:
 
-- **The caveman polarity assertion has now been defeated four times**, by four different escapes:
-  a co-occurrence match, a sentence satisfying the claim while stating its inverse, the inverse
-  appended to the claim sentence itself (which `assertClaim`'s inventory screen excludes by
-  construction, `s.text !== hit.text`), and a heading (`scope.statements` covers paragraphs and
-  list items, never headings), the inverse appended to an allow-listed sentence, an inversion in
-  another section once the claim was scoped to its own — and, after all of that, **a heading
-  again**: the heading screen written for escape 3 read `section.blocks`, which never contains the
-  section's own heading, and a same-level `##` opens a new section outside the scope entirely. An
-  earlier version of this bullet claimed every escape had been re-run and failed; the heading one
-  had not been re-run and still passed. Headings are now screened across the whole document, and
-  all five escapes were re-run against that and fail.
+- **The caveman polarity assertion was defeated EIGHT ways across six rounds, and every fix opened
+  the next hole.** Co-occurrence matching; one sentence satisfying the claim while stating its
+  inverse; the inverse appended to the claim sentence, which `assertClaim` exempts by construction;
+  a heading, which `parseDoc` never turns into a statement; the inverse appended to an allow-listed
+  sentence; an inversion in another section, opened by scoping the claim to its own; a sentence
+  naming neither "reviewer" nor "caveman" ("the grading lenses ... do receive the level in full");
+  and — the round-four instrument defeating itself — an aside spliced *inside* the claim sentence
+  through the `[^.]*` in its own exact-shape regex, which both inventory screens then skip because
+  it **is** the claim. A duplicate-titled decoy section, a code block, and the frontmatter were
+  also reachable.
+
+  **The lesson is structural, not a better regex.** A word-matcher over prose can only forbid the
+  phrasings its author imagined, and prose has unbounded ways to say the opposite. The section is
+  now pinned **exactly**, as a snapshot, with a hand-maintained inventory of every other mention of
+  `caveman` in the skill — headings, code blocks and frontmatter included, none of which `parseDoc`
+  reaches. Any edit fails the test, which is the intent: this measurement is load-bearing, and
+  changing it should be a deliberate act that updates the fixture in the same commit. All eight
+  escapes were re-run against the snapshot and all eight fail.
+
 - **The `MAX_ENTRIES` cap reintroduced the bug the walk was written to remove.** It stopped the
   walk silently, so a store past it under-reported at exit 0 — reason 2 of the walk's own header,
   reintroduced by the bound added for reason 3. Then the fix for that had an **off-by-one**:
