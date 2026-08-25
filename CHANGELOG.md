@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.1.6
 
 Two review passes over code that had shipped without any.
 

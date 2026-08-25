@@ -1,7 +1,9 @@
 # Handoff — 2026-08-25, end of session
 
-`v1.1.5` is tagged at `master`. **There is unreleased work on `fix/pass6-findings`**, including a
-security fix, and it is not merged. See "What to do first".
+`v1.1.6` is tagged at `master` and released. Nothing is unreleased.
+
+It closes a live escape in `usage`, and it shipped only after the three-platform matrix ran green
+on the exact tree that was tagged — see "What to do first" for why that sentence is not decoration.
 
 ## Read this first
 
@@ -28,9 +30,11 @@ and restart. An unbumped version makes the update a no-op.
 
 ## What to do first
 
-`fix/pass6-findings` is green (**1962 tests, 1959 pass, 0 fail, 3 skipped**) and unmerged. Decide
-whether it lands and whether it ships as `v1.1.6`. It carries a security fix, so leaving it
-unmerged leaves the escape live in the released `v1.1.5`.
+**The CI workflow triggers on `push: branches: [master]` and `pull_request` — nothing else.**
+Pushing a feature branch runs NO checks at all. A review pass caught this handoff about to tag a
+release on a green tick that belonged to another commit; pushing the branch did not fix it, and
+opening a PR was what actually ran the matrix. If you are about to ship from a branch, open the PR
+and read `gh pr checks <n>`.
 
     npm test                                     # expect 1962 / 1959 / 0 fail / 3 skipped
     gh run list --branch <this branch> --limit 1 # NOT `--limit 1` on its own
