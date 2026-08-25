@@ -137,12 +137,20 @@ test('the skill states the level count the code actually validates', async () =>
 // NOT — mutating either back to "four levels" left the suite green while a followups doc claimed
 // the two "cannot drift apart again in either direction". Bound here, so the claim is true.
 test('the README and CHANGELOG state the level count the code validates', async () => {
+  const WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six']
+  const correct = WORDS[CAVEMAN_LEVELS.length]
+  // The wrong spellings are derived by EXCLUDING the right one, not hard-coded. A fixed list of
+  // `(two|four|five)` contradicted the assertion above it for any count in that list — the two
+  // could never both hold — so the test was unsatisfiable the moment CAVEMAN_LEVELS changed to one
+  // of them, which is precisely when it needed to work.
+  const wrong = WORDS.filter((w) => w !== correct).join('|')
   for (const file of ['../README.md', '../CHANGELOG.md']) {
     const text = await readFile(new URL(file, import.meta.url), 'utf8')
-    if (!/levels are validated/.test(text)) continue
-    assert.match(text, new RegExp(`${['zero', 'one', 'two', 'three', 'four', 'five'][CAVEMAN_LEVELS.length]} levels are validated`, 'i'),
+    // NO `continue` guard. Skipping when the sentence is absent let the binding evaporate on the
+    // exact reword it exists to catch: delete the claim and the file stops being checked at all.
+    assert.match(text, new RegExp(`${correct} levels are validated`, 'i'),
       `${file} must name the same level count CAVEMAN_LEVELS defines`)
-    assert.doesNotMatch(text, /\b(two|four|five) levels are validated/i,
+    assert.doesNotMatch(text, new RegExp(`\\b(${wrong}) levels are validated`, 'i'),
       `${file} names a level count the code does not validate`)
   }
 })

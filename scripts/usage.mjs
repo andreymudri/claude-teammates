@@ -128,13 +128,28 @@ export function renderUsage(report) {
     // other record in it. Filing that under "unreadable" states the opposite of what happened, in
     // the one line a reader takes the totals' trustworthiness from. A missing `kept` is the older
     // shape, where nothing was salvaged.
-    const partial = unreadable.filter((e) => (e.kept ?? 0) > 0)
-    const lost = unreadable.length - partial.length
-    if (lost > 0) lines.push(`${lost} transcript(s) unreadable`)
+    // Each kind named as what it actually is. `kept: 0` was overloaded to mean a read failure, a
+    // file that read fine but holds no records yet, and a DIRECTORY the walk could not enter — and
+    // this tally called all three "transcript(s) unreadable", asserting a read failure that never
+    // happened and calling a directory a transcript, in the one line a reader takes the totals'
+    // trustworthiness from. `kind` is absent on the older shape, where `kept > 0` meant partial and
+    // anything else meant unreadable; that reading is the fallback.
+    const kindOf = (e) => e.kind ?? ((e.kept ?? 0) > 0 ? 'partial' : 'unreadable')
+    const count = (kind) => unreadable.filter((e) => kindOf(e) === kind).length
+    const partial = unreadable.filter((e) => kindOf(e) === 'partial')
+    if (count('unreadable') > 0) lines.push(`${count('unreadable')} transcript(s) unreadable`)
     if (partial.length > 0) {
       const dropped = partial.reduce((sum, e) => sum + (e.dropped ?? 0), 0)
       lines.push(`${partial.length} transcript(s) with dropped lines (${dropped} line(s) total)`)
     }
+    if (count('empty') > 0) lines.push(`${count('empty')} transcript(s) with no records yet`)
+    // Inflected, like the unreadable-entry notice in finish.mjs: "1 directory(ies)" reads as a
+    // template nobody checked.
+    const dirs = count('directory')
+    if (dirs > 0) lines.push(`${dirs} ${dirs === 1 ? 'directory' : 'directories'} could not be read`)
+    // Last, because it bounds everything above it: past the cap the report is incomplete and no
+    // other count on this screen can be read as a total.
+    for (const e of unreadable.filter((x) => kindOf(x) === 'truncated')) lines.push(`walk truncated: ${p(e.reason)}`)
   }
   return lines.join('\n')
 }

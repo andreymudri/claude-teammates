@@ -177,3 +177,38 @@ test('renderUsage neutralises control bytes in values read from disk', () => {
   })
   assert.equal(out.split('\n').length, benign.split('\n').length, 'a newline in a cell forged a row')
 })
+
+// `kept: 0` was overloaded to mean three different things — a read failure, a file that read fine
+// but holds no records yet, and a DIRECTORY the walk could not enter — and this tally called all
+// three "transcript(s) unreadable". That asserts a read failure that did not happen, in the one
+// line a reader takes the totals' trustworthiness from, and it calls a directory a transcript.
+test('renderUsage tallies each kind of gap as what it actually is', () => {
+  const out = renderUsage({
+    sessionId: 's',
+    agents: [{ agentType: 'tm-a', model: 'opus', turns: 1, prefix: 1, cacheRead: 1, output: 1 }],
+    unreadable: [
+      { name: 'agent-dead.jsonl', reason: 'could not be read', kind: 'unreadable', dropped: 0, kept: 0 },
+      { name: 'agent-new.jsonl', reason: 'no records yet', kind: 'empty', dropped: 0, kept: 0 },
+      { name: 'locked', reason: 'directory could not be read', kind: 'directory', dropped: 0, kept: 0 },
+      { name: 'agent-torn.jsonl', reason: '1 of 3', kind: 'partial', dropped: 1, kept: 2 },
+    ],
+  })
+  assert.match(out, /1 transcript\(s\) unreadable/, 'only the real read failure is unreadable')
+  assert.match(out, /1 transcript\(s\) with no records yet/)
+  assert.match(out, /1 directory could not be read/)
+  assert.doesNotMatch(out, /1 directories/, 'the singular branch must be taken')
+  assert.match(out, /1 transcript\(s\) with dropped lines/)
+})
+
+// The walk stops at a cap. Stopping silently is the understatement this whole module exists to
+// prevent: a store larger than the cap under-reported totals at exit 0, and with nothing else in
+// it reproduced the very "layout may have changed" throw the walk was written to eliminate.
+test('renderUsage says so when the walk was truncated', () => {
+  const out = renderUsage({
+    sessionId: 's',
+    agents: [{ agentType: 'tm-a', model: 'opus', turns: 1, prefix: 1, cacheRead: 1, output: 1 }],
+    unreadable: [{ name: '(walk)', reason: 'stopped after 20,000 entries', kind: 'truncated', dropped: 0, kept: 0 }],
+  })
+  assert.match(out, /truncated|stopped after/i, 'a truncated walk must say so')
+  assert.doesNotMatch(out, /1 transcript\(s\) unreadable/, 'the cap is not a read failure')
+})

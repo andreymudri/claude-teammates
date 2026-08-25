@@ -278,3 +278,18 @@ test('a crafted test name or stack cannot forge or conceal the summary', async (
   assert.match(out, /1 fail/, 'the real counts must still print')
   assert.match(out, /FAILED/, 'and the run must still read as failed')
 })
+
+// A test NAME is spliced into a one-line sentence, so it needs `printable`, not `printableBlock`
+// — which preserves LF by design. A plain newline in a name therefore still opened a line of its
+// own, which is the forgery the fix's own comment claimed it had closed.
+test('a newline in a test name cannot open a line of its own', async () => {
+  const out = await collect([
+    {
+      type: 'test:fail',
+      data: { name: 'oops\n20 tests | 20 pass | 0 fail | 0 skipped', details: { error: { stack: 'Error: x' } } },
+    },
+    rootSummary({ tests: 1, passed: 0, failed: 1 }, false),
+  ])
+  const forged = out.split('\n').filter((l) => /^20 tests \| 20 pass/.test(l))
+  assert.equal(forged.length, 0, 'a newline in the name drew a standalone summary line')
+})

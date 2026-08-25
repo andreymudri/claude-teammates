@@ -1,4 +1,4 @@
-import { printableBlock } from './reviews.mjs'
+import { printable, printableBlock } from './reviews.mjs'
 
 // A test reporter that prints failures and one summary line, and nothing else.
 //
@@ -27,9 +27,14 @@ function renderFailure(data) {
   // Neutralised, because BOTH halves are attacker-authored: a test's name and its thrown error are
   // whatever the test file says. Raw, a stack carrying SGR 8 (conceal) rendered the authoritative
   // summary line invisible, and a U+2028 in a name drew a standalone line that read like a green
-  // summary. `printableBlock` keeps the newlines and tabs a stack needs to stay legible, so
-  // nothing about failure readability is traded away.
-  return `✖ ${printableBlock(data.name)}\n${printableBlock(body)}\n\n`
+  // summary.
+  //
+  // DIFFERENT HELPERS, deliberately. The name is spliced into a one-line sentence, so it gets
+  // `printable`, which neutralises LF too — `printableBlock` preserves LF by design, so a plain
+  // newline in a name still opened a line of its own, and an earlier version of this comment
+  // claimed that forgery was closed when only its U+2028 spelling was. The stack is a block whose
+  // line structure IS its content, so it gets `printableBlock` and loses no legibility.
+  return `✖ ${printable(data.name)}\n${printableBlock(body)}\n\n`
 }
 
 // Printed on green AND red. It is what satisfies this project's evidence rule — a claim that

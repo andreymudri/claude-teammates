@@ -422,3 +422,26 @@ test('a store holding only an empty transcript reports it rather than blaming th
     assert.equal(report.unreadable.length, 1)
   }, { files: { 'agent-empty.jsonl': '' } })
 })
+
+// The cap must not stop the walk silently. Past it, a store under-reported its totals at exit 0 —
+// and with nothing else readable it threw the very "layout may have changed" message the walk was
+// written to eliminate, reintroduced by the bound added to keep the walk finite.
+test('a truncated walk says so rather than under-reporting silently', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-usage-cap-'))
+  try {
+    const subagents = path.join(dir, projectSlug(FAKE_ROOT), 'sess-1', 'subagents')
+    await mkdir(path.join(subagents, 'wf-1'), { recursive: true })
+    await writeFile(path.join(subagents, 'agent-flat.jsonl'), line({ cache_read_input_tokens: 1000 }), 'utf8')
+    await writeFile(path.join(subagents, 'wf-1', 'agent-nested.jsonl'), line({ cache_read_input_tokens: 1000 }), 'utf8')
+    // Enough siblings at the top level to exhaust the cap before the walk reaches wf-1.
+    await Promise.all(Array.from({ length: 20_050 }, (_, i) =>
+      writeFile(path.join(subagents, `junk-${i}.txt`), '', 'utf8')))
+
+    const report = await readSessionUsage({ projectsDir: dir, root: FAKE_ROOT })
+    const truncated = report.unreadable.filter((e) => e.kind === 'truncated')
+    assert.equal(truncated.length, 1, 'a truncated walk must be reported, never silent')
+    assert.match(truncated[0].reason, /incomplete/i)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

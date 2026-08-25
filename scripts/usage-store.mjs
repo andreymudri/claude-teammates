@@ -106,7 +106,7 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null }) 
       readAnything = true
     } catch {
       if (relative === '') break
-      unreadable.push({ name: relative, reason: 'directory could not be read', dropped: 0, kept: 0 })
+      unreadable.push({ name: relative, reason: 'directory could not be read', kind: 'directory', dropped: 0, kept: 0 })
       continue
     }
     for (const entry of entries) {
@@ -121,6 +121,19 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null }) 
       else if (entry.isFile() && entry.name.endsWith('.jsonl') && entry.name.startsWith('agent-')) transcripts.push(name)
     }
   }
+  // The cap must not stop the walk SILENTLY. Truncating without a word is the understatement this
+  // module exists to prevent: a store past the cap under-reported its totals at exit 0, and with
+  // nothing else in it reproduced the very "layout may have changed" throw reason 2 above says
+  // this walk was written to eliminate — reintroduced by the bound added for reason 3.
+  if (budget <= 0) {
+    unreadable.push({
+      name: '(walk)',
+      reason: `stopped after ${MAX_ENTRIES.toLocaleString('en-US')} entries; this report is incomplete`,
+      kind: 'truncated',
+      dropped: 0,
+      kept: 0,
+    })
+  }
   if (!readAnything) throw missing(subagentsDir)
 
   const agents = []
@@ -132,7 +145,7 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null }) 
     } catch (err) {
       // Named and counted, then carry on with the rest. Skipping silently would understate the
       // totals this command exists to make trustworthy.
-      unreadable.push({ name, reason: 'could not be read', dropped: 0, kept: 0 })
+      unreadable.push({ name, reason: 'could not be read', kind: 'unreadable', dropped: 0, kept: 0 })
       continue
     }
 
@@ -157,6 +170,7 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null }) 
       unreadable.push({
         name,
         reason: `${dropped} of ${dropped + records.length} line(s) did not parse`,
+        kind: 'partial',
         dropped,
         kept: records.length,
       })
@@ -167,7 +181,7 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null }) 
     // not happened. It is the ordinary state between a dispatch creating the transcript and the
     // first turn being appended, which is exactly when an operator reports on a live run.
     if (records.length === 0) {
-      if (dropped === 0) unreadable.push({ name, reason: 'no records yet', dropped: 0, kept: 0 })
+      if (dropped === 0) unreadable.push({ name, reason: 'no records yet', kind: 'empty', dropped: 0, kept: 0 })
       continue
     }
 
