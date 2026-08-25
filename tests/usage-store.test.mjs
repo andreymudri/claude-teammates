@@ -23,7 +23,11 @@ async function withStore(fn, { files }) {
     const subagents = path.join(dir, projectSlug(FAKE_ROOT), 'sess-1', 'subagents')
     await mkdir(subagents, { recursive: true })
     for (const [name, body] of Object.entries(files)) {
-      await writeFile(path.join(subagents, name), body, 'utf8')
+      // A key may carry a subdirectory, because the harness nests a workflow's transcripts under
+      // `subagents/workflows/<wf-id>/` rather than writing them flat.
+      const full = path.join(subagents, ...name.split('/'))
+      await mkdir(path.dirname(full), { recursive: true })
+      await writeFile(full, body, 'utf8')
     }
     await fn({ projectsDir: dir, subagents })
   } finally {
@@ -155,4 +159,42 @@ test('a project directory with no session store throws, naming the layout', asyn
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+// The layout that produced the finding, taken from a real store: a workflow-dispatched run keeps
+// its transcripts under `subagents/workflows/<wf-id>/`, and `subagents/` itself holds no .jsonl at
+// all. A non-recursive readdir matched nothing, so five real transcripts were reported as
+// `(0 subagents)` with a zeros table and exit 0 — the empty report the header above forbids.
+test('transcripts nested under subagents/workflows are found, not reported as zero', async () => {
+  await withStore(async ({ projectsDir }) => {
+    const report = await readSessionUsage({ projectsDir, root: FAKE_ROOT })
+    assert.equal(report.agents.length, 2, 'both nested transcripts must be reported')
+    const reviewer = report.agents.find((a) => a.agentType === 'tm-reviewer')
+    assert.ok(reviewer, 'the meta file beside a nested transcript must still supply the role')
+    assert.equal(reviewer.cacheRead, 900)
+  }, {
+    files: {
+      'workflows/wf_204b1468/agent-a.jsonl': [line({ cache_read_input_tokens: 400 }), line({ cache_read_input_tokens: 500 })].join('\n'),
+      'workflows/wf_204b1468/agent-a.meta.json': JSON.stringify({ agentType: 'tm-reviewer', model: 'opus' }),
+      'workflows/wf_204b1468/agent-b.jsonl': line({ cache_read_input_tokens: 70 }),
+    },
+  })
+})
+
+// Recursing into `subagents/` reaches files the flat read never saw. A workflow keeps its
+// `journal.jsonl` beside the agent transcripts; it is valid JSONL carrying no usage, so it parsed
+// cleanly and produced a phantom `(unknown)` row of zeros — a row for an agent that never ran.
+// The layout in the header names transcripts `agent-<id>.jsonl`, so the basename is the filter.
+test('a non-agent .jsonl beside the transcripts is not reported as an agent', async () => {
+  await withStore(async ({ projectsDir }) => {
+    const report = await readSessionUsage({ projectsDir, root: FAKE_ROOT })
+    assert.equal(report.agents.length, 1, 'only the agent transcript may produce a row')
+    assert.equal(report.agents[0].cacheRead, 40)
+    assert.equal(report.unreadable.length, 0, 'the journal is skipped, not reported as unreadable')
+  }, {
+    files: {
+      'workflows/wf_1/agent-a.jsonl': line({ cache_read_input_tokens: 40 }),
+      'workflows/wf_1/journal.jsonl': JSON.stringify({ event: 'agent-start', label: 'review' }),
+    },
+  })
 })

@@ -64,14 +64,23 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null }) 
 
   let entries
   try {
-    entries = await readdir(subagentsDir)
+    // Recursive, because a workflow-dispatched run keeps its transcripts under
+    // `subagents/workflows/<wf-id>/` rather than flat. A non-recursive read matched no .jsonl at
+    // all there and returned a zeros table at exit 0 — the empty report the header above forbids,
+    // for five real transcripts. Entries come back relative to `subagentsDir`, so the row name
+    // carries the subdirectory and the `.meta.json` sibling still resolves beside its transcript.
+    entries = await readdir(subagentsDir, { recursive: true })
   } catch {
     throw missing(subagentsDir)
   }
 
   const agents = []
   const unreadable = []
-  for (const name of entries.filter((f) => f.endsWith('.jsonl')).sort()) {
+  // `agent-` as well as the extension: recursing reaches a workflow's `journal.jsonl`, which is
+  // valid JSONL carrying no usage and so produced a phantom row of zeros for an agent that never
+  // ran. The header above names the transcript file `agent-<id>.jsonl`; that is the filter.
+  const isTranscript = (f) => f.endsWith('.jsonl') && path.basename(f).startsWith('agent-')
+  for (const name of entries.filter(isTranscript).sort()) {
     const full = path.join(subagentsDir, name)
     let records
     try {
