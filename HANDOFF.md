@@ -95,9 +95,9 @@ On the last row — **measured 2026-08-25, and the answer is no.** Four facts, e
 or from the real transcripts in session `314b4caf`, not estimated:
 
 1. `caveman` has two readers, and `composeBrief` (`scripts/brief.mjs`) has two call sites —
-   `scripts/workflow-gen.mjs` and `scripts/cli.mjs:2153` (the `brief` subcommand) — but **both
-   produce implementer briefs**. The second reader, `renderDigest` (`scripts/digest.mjs:45`, called
-   at `cli.mjs:2017`), shortens the digest this CLI prints to the operator; it reaches no agent's
+   `scripts/workflow-gen.mjs` and the `brief` subcommand in `scripts/cli.mjs` — but **both
+   produce implementer briefs**. The second reader, `renderDigest` (`scripts/digest.mjs`, called by
+   the `digest` subcommand), shortens the digest this CLI prints to the operator; it reaches no agent's
    output at all. What carries the argument is unchanged: `scripts/review-gen.mjs` has no caveman
    path, so the `claims` reviewer that emitted 22,900 output tokens — the whole motivating example
    — never receives the instruction.

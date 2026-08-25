@@ -219,6 +219,33 @@ One thing it declined to file, correctly: the `model` column renders `(unknown)`
 The base does the same, so the branch did not introduce it — though it is the same argument the
 numeric-width fix rests on, applied to a value this codebase generates itself.
 
+### The claims and tests lenses of the second pass
+
+Thirteen more, no highs — and almost all of them defects in the *first* round of fixes, or in the
+prose written to describe them. The tests lens ran 30 mutations of its own rather than trusting the
+author's; most new tests bit, and these did not:
+
+| sev | finding | resolution |
+|---|---|---|
+| medium | `tests/skill-config.test.mjs:46` — the polarity rewrite **narrowed the hole, it did not close it**. `unaffected` need not be about caveman, and the verb list missed `given`. The reviewer rewrote the skill to say reviewers *are given* the level and the full suite stayed green. | Both terms now required in one statement; verb list widened. The reviewer's exact rewrite now fails it. |
+| medium | `tests/usage-cli.test.mjs:104` — the `--session` test was **flaky**: the fixture built `sess-other` second, so it was usually already the newest, and with the flag ignored it still passed in **2 of 8 runs**, decided by an mtime tie. | The second session is stamped a day older. Mutant killed 8/8. |
+| medium | `scripts/usage.mjs:94` — the numeric-widening block was **dead weight to the suite**: `return width` was green. `padStart` alone keeps every digit, so pinning the number pins neither the widening nor the alignment. | Pinned by column alignment across two agents of different magnitudes. |
+| medium | `scripts/quiet-reporter.mjs:15` — the module header still said "stderr is passed through untouched" after the code stopped doing that: the same sentence the spec was amended twice to correct, left stale one file over. | Corrected, with a note that it was stale. |
+| medium | `scripts/cli.mjs` — the new refusal claimed "a named phase has no task set to adjudicate". **False**: `tasksOfPhase` returns every task of the run for a non-integer name. It also prints for `workflow`, `record-fix-round` and a plain typo, where the sentence about `--no-fleet` is meaningless. | Reworded to the accurate claim — tasks and rounds are *keyed* numerically — with the `--no-fleet` case made conditional. A test now refuses the old wording. |
+| medium | `skills/phase-gate/SKILL.md:193` — the "On FAIL" procedure is unfollowable for the `--no-fleet` gate the same skill documents, and its list of what makes `fix` exit 2 was incomplete. | The skill now states the boundary: fix the findings directly and re-run the gate; `retry`/`escalate`/the round budget presume task branches. |
+| low | `renderPlanNotes` plural branch **still unfalsifiable** — always-`entry` was green. The mirror of the bug the new singular test was written for. | Both branches pinned. |
+| low | the load-failure test's alternation was satisfied by **node's own crash dump**, so it survived the very `renderSummary` silencing its comment describes. | Asserts the reporter's own line. |
+| low | the win32 skip was a **blanket predicate** resting on a claim that contradicts the Win32 filename rule (which forbids bytes below 0x20, not U+2028/U+0085). | Now a real capability probe: it attempts the mkdir and skips only if the filesystem refuses, naming the errno. |
+| low | `HANDOFF.md` — the correction written "so it is auditable" cited `cli.mjs:2017`/`:2153`; at the tip those are a `})` and a blank line. | Line numbers dropped for subcommand names, which do not drift. |
+| low | the followups doc claimed the level count "cannot drift apart again in either direction" — **only the skill was bound**; README and CHANGELOG were unpinned and mutating either back to "four" was green. | Both now bound to `CAVEMAN_LEVELS`. |
+| low | `cli.mjs` — "neutralised like every other print site in this file" overstates: four sites still interpolate repo- and fs-derived values raw. | Comment corrected to name it as a gap rather than a convention. |
+| low | `usage-store.mjs` — `'.. '` passes the validator, since Windows strips trailing spaces and dots. Unverified on Windows; `reviewFileName` has the identical gap. | **Open.** Fixing it in one place while its model keeps the gap would be worse than fixing neither. |
+
+The claims lens verified the 22-finding tally directly against the first pass's findings files
+(5+4+5+8, reconciling to 1/11/10 post-refutation) and left **7 claims unprobed**, including the
+`31,394,783` figure and the HANDOFF token measurements, which depend on stores not present in a
+scratch worktree.
+
 ## Not reviewed
 
 The claims lens reached its mutation cap with **9 claims enumerated but unprobed**, and said so

@@ -184,7 +184,12 @@ test('a file that throws at import fails loudly rather than printing nothing', a
       stdout = err.stdout ?? ''
     }
     assert.notEqual(status, 0, 'a file that cannot be loaded must not exit 0')
-    assert.match(stdout, /boom at import time|1 fail|no test summary/, 'the reason must be visible')
+    // NOT an alternation including the thrown text: node prints its own crash dump for an import
+    // failure, which satisfied `/boom at import time/` no matter what this reporter did — so the
+    // test survived the very renderSummary silencing its comment describes. The reporter's own
+    // line is what is asserted.
+    assert.match(stdout, /\d+ tests \| .* fail|no test summary was emitted/,
+      "the reporter's own summary line must be present, not just node's crash dump")
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

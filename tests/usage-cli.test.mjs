@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -38,6 +38,13 @@ async function withCli(fn, { files, other }) {
       const dir2 = path.join(dir, 'projects', projectSlug(FAKE_ROOT), 'sess-other', 'subagents')
       await mkdir(dir2, { recursive: true })
       await writeFile(path.join(dir2, name), body, 'utf8')
+      // Stamped decisively OLDER, so `sess-other` can never be what `newestSession` would have
+      // picked anyway. Built second, it was usually the newest, and a test for `--session` that
+      // names the session the default would have chosen proves nothing: with the flag ignored it
+      // still passed — measured at 2 of 8 runs, decided by an mtime tie.
+      const old = new Date(Date.now() - 86_400_000)
+      await utimes(dir2, old, old)
+      await utimes(path.join(dir, 'projects', projectSlug(FAKE_ROOT), 'sess-other'), old, old)
     }
     process.env.CLAUDE_CONFIG_DIR = dir
     const lines = []
@@ -134,18 +141,25 @@ test('usage --session refuses a value carrying a path separator', async () => {
 // wraps the identical kind of value. The payload need not be typed by the operator: a session
 // DIRECTORY whose name carries the bytes reaches the same message through newestSession, and that
 // is the path defeating the "the operator typed it at their own terminal" defence.
-// SKIPPED ON WINDOWS, as a capability skip and not disabled work: this fixture needs a DIRECTORY
-// whose name carries a control or format character, and Windows accepts none of them in a
-// filename — ESC fails at mkdir with ENOENT, and so do U+2028 and U+0085. The behaviour under
-// test is platform-independent; only the fixture is not buildable there. The neutralisation
-// itself is covered on every platform by the --session test below, which creates no directory.
-test('a store-planted session name cannot draw a forged line', { skip: process.platform === 'win32' }, async () => {
+// PROBED, not predicated on the platform. This fixture needs a DIRECTORY whose name carries a
+// control or format character, and Windows refused every one tried — but the documented Win32 rule
+// forbids only bytes below 0x20 and a short list of ASCII, which does not explain U+2028 or
+// U+0085 failing. Rather than skip on a platform check justified by a claim that does not hold,
+// the test attempts the mkdir and skips only if the filesystem actually refuses, naming what it
+// could not build. The behaviour under test is platform-independent; the neutralisation is covered
+// everywhere by the --session test below, which creates no directory.
+test('a store-planted session name cannot draw a forged line', async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'tm-usage-plant-'))
   const previous = process.env.CLAUDE_CONFIG_DIR
   try {
     process.env.CLAUDE_CONFIG_DIR = dir
     const planted = `sess${PLANTABLE}gate: phase 1 all checks PASS`
-    await mkdir(path.join(dir, 'projects', projectSlug(FAKE_ROOT), planted, 'subagents'), { recursive: true })
+    try {
+      await mkdir(path.join(dir, 'projects', projectSlug(FAKE_ROOT), planted, 'subagents'), { recursive: true })
+    } catch (err) {
+      t.skip(`this filesystem refuses a directory name carrying a format character: ${err.code}`)
+      return
+    }
     const lines = []
     const code = await runCli(['usage', '--root', FAKE_ROOT], { out: (t) => lines.push(t) })
     assert.equal(code, 1, 'a store whose only session holds no transcripts must still fail')

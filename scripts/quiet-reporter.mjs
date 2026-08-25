@@ -11,9 +11,13 @@ import { printableBlock } from './reviews.mjs'
 // twice, and the gate once per phase. Measured with this reporter in place: ~99 tokens on a
 // green run, down from ~40,372.
 //
-// The saving comes ENTIRELY from the success path. Failures keep their full detail, stderr is
-// passed through untouched, and the summary prints either way — a reporter that made a failing
-// run harder to read would have traded the only output anyone reads for the output nobody does.
+// The saving comes ENTIRELY from the success path. Failures keep their full detail and the summary
+// prints either way — a reporter that made a failing run harder to read would have traded the only
+// output anyone reads for the output nobody does. Test-authored text (stdout, stderr, a test's name
+// and its error stack) is passed through with its newlines and tabs intact and its other control
+// bytes neutralised; see the two sites below for why that costs no detail. This paragraph said
+// "stderr is passed through untouched" after the code stopped doing that — the same sentence the
+// spec was amended to correct, left stale here.
 
 // Failure detail is never shortened. See above: the success path is where the noise is, so
 // there is nothing to gain by abbreviating a stack and a diagnostic to lose by doing it.

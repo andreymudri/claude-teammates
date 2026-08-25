@@ -41,16 +41,20 @@ test('the skill states that caveman reaches only implementer briefs and the loca
   // Polarity, not co-occurrence. Requiring only that both terms appear in one statement let the
   // sentence be rewritten to its exact opposite — "Reviewer dispatches also apply caveman, so the
   // reviewers obey any value you set" — with the suite green. Found by mutation.
+  // `caveman` AND the negation must both be in the statement. `/reviewer.*unaffected/` alone let
+  // the sentence say reviewers are unaffected by something else entirely while a neighbouring one
+  // said they DO receive the level — a reviewer rewrote the paragraph that way and the whole suite
+  // stayed green.
   assertStatement(
     await doc(),
-    /reviewer[\s\S]*(no caveman path|unaffected)/i,
+    /reviewer[\s\S]*caveman[\s\S]*(no caveman path|unaffected)|reviewer[\s\S]*(carry no caveman|no caveman path)/i,
     'teammates-config must say reviewer dispatches are unaffected by caveman',
   )
   // And the inversion is refused outright, so a future edit cannot satisfy the assertion above in
   // one sentence while asserting the opposite in another.
   assertNoStatement(
     await doc(),
-    /reviewer[\s\S]*\b(obeys?|apply|applies|receives?|honou?rs?)\b[\s\S]*caveman|caveman[\s\S]*reviewer[\s\S]*\b(obeys?|applies|honou?rs)\b/i,
+    /reviewer[\s\S]*\b(obeys?|apply|applies|applied|receives?|received|given|gets?|honou?rs?|use[sd]?)\b[\s\S]*caveman|caveman[\s\S]*reviewer[\s\S]*\b(obeys?|applies|applied|given|gets?|honou?rs|use[sd]?)\b/i,
     'teammates-config must not claim reviewers apply caveman',
   )
 })
@@ -127,4 +131,18 @@ test('the skill states the level count the code actually validates', async () =>
     /\b(two|four|five)\s+levels\b/i,
     'teammates-config must not name a level count the code does not validate',
   )
+})
+
+// The skill was bound to CAVEMAN_LEVELS; the README and CHANGELOG carry the same sentence and were
+// NOT — mutating either back to "four levels" left the suite green while a followups doc claimed
+// the two "cannot drift apart again in either direction". Bound here, so the claim is true.
+test('the README and CHANGELOG state the level count the code validates', async () => {
+  for (const file of ['../README.md', '../CHANGELOG.md']) {
+    const text = await readFile(new URL(file, import.meta.url), 'utf8')
+    if (!/levels are validated/.test(text)) continue
+    assert.match(text, new RegExp(`${['zero', 'one', 'two', 'three', 'four', 'five'][CAVEMAN_LEVELS.length]} levels are validated`, 'i'),
+      `${file} must name the same level count CAVEMAN_LEVELS defines`)
+    assert.doesNotMatch(text, /\b(two|four|five) levels are validated/i,
+      `${file} names a level count the code does not validate`)
+  }
 })

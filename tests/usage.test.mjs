@@ -124,6 +124,28 @@ test('renderUsage distinguishes a dropped line from an unreadable transcript', (
 // The headline number of a token report is not a value to truncate. `fit` applied its rule to
 // numeric cells too, so a cache_rd of 1,000,000,000 rendered as `1,000,000,…` in a 12-wide
 // column — and a long fleet run reaches 10^9 comfortably. Numeric columns widen instead.
+// COLUMN ALIGNMENT, not just the digits. `padStart` alone keeps every digit, so an assertion that
+// only checks the number survives `return width` — the entire widening block was dead weight to
+// the suite. What widening actually buys is that the rows still line up, which needs two agents of
+// different magnitudes and a header and TOTAL row measured against them.
+test('renderUsage widens a numeric column so every row still lines up', () => {
+  const out = renderUsage({
+    sessionId: 's',
+    agents: [
+      { agentType: 'tm-a', model: 'opus', turns: 1, prefix: 1, cacheRead: 121_000_000_000, output: 1 },
+      { agentType: 'tm-b', model: 'opus', turns: 1, prefix: 1, cacheRead: 12_000_000_000, output: 1 },
+    ],
+    unreadable: [],
+  })
+  const rows = out.split('\n').filter((l) => /tm-a|tm-b|agentType|TOTAL|^─+$/.test(l))
+  assert.equal(rows.length, 5, 'header, two agent rows, separator and TOTAL')
+  const widths = new Set(rows.map((r) => [...r].length))
+  assert.equal(widths.size, 1, `rows must share one width, got ${[...widths].join(', ')}`)
+  // Ungrouped digits mean two cells collided: `121,000,000,00012,000,000,000` is what a fixed
+  // width produced.
+  assert.doesNotMatch(out, /\d{4,}/, 'a numeric cell ran into its neighbour')
+})
+
 test('renderUsage never truncates a numeric cell', () => {
   const out = renderUsage({
     sessionId: 's',

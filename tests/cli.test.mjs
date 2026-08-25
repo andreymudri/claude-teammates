@@ -11074,8 +11074,11 @@ test('fix explains that a named-phase verdict has no task set to adjudicate', as
     // The MESSAGE line only. Asserting against the whole output passed against the old refusal,
     // because `USAGE` is dumped beneath it and the usage text itself contains `--no-fleet`.
     const message = lines.join('\n').split('\n\n')[0]
-    assert.match(message, /no task set|named phase|not adjudicable/i,
+    assert.match(message, /keyed by numeric phase|no task branches/i,
       'the refusal must name the case rather than reading as a mistyped flag')
+    // And must NOT claim a named phase has no task set: `tasksOfPhase` returns every task of the
+    // run for a non-integer name. An earlier wording said exactly that and was false.
+    assert.doesNotMatch(message, /named phase has no task set/i, 'the refusal overstates')
     assert.doesNotMatch(message, /^missing required argument/,
       'a real boundary must not be reported as a typo')
   })
@@ -11090,7 +11093,7 @@ test('the named-phase refusal still lists the other missing arguments', async ()
     const code = await runCli(['workflow', '--phase', 'default', '--root', root], io)
     assert.equal(code, 2)
     const message = lines.join('\n').split('\n\n')[0]
-    assert.match(message, /no task set|named phase/i, 'the phase boundary must still be explained')
+    assert.match(message, /keyed by numeric phase/i, 'the phase boundary must still be explained')
     assert.match(message, /--run/, 'the other missing argument must not be swallowed')
   })
 })

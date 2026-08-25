@@ -1808,15 +1808,18 @@ export async function runCli(argv, io = { out: console.log }) {
   if (REQUIRED[command]) {
     const missing = missingArgs(command, flags, positional)
     if (missing.includes(NAMED_PHASE_REFUSAL)) {
-      // These commands filter tasks and count fix rounds by numeric phase, so a phase with no
-      // task set has nothing to retry: its findings are fixed directly rather than by
-      // redispatching a teammate. Stated as the boundary it is.
+      // Stated as the boundary it is rather than as a typo. Note what it must NOT say: that a
+      // named phase has no task set. `tasksOfPhase` returns EVERY task of the run for a
+      // non-integer phase name, which is the honest reading of "this manifest phase's diff" —
+      // so the accurate claim is only that tasks and rounds are keyed numerically, and this
+      // refusal also reaches `workflow` and `record-fix-round` and a plain typo.
       // Every OTHER missing flag is listed alongside. Returning on the phase alone bounced the
       // operator a second time for something this call already knew was absent.
       const alsoMissing = missing.filter((m) => m !== NAMED_PHASE_REFUSAL)
-      io.out(`${command} takes --phase <integer> and got ${printable(flags.phase)}: a named phase `
-        + 'has no task set to adjudicate. A --no-fleet gate produces one, and its findings are '
-        + 'fixed directly rather than by redispatching a task.'
+      io.out(`${command} takes --phase <integer> and got ${printable(flags.phase)}. Tasks and fix `
+        + 'rounds are keyed by numeric phase, so a non-numeric value addresses none of them. If '
+        + 'this came from a --no-fleet gate verdict, which names its phase from the manifest, that '
+        + 'verdict has no task branches to redispatch and its findings are fixed directly.'
         + (alsoMissing.length > 0 ? ` Also missing: ${alsoMissing.join(', ')}.` : '')
         + `\n\n${USAGE}`)
       return 2
@@ -3056,7 +3059,9 @@ export async function runCli(argv, io = { out: console.log }) {
       io.out(flags.json === true ? printableBlock(JSON.stringify(report, null, 2)) : renderUsage(report))
       return 0
     } catch (err) {
-      // Neutralised like every other print site in this file. The value is not the operator's own
+      // Neutralised, as the sibling handler below is. (Not every print site in this file is —
+      // several still interpolate repo- and fs-derived values raw; that is a gap, not a
+      // convention this line is conforming to.) The value is not the operator's own
       // typing: `missing()` splices the store path into the message, and that path carries a
       // session DIRECTORY name discovered on disk — so a directory an agent can create reaches
       // this line with no flag typed at all. The sibling handler below wraps for the same reason.
