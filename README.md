@@ -238,7 +238,7 @@ is the last message an agent emits, so it is re-read zero times by the agent tha
 
 The caveman brief is **larger** than the default by about 3%: the added STYLE block costs more
 than compressing the connective prose saves, and a brief sits in the prefix, so that cost is
-re-read every turn. The four levels are validated but not honoured by this plugin's own code —
+re-read every turn. The three levels are validated but not honoured by this plugin's own code —
 `digest` reads only whether the value is truthy, and the brief passes the level through to an
 external `caveman:caveman` skill, instructing the agent to apply the style directly when that
 skill is absent.

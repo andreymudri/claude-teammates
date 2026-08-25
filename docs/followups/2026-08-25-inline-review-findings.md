@@ -14,8 +14,8 @@ Four `tm-reviewer` lenses at the fixed `capable` tier (`agents.reviewer.tier` an
     recorded in .teammates/usage/status.json under `solo:default`
     findings in .teammates/inline-review/reviews/
 
-**Post-refutation tally: 1 high, 11 medium, 10 low.** Five are fixed — the high, three mediums
-and one low, each in its own section below. The remaining 17 are recorded rather than fixed, and
+**Post-refutation tally: 1 high, 11 medium, 10 low.** Seven are fixed — the high, five mediums
+and one low, each in its own section below. The remaining 15 are recorded rather than fixed, and
 nothing in this document is closed by having been written down.
 
 ## Fixed
@@ -87,6 +87,35 @@ the only way to tell the two halves apart. Each mutation is killed, and by exact
 | `mtime: own` (directory only) | a session whose store is newer wins |
 | `mtime: store.mtimeMs` (store only) | a session whose directory is newer wins |
 
+### `tests/skill-config.test.mjs:44` and `:60` — assertions that tested co-occurrence (medium)
+
+The file exists to bind the caveman measurement's prose to the code, so an unfalsifiable assertion
+in it defeats its whole purpose. Two were:
+
+- `:44` required only that `caveman` and `reviewer` appear in **one statement**, so the sentence
+  could be rewritten to its exact opposite — "Reviewer dispatches also apply caveman, so the
+  reviewers obey any value you set" — with the suite green. Now pinned on polarity, plus an
+  `assertNoStatement` refusing the inversion outright, so one sentence cannot satisfy the
+  assertion while another asserts the opposite.
+- `:60` matched a bare `/(larger|longer|bigger)/i` naming neither `caveman` nor `brief`, so any
+  unrelated "no longer" satisfied it and the claim could be **deleted outright**. Now requires the
+  named subject and the comparison, plus a refusal of "smaller".
+
+Closed **`README.md:241`** in the same pass: "The four levels are validated" while
+`CAVEMAN_LEVELS` has three (`lite`, `full`, `ultra`). Corrected in the skill, the README and
+`CHANGELOG.md:23`, and now bound to the constant — the test imports `CAVEMAN_LEVELS` and asserts
+the prose names the count the code validates, so the two cannot drift apart again in either
+direction.
+
+Each of the four mutations was run and killed by its intended test:
+
+| mutation | killed by |
+|---|---|
+| reviewers *do* apply caveman | caveman reaches only implementer briefs |
+| delete the larger-than-default claim | the terse brief is larger, not smaller |
+| claim the brief is *smaller* | the terse brief is larger, not smaller |
+| level count drifts back to four | the level count the code actually validates |
+
 ## Open — `usage`, the largest unreviewed surface
 
 | sev | site | finding |
@@ -102,7 +131,6 @@ that leaves the suite green.
 
 | sev | site | mutation that survives |
 |---|---|---|
-| medium | `tests/skill-config.test.mjs:44` | The doc-claim assertions test **co-occurrence, not polarity**. Rewriting the skill to the exact inversion it exists to prevent leaves 6 pass / 0 fail. Same at `:60`, where `/(larger\|longer\|bigger)/i` names neither `caveman` nor `brief` and is satisfied by any unrelated "no longer". |
 | medium | `tests/usage-cli.test.mjs:69` | `--session` is documented in USAGE and registered in `KNOWN_FLAGS` but never driven; replacing the expression with `sessionId: null` leaves 500 pass / 0 fail. |
 | medium | `tests/usage.test.mjs:91` | The truncation test uses a 30-char fixture against a 32-wide column, so `padEnd` alone satisfies it and the truncation branch never executes. Its comment claims the opposite. |
 | medium | `tests/usage-store.test.mjs:63` | The existing-but-empty `subagents/` case is untested — a **second route** to the empty report the header forbids, independent of the recursion bug fixed above. Still open. |
@@ -120,7 +148,6 @@ semantics — the Windows-hostile spots were handled deliberately.
 
 | sev | site | finding |
 |---|---|---|
-| medium | `README.md:241` | "The four levels are validated" — `CAVEMAN_LEVELS` has **three**, and three is pinned by the suite. Repeated verbatim at `skills/teammates-config/SKILL.md:48` and `CHANGELOG.md:23`. |
 | medium | `docs/followups/2026-08-22-fog-open-findings.md:124` | `## Phase 4 items — CLOSED` and "Everything above that named a defect or a gap is now addressed" (line 221) assert closure over a subsection the **same document** calls "not clean, they are unexamined". Proven: `scripts/cli.mjs:2959`'s `catch { /* Swallow and print nothing */ }` can be mutated to print a line and the suite stays green. |
 | low | `CHANGELOG.md:50`, `HANDOFF.md:16` | "`tm-implementer` declares seven tools" — it declares **six**, and `CHANGELOG.md:110` says six. |
 | low | `docs/specs/2026-08-24-quiet-test-reporter-design.md:119` | The Testing table lists a `load failure` test that does not exist. The behaviour itself is correct and was executed. |

@@ -20,7 +20,7 @@ it was carried as; no code behaviour changed.
   (turn 49/49 and 46/46), so it is re-read zero times by the agent that wrote it. The one part
   `caveman` touches is the one part that does not accumulate.
 - **The caveman brief is larger than the default, by 156 chars (2.8%)**, and a brief sits in the
-  prefix, so that cost *is* re-read every turn. The four levels are validated but not honoured by
+  prefix, so that cost *is* re-read every turn. The three levels are validated but not honoured by
   this plugin's own code: `digest` reads only truthiness, and the brief delegates the level to an
   external `caveman:caveman` skill.
 - README and `skills/teammates-config` now state all of the above; previously neither said what
