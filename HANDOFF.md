@@ -94,10 +94,18 @@ Measured composition of the 27,499-token prefix:
 On the last row — **measured 2026-08-25, and the answer is no.** Four facts, each read from code
 or from the real transcripts in session `314b4caf`, not estimated:
 
-1. `caveman` is read only by `composeBrief` (`scripts/brief.mjs`), called only from
-   `scripts/workflow-gen.mjs` for **implementer** dispatches. `scripts/review-gen.mjs` has no
-   caveman path, so the `claims` reviewer that emitted 22,900 output tokens — the whole
-   motivating example — never receives the instruction at all.
+1. `caveman` has two readers, and `composeBrief` (`scripts/brief.mjs`) has two call sites —
+   `scripts/workflow-gen.mjs` and `scripts/cli.mjs:2153` (the `brief` subcommand) — but **both
+   produce implementer briefs**. The second reader, `renderDigest` (`scripts/digest.mjs:45`, called
+   at `cli.mjs:2017`), shortens the digest this CLI prints to the operator; it reaches no agent's
+   output at all. What carries the argument is unchanged: `scripts/review-gen.mjs` has no caveman
+   path, so the `claims` reviewer that emitted 22,900 output tokens — the whole motivating example
+   — never receives the instruction.
+
+   *(Corrected 2026-08-25. The original read "read only by `composeBrief`, called only from
+   `workflow-gen.mjs`"; both halves were false, found by a `claims` reviewer. The conclusion below
+   survives the correction, because it rests on `review-gen.mjs` having no caveman path, which
+   holds.)*
 2. The terse brief's STYLE block scopes the style to "summary and blockers": the returned result,
    not intermediate turns and not thinking.
 3. That summary is the **last** assistant message — turn 49/49 and 46/46 in the two real

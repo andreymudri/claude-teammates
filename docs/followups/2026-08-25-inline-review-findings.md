@@ -10,12 +10,13 @@ is everything after the fog merge, which includes the two runs `quiet` and `usag
 Four `tm-reviewer` lenses at the fixed `capable` tier (`agents.reviewer.tier` and
 `agents.reviewer.effort` both unset), then a refutation reviewer against every `high`.
 
-    verdict FAIL — test pass, review fail (1 surviving high of 3)
+    verdict PASS — test pass, review pass (0 surviving high), after one fix round
     recorded in .teammates/usage/status.json under `solo:default`
     findings in .teammates/inline-review/reviews/
 
-**Post-refutation tally: 1 high, 11 medium, 10 low.** The high is fixed (see below); the rest are
-recorded here rather than fixed, and nothing in this document is closed by having been written down.
+**Post-refutation tally: 1 high, 11 medium, 10 low.** Four are fixed — the high, two mediums and
+one low, each in its own section below. The remaining 18 are recorded rather than fixed, and
+nothing in this document is closed by having been written down.
 
 ## Fixed
 
@@ -42,13 +43,39 @@ Fixed in `3c55f07` with two reproducing tests. Recursing also reached a workflow
 — valid JSONL carrying no usage, so it parsed cleanly into a phantom `(unknown)` row of zeros for
 an agent that never ran; the filter now also requires the documented `agent-` basename.
 
+### `scripts/usage-store.mjs:79` — all-or-nothing transcript parse (medium)
+
+`body.split('\n').map(JSON.parse)` sat in one `try`, so **one torn last line** sent every record
+in the file to `unreadable` — and a transcript is appended to while its session runs, so reading
+one during a live fleet run (exactly when an operator reports on it) catches a half-written line.
+A fixture lost 1.7M cache reads while the headline still read `fixed prefix = 100% of all cache
+reads`, computed from what survived.
+
+Now parsed per line: the bad line is dropped and counted, the records before it are kept. Fixing
+it also closed **`usage-store.mjs:83`** (medium, security lens) — the reason string is now built
+from a line count instead of the `JSON.parse` message, which quoted the offending source text back
+and so put the operator's real conversation content into a printed report.
+
+`renderUsage` counts the two cases apart, because a transcript that lost one line still
+contributed its row, and filing that under "unreadable" states the opposite of what happened in
+the one line a reader takes the totals' trustworthiness from.
+
+### `HANDOFF.md:97` — the caveman readers (low)
+
+"read only by `composeBrief`, called only from `workflow-gen.mjs`" was false in both halves:
+`renderDigest` (`digest.mjs:45`) also reads `caveman`, and `cli.mjs:2153` is a second
+`composeBrief` call site. Corrected in place, with the original quoted so the correction is
+auditable.
+
+**The conclusion survives.** Both `composeBrief` call sites produce implementer briefs, and
+`renderDigest` shortens the digest this CLI prints to the operator — it reaches no agent output at
+all. The argument rests on `review-gen.mjs` having no caveman path, which is verified and holds.
+
 ## Open — `usage`, the largest unreviewed surface
 
 | sev | site | finding |
 |---|---|---|
-| medium | `usage-store.mjs:79` | All-or-nothing parse: `body.split('\n').map(JSON.parse)` in one `try`, so **one torn last line** — the ordinary state of a transcript being appended to while `usage` runs — sends the whole file to `unreadable` and erases every readable record in it. A fixture lost 1.7M cache reads while the headline read `fixed prefix = 100% of all cache reads`. Parse per line and count the bad lines. |
 | medium | `usage-store.mjs:63` | `--session` is joined into the store path with no filename-component validation. `--session '../../../outside'` walked out of the projects directory and read `.jsonl` files elsewhere on disk, disclosing the first bytes of one in an error message. `reviewFileName` (`scripts/reviews.mjs:86-93`) is the validator this repo already has for exactly this shape; `--session` got no equivalent. Also reachable with no flag at all, since `newestSession` returns a directory name that is re-joined. |
-| medium | `usage-store.mjs:83` | `JSON.parse` failure messages quote the offending source text, so a partially-written **real transcript** puts user conversation content into the printed report — and it is never passed through `printable()`. |
 | low | `cli.mjs:3021`, `usage.mjs:53`, `:75`, `:104` | The **only** render module in `scripts/` with zero `printable()` references (doctor 9, digest 9, liveness 3, plan-drift 5, finish 14). `fit()` pads by `String.length` and neutralises nothing, and **a literal newline needs no escape sequence at all** — a three-file fixture printed three fully forged lines with zero `0x1B` bytes, surviving a pager or a plain log. `--json` is not a mitigation: `0x9B`, U+2028 and U+202E all survive `JSON.stringify` raw. Not covered by the accepted bidi exposure, which asserts at `2026-08-22-fog-open-findings.md:104-112` that C1/CR/U+2028 render as tokens — false here. `usage.mjs` landed two days after the audit that set that convention: oversight, not decision. Rated low only because nothing automated consumes the output — `usage` appears in no skill, agent, hook, command, template or gate manifest. |
 | low | `usage.mjs:70` | `fit()` truncates numeric cells: `1,000,000,000` renders as `1,000,000,…` in a 12-wide `cache_rd` column. A single reviewer in this session already carries 1.7M cache reads; a long fleet run reaches 10⁹. The headline number of a token report is not a value to truncate. |
 
@@ -82,7 +109,6 @@ semantics — the Windows-hostile spots were handled deliberately.
 | medium | `docs/followups/2026-08-22-fog-open-findings.md:124` | `## Phase 4 items — CLOSED` and "Everything above that named a defect or a gap is now addressed" (line 221) assert closure over a subsection the **same document** calls "not clean, they are unexamined". Proven: `scripts/cli.mjs:2959`'s `catch { /* Swallow and print nothing */ }` can be mutated to print a line and the suite stays green. |
 | low | `CHANGELOG.md:50`, `HANDOFF.md:16` | "`tm-implementer` declares seven tools" — it declares **six**, and `CHANGELOG.md:110` says six. |
 | low | `docs/specs/2026-08-24-quiet-test-reporter-design.md:119` | The Testing table lists a `load failure` test that does not exist. The behaviour itself is correct and was executed. |
-| low | `HANDOFF.md:97` | "`caveman` is read only by `composeBrief`, called only from `workflow-gen.mjs`" — **both halves false**: `digest.mjs` also reads it, and `cli.mjs:2153` also calls `composeBrief`. This is load-bearing: it is the reasoning the caveman-rejection decision rests on. The rejection may still be right, but this sentence is not the evidence for it. |
 
 Ten mutations confirmed the diff's own closure records **do** hold — including the `printable`
 neutralisation of a quoted Out of Scope entry, the `rebuild-state` recovery path, the continuation
