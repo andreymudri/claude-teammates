@@ -1,6 +1,6 @@
 # Handoff — 2026-08-24, end of session
 
-Everything below is on `master` and pushed. One branch, one worktree. `v1.1.2` is tagged at
+Everything below is on `master` and pushed. One branch, one worktree. `v1.1.3` is tagged at
 `master` — nothing is unreleased.
 
 ## Read this first
@@ -147,8 +147,11 @@ after pushing rather than trusting a local pass.
 
 ## Release state
 
-`v1.1.1` is tagged at `b36b821` and pushed; `master`, the tag, `package.json` and
-`.claude-plugin/plugin.json` all agree. Nothing is unreleased.
+`v1.1.3` is tagged at `master` and pushed; `master`, the tag, `package.json` and
+`.claude-plugin/plugin.json` all agree. Nothing is unreleased. It is docs plus one test file —
+the `caveman` measurement, merged as PR #15 and green on all three platforms — so the bump is a
+patch on its own terms, not a judgement call. It exists so `claude plugin update` is not a no-op:
+the corrected `teammates-config` text cannot reach a running fleet without a version to update to.
 
 One judgement recorded rather than hidden: `usage` is a **new CLI subcommand**, and by the
 reasoning that made v1.1.0 a minor bump — `init-run` gained a refusal it did not have — this
@@ -157,7 +160,7 @@ Retagging is cheap if that reads wrong later.
 
 ## Verify before trusting anything above
 
-    npm test                              # expect 1876 tests, 1873 pass, 0 fail, 3 skipped
+    npm test                              # expect 1882 tests, 1879 pass, 0 fail, 3 skipped
     gh run list --limit 1                 # the last push must be green on all three platforms
     node scripts/cli.mjs usage --root .   # the measurement tool
 

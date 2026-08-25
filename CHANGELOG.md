@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## v1.1.3
+
+Documentation only, plus the test file that binds it. `caveman` was measured and is not the lever
+it was carried as; no code behaviour changed.
 
 ### The `caveman` lever is measured, and it is not one
 
