@@ -89,14 +89,40 @@ Measured composition of the 27,499-token prefix:
 | `usage` command | **shipped** — reproduces the original ad-hoc numbers exactly |
 | tool declarations | **shipped and verified active** — 27,499 → 9,610 per implementer turn |
 | skill descriptions | **measured and rejected** — ~144 tokens/turn against real routing risk |
-| agent verbosity (`caveman`) | **unexplored, and the largest remaining lever** |
+| agent verbosity (`caveman`) | **measured 2026-08-25 and rejected** — reaches ~5-8% of one role's output |
 
-On the last row: the `claims` reviewer emitted 22,900 output tokens, **10,132 of them thinking**,
-and output accumulates into context and is re-read every later turn. I earlier dismissed
-`caveman` as "not a lever" because it makes a *brief* 3% larger — that was the wrong
-measurement. A brief is paid once; accumulated output is paid every turn. But this is a genuine
-quality trade-off, unlike everything above: those thinking tokens are what found the unpinned
-`if (notes)` guard by mutation. **Measure before assuming a saving.**
+On the last row — **measured 2026-08-25, and the answer is no.** Four facts, each read from code
+or from the real transcripts in session `314b4caf`, not estimated:
+
+1. `caveman` is read only by `composeBrief` (`scripts/brief.mjs`), called only from
+   `scripts/workflow-gen.mjs` for **implementer** dispatches. `scripts/review-gen.mjs` has no
+   caveman path, so the `claims` reviewer that emitted 22,900 output tokens — the whole
+   motivating example — never receives the instruction at all.
+2. The terse brief's STYLE block scopes the style to "summary and blockers": the returned result,
+   not intermediate turns and not thinking.
+3. That summary is the **last** assistant message — turn 49/49 and 46/46 in the two real
+   multi-turn agents — so it is re-read **zero** times by the agent that wrote it. "Output
+   accumulates and is re-paid every turn" is true of thinking and tool_use, and false of exactly
+   the part caveman targets.
+4. The terse brief is **+156 chars (+2.8%)**, and a brief sits in the prefix, so *that* cost is
+   re-read every turn: +39 tokens x turns.
+
+Measured composition of agent output (`~tok` from chars/4; thinking is the residual, as the
+stored thinking blocks carry a signature but no text):
+
+| agent | turns | output | thinking | tool_use | visible text | final summary |
+|---|---|---|---|---|---|---|
+| `tm-reviewer` (claims) | 49 | 22,900 | ~16,480 (72%) | ~4,646 | ~1,774 (8%) | 6,949 chars |
+| `tm-reviewer` | 46 | 12,965 | ~9,817 (76%) | ~2,541 | ~607 (5%) | 2,374 chars |
+
+**The premise held and the lever failed.** Own output really does drive the cost — 71% and 48% of
+each agent's context growth, against 21% and 32% from tool results — and growth x turns is what
+~1M cache reads per agent pay for. But 72-76% of that output is thinking, which a style
+instruction cannot touch. `agents.<role>.effort` is the control for thinking; `caveman` is not.
+
+What is still unmeasured is caveman's actual compression *ratio*, because no real (non-probe)
+implementer transcript survives in any store. A two-agent A/B on the summary alone would settle
+it; a fleet A/B would not be worth its cost for a lever with this ceiling.
 
 ## Traps this session hit — all mine, all the same shape
 

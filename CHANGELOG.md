@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+### The `caveman` lever is measured, and it is not one
+
+- **Measured 2026-08-25 against the real subagent transcripts, and documented, after `caveman`
+  had been carried for a session as "the largest remaining token lever".** The premise held and
+  the lever failed. An agent's own output really does drive its cost — 71% and 48% of context
+  growth in the two real multi-turn agents, against 21% and 32% from tool results — but **72-76%
+  of that output is thinking**, which a style instruction cannot reach. `agents.<role>.effort` is
+  the control for thinking; `caveman` is not.
+- **`caveman` reaches two things: the implementer brief and the local `digest` output.**
+  `scripts/review-gen.mjs` has no caveman path, so reviewers — the largest emitters, at 22,900 and
+  12,965 output tokens — never receive the instruction at all. Inside the brief it is scoped to
+  the returned summary and blockers, and that summary is the **last** message an agent emits
+  (turn 49/49 and 46/46), so it is re-read zero times by the agent that wrote it. The one part
+  `caveman` touches is the one part that does not accumulate.
+- **The caveman brief is larger than the default, by 156 chars (2.8%)**, and a brief sits in the
+  prefix, so that cost *is* re-read every turn. The four levels are validated but not honoured by
+  this plugin's own code: `digest` reads only truthiness, and the brief delegates the level to an
+  external `caveman:caveman` skill.
+- README and `skills/teammates-config` now state all of the above; previously neither said what
+  the knob reached. `tests/skill-config.test.mjs` pins each claim twice — once as a sentence in
+  the skill, once as the behaviour that sentence describes — so the documentation cannot drift
+  from the code it describes.
+
+
 ## v1.1.2
 
 A `usage` bugfix, and the measurement v1.1.1 shipped unconfirmed is now taken.

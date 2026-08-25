@@ -225,6 +225,28 @@ inference for every task. The **reviewer** and **integrator** are not in the pla
 inferred: the dispatching skill fixes them at `capable` and `mid`, and a configured tier replaces
 that fixed choice.
 
+### `caveman` is narrower than its position in that table suggests
+
+Measured 2026-08-25 against real subagent transcripts, because it had been carried for a session
+as the largest remaining token lever and is not one.
+
+`caveman` has exactly two consumers: it rewrites the **implementer** brief, and it renders the
+local `digest` output terse. Reviewer and integrator dispatches carry no caveman path, so the
+reviewers — the largest emitters in a run — are unaffected by any value you set. Inside the
+implementer brief the instruction is scoped to the returned summary and blockers, and that summary
+is the last message an agent emits, so it is re-read zero times by the agent that wrote it.
+
+The caveman brief is **larger** than the default by about 3%: the added STYLE block costs more
+than compressing the connective prose saves, and a brief sits in the prefix, so that cost is
+re-read every turn. The four levels are validated but not honoured by this plugin's own code —
+`digest` reads only whether the value is truthy, and the brief passes the level through to an
+external `caveman:caveman` skill, instructing the agent to apply the style directly when that
+skill is absent.
+
+If a run's output cost is the problem, reach for `agents.<role>.effort`. Thinking is 72-76% of an
+agent's output tokens; `effort` is the control for thinking and no style instruction can touch it.
+Lowering it trades review depth for tokens, which `caveman` does not.
+
 ### The four subcommands manage ergonomics, not enforcement
 
     node scripts/cli.mjs config list
