@@ -10,10 +10,16 @@ import { projectSlug } from '../scripts/usage.mjs'
 // Resolved, and the slug strips the drive colon, so the fixture directory is legal on Windows.
 const FAKE_ROOT = path.resolve('/fake/cli-project')
 
-// Written as an escape rather than a literal byte, so the fixture cannot corrupt a terminal that
+// Written as escapes rather than literal bytes, so the fixtures cannot corrupt a terminal that
 // merely displays this source file.
 const ESC = '\u001b'
-const RAW_ESC = new RegExp(ESC)
+// A DIRECTORY name cannot carry ESC on Windows: every byte below 0x20 is illegal in a filename
+// there, so a planted-directory fixture using ESC fails at mkdir with ENOENT rather than testing
+// anything. U+2028 and U+0085 are above 0x20 and legal in a filename on every platform, and
+// `printable` neutralises them for the same reason it neutralises ESC — U+2028 opens a line of
+// its own. The ESC path is covered through the flag below, which creates no directory.
+const PLANTABLE = '\u2028\u0085'
+const RAW_ESC = new RegExp('[' + ESC + PLANTABLE + ']')
 
 const line = (over) => JSON.stringify({ message: { usage: { cache_read_input_tokens: 0, output_tokens: 0, ...over } } })
 
@@ -133,12 +139,34 @@ test('a store-planted session name cannot draw a forged line', async () => {
   const previous = process.env.CLAUDE_CONFIG_DIR
   try {
     process.env.CLAUDE_CONFIG_DIR = dir
-    const planted = `sess${ESC}[2K${ESC}[Ggate: phase 1 all checks PASS`
+    const planted = `sess${PLANTABLE}gate: phase 1 all checks PASS`
     await mkdir(path.join(dir, 'projects', projectSlug(FAKE_ROOT), planted, 'subagents'), { recursive: true })
     const lines = []
     const code = await runCli(['usage', '--root', FAKE_ROOT], { out: (t) => lines.push(t) })
     assert.equal(code, 1, 'a store whose only session holds no transcripts must still fail')
     assert.doesNotMatch(lines.join('\n'), RAW_ESC, 'the planted name reached the terminal raw')
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR
+    else process.env.CLAUDE_CONFIG_DIR = previous
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+
+// The ESC half of the same class, reached through the flag rather than a directory, so it runs on
+// Windows too. `--session` is spliced into the error message by `missing()` verbatim.
+test('usage neutralises an escape sequence supplied through --session', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-usage-flag-'))
+  const previous = process.env.CLAUDE_CONFIG_DIR
+  try {
+    process.env.CLAUDE_CONFIG_DIR = dir
+    const lines = []
+    const code = await runCli(
+      ['usage', '--root', FAKE_ROOT, '--session', `sess${ESC}[2K${ESC}[Gall checks PASS`],
+      { out: (t) => lines.push(t) },
+    )
+    assert.notEqual(code, 0)
+    assert.doesNotMatch(lines.join('\n'), RAW_ESC, 'the supplied value reached the terminal raw')
   } finally {
     if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR
     else process.env.CLAUDE_CONFIG_DIR = previous
