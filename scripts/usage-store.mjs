@@ -15,9 +15,14 @@ import path from 'node:path'
 import { isUnsafePathComponent, printable } from './reviews.mjs'
 import { projectSlug, summarizeTranscript } from './usage.mjs'
 
-// The ONE definition of the shipped bound: `readSessionUsage` resolves `maxEntries ?? this`, so a
-// test reading this constant is reading the bound the walk actually applies. Exported because
-// injecting `maxEntries` verifies only that the truncation notice fires, never what the default is.
+// The shipped default bound. Exported because injecting `maxEntries` verifies only that the
+// truncation notice fires, never what the default is.
+//
+// READING THIS CONSTANT IS NOT READING THE BOUND THE WALK APPLIES — an earlier comment here said
+// it was, and that was false: the default is resolved from `maxEntries ?? this` at a site nothing
+// pinned, so raising it by one token (in the signature, or in the `??`) left the walk effectively
+// unbounded with the entire suite green. The applied cap is returned on the report as `cap`, and
+// that is what the test asserts against.
 export const DEFAULT_MAX_ENTRIES = 20_000
 
 // Tagged, not matched by text. The catch below has to tell THIS error apart from a raw fs error,
@@ -91,7 +96,16 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null, ma
   // observed it being used.
   const cap = maxEntries ?? DEFAULT_MAX_ENTRIES
   if (!Number.isInteger(cap) || cap < 1) {
-    throw new Error(`maxEntries must be a positive integer, got ${JSON.stringify(maxEntries)}`)
+    // NOT `JSON.stringify` alone: it THROWS on a BigInt, so `2n` produced a serialization
+    // TypeError naming neither the argument nor the value, from the very line whose contract is
+    // that a bad cap is refused BY NAME. It also renders NaN and Infinity as `null`, so the
+    // message quoted a value the caller had not passed. `String` first for those three.
+    const shown = typeof maxEntries === 'bigint'
+      ? `${maxEntries}n`
+      : typeof maxEntries === 'number' && !Number.isFinite(maxEntries)
+        ? String(maxEntries)
+        : JSON.stringify(maxEntries) ?? String(maxEntries)
+    throw new Error(`maxEntries must be a positive integer, got ${shown}`)
   }
   const projectDir = path.join(projectsDir, projectSlug(path.resolve(root)))
   const session = sessionId ?? await newestSession(projectDir)
@@ -310,5 +324,11 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null, ma
   // Largest per-turn tax first. Ordering by a total would bury exactly the finding this command
   // was built to surface: an agent with few turns and a large prefix.
   agents.sort((a, b) => (b.prefix * b.turns) - (a.prefix * a.turns))
-  return { sessionId: session, agents, unreadable }
+  // `cap` is RETURNED so the shipped bound is observable in a one-file store. It was two values
+  // joined at an unpinned site — the signature default and the `??` — and a test that reads
+  // DEFAULT_MAX_ENTRIES and asserts "no truncation happened" never observes either being applied:
+  // raising the effective default by one token left the whole suite green, twice over, which is
+  // the exact defect the comment on that constant claims is impossible. Reading it back closes
+  // that without building 20,001 files, which is the fixture that took macOS CI down with EMFILE.
+  return { sessionId: session, agents, unreadable, cap }
 }

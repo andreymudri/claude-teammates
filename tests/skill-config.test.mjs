@@ -29,12 +29,17 @@ const doc = async () => {
 // across whatever scope it is handed, so passing the document made an innocuous sentence in an
 // unrelated section fail the caveman test — with a message about caveman. Both screens belong
 // where the claim lives.
-const cavemanSection = async () => {
-  const parsed = await doc()
+//
+// ONE definition of "which section", used by every caller. It was a helper nothing called, beside
+// a regression test that re-implemented the same `sections.find` inline — so the helper could
+// regress without failing anything, which a review filed twice: once as bypassed, once as
+// unreachable. A lookup used in two places is written once.
+const findCavemanSection = (parsed) => {
   const section = parsed.sections.find((s) => /What .*caveman.* actually reaches/.test(s.title ?? ''))
   assert.ok(section, 'the skill must keep a section stating what caveman reaches')
   return section
 }
+
 
 const task = {
   id: 'T1',
@@ -317,11 +322,15 @@ test('prose in an unrelated section does not fail the caveman claim', async () =
   const { body } = splitFrontmatter(text, 'teammates-config')
   const edited = `${body}\n\n## Troubleshooting\n\nThe above requirement applies to every layer.\n`
   const parsed = parseDoc(edited, 'teammates-config/SKILL.md (edited)')
-  const section = parsed.sections.find((s) => /What .*caveman.* actually reaches/.test(s.title ?? ''))
+  const section = findCavemanSection(parsed)
   assertClaim(section, {
     label: 'reviewers are unaffected by caveman',
     claim: /Reviewer and integrator dispatches carry no caveman path at all/,
     subject: /reviewer/i,
-    allow: [/enforcement key never goes in the local file/, /a well-shaped value passes silently/],
+    // No `allow` entries: both that were here matched nothing in the screened section — one
+    // appears nowhere in the skill, the other lives in a different section — so they were carried
+    // over from when `assertClaim` ran document-wide. A dead allow entry only makes the screen
+    // stricter, so this is not a hole; it is a list that had stopped describing anything.
+    allow: [],
   })
 })

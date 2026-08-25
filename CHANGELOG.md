@@ -41,7 +41,11 @@ Two review passes over code that had shipped without any.
   arm (`resolved === '.' || '..'`, unreachable because the strip removes the whole trailing run) is
   removed rather than tested, with the equivalence brute-forced over 177,155 inputs.
 
-- **The `caveman` claim was defeated a ninth and tenth time**, both by the fix for the eighth. The
+- **The `caveman` claim was defeated a ninth and a tenth time.** Only one route was opened by the
+  previous fix — an added section carried past the byte-for-byte snapshot by `cp`-ing the fixture.
+  The other two had never been bound by any round: `agents/tm-reviewer.md`, which IS the reviewer's
+  dispatch prompt, and `CHANGELOG.md`, which states the measurement in more detail than either
+  pinned file. The
   anchor for the skill's text is now a SHA-256 constant in the test file, which a `cp` over the
   fixture cannot reach; `agents/tm-reviewer.md`, `agents/tm-integrator.md` and `CHANGELOG.md` are
   bound for the first time. The prose layers are documented as change detectors rather than proofs

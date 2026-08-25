@@ -534,6 +534,71 @@ window is not zero — Node cannot close it without fd-relative opens. An attack
 inside the store does not need to win a race to put a transcript there; the race only buys reaching
 files OUTSIDE it.
 
+## Eighth review pass — the gap, and release readiness (2026-08-25)
+
+Three lenses over `f1626e3..be9f093` — the commit that fell between pass 5's tip and pass 6's base
+and had been read by nobody — plus a release-readiness sweep. **18 findings, 5 `high`**: 11 claims,
+5 tests, 2 correctness.
+
+### It stopped the release
+
+**The branch had never been pushed and had zero CI runs.** The verification block in HANDOFF.md
+said `gh run list --limit 1`, which unfiltered returns the newest run in the REPO — `master`'s
+v1.1.5 run, three commits back, from before a single test on this branch existed. The same document
+warned two paragraphs later that three tests here would have taken Windows CI red and that a local
+run proves one platform of three, and then handed over a command that reports another commit's
+verdict. The command is now `--branch`-scoped, and the branch is pushed and CI-verified before the
+tag.
+
+### The bound the commit existed to pin was still not pinned
+
+`be9f093` moved the `maxEntries` default off the signature and into `maxEntries ?? DEFAULT_MAX_ENTRIES`,
+with a comment calling the constant "The ONE definition of the shipped bound". There were still
+two sites, each independently mutable with the suite green — and the move pushed the live one AWAY
+from production, since `cli.mjs` omits `maxEntries` entirely and therefore takes the signature
+default and never reaches the `??`. Setting the signature default to `Number.MAX_SAFE_INTEGER`
+shipped an unbounded walk at the exact baseline.
+
+The test named for the bound could not catch it: on a one-file store `if (budget-- <= 0)` cannot
+trip for any admissible cap, so "nothing truncated" was **unfalsifiable by construction**. Setting
+the shipped default to `1` — every `usage` run reporting at most one transcript, the under-report
+at exit 0 this module exists to prevent — left both guard tests green.
+
+The applied cap is now **returned on the report** and asserted, which observes the bound without
+building the 20,001-file fixture that took macOS CI down with EMFILE. The catastrophic-default
+mutation now fails 9 tests; raising either site fails; changing the constant fails.
+
+### The record pointed at the wrong evidence
+
+Three of the claims highs were about where the truth lives, not what it is:
+
+- HANDOFF.md named `results-final.json` / `verdict-final.json` as holding the coverage caveat.
+  Those are the **pre-release** verdict, and their review output asserts coverage *through*
+  `be9f093` — the exact opposite of the bullet beside them.
+- `be9f093`'s diffstat was given as "`scripts/usage-store.mjs` (+21/-4)", a number matching nothing
+  in the commit and naming one file and no tests — which would have sent a reviewer past
+  `tests/skill-config.test.mjs`, where that commit rewrote the caveman heading screen pass 6 then
+  found had stopped catching anything.
+- The gate record said "pass 7 over `c2d0398..HEAD`" — HEAD meant `33babfd` when it was written,
+  two minutes before `b726cc4` existed. It also said "All highs and mediums closed" while
+  `skills/phase-gate/SKILL.md:207` was open, which the lens proved by inverting the paragraph to
+  its exact negation and watching the suite stay green. That one is **now closed**: bound in
+  `tests/skill-contracts.test.mjs`, negation re-run and failing.
+
+Two corrections to arithmetic this document had asserted: only **two** of the four `refute-*.json`
+files re-file the finding they adjudicate — the other two carry `findings: []` and record their
+verdict in `correctedSeverity`. And every cell of the seven-pass table was independently recounted
+from the JSON and is correct.
+
+### The regress, named
+
+Pass 8's findings were fixed in a commit no pass has read. **Every round has this property: the
+commit that closes a pass is written after it.** The honest stopping point is not a claim of full
+coverage but a statement of what the last commit has instead — per-fix verification by execution
+and mutation, done by the author, which is weaker than a lens pass. That is what the gate output
+says, in those words.
+
+
 ## Not reviewed
 
 Three passes recorded claims they enumerated but did not probe. Earlier versions of this section

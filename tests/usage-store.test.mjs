@@ -546,11 +546,14 @@ test('an unusable maxEntries is refused by name, not turned into a layout lie', 
       )
     }
     // `null` is not a bad value: it means "use the shipped default", which is how the CLI reaches
-    // this function. It crashed before the bound was resolved from the constant rather than from a
-    // default parameter, which applies only to `undefined`.
+    // this function. This is a deliberate BEHAVIOUR CHANGE, not a crash fix: at `f1626e3` the
+    // guard ran on the raw parameter, so `Number.isInteger(null)` was false and `null` was refused
+    // BY NAME — this very list used to contain it. (An earlier version of this comment said `null`
+    // "crashed", which belongs to the era before any validation existed and was wrong about the
+    // revision immediately before it.)
     const report = await readSessionUsage({ projectsDir, root: FAKE_ROOT, maxEntries: null })
     assert.equal(report.agents.length, 1)
-    assert.equal(report.unreadable.filter((e) => e.kind === 'truncated').length, 0)
+    assert.equal(report.cap, DEFAULT_MAX_ENTRIES, 'null must resolve to the shipped default')
   }, { files: { 'agent-a.jsonl': line({ cache_read_input_tokens: 10 }) } })
 })
 
@@ -561,9 +564,11 @@ test('an unusable maxEntries is refused by name, not turned into a layout lie', 
 test('the default cap is a real bound, not an unreachable number', async () => {
   await withStore(async ({ projectsDir }) => {
     const report = await readSessionUsage({ projectsDir, root: FAKE_ROOT })
-    assert.equal(report.unreadable.filter((e) => e.kind === 'truncated').length, 0)
-    // The bound itself: a store one entry past the default must truncate. Asserted through the
-    // exported default rather than by building such a store, which is what broke macOS CI.
+    // `report.cap`, NOT a truncation count. On a one-file store `if (budget-- <= 0)` cannot trip
+    // for ANY admissible cap, so asserting "nothing truncated" here was unfalsifiable by
+    // construction — the test named for the bound did not guard the bound, and setting the shipped
+    // default to 1 left it green while every `usage` run reported at most one transcript.
+    assert.equal(report.cap, DEFAULT_MAX_ENTRIES, 'the walk must APPLY the documented default')
     assert.equal(DEFAULT_MAX_ENTRIES, 20_000, 'the documented bound is the one that ships')
     assert.ok(Number.isInteger(DEFAULT_MAX_ENTRIES) && DEFAULT_MAX_ENTRIES < 1e6,
       'a bound nothing can reach is not a bound')
@@ -846,4 +851,38 @@ test('a FIFO named like a meta file does not hang the report', NO_SYMLINKS_ON_WI
     await writeFile(path.join(store, 'agent-a.jsonl'), usageLine(10), 'utf8')
     execFileSync('mkfifo', [path.join(store, 'agent-a.meta.json')])
   })
+})
+
+
+// The applied bound, read back off the report rather than off the constant. The default was two
+// values joined at a site nothing pinned — the signature default and the `??` — and the test that
+// claimed to pin it read DEFAULT_MAX_ENTRIES and asserted "no truncation on a 1-file store", which
+// observes NEITHER being applied. Both one-token escapes left the whole suite green: raising the
+// signature default, and raising the `??` fallback. This asserts the number the walk actually used.
+test('the default cap the walk applies is the exported constant', async () => {
+  await withStore(async ({ projectsDir }) => {
+    for (const injected of [undefined, null]) {
+      const report = await readSessionUsage({ projectsDir, root: FAKE_ROOT, maxEntries: injected })
+      assert.equal(report.cap, DEFAULT_MAX_ENTRIES,
+        `maxEntries: ${injected} must resolve to the shipped default, and the walk must APPLY it`)
+    }
+    const injected = await readSessionUsage({ projectsDir, root: FAKE_ROOT, maxEntries: 7 })
+    assert.equal(injected.cap, 7, 'an injected cap is reported as the one applied')
+  }, { files: { 'agent-a.jsonl': line({ cache_read_input_tokens: 10 }) } })
+})
+
+// The refusal's contract is that a bad cap is named. `JSON.stringify` THROWS on a BigInt, so the
+// error-formatting path itself failed with a TypeError naming neither the argument nor the value;
+// it also renders NaN and Infinity as `null`, quoting a value the caller never passed.
+test('an unusable cap is refused by name whatever its type', async () => {
+  await withStore(async ({ projectsDir }) => {
+    const cases = [[0, '0'], [-1, '-1'], [1.5, '1.5'], [NaN, 'NaN'], [Infinity, 'Infinity'], [2n, '2n'], ['x', '"x"'], [true, 'true']]
+    for (const [value, shown] of cases) {
+      await assert.rejects(
+        () => readSessionUsage({ projectsDir, root: FAKE_ROOT, maxEntries: value }),
+        (err) => /maxEntries must be a positive integer/.test(err.message) && err.message.endsWith(shown),
+        `maxEntries ${String(value)} must be refused with its own value named, got a different message`,
+      )
+    }
+  }, { files: { 'agent-a.jsonl': line({ cache_read_input_tokens: 10 }) } })
 })

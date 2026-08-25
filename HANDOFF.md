@@ -28,17 +28,23 @@ and restart. An unbumped version makes the update a no-op.
 
 ## What to do first
 
-`fix/pass6-findings` is green (**1959 tests, 1956 pass, 0 fail, 3 skipped**) and unmerged. Decide
+`fix/pass6-findings` is green (**1962 tests, 1959 pass, 0 fail, 3 skipped**) and unmerged. Decide
 whether it lands and whether it ships as `v1.1.6`. It carries a security fix, so leaving it
 unmerged leaves the escape live in the released `v1.1.5`.
 
-    npm test                              # expect 1959 / 1956 / 0 fail / 3 skipped
-    gh run list --limit 1                 # green on Linux, macOS and Windows
+    npm test                                     # expect 1962 / 1959 / 0 fail / 3 skipped
+    gh run list --branch <this branch> --limit 1 # NOT `--limit 1` on its own
 
-**Do not trust a green suite as evidence that Windows is green.** Three tests on this branch would
-have taken Windows CI red — they build symlinks, and without `{ skip: process.platform === 'win32' }`
-they throw EPERM *inside the fixture builder* and FAIL rather than skip. That is fixed, but the
-class is worth remembering: this repo's suite runs on three platforms and the local run proves one.
+**`gh run list --limit 1` is the wrong command, and an earlier version of this file printed it.**
+Unfiltered it returns the newest run in the REPO — which was `master`'s v1.1.5 run, three commits
+back, from before a single test on this branch existed. A branch that has never been pushed has no
+runs at all, and the unfiltered command hides that behind another commit's green tick.
+
+**Do not trust a green local suite as evidence that Windows is green.** Three tests on this branch
+would have taken Windows CI red — they build symlinks, and without
+`{ skip: process.platform === 'win32' }` they throw EPERM *inside the fixture builder* and FAIL
+rather than skip. That is fixed, but the class is the point: the matrix is ubuntu/macos/windows,
+and a local run proves one of the three.
 
 ## The numbers, recounted from JSON
 
@@ -55,10 +61,12 @@ is the only record that survives a clone.
 | 5 | pass 4's fixes | 18 | 4 |
 | 6 | **the release commits — never reviewed** | 28 | 6 |
 | 7 | pass 6's fixes | 29 | 11 |
+| 8 | `be9f093` (the gap) + release readiness | 18 | 5 |
 
 Passes 1–5 total **97 findings, 11 `high` pre-refutation, 8 `high` post-refutation**. Say which of
-those you mean. The four `refute-*.json` files RE-FILE the finding they adjudicate rather than
-adding a new site, and they downgraded three severities — so "97 findings, 11 high, filed by five
+those you mean. Two of the four `refute-*.json` files RE-FILE the finding they adjudicate rather
+than adding a new site; the other two carry `findings: []` and record their verdict in a
+`correctedSeverity` field instead. Between them they downgraded three severities — so "97 findings, 11 high, filed by five
 passes and four refutations" is three different tallies in one sentence, and an earlier version of
 this document shipped exactly that.
 
@@ -104,23 +112,34 @@ in pass 7 against 6 in the pass it repaired.
 
 ## Still open
 
-- **`be9f093` has been reviewed by no pass.** Pass 5 ended at `f1626e3`; pass 6 took `be9f093` as
-  its base, and `A..B` excludes `A`. It changes `scripts/usage-store.mjs` (+21/-4). This is the
-  highest-yield unreviewed range left, by the same reasoning that made pass 6 worth running.
+- **The final commit is not lens-reviewed, and this is the regress that never fully closes.**
+  Pass 8 covered `be9f093` (the gap pass 5 and 6 left) and the release artifacts, and its findings
+  were fixed — in a commit no pass has read. Every round has this property: the commit that closes
+  a pass is written after it. What that commit's changes DO have is per-fix verification by
+  execution and mutation, done by the author and recorded in the gate output. **That is weaker
+  than a lens pass and is stated as such rather than papered over.** If you take one more pass,
+  take it here.
 - **One mutation is deliberately alive.** Reverting the walk to read from the unresolved name
   instead of `resolvedStore` survives the whole suite. The difference is observable only under a
   race, and the containment check forces the two paths equal in every state a test can construct.
   The TOCTOU window is narrowed, not closed — Node cannot close it without fd-relative opens.
-- **`skills/phase-gate/SKILL.md:207`** — the rewritten solo-gate paragraph is bound by no
-  assertion; its exact negation passes the suite. Filed by pass 5, carried through 6 and 7.
+- ~~`skills/phase-gate/SKILL.md:207`~~ — **closed.** Filed by pass 5 and carried unclosed through
+  passes 6 and 7; pass 8 verified the negation still passed. Now bound in
+  `tests/skill-contracts.test.mjs`, with the three sentences pinned as change detectors and the
+  one mechanically decidable claim (no `--run`, no persisted verdict) asserted against the code
+  that implements it. The negation was re-run and fails.
 - **The three `mutation | killed by` tables** in the followups doc have not been re-run since they
   were written. Only the v1.1.5 validator table was re-verified.
 - **`docs/followups/2026-08-22-fog-open-findings.md`** — the accepted bidi exposure (a recorded
   decision) and **49 enumerated-but-unprobed claims** across run `fog`'s four phases. Carried.
 - **The gate's persisted record carries no coverage caveat, and cannot.** `.teammates/usage/status.json`
   stores `{verdict, failed, optionalFailed, skipped, pending, branchShas, phaseName, recordedAt}` —
-  there is no `results` key, so the `review` check's `output` is not in it. The caveat text lives
-  only in `.teammates/inline-review/results-final.json` and `verdict-final.json`, both gitignored.
+  there is no `results` key, so the `review` check's `output` is not in it. The six-item caveat lives
+  in `.teammates/inline-review/gate-pass7.txt` and `results-pass7.json`, both gitignored. It is NOT
+  in `results-final.json` / `verdict-final.json`, which an earlier version of this bullet named:
+  those hold the PRE-RELEASE verdict, whose review output claims "5 lens passes over
+  6a9edff..be9f093 ... all closed" — asserting coverage THROUGH `be9f093`, the exact opposite of
+  the first bullet in this list, and predating this branch entirely.
   An earlier handoff claimed the persisted gate records the caveat. It does not.
 
 ## What `usage` does and does not demonstrate
