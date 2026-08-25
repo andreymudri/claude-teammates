@@ -237,3 +237,64 @@ test('a drop reason carries no content from the transcript', async () => {
     assert.doesNotMatch(report.unreadable[0].reason, /ANTHROPIC/)
   }, { files: { 'agent-secret.jsonl': 'ANTHROPIC_API_KEY=sk-ant-secret-abc123' } })
 })
+
+// Builds several sessions with mtimes set explicitly on BOTH the session directory and its store,
+// which is the only way to tell the two halves of the selection rule apart. Every fixture above
+// carries exactly one session, so none of them could: the sort direction and the Math.max rule
+// were both unpinned, and inverting either left the suite green.
+async function withSessions(fn, sessions) {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-usage-sessions-'))
+  try {
+    for (const [name, { own, store }] of Object.entries(sessions)) {
+      const subagents = path.join(dir, projectSlug(FAKE_ROOT), name, 'subagents')
+      await mkdir(subagents, { recursive: true })
+      await writeFile(path.join(subagents, 'agent-a.jsonl'), line({ cache_read_input_tokens: 1 }), 'utf8')
+      // The store first: writing into a directory stamps it, so the session directory has to be
+      // stamped after everything inside it exists.
+      await utimes(subagents, new Date(store), new Date(store))
+      await utimes(path.join(dir, projectSlug(FAKE_ROOT), name), new Date(own), new Date(own))
+    }
+    await fn({ projectsDir: dir })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+}
+
+const T = (ms) => 1_700_000_000_000 + ms
+
+test('the newest session is chosen, not the oldest', async () => {
+  await withSessions(async ({ projectsDir }) => {
+    const report = await readSessionUsage({ projectsDir, root: FAKE_ROOT })
+    assert.equal(report.sessionId, 'sess-new')
+  }, {
+    // Named so the winner sorts FIRST alphabetically, so a fixture that happened to be in
+    // readdir order cannot pass an inverted sort by accident.
+    'sess-new': { own: T(9000), store: T(9000) },
+    'sess-old': { own: T(1000), store: T(1000) },
+  })
+})
+
+// The store is stamped when a transcript is added; the session directory when the store is
+// created. Taking only the directory's mtime picks the session that has been idle longest since
+// its store appeared — here, the one that is not being written to.
+test('a session whose store is newer wins over one whose directory is newer', async () => {
+  await withSessions(async ({ projectsDir }) => {
+    const report = await readSessionUsage({ projectsDir, root: FAKE_ROOT })
+    assert.equal(report.sessionId, 'sess-live', 'the later of the two mtimes decides')
+  }, {
+    'sess-live': { own: T(1000), store: T(9000) },
+    'sess-idle': { own: T(5000), store: T(2000) },
+  })
+})
+
+// The other half of the same rule: taking only the store's mtime loses to a session whose
+// directory was touched more recently than its store.
+test('a session whose directory is newer wins over one whose store is newer', async () => {
+  await withSessions(async ({ projectsDir }) => {
+    const report = await readSessionUsage({ projectsDir, root: FAKE_ROOT })
+    assert.equal(report.sessionId, 'sess-touched', 'the later of the two mtimes decides')
+  }, {
+    'sess-touched': { own: T(9000), store: T(1000) },
+    'sess-stored': { own: T(2000), store: T(5000) },
+  })
+})

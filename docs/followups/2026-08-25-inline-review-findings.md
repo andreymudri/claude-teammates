@@ -14,8 +14,8 @@ Four `tm-reviewer` lenses at the fixed `capable` tier (`agents.reviewer.tier` an
     recorded in .teammates/usage/status.json under `solo:default`
     findings in .teammates/inline-review/reviews/
 
-**Post-refutation tally: 1 high, 11 medium, 10 low.** Four are fixed — the high, two mediums and
-one low, each in its own section below. The remaining 18 are recorded rather than fixed, and
+**Post-refutation tally: 1 high, 11 medium, 10 low.** Five are fixed — the high, three mediums
+and one low, each in its own section below. The remaining 17 are recorded rather than fixed, and
 nothing in this document is closed by having been written down.
 
 ## Fixed
@@ -71,6 +71,22 @@ auditable.
 `renderDigest` shortens the digest this CLI prints to the operator — it reaches no agent output at
 all. The argument rests on `review-gen.mjs` having no caveman path, which is verified and holds.
 
+### `tests/usage-store.test.mjs:131` — `newestSession` was unpinned (medium)
+
+Every fixture carried exactly one session, so neither half of the selection rule could be tested:
+inverting the sort to pick the **oldest** session, or dropping the `Math.max(own, store.mtimeMs)`
+rule the source comment defends at length, both left the suite green. That rule *is* the v1.1.2
+fix, so the fix had no regression guard at all.
+
+Three tests now, over a fixture that stamps the session directory and its store independently —
+the only way to tell the two halves apart. Each mutation is killed, and by exactly one test:
+
+| mutation | killed by |
+|---|---|
+| `sort((a, b) => a.mtime - b.mtime)` (pick oldest) | the newest session is chosen, not the oldest |
+| `mtime: own` (directory only) | a session whose store is newer wins |
+| `mtime: store.mtimeMs` (store only) | a session whose directory is newer wins |
+
 ## Open — `usage`, the largest unreviewed surface
 
 | sev | site | finding |
@@ -87,7 +103,6 @@ that leaves the suite green.
 | sev | site | mutation that survives |
 |---|---|---|
 | medium | `tests/skill-config.test.mjs:44` | The doc-claim assertions test **co-occurrence, not polarity**. Rewriting the skill to the exact inversion it exists to prevent leaves 6 pass / 0 fail. Same at `:60`, where `/(larger\|longer\|bigger)/i` names neither `caveman` nor `brief` and is satisfied by any unrelated "no longer". |
-| medium | `tests/usage-store.test.mjs:131` | Every fixture has exactly one session, so `newestSession` is unpinned — inverting the sort to pick the **oldest**, or dropping the `Math.max(own, store.mtimeMs)` rule the source comment defends at length, both stay green. This is the v1.1.2 fix itself going untested. |
 | medium | `tests/usage-cli.test.mjs:69` | `--session` is documented in USAGE and registered in `KNOWN_FLAGS` but never driven; replacing the expression with `sessionId: null` leaves 500 pass / 0 fail. |
 | medium | `tests/usage.test.mjs:91` | The truncation test uses a 30-char fixture against a 32-wide column, so `padEnd` alone satisfies it and the truncation branch never executes. Its comment claims the opposite. |
 | medium | `tests/usage-store.test.mjs:63` | The existing-but-empty `subagents/` case is untested — a **second route** to the empty report the header forbids, independent of the recursion bug fixed above. Still open. |
