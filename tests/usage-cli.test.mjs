@@ -134,7 +134,12 @@ test('usage --session refuses a value carrying a path separator', async () => {
 // wraps the identical kind of value. The payload need not be typed by the operator: a session
 // DIRECTORY whose name carries the bytes reaches the same message through newestSession, and that
 // is the path defeating the "the operator typed it at their own terminal" defence.
-test('a store-planted session name cannot draw a forged line', async () => {
+// SKIPPED ON WINDOWS, as a capability skip and not disabled work: this fixture needs a DIRECTORY
+// whose name carries a control or format character, and Windows accepts none of them in a
+// filename — ESC fails at mkdir with ENOENT, and so do U+2028 and U+0085. The behaviour under
+// test is platform-independent; only the fixture is not buildable there. The neutralisation
+// itself is covered on every platform by the --session test below, which creates no directory.
+test('a store-planted session name cannot draw a forged line', { skip: process.platform === 'win32' }, async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'tm-usage-plant-'))
   const previous = process.env.CLAUDE_CONFIG_DIR
   try {
