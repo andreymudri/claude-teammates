@@ -121,10 +121,17 @@ because `+` is not a thematic-break character.
 - **`tests/phases.test.mjs:246`** — the phase-level assertion is implied by the absolute
   expectations above it; gutting `assignPhases` leaves it green.
 
-## Phase 4 items — CLOSED
+## Phase 4 items — CLOSED (except the enumerated-unprobed subsection below)
 
 All eight were reported against `teammates/fog/T6@380532f`, rated `low`, and knowingly
 integrated at merge `2c39ce8`. Line numbers are as of that tip.
+
+**Scope of this heading, corrected 2026-08-25.** It said `CLOSED` unqualified, which covered the
+*"Claims the phase 4 review enumerated but never reached"* subsection further down — the one this
+same document describes as "not clean, they are unexamined". Those six are still unexamined; a
+review that did not reach a claim closes nothing. A `claims` lens on 2026-08-25 probed one of them,
+`scripts/cli.mjs` "Swallow and print nothing", and confirmed it is **still unpinned**: mutating the
+catch body to print a line leaves the suite green. The remaining five were not reached then either.
 
 Three of them are the same defect seen from different angles — the `if (notes)` guard is
 unpinned — and two lenses reached it independently:
@@ -218,8 +225,14 @@ breakdown are unchanged by the edit — T1(p1) T2/T4/T5/T7(p2) T3(p3) T6(p4), ex
 
 ## Closing summary (autonomous pass)
 
-Everything above that named a defect or a gap is now addressed. What was done, and how each was
-verified:
+Every finding above that **named a defect** is addressed; what was done and how each was verified
+follows. This does **not** extend to the enumerated-but-unprobed claims in each phase's own
+subsection — 49 across the four phases — which name no defect because nobody looked. They are
+carried, not closed.
+
+*(Scope corrected 2026-08-25. The original read "Everything above that named a defect or a gap is
+now addressed", which read as closure over the unprobed lists too. A later `claims` lens confirmed
+at least one of them is still unpinned.)*
 
 - **`renderPlanNotes` input-shape defense** (phase 2 `finish.mjs:157`, phase 4 `cli.mjs:2881`,
   `cli.mjs:2877` — one root cause, three findings). Each field is checked for its documented

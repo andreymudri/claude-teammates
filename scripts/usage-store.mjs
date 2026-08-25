@@ -12,6 +12,7 @@
 import { readdir, readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
 
+import { printable } from './reviews.mjs'
 import { projectSlug, summarizeTranscript } from './usage.mjs'
 
 function missing(dir) {
@@ -60,6 +61,16 @@ export async function readSessionUsage({ projectsDir, root, sessionId = null }) 
   // a session. Resolving is idempotent for a path that is already absolute.
   const projectDir = path.join(projectsDir, projectSlug(path.resolve(root)))
   const session = sessionId ?? await newestSession(projectDir)
+  // Checked before it is joined, and checked here rather than only at the CLI: `--session` is not
+  // the only way a name reaches this line. `newestSession` returns a directory name that is
+  // joined again, so a directory an attacker can create under the projects directory is the same
+  // primitive. Unvalidated, `../` walked out of the store entirely and read .jsonl files
+  // elsewhere on disk, disclosing the first bytes of one through a parse-error line.
+  // `reviewFileName` (scripts/reviews.mjs) refuses a lens on exactly these grounds; this is that
+  // rule applied to the one component this module joins.
+  if (typeof session !== 'string' || session === '' || /[\\/]/.test(session) || session === '.' || session === '..') {
+    throw new Error(`a session must be a non-empty name with no path separators, got ${JSON.stringify(printable(session))}`)
+  }
   const subagentsDir = path.join(projectDir, session, 'subagents')
 
   let entries

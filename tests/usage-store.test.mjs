@@ -298,3 +298,19 @@ test('a session whose directory is newer wins over one whose store is newer', as
     'sess-stored': { own: T(2000), store: T(5000) },
   })
 })
+
+// The traversal is refused where the join happens, not only at the CLI, because `--session` is
+// not the only way a name reaches here: `newestSession` returns a directory name that is joined
+// again, so a directory an attacker can create is the same primitive.
+test('a session name with a path separator is refused before it is joined', async () => {
+  await withStore(async ({ projectsDir }) => {
+    await assert.rejects(
+      () => readSessionUsage({ projectsDir, root: FAKE_ROOT, sessionId: '../../elsewhere' }),
+      (err) => /no path separators/.test(err.message) && !/no transcripts found/.test(err.message),
+    )
+    await assert.rejects(
+      () => readSessionUsage({ projectsDir, root: FAKE_ROOT, sessionId: '..' }),
+      (err) => /no path separators/.test(err.message),
+    )
+  }, { files: { 'agent-a.jsonl': line({ cache_read_input_tokens: 10 }) } })
+})

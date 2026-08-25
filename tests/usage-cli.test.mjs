@@ -13,13 +13,20 @@ const line = (over) => JSON.stringify({ message: { usage: { cache_read_input_tok
 
 // The fixture store is injected through CLAUDE_CONFIG_DIR so no test reads the developer's real
 // transcripts, and the variable is restored afterwards whatever happens.
-async function withCli(fn, { files }) {
+async function withCli(fn, { files, other }) {
   const dir = await mkdtemp(path.join(tmpdir(), 'tm-usage-cli-'))
   const previous = process.env.CLAUDE_CONFIG_DIR
   try {
     const subagents = path.join(dir, 'projects', projectSlug(FAKE_ROOT), 'sess-9', 'subagents')
     await mkdir(subagents, { recursive: true })
     for (const [name, body] of Object.entries(files)) await writeFile(path.join(subagents, name), body, 'utf8')
+    // A second session, so `--session` has something to choose BETWEEN. With one session in the
+    // store the flag could be ignored entirely and every assertion still passed.
+    for (const [name, body] of Object.entries(other ?? {})) {
+      const dir2 = path.join(dir, 'projects', projectSlug(FAKE_ROOT), 'sess-other', 'subagents')
+      await mkdir(dir2, { recursive: true })
+      await writeFile(path.join(dir2, name), body, 'utf8')
+    }
     process.env.CLAUDE_CONFIG_DIR = dir
     const lines = []
     const code = await fn({ io: { out: (t) => lines.push(t) }, lines })
@@ -77,4 +84,35 @@ test('usage --json emits the same numbers as the table', async () => {
   assert.equal(reviewer.turns, 2)
   assert.equal(reviewer.cacheRead, 400)
   assert.equal(report.sessionId, 'sess-9')
+})
+
+// `--session` was documented in USAGE and registered in KNOWN_FLAGS but no test drove it, so the
+// CLI could ignore the flag entirely and the suite stayed green. Two sessions, so selecting one
+// means something.
+test('usage --session reports on the named session, not the newest', async () => {
+  const { code, out } = await withCli(
+    ({ io }) => runCli(['usage', '--root', FAKE_ROOT, '--session', 'sess-other', '--json'], io),
+    {
+      files: FIXTURE,
+      other: { 'agent-z.jsonl': line({ cache_read_input_tokens: 7777 }) },
+    },
+  )
+  assert.equal(code, 0)
+  const report = JSON.parse(out)
+  assert.equal(report.sessionId, 'sess-other')
+  assert.equal(report.agents.length, 1, 'only the named session may be read')
+  assert.equal(report.agents[0].cacheRead, 7777)
+})
+
+// `--session` is joined straight into the store path, so `../` walked out of the projects
+// directory and read .jsonl files elsewhere on disk — disclosing the first bytes of one in the
+// parse-error line. Refused by name now, the way reviewFileName already refuses a lens.
+test('usage --session refuses a value carrying a path separator', async () => {
+  const { code, out } = await withCli(
+    ({ io }) => runCli(['usage', '--root', FAKE_ROOT, '--session', '../../../outside'], io),
+    { files: FIXTURE },
+  )
+  assert.notEqual(code, 0)
+  assert.match(out, /no path separators/)
+  assert.doesNotMatch(out, /no transcripts found/, 'refused by name, not by failing to find it')
 })

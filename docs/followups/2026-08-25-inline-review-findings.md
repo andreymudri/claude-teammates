@@ -14,8 +14,8 @@ Four `tm-reviewer` lenses at the fixed `capable` tier (`agents.reviewer.tier` an
     recorded in .teammates/usage/status.json under `solo:default`
     findings in .teammates/inline-review/reviews/
 
-**Post-refutation tally: 1 high, 11 medium, 10 low.** Seven are fixed — the high, five mediums
-and one low, each in its own section below. The remaining 15 are recorded rather than fixed, and
+**Post-refutation tally: 1 high, 11 medium, 10 low.** Ten are fixed — the high, eight mediums and
+one low, each in its own section below. The remaining 12 are recorded rather than fixed, and
 nothing in this document is closed by having been written down.
 
 ## Fixed
@@ -116,11 +116,52 @@ Each of the four mutations was run and killed by its intended test:
 | claim the brief is *smaller* | the terse brief is larger, not smaller |
 | level count drifts back to four | the level count the code actually validates |
 
+### `scripts/usage-store.mjs:63` — `--session` path traversal (medium)
+
+`--session` was joined into the store path with no filename-component validation, so
+`--session '../../../outside'` walked out of the projects directory and read `.jsonl` files
+elsewhere on disk — disclosing the first bytes of one through a parse-error line, plus the names of
+every `.jsonl` under any reachable `*/subagents/`.
+
+Refused by name now, on the same rule `reviewFileName` (`scripts/reviews.mjs:86-93`) already
+applies to a lens: non-empty, no separators, not `.` or `..`. Validated in `readSessionUsage`
+rather than only at the CLI, because `--session` is not the only way a name reaches that join —
+`newestSession` returns a directory name that is joined again, so a directory an attacker can
+create is the same primitive.
+
+### `tests/usage-cli.test.mjs:69` — `--session` was never driven (medium)
+
+Documented in USAGE and registered in `KNOWN_FLAGS`, but no test exercised it: replacing the
+expression with `sessionId: null` left 500 pass / 0 fail. Now driven against a **two-session**
+fixture, so selecting one means something — with a single session in the store the flag could still
+be ignored and every assertion pass.
+
+Three mutations run, each killed:
+
+| mutation | killed by |
+|---|---|
+| `sessionId: null` (CLI ignores the flag) | `--session` reports on the named session |
+| drop the validation entirely | both traversal tests |
+| validation allows `..` | a session name with a separator is refused |
+
+### `docs/followups/2026-08-22-fog-open-findings.md:124` — closure asserted over unexamined work (medium)
+
+`## Phase 4 items — CLOSED` and "Everything above that named a defect or a gap is now addressed"
+covered the *"Claims the phase 4 review enumerated but never reached"* subsection — which the same
+document calls "not clean, they are unexamined". A review that did not reach a claim closes nothing.
+
+Corrected rather than papered over: the heading is scoped, and the closing summary now says
+explicitly that the 49 unprobed claims across the four phases are **carried, not closed**. Both
+corrections quote what they replaced.
+
+Verified rather than inherited: mutating `scripts/cli.mjs`'s `catch { /* Swallow and print
+nothing */ }` to print a line leaves the suite at **1894 tests, 1891 pass, 0 fail** — so that
+claim is confirmed still unpinned, first-hand.
+
 ## Open — `usage`, the largest unreviewed surface
 
 | sev | site | finding |
 |---|---|---|
-| medium | `usage-store.mjs:63` | `--session` is joined into the store path with no filename-component validation. `--session '../../../outside'` walked out of the projects directory and read `.jsonl` files elsewhere on disk, disclosing the first bytes of one in an error message. `reviewFileName` (`scripts/reviews.mjs:86-93`) is the validator this repo already has for exactly this shape; `--session` got no equivalent. Also reachable with no flag at all, since `newestSession` returns a directory name that is re-joined. |
 | low | `cli.mjs:3021`, `usage.mjs:53`, `:75`, `:104` | The **only** render module in `scripts/` with zero `printable()` references (doctor 9, digest 9, liveness 3, plan-drift 5, finish 14). `fit()` pads by `String.length` and neutralises nothing, and **a literal newline needs no escape sequence at all** — a three-file fixture printed three fully forged lines with zero `0x1B` bytes, surviving a pager or a plain log. `--json` is not a mitigation: `0x9B`, U+2028 and U+202E all survive `JSON.stringify` raw. Not covered by the accepted bidi exposure, which asserts at `2026-08-22-fog-open-findings.md:104-112` that C1/CR/U+2028 render as tokens — false here. `usage.mjs` landed two days after the audit that set that convention: oversight, not decision. Rated low only because nothing automated consumes the output — `usage` appears in no skill, agent, hook, command, template or gate manifest. |
 | low | `usage.mjs:70` | `fit()` truncates numeric cells: `1,000,000,000` renders as `1,000,000,…` in a 12-wide `cache_rd` column. A single reviewer in this session already carries 1.7M cache reads; a long fleet run reaches 10⁹. The headline number of a token report is not a value to truncate. |
 
@@ -131,7 +172,6 @@ that leaves the suite green.
 
 | sev | site | mutation that survives |
 |---|---|---|
-| medium | `tests/usage-cli.test.mjs:69` | `--session` is documented in USAGE and registered in `KNOWN_FLAGS` but never driven; replacing the expression with `sessionId: null` leaves 500 pass / 0 fail. |
 | medium | `tests/usage.test.mjs:91` | The truncation test uses a 30-char fixture against a 32-wide column, so `padEnd` alone satisfies it and the truncation branch never executes. Its comment claims the opposite. |
 | medium | `tests/usage-store.test.mjs:63` | The existing-but-empty `subagents/` case is untested — a **second route** to the empty report the header forbids, independent of the recursion bug fixed above. Still open. |
 | low | `tests/cli.test.mjs:11007` | `samePlanNotes`' entry-text comparison survives deletion: fog drift is only tested by removing an entry, which changes the count, so a reworded question of the same count is never detected. |
@@ -148,7 +188,6 @@ semantics — the Windows-hostile spots were handled deliberately.
 
 | sev | site | finding |
 |---|---|---|
-| medium | `docs/followups/2026-08-22-fog-open-findings.md:124` | `## Phase 4 items — CLOSED` and "Everything above that named a defect or a gap is now addressed" (line 221) assert closure over a subsection the **same document** calls "not clean, they are unexamined". Proven: `scripts/cli.mjs:2959`'s `catch { /* Swallow and print nothing */ }` can be mutated to print a line and the suite stays green. |
 | low | `CHANGELOG.md:50`, `HANDOFF.md:16` | "`tm-implementer` declares seven tools" — it declares **six**, and `CHANGELOG.md:110` says six. |
 | low | `docs/specs/2026-08-24-quiet-test-reporter-design.md:119` | The Testing table lists a `load failure` test that does not exist. The behaviour itself is correct and was executed. |
 
