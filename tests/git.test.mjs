@@ -760,6 +760,34 @@ test('removeWorktree rejects an empty dir with GitError', async () => {
   assert.deepEqual(calls, [])
 })
 
+// --- deleteBranch --------------------------------------------------------------------------
+
+test('deleteBranch removes a branch and reports a name that is not there', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-delbranch-'))
+  const git = createGit({ cwd: root })
+  const sh = (args) => defaultGitExec(args, root)
+  try {
+    await sh(['init', '--initial-branch=main'])
+    await sh(['config', 'user.email', 'test@example.com'])
+    await sh(['config', 'user.name', 'test'])
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['branch', 'scratch'])
+
+    await git.deleteBranch('scratch')
+    assert.equal(await git.branchExists('scratch'), false)
+    await assert.rejects(() => git.deleteBranch('scratch'), (err) => err instanceof GitError)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('deleteBranch refuses an empty name without asking git', async () => {
+  const git = createGit({ cwd: '.', exec: async () => { throw new Error('git must not be called') } })
+  await assert.rejects(() => git.deleteBranch(''), (err) => err instanceof GitError)
+})
+
 // --- mergeInto -----------------------------------------------------------------------------
 
 // One merge per branch, each resolved through refs/heads/ first. Handing git three or more

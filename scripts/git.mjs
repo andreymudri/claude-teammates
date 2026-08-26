@@ -464,6 +464,21 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
       await run(['worktree', 'remove', '--force', '--end-of-options', dir])
       return true
     },
+    // -D, not -d. `-d` measures "merged" against whatever HEAD the caller's worktree has
+    // checked out, which is not the run branch whenever the operator has wandered onto
+    // another branch — so it refuses branches that ARE merged and accepts branches that are
+    // not, depending on where the caller happens to stand. The proof belongs to the caller
+    // (`isAncestor` against the run branch) and this deletes what the caller proved.
+    //
+    // No `qualifyBranch` here, deliberately: `git branch -D` resolves its argument in
+    // refs/heads only, so the tag-precedence hazard that helper exists for cannot apply.
+    async deleteBranch(name) {
+      if (!isNonEmptyString(name)) {
+        throw new GitError(`deleteBranch requires a non-empty branch name, got ${JSON.stringify(name)}`)
+      }
+      await run(['branch', '-D', '--end-of-options', name])
+      return true
+    },
     // Returns null when every branch merged, or the conflicted paths when one did not.
     // Throws a GitError when the merge FAILED rather than conflicted — the two are different
     // answers and the caller cannot act on them the same way.
