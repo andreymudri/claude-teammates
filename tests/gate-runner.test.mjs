@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
   defaultExec,
+  liveGroupPids,
   runCommandCheck,
   describePendingCheck,
   runChecks,
@@ -2900,8 +2901,31 @@ test('a base merge whose only contribution is a mode change is explained, not fl
   })
 })
 
-test('a timed-out command check kills the whole process group, not just the shell', { skip: process.platform === 'win32' && 'POSIX process groups' }, async () => {
-  const alive = (pid) => { try { process.kill(Number(pid), 0); return true } catch { return false } }
+// POSIX process groups and signal dispositions. The win32 half of `killGroup` is `taskkill`,
+// which these cannot drive.
+const POSIX_ONLY = process.platform === 'win32' && 'POSIX process groups and signal dispositions'
+
+// A pid the OS still knows about. A signal-0 probe answers YES for a zombie too — the window
+// between a kill landing and node reaping the child — so every caller polls rather than
+// sampling once.
+const alivePid = (pid) => { try { process.kill(Number(pid), 0); return true } catch { return false } }
+
+// Polls for at most `ms`, so a process that never dies costs a bounded wait rather than a hung
+// suite. Answers whether the pid is gone, not whether it died for the reason the caller wanted.
+const waitForExit = async (pid, ms = 3_000) => {
+  const until = Date.now() + ms
+  while (Date.now() < until && alivePid(pid)) await new Promise((r) => setTimeout(r, 25))
+  return !alivePid(pid)
+}
+
+const killPid = (pid) => { try { process.kill(Number(pid), 'SIGKILL') } catch { /* already gone, which is the pass case */ } }
+
+// Armed timers, from node's own resource table. Read ONLY as a delta around a single call: the
+// test runner and everything else in this process arm timers of their own, so the absolute
+// count carries no meaning and a delta of zero is all this can assert.
+const armedTimers = () => process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length
+
+test('a timed-out command check kills the whole process group, not just the shell', { skip: POSIX_ONLY }, async () => {
   // The grandchild's stdio is redirected on purpose. Inheriting the pipe makes `close` wait on
   // the grandchild no matter who was killed, so the promise would not settle until `sleep`
   // ended of its own accord — and a test that waits out the sleep passes even when the kill
@@ -2910,24 +2934,91 @@ test('a timed-out command check kills the whole process group, not just the shel
   const pid = /GRANDCHILD=(\d+)/.exec(output)?.[1]
   assert.ok(pid, `the command did not report its grandchild pid: ${JSON.stringify(output)}`)
   try {
-    // The grace timer is 5s; poll rather than sleeping a fixed interval.
-    for (let i = 0; i < 60 && alive(pid); i += 1) await new Promise((r) => setTimeout(r, 100))
-    assert.equal(alive(pid), false, 'the grandchild outlived the timeout, so only the shell was killed')
+    assert.equal(await waitForExit(pid, 6_000), true, 'the grandchild outlived the timeout, so only the shell was killed')
     assert.notEqual(code, 0)
     assert.match(output, /timed out after 0s; its process group was killed/)
   } finally {
     // A failing run has left a live `sleep` behind; it is this test's to clean up.
-    try { process.kill(Number(pid), 'SIGKILL') } catch { /* already gone, which is the pass case */ }
+    killPid(pid)
   }
 })
 
-test('a timed-out command check is a fail carrying its reason, never a pass', async () => {
+test('a timed-out command check is a fail carrying its reason, never a pass', { skip: POSIX_ONLY, timeout: 20_000 }, async () => {
+  // THE SUITE THE GRACE WINDOW EXISTS FOR: it traps SIGTERM, writes its coverage note and exits
+  // 0, all inside the grace. `code ?? 1` passes that 0 straight through, `runCommandCheck` then
+  // reads `code === 0` as a pass and BLANKS the output on the pass branch — so the operator sees
+  // a green check with no output at all for a suite that never finished.
+  //
+  // The real `defaultExec` runs here, and that is the point of the test: the version this
+  // replaced stubbed `exec` with a hardcoded `{code: 1}` and so never reached the close handler
+  // where the defect lived. `exec` is wrapped only to shorten the 15-minute default.
   const result = await runCommandCheck(
-    { name: 'slow', kind: 'command', run: 'irrelevant' },
-    { cwd: process.cwd(), exec: async () => ({ code: 1, output: 'partial\n— timed out after 900s; its process group was killed' }) },
+    { name: 'slow', kind: 'command', run: "trap 'echo coverage written; exit 0' TERM; sleep 20 & wait" },
+    { cwd: process.cwd(), exec: (cmd, cwd) => defaultExec(cmd, cwd, { timeoutMs: 300 }) },
   )
-  assert.equal(result.status, 'fail')
-  assert.match(result.output, /timed out after 900s/)
+  assert.equal(result.status, 'fail', `a suite killed by the timeout must not read as a pass: ${JSON.stringify(result)}`)
+  assert.notEqual(result.exitCode, 0)
+  assert.match(result.output, /coverage written/)
+  assert.match(result.output, /timed out after 0s; its process group was killed/)
+})
+
+test('a check that ignores SIGTERM is SIGKILLed when the grace expires', { skip: POSIX_ONLY, timeout: 20_000 }, async () => {
+  // The other half of the KILL_GRACE_MS claim — "one that ignores it does not get to outlive the
+  // gate" — which nothing pinned: the group-kill test above uses `sleep`, and `sleep` dies on
+  // SIGTERM, so replacing the grace SIGKILL with a comment left the whole suite green.
+  //
+  // `trap '' TERM` sets SIG_IGN, and an ignored disposition is inherited across exec, so the
+  // background `sleep` ignores SIGTERM too. Only the grace SIGKILL can end either of them.
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-grace-'))
+  let kid = null
+  try {
+    const pidFile = path.join(dir, 'kid.pid')
+    const { code, output } = await defaultExec(
+      `trap '' TERM; sleep 20 & echo $! > '${pidFile}'; wait`,
+      process.cwd(),
+      // `graceMs` is shortened from its 5-second default for the wall clock only; the path it
+      // drives is the production one.
+      { timeoutMs: 400, graceMs: 400 },
+    )
+    kid = (await readFile(pidFile, 'utf8')).trim()
+    assert.match(kid, /^\d+$/, `the command did not report its child pid: ${JSON.stringify(kid)}`)
+    assert.equal(await waitForExit(kid, 5_000), true, 'a SIGTERM-ignoring child outlived the gate, so the grace SIGKILL never landed')
+    assert.notEqual(code, 0)
+    assert.match(output, /timed out after 0s; its process group was killed/)
+  } finally {
+    if (kid) killPid(kid)
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a timed-out check settles on the kill, not on pipes a grandchild escaped the group still holds', { skip: POSIX_ONLY, timeout: 20_000 }, async () => {
+  // `close` waits for the stdio PIPES, not for the direct child. A grandchild that leaves the
+  // process group while inheriting them — `setsid`, or `spawn(..., { detached: true, stdio:
+  // 'inherit' })` — survives every signal the timeout can deliver and holds those pipes open, so
+  // settling only on `close` leaves the 15-minute bound bypassable by an ordinary manifest `run`
+  // string, and the gate records no verdict at all.
+  const escapee = "const{spawn}=require('node:child_process');const c=spawn(process.execPath,['-e','setTimeout(()=>{},8000)'],{detached:true,stdio:'inherit'});c.unref();console.log('ESCAPED='+c.pid)"
+  const started = Date.now()
+  const { code, output } = await defaultExec(
+    `${process.execPath} -e "${escapee}"; sleep 8`,
+    process.cwd(),
+    { timeoutMs: 300, graceMs: 300 },
+  )
+  const elapsed = Date.now() - started
+  const pid = /ESCAPED=(\d+)/.exec(output)?.[1]
+  try {
+    assert.ok(pid, `the command did not report its escaped grandchild: ${JSON.stringify(output)}`)
+    assert.ok(alivePid(pid), 'setup: the grandchild must still hold the pipes when the promise settles')
+    // Bounded by timeoutMs + graceMs, generously: the escapee holds the pipes for 8s, so
+    // anything near that is a settle that waited on `close`.
+    assert.ok(elapsed < 4_000, `settled after ${elapsed}ms, so it waited on pipes the kill cannot close`)
+    assert.notEqual(code, 0)
+    // The output collected before the kill still reaches the caller.
+    assert.match(output, /ESCAPED=\d+/)
+    assert.match(output, /timed out after 0s; its process group was killed/)
+  } finally {
+    if (pid) killPid(pid)
+  }
 })
 
 test('defaultExec hands the spawned pid to onSpawn before the promise resolves', async () => {
@@ -2936,4 +3027,42 @@ test('defaultExec hands the spawned pid to onSpawn before the promise resolves',
   assert.equal(code, 0)
   assert.equal(seen.length, 1)
   assert.ok(Number.isInteger(seen[0]) && seen[0] > 0, `expected a pid, got ${seen[0]}`)
+})
+
+test('a throw from onSpawn rejects with nothing left running, armed or registered', { skip: POSIX_ONLY, timeout: 20_000 }, async () => {
+  // The throwing `onSpawn` is a real path, not a hypothetical: it is the claim-file write, and a
+  // claim can fail with EACCES or ENOSPC. Thrown BEFORE the listeners were attached, it left
+  // `done()` unreachable — both timers armed, the pid still in `liveGroups`, the pipes never
+  // drained and the child never killed. Measured on the pre-fix module: the promise rejected at
+  // 9ms and the process stayed alive until 8016ms, and with the 15-minute default that is a gate
+  // that reports its failure and then does not exit for fifteen minutes — after which its exit
+  // sweep SIGKILLs a group that died long ago, which on a busy host is a recycled pid.
+  let spawned = null
+  const before = armedTimers()
+  await assert.rejects(
+    defaultExec('sleep 20 & wait', process.cwd(), {
+      timeoutMs: 60_000,
+      onSpawn: (pid) => { spawned = pid; throw new Error('claim write failed') },
+    }),
+    /claim write failed/,
+  )
+  try {
+    assert.ok(Number.isInteger(spawned), `expected a pid, got ${spawned}`)
+    assert.equal(armedTimers(), before, 'a timer stayed armed, so the gate keeps node alive after it has reported')
+    assert.ok(!liveGroupPids().includes(spawned), 'the pid stayed in liveGroups, so the exit sweep will signal a pid the OS may have recycled')
+    assert.equal(await waitForExit(spawned, 5_000), true, 'the group outlived the rejection')
+  } finally {
+    if (spawned) killPid(spawned)
+  }
+})
+
+test('liveGroupPids reports a running group and drops it once the command ends', { skip: POSIX_ONLY, timeout: 20_000 }, async () => {
+  let duringRun = null
+  let seen = null
+  const { code } = await defaultExec('exit 0', process.cwd(), {
+    onSpawn: (pid) => { seen = pid; duringRun = liveGroupPids() },
+  })
+  assert.equal(code, 0)
+  assert.ok(duringRun.includes(seen), 'a live group must be registered before anything can observe the process it names')
+  assert.ok(!liveGroupPids().includes(seen), 'a finished group must be deregistered, or the exit sweep signals a recycled pid')
 })

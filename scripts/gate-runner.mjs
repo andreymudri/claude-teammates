@@ -40,6 +40,13 @@ function killGroup(pid, signal) {
 const liveGroups = new Set()
 let teardownInstalled = false
 
+// A SNAPSHOT of that set, never the set itself — a caller that could mutate it could disarm the
+// sweep. A snapshot and nothing more: a pid it lists may have exited between the read and the
+// caller's use of it, so this answers "was this registered" and never "is this alive".
+export function liveGroupPids() {
+  return [...liveGroups]
+}
+
 function installTeardown() {
   if (teardownInstalled) return
   teardownInstalled = true
@@ -51,7 +58,11 @@ function installTeardown() {
   process.once('SIGTERM', () => { sweep(); process.exit(143) })
 }
 
-export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn = null } = {}) {
+// `graceMs` overrides KILL_GRACE_MS. It exists so a test can drive the SIGKILL path without
+// five seconds of wall clock; production callers pass neither it nor anything but `timeoutMs`
+// and `onSpawn`, and shortening it changes only when the second signal is sent, never which
+// path runs.
+export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn = null, graceMs = KILL_GRACE_MS } = {}) {
   return new Promise((resolve, reject) => {
     installTeardown()
     const child = spawn(cmd, {
@@ -65,41 +76,110 @@ export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn 
     })
     let output = ''
     let timedOut = false
+    let timer = null
     let grace = null
-    const timer = setTimeout(() => {
-      timedOut = true
-      killGroup(child.pid, 'SIGTERM')
-      grace = setTimeout(() => killGroup(child.pid, 'SIGKILL'), KILL_GRACE_MS)
-    }, timeoutMs)
-    const done = () => {
+    let settled = false
+
+    // Runs on EVERY exit path there is — a normal close, a spawn error, a throw out of
+    // `onSpawn`, and the grace expiry that settles without a close — because each of the three
+    // things it undoes outlives this promise otherwise. A timer left armed keeps node's event
+    // loop alive long after the verdict was reported; a pid left in `liveGroups` is a pid the
+    // exit sweep signals after the OS may have recycled it.
+    const cleanup = () => {
       clearTimeout(timer)
       clearTimeout(grace)
-      liveGroups.delete(child.pid)
+      if (child.pid !== undefined) liveGroups.delete(child.pid)
     }
-    if (child.pid !== undefined) {
-      liveGroups.add(child.pid)
-      // Called synchronously, before this promise can yield, so a holder registered here is
-      // registered before anything can observe the process it names. A throw propagates:
-      // a claim that cannot be written must not read as a check that ran unclaimed.
-      if (onSpawn) onSpawn(child.pid)
+    // Our end of the pipes. Dropping them is what stops a process that escaped the group from
+    // holding this promise open; the limit is that anything it writes afterwards is lost, which
+    // is output from a process the gate has already given up on.
+    const dropPipes = () => {
+      child.stdout?.destroy()
+      child.stderr?.destroy()
     }
-    child.stdout.on('data', (d) => { output += d })
-    child.stderr.on('data', (d) => { output += d })
-    child.on('error', (err) => {
-      done()
-      if (child.pid !== undefined) killGroup(child.pid, 'SIGKILL')
-      reject(err)
-    })
-    child.on('close', (code) => {
-      done()
-      if (!timedOut) { resolve({ code: code ?? 1, output }); return }
-      // A killed child reports code null, which `?? 1` turns into the failure this is.
+    // FIRST SETTLE WINS, and cleanup happens with it. A timeout that settles on the grace expiry
+    // usually DOES see a `close` afterwards — destroying the pipes below tends to produce one —
+    // and that must not re-run a cleanup whose `liveGroups.delete` would by then name whatever
+    // holds that pid. Stated, not tested: the second `resolve` a missing guard allows is a no-op
+    // the promise machinery swallows, and the delete only misfires once the OS has recycled the
+    // pid, which no test here can make happen on demand.
+    const settle = (fn) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      fn()
+    }
+    // `code || 1`, not `code ?? 1`. `?? 1` converts the `null` of a signal-killed child but not
+    // a `0` — and a suite that TRAPS SIGTERM and exits cleanly inside the grace, the exact case
+    // the grace exists to accommodate, closes with 0. `runCommandCheck` reads `code === 0` as a
+    // pass and blanks the output on that branch, taking the timeout notice with it: a green
+    // check with no output for a suite that never finished. The price of `||` is that a command
+    // which genuinely finished 0 in the race between the timer firing and `close` is reported as
+    // a fail — for a gate, that is failing closed, which is the direction to be wrong in.
+    const resolveTimedOut = (code) => settle(() => {
       const seconds = Math.round(timeoutMs / 1000)
       resolve({
-        code: code ?? 1,
+        code: code || 1,
         output: `${output}\n— timed out after ${seconds}s; its process group was killed`,
       })
     })
+
+    timer = setTimeout(() => {
+      timedOut = true
+      killGroup(child.pid, 'SIGTERM')
+      grace = setTimeout(() => {
+        killGroup(child.pid, 'SIGKILL')
+        // SETTLED ON THE KILL BEING DELIVERED, not on `close`. `close` waits for the stdio
+        // pipes rather than for the direct child, and a grandchild that left the group while
+        // inheriting them — a `setsid`, or a `spawn(..., { detached: true, stdio: 'inherit' })`
+        // — survives everything this can signal and holds them open. Waiting on that is the
+        // unbounded check the timeout exists to stop, reachable from an ordinary manifest `run`
+        // string. So the bound is timeoutMs + graceMs and nothing here waits past it.
+        //
+        // The limit: this says the kill was SENT, not that the suite is gone. Nothing in a
+        // process can end a process that left its group, and the output that grandchild would
+        // still have written is lost with the pipes.
+        dropPipes()
+        resolveTimedOut(null)
+      }, graceMs)
+    }, timeoutMs)
+
+    // ATTACHED BEFORE `onSpawn` RUNS. `onSpawn` writes the preview claim file and so can throw
+    // on EACCES or ENOSPC; called first, its throw left no `close` or `error` listener attached
+    // at all, so nothing ever ran the cleanup — both timers stayed armed, the pid stayed in
+    // `liveGroups`, the pipes were never drained, and a later `error` event was an uncaught
+    // exception. Measured on that shape: the promise rejected at 9ms and the process stayed
+    // alive to 8016ms.
+    child.stdout.on('data', (d) => { output += d })
+    child.stderr.on('data', (d) => { output += d })
+    child.on('error', (err) => {
+      settle(() => {
+        if (child.pid !== undefined) killGroup(child.pid, 'SIGKILL')
+        reject(err)
+      })
+    })
+    child.on('close', (code) => {
+      if (timedOut) { resolveTimedOut(code); return }
+      settle(() => resolve({ code: code ?? 1, output }))
+    })
+
+    if (child.pid !== undefined) {
+      liveGroups.add(child.pid)
+      // Called synchronously, before this promise can yield, so a holder registered here is
+      // registered before anything can observe the process it names. A throw propagates — a
+      // claim that cannot be written must not read as a check that ran unclaimed — but it
+      // propagates through the SAME cleanup an ordinary exit runs, plus the kill, so a gate
+      // that reports this failure can still exit and leaves nothing of the child behind.
+      try {
+        if (onSpawn) onSpawn(child.pid)
+      } catch (err) {
+        settle(() => {
+          killGroup(child.pid, 'SIGKILL')
+          dropPipes()
+          reject(err)
+        })
+      }
+    }
   })
 }
 
