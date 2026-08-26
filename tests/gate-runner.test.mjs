@@ -10,6 +10,7 @@ import {
   REAP_INTERVAL_MS,
   defaultExec,
   liveGroupPids,
+  registerGroup,
   runCommandCheck,
   describePendingCheck,
   runChecks,
@@ -3139,16 +3140,23 @@ test('a timed-out check settles on the kill, not on pipes a grandchild escaped t
   }
 })
 
-test('defaultExec applies its default timeout when the caller passes no options at all', { timeout: 20_000 }, async () => {
-  // THE ONLY TIMEOUT PRODUCTION EVER USES. `runCommandCheck` calls `exec(check.run, cwd)` with
-  // no options object, so every real gate runs on the default — and nothing pinned that the
-  // default is applied. Mutating `timeoutMs = COMMAND_TIMEOUT_MS` to `timeoutMs = 30` left all
-  // 142 tests in this file green, while every project suite would then fail its own gate with
-  // "— timed out after 0s". A second of real sleep is the whole cost of noticing.
-  const { code, output } = await defaultExec('sleep 1', process.cwd())
-  assert.equal(code, 0, output)
-  assert.doesNotMatch(output, /timed out/, 'a one-second command was timed out by the default, so the default is not what the module says it is')
-})
+// THE ONLY TIMEOUT PRODUCTION EVER USES is the default: `runCommandCheck` calls
+// `exec(check.run, cwd)` with no options object, so every real gate runs on it. It is held by
+// the two tests below and, until this round, by a third that ran `defaultExec('sleep 1')` and
+// asserted it was not killed. That one is gone, for two reasons and not for its second of wall
+// clock alone.
+//
+// IT WAS THE ONLY TEST IN THIS FILE THAT RAN A POSIX COMMAND UNGUARDED. `.github/workflows/
+// test.yml` runs the matrix [ubuntu-latest, windows-latest, macos-latest]; eighteen tests here
+// carry `skip: POSIX_ONLY` and that one did not, while `sleep` is not a cmd.exe builtin — on
+// win32 `spawn('sleep 1', { shell: true })` resolves it off PATH and fails outright unless the
+// runner image happens to carry Git's usr/bin. Every other `sleep` in this file is either inside
+// a POSIX_ONLY test or inside a helper only such tests call.
+//
+// AND IT WAS SUBSUMED. The spy test below makes the same no-options call and asserts the delay
+// the timeout was ARMED WITH, so it catches everything the sleep caught (`timeoutMs = 30`)
+// plus two things it could not: the timer being deleted outright, and the applied default
+// diverging from the constant. Measured, 3.8ms against 1004.9ms.
 
 test('COMMAND_TIMEOUT_MS is fifteen minutes, which is a policy no behavioural test can reach', () => {
   // The test above proves the default is APPLIED. It cannot prove the default is RIGHT: cutting
@@ -3637,6 +3645,63 @@ test('a check whose process group empties early is retired while the promise is 
     if (escaped) killPid(escaped)
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+test('a pid handed to a second call retires the first, which is the one reuse ordering that is observable', { skip: POSIX_ONLY, timeout: 20_000 }, async () => {
+  // THE MIRROR OF THE TEST BELOW, and the half of pid reuse that CAN be pinned.
+  //
+  // `liveGroups.set` on an occupied key discards the old value silently, and that value is the
+  // displaced call's only channel for learning it was retired. Strand it and nothing can ever
+  // set that call's `retired` flag — `retireIfGroupGone` answers false, because the group at
+  // that number is now the SECOND call's and alive — so the first call's grace fires with
+  // `retired === false`, finds the pid registered, probes a group that answers alive, and
+  // SIGKILLs a check that is running normally. A spurious FAIL, from the mechanism added to
+  // prevent spurious FAILs.
+  //
+  // WHY THIS ONE IS REACHABLE WHEN THE OTHER IS NOT. Reuse after retirement is invisible: the
+  // pid is gone from the map and nothing in the process can tell the new holder from the old.
+  // Reuse BEFORE retirement announces itself — being handed a pid that is already in the map is
+  // proof the previous holder's group has ended, because a live group keeps its pgid reserved
+  // and the OS cannot hand the same one out twice. So the re-registration is the observable
+  // event, and staging it needs no pid recycling at all: a number whose group is already gone
+  // stands in for the recycled one exactly, since what `registerGroup` reacts to is the
+  // COLLISION and not the history behind it.
+  // WHAT THIS DOES NOT REACH, stated because a green run here is narrower than it looks: it
+  // drives `registerGroup` directly, so it pins the DISPLACEMENT and not the fact that
+  // `defaultExec` goes through it. Measured — rewrite that one call site back to a bare
+  // `liveGroups.set` and this test stays green, because it never spawns the colliding call.
+  // Pinning that would need the OS to hand a staged number to a real spawn, and staging a
+  // number the module has not itself issued would put a pid on the sweep set that may belong to
+  // someone else's live group — a test that can SIGKILL an unrelated process is not worth the
+  // coverage. What holds it instead is that `liveGroups.set` appears exactly once in the module,
+  // inside `registerGroup`, and rule 1's block names that as the one place a pid enters the set.
+  let aRetired = false
+  let bRetired = false
+  let dead = null
+  // A real pid from a real spawn, whose group is certainly gone and which this module has
+  // already retired — the same state a stale registration is in when the OS reissues its number.
+  await defaultExec('exit 0', process.cwd(), { onSpawn: (pid) => { dead = pid } })
+  assert.ok(Number.isInteger(dead), `setup: expected a pid, got ${dead}`)
+  assert.ok(!liveGroupPids().includes(dead), 'setup: the finished call must already be retired, or this is staging a live group rather than a reissued number')
+  try {
+    // NOTHING AWAITS BETWEEN THE TWO REGISTRATIONS, deliberately: the reaper runs on a timer and
+    // a tick between them would retire the first call itself, which is a different event wearing
+    // the same result. Synchronous, so only the displacement can be what sets `aRetired`.
+    registerGroup(dead, () => { aRetired = true })
+    assert.equal(aRetired, false, 'setup: registering retired the call that was doing the registering')
+    registerGroup(dead, () => { bRetired = true })
+    assert.equal(aRetired, true, 'the displaced call was never told its number had been reissued, so nothing can set its `retired` flag and its grace SIGKILL will land on whoever holds the pid now')
+    assert.equal(bRetired, false, 'the incoming call was retired by its own registration, which would disarm every signal it is entitled to send')
+  } finally {
+    // The stale registration is this test's to clear. A real call restarts the reaper if it had
+    // stopped, and the reaper retires the pid on its first tick because the group answers ESRCH.
+    await defaultExec('exit 0', process.cwd())
+  }
+  assert.notEqual(
+    await waitForRetirement(dead, REAP_BOUND_MS + 2_000),
+    null,
+    'the staged registration was never reaped, so this test has left a pid on the sweep set for the rest of the run (or the OS reissued that number to something live, which would make the staging invalid)',
+  )
 })
 
 test('the per-call retirement latch withholds nothing from a group that is still ours', { skip: POSIX_ONLY, timeout: 20_000 }, async () => {

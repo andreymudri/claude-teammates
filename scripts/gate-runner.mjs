@@ -163,6 +163,37 @@ function retire(pid) {
   onRetire?.()
 }
 
+// The one place a pid ENTERS the set, and it exists because `Map.set` on an occupied key
+// discards the old value silently — and the value IS the displaced call's only channel for
+// learning it was retired.
+//
+// THE ORDERING THIS CLOSES, which is the mirror image of the one rule 2 already handles. Rule 2
+// covers reuse AFTER retirement: the pid left the set, the OS handed the number on, and a late
+// timer must not chase it. This is reuse BEFORE retirement — `cleanup` keeps a pid registered
+// with its grace armed whenever it probes a non-empty group, that group's last member then
+// exits, and the pgid is free from that instant while the reaper does not look for up to
+// REAP_INTERVAL_MS. Inside that window the number can be handed to a NEW spawn. Overwriting the
+// map entry there would strand the first call's callback: nothing could ever set its `retired`
+// flag, because `retireIfGroupGone` answers false for a group that is now the SECOND call's and
+// very much alive. The first call's grace would then fire with `retired === false`, find the pid
+// registered (to someone else), probe a group that answers alive (someone else's), and deliver
+// its SIGKILL into the middle of a running check — a spurious FAIL, which is the exact harm the
+// Map was added to prevent.
+//
+// AND THIS ONE IS TESTABLE, unlike its mirror. Being handed a pid that is ALREADY in this map is
+// itself proof that the previous holder's group has ended, because a live group keeps its pgid
+// reserved and the OS cannot hand it out twice. That makes the re-registration the observable
+// event — the single moment pid reuse is visible from inside a process — so `retire` is called
+// on the way in and the displaced call learns of it. Exported for the test that pins exactly
+// that, alongside `liveGroupPids`.
+export function registerGroup(pid, onRetire) {
+  // A no-op unless the number was still registered to an earlier call: `retire` on an absent
+  // pid gets `undefined`, deletes nothing and calls nothing. Routed through `retire` rather than
+  // reading the map here so that "the one place a pid leaves the set" stays literally true.
+  retire(pid)
+  liveGroups.set(pid, onRetire)
+}
+
 // RULE 2's clock. Once a check's promise has settled there is no `close`, no `exit` and no
 // signal left to notice its last member finally going, so without this a pid registered under
 // rule 1 sits on the sweep list until the next signal attempt — the timeout, or a Ctrl-C.
@@ -199,7 +230,20 @@ function startReaper() {
 // A MAP, pid -> the retirement callback of the call that registered it, not a bare Set. The
 // callback is rule 2's "per call" clause and the value is never read for anything else: the
 // membership test is still what withholds a signal from a number nobody owns, and this is what
-// withholds one from a number SOMEBODY ELSE now owns.
+// tells a call it no longer owns the number it is about to signal.
+//
+// EXACTLY WHAT THAT COVERS, because this used to say "withholds one from a number SOMEBODY ELSE
+// now owns" flatly and that is true of only one of the two orderings. Reuse comes in two, and
+// they are closed by different things and pinned to different depths:
+//
+//   BEFORE RETIREMENT — the number is handed to a new call while the old one is still in this
+//   map. Closed by `registerGroup`, which retires the displaced call on the way in, and PINNED:
+//   the re-registration is itself proof the old group ended, so a test can stage it.
+//
+//   AFTER RETIREMENT — the number is handed out once the old call has already left the map, and
+//   its armed timers still hold it. Closed by the `retired` latch those timers read through
+//   `signalGroup`, and NOT pinned, because reaching it needs the OS to recycle a pid inside a
+//   grace window and that is not arrangeable from inside a process.
 //
 // The hole it closes, which the Set could not: `killGroup`'s guard was a test on the NUMBER. A
 // grace timer armed by check A and fired 3.1s after A's pid was retired was withheld only by A's
@@ -418,7 +462,7 @@ export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn 
     })
 
     if (child.pid !== undefined) {
-      liveGroups.set(child.pid, () => { retired = true })
+      registerGroup(child.pid, () => { retired = true })
       startReaper()
       // Called synchronously, before this promise can yield, so a holder registered here is
       // registered before anything can observe the process it names. A throw propagates — a
