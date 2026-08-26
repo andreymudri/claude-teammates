@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
   COMMAND_TIMEOUT_MS,
+  KILL_GRACE_MS,
+  REAP_INTERVAL_MS,
   defaultExec,
   liveGroupPids,
   runCommandCheck,
@@ -2963,10 +2965,38 @@ const waitForRetirement = (pid, ms) => waitUntil(() => !liveGroupPids().includes
 const heldMember = (goFile) => `sh -c 'while [ ! -f "${goFile}" ]; do sleep 0.02; done' >/dev/null 2>&1 &`
 const releaseMember = (goFile) => writeFile(goFile, 'go')
 
-// Retirement is generous by two reap intervals here, and deliberately: what is being pinned is
-// that the window is BOUNDED BY A PROBE INTERVAL rather than by the timeout, and the difference
-// between those two is 250ms against fifteen minutes. A tighter bound would only buy flake.
+// Retirement is generous by TEN reap intervals here — 2_500 against a REAP_INTERVAL_MS of 250,
+// and the earlier wording said "two", which is the same defect class as an overstated claim in
+// the module. Deliberately loose all the same: what is being pinned is that the window is
+// BOUNDED BY A PROBE INTERVAL rather than by the timeout, and the difference between those two
+// is a quarter of a second against fifteen minutes. A tighter bound would only buy flake.
+//
+// The cost of that looseness, stated rather than left to be discovered: it means these tests
+// cannot notice REAP_INTERVAL_MS being raised as far as 2_000, and they cannot tell retirement
+// at the child's `exit` apart from retirement at the next reap. Both of those are held by the
+// change-detector on the constant below and by nothing behavioural.
 const REAP_BOUND_MS = 2_500
+
+test('KILL_GRACE_MS is five seconds, an upper bound nothing in this file can reach behaviourally', () => {
+  // THE UPPER SIDE OF THE GRACE, and it is a change-detector on purpose. The LOWER side is
+  // behavioural — the SIGTERM trap below does 300ms of real work and a zero grace loses its
+  // `echo` — but the upper side is not reachable at all: raising this to 60_000 leaves every
+  // test in this file green, because the only run whose signal the constant's own value can
+  // delay is one whose trap exits INSIDE the window, and `cleanup` then clears the timer the
+  // moment the group is observed empty. What the number actually buys is how long a
+  // SIGTERM-ignoring member gets to outlive the verdict, and that is a policy, not a behaviour.
+  // Pinning it makes the edit deliberate; it does not say five seconds suits your suite.
+  assert.equal(KILL_GRACE_MS, 5_000)
+})
+
+test('REAP_INTERVAL_MS is 250ms, which is the whole width of the window rule 2 leaves open', () => {
+  // Same shape and the same honesty. The retirement tests above allow REAP_BOUND_MS — ten of
+  // these — precisely so that they do not flake, which means raising this to 2_000 leaves them
+  // green while quadrupling the interval during which a retired-but-unnoticed pgid can be handed
+  // to a stranger. Nothing behavioural in this file separates 250 from 2_000, so this is what
+  // separates them.
+  assert.equal(REAP_INTERVAL_MS, 250)
+})
 
 test('a timed-out command check kills the whole process group, not just the shell', { skip: POSIX_ONLY }, async () => {
   // The grandchild's stdio is redirected on purpose. Inheriting the pipe makes `close` wait on
@@ -2998,11 +3028,21 @@ test('a timed-out command check is a fail carrying its reason, never a pass', { 
   //
   // It is also the one run in this file that ARMS THE GRACE and then settles without it firing —
   // the trap exits 0 inside the window, so the group is empty when `cleanup` probes it — and the
-  // delta below is what pins the `clearTimeout(grace)` on that branch. Deleted, that timer stays
-  // armed with the FULL five-second default past the verdict, keeping node alive to fire
-  // `process.kill(-pid, SIGKILL)` at a group that exited long before: the same freed-pid hazard
-  // the retirement probe exists to close. `graceMs` is left at its default here, because a
-  // shortened one would hide most of that lingering.
+  // delta below is what pins the `clearTimeout(grace)` on that branch. `graceMs` is left at its
+  // default here, because a shortened one would hide most of the lingering.
+  //
+  // WHAT DELETING THAT `clearTimeout` ACTUALLY COSTS, because this comment used to name the
+  // wrong consequence and the wrong consequence is the more alarming one. It does NOT deliver a
+  // SIGKILL to a freed pid: this branch retires the pid on its way past, and `killGroup` returns
+  // on `liveGroups.has(pid)` before it probes anything, so the signal is withheld — traced on
+  // the mutant, the grace fires and sends nothing. The cost is the timer itself. It stays armed
+  // and REF'D for the full five-second default (the `grace?.unref()` is on the other branch
+  // only), so a gate that has already reported its verdict holds node open for five seconds per
+  // timed-out check. That is rule 3, not rule 2.
+  //
+  // Read the corrected version before touching `liveGroups.has(pid)`: that guard is not made
+  // redundant by anything here. It is the one thing standing between a retired pgid and every
+  // signal this module can still send at it.
   //
   // THE TRAP DOES REAL WORK — `sleep 0.3` before the echo — and that is what pins KILL_GRACE_MS's
   // VALUE rather than merely its existence. With an instant trap, setting the constant to 0 left
@@ -3014,7 +3054,7 @@ test('a timed-out command check is a fail carrying its reason, never a pass', { 
     { name: 'slow', kind: 'command', run: "trap 'sleep 0.3; echo coverage written; exit 0' TERM; sleep 20 & wait" },
     { cwd: process.cwd(), exec: (cmd, cwd) => defaultExec(cmd, cwd, { timeoutMs: 300 }) },
   )
-  assert.equal(armedTimers(), before, 'the grace timer stayed armed past the verdict, so node lingers and then signals a pid the OS may have recycled')
+  assert.equal(armedTimers(), before, 'the grace timer stayed armed and ref\'d past the verdict, so a gate that has reported holds node open for the full five-second grace — the SIGKILL itself is withheld by the registration guard, the delay is not')
   assert.equal(result.status, 'fail', `a suite killed by the timeout must not read as a pass: ${JSON.stringify(result)}`)
   assert.notEqual(result.exitCode, 0)
   assert.match(result.output, /coverage written/)
@@ -3060,8 +3100,12 @@ test('a timed-out check settles on the kill, not on pipes a grandchild escaped t
   // before the SIGTERM or the test measures nothing, and that is a race against process startup:
   // measured, the two-node version cleared a 300ms window in 35ms unloaded and took 659ms at
   // eight times oversubscription. Spawning a detached `sh` instead of a second node halves the
-  // startup, and 900ms against it is headroom rather than hope. A blown setup fails on the
-  // `assert.ok(pid, ...)` below, whose message is nothing like the one the real defect gives.
+  // startup, and 900ms against it is headroom at any load this file has been verified at — 8x
+  // oversubscription, and one core with 16 competing loops. It is NOT unconditional headroom,
+  // and the earlier wording implied it was: at 48 busy loops pinned to one core the escapee's
+  // startup does not fit and this fails on the setup assertion below. That is the accepted
+  // failure mode, not a hidden one — the assertion is ordered first and its message is nothing
+  // like the one the real defect gives, so a blown setup is diagnosable at a glance.
   const escapee = "const{spawn}=require('node:child_process');const c=spawn('sh',['-c','sleep 8'],{detached:true,stdio:'inherit'});c.unref();console.log('ESCAPED='+c.pid)"
   const started = Date.now()
   const openPipes = pipeWraps()
@@ -3080,7 +3124,7 @@ test('a timed-out check settles on the kill, not on pipes a grandchild escaped t
   const leakedPipes = pipeWraps() - openPipes
   const pid = /ESCAPED=(\d+)/.exec(output)?.[1]
   try {
-    assert.ok(pid, `the command did not report its escaped grandchild: ${JSON.stringify(output)}`)
+    assert.ok(pid, `setup: the command did not report its escaped grandchild, so its node startup did not fit inside the 900ms timeout and there was never a process holding the pipes to measure: ${JSON.stringify(output)}`)
     assert.equal(leakedPipes, 0, 'our end of the pipes stayed open on a grandchild that outran the kill, so the gate reports its verdict and then cannot exit')
     assert.ok(alivePid(pid), 'setup: the grandchild must still hold the pipes when the promise settles')
     // Bounded by timeoutMs + graceMs, generously: the escapee holds the pipes for 8s, so
@@ -3115,6 +3159,38 @@ test('COMMAND_TIMEOUT_MS is fifteen minutes, which is a policy no behavioural te
   assert.equal(COMMAND_TIMEOUT_MS, 15 * 60_000)
 })
 
+test('the default a no-options call applies IS COMMAND_TIMEOUT_MS, not merely some default over a second', async () => {
+  // THE GAP BETWEEN THE TWO TESTS ABOVE, which neither of them closes. The `sleep 1` test pins
+  // that SOME default over one second is applied. The change-detector pins that the CONSTANT is
+  // fifteen minutes. Rewriting the default binding to `timeoutMs = 60_000` while leaving
+  // `COMMAND_TIMEOUT_MS = 15 * 60_000` untouched satisfies both and leaves the suite green — and
+  // every real gate would then bound its checks at sixty seconds, so a project suite taking 90s
+  // on a cold cache reports a FAIL it did not earn. What is missing is the IDENTITY of the two,
+  // and this is the only test that asserts it.
+  //
+  // Observed rather than waited out: the module arms its timeout with the global `setTimeout`,
+  // and the executor of `defaultExec`'s promise runs SYNCHRONOUSLY, so replacing the global for
+  // exactly the duration of the call captures the delay it asked for. Nothing else in the
+  // process can interleave inside a synchronous call, and it is restored in a `finally` before
+  // anything is awaited, so the swap cannot outlive the statement. The alternative — letting the
+  // real default fire — is fifteen minutes of wall clock.
+  const realSetTimeout = globalThis.setTimeout
+  const delays = []
+  let pending
+  try {
+    globalThis.setTimeout = (fn, ms, ...rest) => { delays.push(ms); return realSetTimeout(fn, ms, ...rest) }
+    // NO OPTIONS OBJECT AT ALL, which is exactly how `runCommandCheck` calls it: `exec(check.run,
+    // cwd)`. Anything passed here would pin the argument rather than the default.
+    pending = defaultExec('exit 0', process.cwd())
+  } finally {
+    globalThis.setTimeout = realSetTimeout
+  }
+  const { code } = await pending
+  assert.equal(code, 0)
+  assert.equal(delays.length, 1, `expected the one timeout timer and nothing else armed synchronously, got ${JSON.stringify(delays)}`)
+  assert.equal(delays[0], COMMAND_TIMEOUT_MS, `a no-options call armed its timeout at ${delays[0]}ms while COMMAND_TIMEOUT_MS is ${COMMAND_TIMEOUT_MS}ms — every real gate runs on this default, so the number the module documents is not the number it enforces`)
+})
+
 test('a probe that answers EPERM keeps the pid registered, because that signal could not have landed either', { skip: POSIX_ONLY, timeout: 20_000 }, async () => {
   // EPERM says the group EXISTS and is not ours to signal. Retiring on it would drop a running
   // group from the sweep on the strength of an error that says the opposite — and inverting the
@@ -3129,6 +3205,12 @@ test('a probe that answers EPERM keeps the pid registered, because that signal c
   const goFile = path.join(dir, 'go')
   const realKill = process.kill.bind(process)
   let spawned = null
+  // COUNTED, NOT WAITED OUT. The previous version slept a flat 700ms and hoped that was "several
+  // probes"; on a loaded host it can be fewer than one, which makes the assertion below vacuous
+  // in exactly the conditions a reaper bug would show up in, and on an idle one it is 450ms of
+  // wall clock spent after the answer was already in. The stub knows when it has answered, so
+  // the test waits for the EVENT — two EPERM answers, which is two reaper ticks — and stops.
+  let epermAnswers = 0
   try {
     await defaultExec(`${heldMember(goFile)} echo started`, process.cwd(), {
       timeoutMs: 20_000,
@@ -3137,14 +3219,14 @@ test('a probe that answers EPERM keeps the pid registered, because that signal c
     assert.ok(liveGroupPids().includes(spawned), 'setup: a running group must be registered before this can ask what happens when its probe fails')
     process.kill = (target, sig) => {
       if ((sig === 0 || sig === '0') && target === -spawned) {
+        epermAnswers += 1
         const err = new Error('operation not permitted')
         err.code = 'EPERM'
         throw err
       }
       return realKill(target, sig)
     }
-    // Long enough for several probes to have run and answered EPERM.
-    await new Promise((r) => setTimeout(r, 700))
+    assert.notEqual(await waitUntil(() => epermAnswers >= 2, 5_000), null, `setup: the probe was only asked ${epermAnswers} time(s), so nothing here has been given a chance to retire the pid`)
     assert.ok(liveGroupPids().includes(spawned), 'a probe that could not tell whether the group is ours retired the pid anyway, dropping a live group from the sweep')
   } finally {
     process.kill = realKill
@@ -3417,6 +3499,93 @@ test('a gate that exits of its own accord sweeps the check group on the way out'
   }
 })
 
+// The second driver, for the one clause of rule 3 that only node's OWN EXIT can answer: the
+// reaper's `unref`. Its check PASSES in milliseconds and leaves a member holding the group for
+// twenty-five seconds, which is the shape rule 1 keeps registered — so the reaper is still
+// ticking with a non-empty `liveGroups` when the verdict is reported, and whether it is ref'd
+// decides whether node can leave.
+const reaperDriverSource = () => [
+  `import { defaultExec } from ${JSON.stringify(new URL('../scripts/gate-runner.mjs', import.meta.url).href)}`,
+  'import { readFileSync } from "node:fs"',
+  'const pidFile = process.argv[2]',
+  // Redirected stdio on the member, as everywhere else in this file: what it must hold open is
+  // the process GROUP, never our end of the pipes, or `close` would wait on it and the exit
+  // being measured would be the pipes rather than the timer.
+  'const run = "sleep 25 >/dev/null 2>&1 & echo $! > \'" + pidFile + "\'; exit 0"',
+  'const res = await defaultExec(run, process.cwd(), { timeoutMs: 60_000 })',
+  // Reported by the driver rather than inferred by the parent, so the parent's stopwatch starts
+  // at the VERDICT and never at the spawn — node's own startup is then not in the measurement,
+  // which is what stops this racing a loaded host the way a fixed window would.
+  'let alive = false',
+  'try { process.kill(Number(readFileSync(pidFile, "utf8").trim()), 0); alive = true } catch {}',
+  'process.stdout.write("SETTLED code=" + res.code + " alive=" + alive + "\\n")',
+  // AND NOTHING ELSE. No `process.exit()`, exactly like `scripts/cli.mjs`, which has one
+  // `process.exitCode = await runCli(...)` and never calls it: this node exits by DRAINING THE
+  // LOOP, which is precisely what a ref'd repeating timer prevents.
+].join('\n')
+
+test('the reaper is unref\'d, so a check that has reported does not hold the gate open until its group ends', { skip: POSIX_ONLY, timeout: 40_000 }, async () => {
+  // RULE 3, THE REAPER CLAUSE — "AFTER THE VERDICT THE GATE NEVER WAITS" — and until this test
+  // it was the one line in the module nothing pinned. Deleting `reaper.unref?.()` left the whole
+  // suite green, twice over two full `npm test` runs. Measured on that mutant with this exact
+  // command: the verdict was reported at 10ms and node exited at 25037ms, held by its own
+  // repeating timer until the member finally ended and the interval cleared itself. Unmutated,
+  // 90ms. On the fifteen-minute production default with a check that leaves a daemon behind,
+  // that is a gate which has PASSED and cannot exit.
+  //
+  // WHY THIS IS OUT OF PROCESS, AND WHY THE OBVIOUS IN-PROCESS TEST CANNOT WORK. The natural
+  // move is an `armedTimers()` delta around a call, the way five other tests here sample it.
+  // That was implemented against the mutant and it PASSES: `T-before = 1`, `T-after = 1`, on two
+  // runs. The reason is structural, not a timing accident — `startReaper` returns early while
+  // `reaper` is non-null, so ONE interval object survives across many tests for as long as any
+  // group is live at each tick, and it is therefore counted on BOTH sides of every delta in this
+  // file. No sampling of that counter can see this timer at all; only the interval's own
+  // `hasRef()`, which is not reachable from outside the module, or node's own exit, which is
+  // what this measures. The stopwatch runs from the driver's reported verdict to the driver's
+  // exit, so neither node startup nor the parent's scheduling is inside it.
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-unref-'))
+  const pidFile = path.join(dir, 'kid.pid')
+  const script = path.join(dir, 'reaper-driver.mjs')
+  let child = null
+  let kid = null
+  try {
+    await writeFile(script, reaperDriverSource())
+    child = spawn(process.execPath, [script, pidFile], { stdio: ['ignore', 'pipe', 'pipe'] })
+    let stdout = ''
+    let stderr = ''
+    let settledAt = null
+    child.stdout.on('data', (d) => {
+      stdout += d
+      if (settledAt === null && /SETTLED/.test(stdout)) settledAt = Date.now()
+    })
+    child.stderr.on('data', (d) => { stderr += d })
+    const seen = await waitForChild(child)
+    const exitedAt = Date.now()
+    try { kid = (await readFile(pidFile, 'utf8')).trim() } catch { kid = null }
+    assert.notEqual(settledAt, null, `setup: the gate never reported a verdict at all: ${JSON.stringify({ stdout, stderr })}`)
+    // Both halves of the setup, from the driver's own report: the check PASSED, and its group
+    // was still running when it did. A check that failed, or one whose member had already gone,
+    // would leave `liveGroups` empty and the reaper would clear itself — which is a green result
+    // that measured nothing.
+    assert.match(stdout, /SETTLED code=0 alive=true/, `setup: the check must pass while its group is still running, or there is no live group to hold the reaper: ${JSON.stringify({ stdout, stderr })}`)
+    assert.equal(seen.signal, null, `the gate was killed rather than exiting on its own: ${JSON.stringify(seen)}`)
+    assert.equal(seen.code, 0, `the gate did not exit cleanly by draining its loop: ${JSON.stringify({ seen, stderr })}`)
+    // THE PIN. Five seconds against a member that lives for twenty-five: the unmutated gate
+    // takes tens of milliseconds and the mutant takes the member's whole lifetime, so there is
+    // twenty seconds of daylight between the two answers and nothing here is a close call.
+    assert.ok(
+      exitedAt - settledAt < 5_000,
+      `the gate reported its verdict and then stayed alive for ${exitedAt - settledAt}ms waiting on a group it had already given up on`
+      + ' — the reaper is ref\'d, so every passing check that leaves anything running holds node open until that thing ends,'
+      + ' which on the production default is a gate that has PASSED and cannot exit',
+    )
+  } finally {
+    if (child) child.kill('SIGKILL')
+    if (kid) killPid(kid)
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('a check whose process group empties early is retired while the promise is still pending', { skip: POSIX_ONLY, timeout: 20_000 }, async () => {
   // THE ESCAPED-GRANDCHILD PATH, which is the case the timeout exists for. The command execs
   // into a process that spawns a DETACHED grandchild inheriting the pipes and then exits, so the
@@ -3470,6 +3639,77 @@ test('a check whose process group empties early is retired while the promise is 
   }
 })
 
+test('the per-call retirement latch withholds nothing from a group that is still ours', { skip: POSIX_ONLY, timeout: 20_000 }, async () => {
+  // THE OTHER DIRECTION OF RULE 2's "PER CALL" CLAUSE, and the only direction a test can reach.
+  //
+  // `killGroup`'s own guard is a test on the NUMBER — `liveGroups.has(pid)` — which cannot tell
+  // a pid still registered to US from the same number re-registered by a LATER `defaultExec`
+  // after the OS handed it back. So each call latches its own `retired` flag and every signal it
+  // sends goes through `signalGroup`, which refuses once that flag is set. The hazard that
+  // closes — a grace timer from check A landing on check B's group — needs the OS to recycle a
+  // pid inside a grace window, which is not arrangeable from inside a process; it is stated in
+  // the module and pinned by nothing, deliberately.
+  //
+  // What IS reachable is the cost of getting the latch wrong in the safe-looking direction: a
+  // flag latched too early makes `signalGroup` a no-op and the gate stops killing anything at
+  // all. Latch `retired = true` at its declaration and this goes red on both signals, as does
+  // every other signal test in the file — this one names the reason.
+  //
+  // Both signals are driven on ONE run: `trap '' TERM` sets SIG_IGN, inherited across the exec
+  // into `sleep`, so the SIGTERM at the timeout is ignored and only the SIGKILL at the grace can
+  // end it. The spy DELEGATES — every call still reaches the real `process.kill` — and records
+  // whether the pid was ours at the moment of each signal, which is the question `signalGroup`
+  // exists to answer.
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-latch-'))
+  const realKill = process.kill.bind(process)
+  const signalled = []
+  let spawned = null
+  let kid = null
+  try {
+    const pidFile = path.join(dir, 'kid.pid')
+    process.kill = (target, sig) => {
+      if (sig !== 0 && sig !== '0') signalled.push({ target, sig, registered: spawned !== null && liveGroupPids().includes(spawned) })
+      return realKill(target, sig)
+    }
+    // `ARMED` is printed only once the trap is set and the member is backgrounded, so its
+    // presence in the output is the SETUP PREDICATE — see the ordering note below.
+    const { code, output } = await defaultExec(
+      `trap '' TERM; sleep 20 & echo $! > '${pidFile}'; echo ARMED; wait`,
+      process.cwd(),
+      { timeoutMs: 200, graceMs: 200, onSpawn: (pid) => { spawned = pid } },
+    )
+    const aimedAtTheGroup = signalled.filter((s) => s.target === -spawned)
+    // THE HALF THAT HOLDS ON EVERY RUN, asserted before anything that a lost setup race can
+    // disturb: the timeout fired at a group that was certainly still live, so a SIGTERM must
+    // have gone out and it must have gone out while the pid was ours. A latch set too early
+    // produces an EMPTY list here, which is the mutation this test is for.
+    assert.equal(aimedAtTheGroup[0]?.sig, 'SIGTERM', `the latch withheld the timeout's SIGTERM from a group that was still this call's own: ${JSON.stringify(aimedAtTheGroup)} — a gate that signals nothing is not a safer gate, it is one that leaves every timed-out suite running`)
+    assert.deepEqual(aimedAtTheGroup.filter((s) => !s.registered), [], `a signal was sent after the pid stopped being registered: ${JSON.stringify(aimedAtTheGroup)}`)
+    assert.notEqual(code, 0)
+    assert.match(output, /timed out after 0s; its process group was killed/)
+    // THE SETUP, DIAGNOSED BEFORE THE STRONGER HALF IS ASKED FOR. The grace SIGKILL is only
+    // reachable if the member SURVIVES the SIGTERM, which needs `trap '' TERM` to have run
+    // inside the 200ms window — and at 48 busy loops pinned to one core the shell does not get
+    // that far. Without this guard that run failed on a bare ENOENT from the pid file, with no
+    // message at all; with it, the run says what happened and the half it could still measure
+    // above has already been measured.
+    assert.match(output, /ARMED/, `setup: the shell did not install its SIGTERM trap inside the 200ms timeout, so there was never a member that could survive to the grace: ${JSON.stringify(output)}`)
+    kid = await readFile(pidFile, 'utf8').then((s) => s.trim(), () => null)
+    assert.match(kid ?? '', /^\d+$/, `setup: the command did not report its child pid: ${JSON.stringify(kid)}`)
+    assert.deepEqual(
+      aimedAtTheGroup.map((s) => s.sig),
+      ['SIGTERM', 'SIGKILL'],
+      `the latch withheld the grace SIGKILL from a group that was still this call's own: ${JSON.stringify(aimedAtTheGroup)}`,
+    )
+    // The signals were SENT, and this is what says the second one also landed.
+    assert.equal(await waitForExit(kid, 5_000), true, 'the grace SIGKILL was recorded as sent but the SIGTERM-ignoring member outlived it')
+  } finally {
+    process.kill = realKill
+    if (kid) killPid(kid)
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('a retired pid is never signalled again, even when the probe says something holds its group again', { skip: POSIX_ONLY, timeout: 20_000 }, async () => {
   // RULE 2, and the one hazard in this file that CANNOT be reached on a real system: a pgid the
   // OS has already handed back out answers the liveness probe "alive", and nothing inside a
@@ -3480,9 +3720,18 @@ test('a retired pid is never signalled again, even when the probe says something
   // path is as wide as the whole timeout.
   //
   // So the probe is made to LIE exactly the way reuse lies: it answers yes for a pid already
-  // retired. What must withhold the signal then is the registration check and nothing else —
-  // with it, `killGroup` returns before it ever probes. Signals aimed at the group are recorded
-  // and NOT delivered, because in the situation being simulated they would land on a stranger.
+  // retired. Signals aimed at the group are then recorded and NOT delivered, because in the
+  // situation being simulated they would land on a stranger.
+  //
+  // WHAT WITHHOLDS THEM IS NOW TWO THINGS, AND THIS TEST CANNOT TELL THEM APART. An earlier
+  // version of this comment said "the registration check and nothing else", which was true when
+  // it was written and stopped being true when `signalGroup` gained its per-call `retired`
+  // latch: the latch refuses first, and `killGroup`'s `liveGroups.has(pid)` refuses after it.
+  // Measured — remove the membership guard and this test stays green, remove the latch and it
+  // stays green, remove both and it is the one test in the file that goes red. So what it pins
+  // is the CLAIM, that a retired pid is never signalled again, and not either mechanism; do not
+  // read a green run here as licence to delete one of them, and see the note above the guard in
+  // `killGroup` for why both are kept.
   const dir = await mkdtemp(path.join(tmpdir(), 'tm-terminal-'))
   const escFile = path.join(dir, 'escapee.pid')
   const escapee = "const{spawn}=require('node:child_process');const fs=require('node:fs');const c=spawn('sh',['-c','sleep 10'],{detached:true,stdio:'inherit'});c.unref();fs.writeFileSync('" + escFile + "',String(c.pid));console.log('ESCAPED='+c.pid)"
@@ -3507,12 +3756,23 @@ test('a retired pid is never signalled again, even when the probe says something
       return true
     }
     const { code, output } = await p
-    escaped = (await readFile(escFile, 'utf8')).trim()
+    // THE CLAIM FIRST, BEFORE ANYTHING THAT CAN THROW ON A LOST SETUP RACE. The `readFile` used
+    // to be the line above this one, and it fails with a bare ENOENT — no message, no diagnosis
+    // — whenever the escapee's node startup does not fit inside the 700ms timeout. Measured at
+    // 48 busy loops pinned to one core: `ENOENT ... escapee.pid`, and the assertion this test
+    // exists for never ran at all. Same defect class as an assertion ordered behind its own
+    // guard, and the fix is the same: assert the claim, then diagnose the setup.
     assert.deepEqual(signalledAfterRetirement, [], `signalled a pid this module had already retired: ${JSON.stringify(signalledAfterRetirement)} — the probe cannot save it, because a reused pgid answers the probe exactly as our own group would`)
     // The timer path really did run, which is what stops the assertion above being vacuous: the
     // note only reaches the output through the timeout, and the grace ran behind it.
     assert.match(output, /timed out after 1s; its process group was killed/)
     assert.notEqual(code, 0)
+    // Needed only for cleanup, so its absence is reported rather than thrown — and what it
+    // reports is a WEAKER RUN, not a defect: with no escapee, the retirement observed above came
+    // from the timeout's own kill rather than from the leader exiting, so only the grace SIGKILL
+    // was ever in the spy's window.
+    escaped = await readFile(escFile, 'utf8').then((s) => s.trim(), () => null)
+    assert.notEqual(escaped, null, `setup: the escapee never recorded its grandchild, so its node startup did not fit inside the 700ms timeout and the assertion above saw only half the signals it should have: ${JSON.stringify(output)}`)
   } finally {
     process.kill = realKill
     if (escaped) killPid(escaped)
@@ -3586,6 +3846,20 @@ test('a group that empties after its leader is retired without ever being signal
   const signalled = []
   let spawned = null
   let escaped = null
+  // THE SETUP GUARD, AND IT HAS TO BE CHECKABLE AT EVERY STEP RATHER THAN ONLY AT THE END.
+  // A signal sent while the pid was still REGISTERED is a legitimate one: it means the timeout
+  // beat the setup, the group was still live when it fired, and everything the test wanted to
+  // observe afterwards has been destroyed by a SIGTERM the module was right to send. The
+  // previous version checked this only after the promise settled, fifteen lines past the first
+  // assertion the wreckage trips — so a loaded host failed on "the leader died and the pid was
+  // dropped while its group still had a member", which is the GENUINE-DEFECT message, and a real
+  // regression was indistinguishable from a busy machine. Right guard, wrong order.
+  const prematureSignal = () => signalled.filter((s) => s.target === -spawned && s.registered)
+  const stillMeasuringSomething = () => assert.deepEqual(
+    prematureSignal(), [],
+    'the timeout signalled the group while it was still live, so the ordering this test needs did not hold and it measured nothing —'
+    + ' this is a lost race against the escapee\'s node startup, not a defect in the module',
+  )
   try {
     process.kill = (target, sig) => {
       if (sig !== 0 && sig !== '0') signalled.push({ target, sig, registered: spawned !== null && liveGroupPids().includes(spawned) })
@@ -3593,33 +3867,45 @@ test('a group that empties after its leader is retired without ever being signal
     }
     // The escapee holds the pipes so `close` cannot settle this early; the held member is what
     // outlives the leader and keeps the pgid reserved until the test lets it go.
+    //
+    // THE ONE FIXED WINDOW LEFT IN THIS FILE, and it is fixed because it cannot be anything else:
+    // the timeout is chosen at spawn, and what has to fit inside it is a whole `node -e` startup
+    // plus the release of the held member. 1_200 did not fit — at 48 busy loops on one core that
+    // startup measures ~2000ms, and the SIGTERM then landed on a live group. 2_500 clears the
+    // extreme case with room, and the guard above is what makes the residue diagnosable rather
+    // than misleading. It costs 1.3s of wall clock against the old window and that is the price
+    // of the honesty; a shorter escapee would be worth more, but leaving the process group needs
+    // setsid, and nothing portable in `sh` does it.
     const p = defaultExec(`${heldMember(goFile)} exec ${process.execPath} -e "${escapee}"`, process.cwd(), {
-      timeoutMs: 1_200,
+      timeoutMs: 2_500,
       graceMs: 100,
       onSpawn: (id) => { spawned = id },
     })
     assert.ok(Number.isInteger(spawned), `setup: expected a pid, got ${spawned}`)
     assert.notEqual(await waitUntil(() => !alivePid(spawned), 10_000), null, 'setup: the group leader never exited, so there was no leaderless window to measure')
     // A GROUP WITH MEMBERS KEEPS ITS PGID RESERVED, so this is still exactly the right thing to
-    // kill and the pid must still be on the list.
+    // kill and the pid must still be on the list — but only if the timeout has not already been
+    // and gone, which is what the guard is asked first.
+    stillMeasuringSomething()
     assert.ok(liveGroupPids().includes(spawned), 'the leader died and the pid was dropped while its group still had a member, so a Ctrl-C now leaves that group behind')
     await releaseMember(goFile)
     const emptiedAt = await waitForGroupEmpty(spawned, 10_000)
     assert.notEqual(emptiedAt, null, 'setup: the member never exited, so the group never emptied')
     const retiredAt = await waitForRetirement(spawned, REAP_BOUND_MS + 2_000)
+    stillMeasuringSomething()
     assert.notEqual(retiredAt, null, 'the pid was never retired, so it stays on the sweep list for every later Ctrl-C and both armed timers still fire at it')
     assert.ok(retiredAt - emptiedAt < REAP_BOUND_MS, `retired ${retiredAt - emptiedAt}ms after the group emptied, which is not a probe interval`)
     const { code, output } = await p
     escaped = (await readFile(escFile, 'utf8')).trim()
     const aimedAtTheGroup = signalled.filter((s) => s.target === -spawned)
-    // Setup first, and with its own message: a signal sent while the pid was still registered is
-    // a legitimate one, and means the timeout fired before the test could empty the group.
-    assert.deepEqual(aimedAtTheGroup.filter((s) => s.registered), [], `the timeout signalled the group while it was still live, so the ordering this test needs did not hold and it measured nothing: ${JSON.stringify(aimedAtTheGroup)}`)
+    // Asked a third time, because the timeout only fires here on a run where everything above
+    // fitted inside it: the same guard, at the last moment it can still be wrong.
+    stillMeasuringSomething()
     assert.deepEqual(aimedAtTheGroup, [], `signalled a group that had already emptied: ${JSON.stringify(aimedAtTheGroup)} — on a busy host that number belongs to someone else by now, and no ESRCH says so`)
     // The timer path DID run, which is what stops the assertion above being vacuous: the note
     // only reaches the output through the timeout, and the SIGTERM it would have sent was
     // withheld because the pid had been retired.
-    assert.match(output, /timed out after 1s; its process group was killed/)
+    assert.match(output, /timed out after 3s; its process group was killed/)
     assert.notEqual(code, 0)
   } finally {
     process.kill = realKill

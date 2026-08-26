@@ -9,12 +9,25 @@ export const COMMAND_TIMEOUT_MS = 15 * 60_000
 
 // Between SIGTERM and SIGKILL. A suite that traps SIGTERM to write a coverage report gets
 // to finish; one that ignores it does not get to outlive the gate.
-const KILL_GRACE_MS = 5_000
+//
+// WHAT THE TESTS HOLD AND WHAT THEY DO NOT, because this comment used to imply a two-sided
+// bound it never had. The LOWER side is behavioural: a trap that does real work — 300ms of it —
+// must reach its `echo`, so a zero or near-zero grace fails. The UPPER side is not behavioural
+// at all and cannot cheaply be made so: raising this to 60_000 leaves every test green, because
+// the only run that lets the constant's own value reach a signal is the one whose trap exits
+// inside the window, and `cleanup` then clears the timer as soon as the group is observed empty.
+// So the upper side is held by a change-detector on the number and nothing else, and the cost it
+// guards against is a SIGTERM-ignoring member surviving that much longer after the verdict.
+export const KILL_GRACE_MS = 5_000
 
 // How often a registered pid is re-probed once nothing else is left to announce its group's
 // end. See `startReaper`: this is the width of the window in rule 2 below, and it is the only
 // number that bounds it.
-const REAP_INTERVAL_MS = 250
+//
+// Held the same two ways for the same reason: the retirement tests allow REAP_BOUND_MS, which is
+// deliberately loose against flake, so raising this to 2_000 would leave them green. The
+// change-detector is what makes that edit deliberate.
+export const REAP_INTERVAL_MS = 250
 
 const TAIL_LINES = 40
 
@@ -36,12 +49,15 @@ const TAIL_LINES = 40
 //      names is OBSERVED empty. Not when a verdict is reported, not when the leader dies — a
 //      group with surviving members keeps its pgid reserved and is still exactly the right
 //      thing to kill.
-//   2. RETIREMENT IS TERMINAL. Once a pid leaves the set, nothing in this module signals it
-//      again, on any platform. The number is free for the OS to hand out and the probe is a
-//      LIVENESS test, not an identity test, so a second look would answer "alive" for a
-//      stranger — a second look is not a second chance. `startReaper` is what keeps the
-//      interval between "the group emptied" and "we noticed" down to one probe period instead
-//      of one timeout.
+//   2. RETIREMENT IS TERMINAL, AND TERMINAL PER CALL RATHER THAN PER NUMBER. Once a pid leaves
+//      the set, nothing in this module signals it again, on any platform. The number is free for
+//      the OS to hand out and the probe is a LIVENESS test, not an identity test, so a second
+//      look would answer "alive" for a stranger — a second look is not a second chance.
+//      "Per call" is the part membership alone cannot express: a timer armed by check A fires
+//      against A's registration, not against whoever holds that number when it fires, so each
+//      call latches its own retirement and stops signalling from that instant. `startReaper` is
+//      what keeps the interval between "the group emptied" and "we noticed" down to one probe
+//      period instead of one timeout.
 //   3. AFTER THE VERDICT THE GATE NEVER WAITS. Anything still owed to a surviving group is owed
 //      by an UNREF'D timer or by the exit sweep, so a group that outlives every signal we can
 //      send cannot hold node open. Holding node open is the unbounded check the timeout exists
@@ -61,6 +77,15 @@ function killGroup(pid, signal) {
   // this that win32 can honour. `taskkill /pid <pid> /T /F` force-kills an entire process TREE
   // at a number Windows recycles aggressively; a retired pid no longer names our tree, and this
   // is what stops that command being aimed at it.
+  //
+  // NO TEST CAN SEE THIS GUARD ALONE ANY MORE, and that is worth knowing before deleting it.
+  // Since every signal `defaultExec` sends goes through `signalGroup`, whose per-call `retired`
+  // latch refuses first, the two are INDEPENDENTLY SUFFICIENT on every path that exists: measured,
+  // removing this line leaves the suite green, removing the latch leaves the suite green, and
+  // only removing BOTH turns the retired-pid test red. It is kept because it is the invariant
+  // `killGroup` itself enforces — the latch belongs to one call, this belongs to the function,
+  // and the sweep in `installTeardown` calls it without any latch of its own. A future caller
+  // that is not `signalGroup` gets rule 2 from here or not at all.
   if (!liveGroups.has(pid)) return
   // RULE 1's probe, and it runs BEFORE the win32 branch rather than after it — the ordering is
   // the same on both platforms even though only one of them learns anything from the call.
@@ -82,7 +107,7 @@ function killGroup(pid, signal) {
   } catch (err) {
     // ESRCH: the group went away between the probe above and here, which is the outcome this
     // wanted, and the pid stops being signalled from now on.
-    if (err.code === 'ESRCH') liveGroups.delete(pid)
+    if (err.code === 'ESRCH') retire(pid)
   }
 }
 
@@ -123,9 +148,19 @@ function retireIfGroupGone(pid) {
     // anyway: retiring here would drop a LIVE group from the sweep on the strength of an error
     // that says the opposite, and the claim is only worth making if something checks it.
     if (err.code !== 'ESRCH') return false
-    liveGroups.delete(pid)
+    retire(pid)
     return true
   }
+}
+
+// The one place a pid leaves the set, so it is the one place that can tell the call which
+// registered it. Everything else — the ESRCH catch in `killGroup`, the win32 exit branch,
+// `cleanup`, the reaper — goes through here rather than deleting from the map itself, because a
+// deletion nobody is told about is precisely the hole rule 2's "per call" clause closes.
+function retire(pid) {
+  const onRetire = liveGroups.get(pid)
+  liveGroups.delete(pid)
+  onRetire?.()
 }
 
 // RULE 2's clock. Once a check's promise has settled there is no `close`, no `exit` and no
@@ -144,7 +179,7 @@ function startReaper() {
   if (process.platform === 'win32' || reaper) return
   reaper = setInterval(() => {
     // A copy: `retireIfGroupGone` deletes from the set it is iterating.
-    for (const pid of [...liveGroups]) retireIfGroupGone(pid)
+    for (const pid of [...liveGroups.keys()]) retireIfGroupGone(pid)
     if (liveGroups.size === 0) { clearInterval(reaper); reaper = null }
   }, REAP_INTERVAL_MS)
   reaper.unref?.()
@@ -161,20 +196,42 @@ function startReaper() {
 // 120-second caller kill that orphans a suite inside a merge preview is exactly a SIGKILL.
 // Nothing in this file can cover that case. What covers it is the claim file the orphan
 // holds itself instead of depending on its parent surviving.
-const liveGroups = new Set()
+// A MAP, pid -> the retirement callback of the call that registered it, not a bare Set. The
+// callback is rule 2's "per call" clause and the value is never read for anything else: the
+// membership test is still what withholds a signal from a number nobody owns, and this is what
+// withholds one from a number SOMEBODY ELSE now owns.
+//
+// The hole it closes, which the Set could not: `killGroup`'s guard was a test on the NUMBER. A
+// grace timer armed by check A and fired 3.1s after A's pid was retired was withheld only by A's
+// pid being absent from the set — and a later `defaultExec` spawn puts that same number back the
+// moment the OS hands it out, after which the probe answers "alive" for the NEW holder and the
+// SIGKILL is delivered to it. The victim is bounded to one of our own later checks, which dies
+// mid-run and reads as a spurious FAIL.
+//
+// STATED, NOT TESTED, and it cannot be otherwise: reaching it requires the OS to hand the same
+// pid back inside a grace window, which is not arrangeable from inside a process — the same
+// unreachable class as the reuse hazard rule 2 exists for. What the tests DO hold is the other
+// direction, that the latch never withholds a signal from a group that is still ours: latch
+// `retired` at its declaration and seven tests go red, one of them named for the reason.
+//
+// The corollary, so nobody draws the wrong conclusion from a green run: DELETING the latch is
+// also invisible, because `killGroup`'s membership guard catches the same signals one frame
+// later on every path a test can reach. The two are independently sufficient today and only
+// removing both is visible. See the note above that guard.
+const liveGroups = new Map()
 let teardownInstalled = false
 
 // A SNAPSHOT of that set, never the set itself — a caller that could mutate it could disarm the
 // sweep. A snapshot and nothing more: a pid it lists may have exited between the read and the
 // caller's use of it, so this answers "was this registered" and never "is this alive".
 export function liveGroupPids() {
-  return [...liveGroups]
+  return [...liveGroups.keys()]
 }
 
 function installTeardown() {
   if (teardownInstalled) return
   teardownInstalled = true
-  const sweep = () => { for (const pid of liveGroups) killGroup(pid, 'SIGKILL') }
+  const sweep = () => { for (const pid of [...liveGroups.keys()]) killGroup(pid, 'SIGKILL') }
   process.once('exit', sweep)
   // Installing a handler displaces node's default disposition, so each one exits itself
   // with the conventional 128 + signal code rather than leaving the process running.
@@ -216,6 +273,18 @@ export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn 
     let timer = null
     let grace = null
     let settled = false
+    // RULE 2's "per call" clause, latched from THIS call's registration and never re-read from
+    // the set. Set by the retirement callback registered below, so every retirement path sets it
+    // — the exit listener, `cleanup`, the ESRCH catch, and the reaper, which is the one no
+    // call-site flag could otherwise see. Once it is true the timers this call armed are inert:
+    // they still FIRE, because the timeout timer is what settles the promise, but they signal
+    // nothing.
+    let retired = false
+    // Every signal this call sends goes through here rather than calling `killGroup` directly.
+    // `killGroup`'s own guard asks whether the NUMBER is registered; this one asks whether it is
+    // still registered TO US, which is the only question a timer armed seconds ago can answer
+    // safely.
+    const signalGroup = (sig) => { if (!retired && child.pid !== undefined) killGroup(child.pid, sig) }
 
     // Runs on EVERY exit path there is — a normal close, a spawn error, a throw out of
     // `onSpawn`, and the grace expiry that settles without a close.
@@ -287,9 +356,9 @@ export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn 
 
     timer = setTimeout(() => {
       timedOut = true
-      killGroup(child.pid, 'SIGTERM')
+      signalGroup('SIGTERM')
       grace = setTimeout(() => {
-        killGroup(child.pid, 'SIGKILL')
+        signalGroup('SIGKILL')
         // SETTLED ON THE KILL BEING DELIVERED, not on `close`. `close` waits for the stdio
         // pipes rather than for the direct child, and a grandchild that left the group while
         // inheriting them — a `setsid`, or a `spawn(..., { detached: true, stdio: 'inherit' })`
@@ -315,15 +384,23 @@ export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn 
     child.stderr.on('data', (d) => { output += d })
     child.on('error', (err) => {
       settle(() => {
-        if (child.pid !== undefined) killGroup(child.pid, 'SIGKILL')
+        signalGroup('SIGKILL')
         reject(err)
       })
     })
-    // Retirement at the FIRST moment the group can be observed empty, which for an escaped
-    // grandchild is here and not at the timeout: the direct child is gone, its group has no
-    // members, and every later signal would aim at a freed number. A group that still has
-    // members keeps its pid registered — see `retireIfGroupGone`, which is what makes that
-    // distinction rather than the exit code this listener carries.
+    // Retirement at the earliest moment the group can be OBSERVED empty — for an escaped
+    // grandchild the direct child is already gone and its group already has no members, so a
+    // pid held past here names a number the OS is free to hand out. A group that still has
+    // members keeps its pid registered: `retireIfGroupGone` is what makes that distinction,
+    // never the exit code this listener carries.
+    //
+    // WHAT THIS BUYS IS LATENCY, NOT CORRECTNESS, and the earlier comment claimed otherwise.
+    // `startReaper` reaches the same pid within REAP_INTERVAL_MS of the same moment, so deleting
+    // this call leaves the whole suite green — every retirement test allows REAP_BOUND_MS, which
+    // is ten probe intervals, and nothing in the file distinguishes retirement-at-exit from
+    // retirement-at-reap. Making that distinction testable would mean asserting a sub-probe
+    // latency, which races the delivery of this very event under load. So: one probe period
+    // earlier, pinned by nothing, and the safety it is often read as providing is the reaper's.
     child.on('exit', () => {
       if (child.pid === undefined) return
       // WIN32 HAS NO GROUP, so the probe cannot answer and the direct child's exit is the last
@@ -332,7 +409,7 @@ export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn 
       // number Windows recycles aggressively. The gap this leaves, stated rather than hidden: a
       // win32 grandchild that outlives `cmd.exe` is not reachable by anything in this file. The
       // POSIX group kill has no such gap. Unverified on-platform — nothing here runs on win32.
-      if (process.platform === 'win32') { liveGroups.delete(child.pid); return }
+      if (process.platform === 'win32') { retire(child.pid); return }
       retireIfGroupGone(child.pid)
     })
     child.on('close', (code) => {
@@ -341,7 +418,7 @@ export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn 
     })
 
     if (child.pid !== undefined) {
-      liveGroups.add(child.pid)
+      liveGroups.set(child.pid, () => { retired = true })
       startReaper()
       // Called synchronously, before this promise can yield, so a holder registered here is
       // registered before anything can observe the process it names. A throw propagates — a
@@ -352,7 +429,7 @@ export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn 
         if (onSpawn) onSpawn(child.pid)
       } catch (err) {
         settle(() => {
-          killGroup(child.pid, 'SIGKILL')
+          signalGroup('SIGKILL')
           dropPipes()
           reject(err)
         })
