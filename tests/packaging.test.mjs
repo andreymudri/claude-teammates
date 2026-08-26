@@ -38,3 +38,9 @@ test('NOTICE marks the original skills as original', async () => {
     assert.ok(notice.includes(name), `NOTICE.md omits original skill ${name}`)
   }
 })
+
+test('the README states that run state is never swept automatically', async () => {
+  const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8')
+  assert.match(readme, /`\.teammates\/<run-id>\/` is never removed by any command/)
+  assert.match(readme, /delete each removed worktree's branch where the run branch already/)
+})

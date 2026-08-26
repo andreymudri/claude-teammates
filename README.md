@@ -161,10 +161,14 @@ Housekeeping:
 
 - `preview-check` — validate `preview.link` before a run rather than at the first gate
 - `prune-run --run <id> --plan <path>` — remove this run's worktrees, but only where the phase's gate
-  recomputes to PASS. Dry run unless `--yes`
+  recomputes to PASS, and delete each removed worktree's branch where the run branch already
+  contains it. Dry run unless `--yes`
 - `rebuild-state --run <id> --plan <path>` — reconstruct `.teammates/` bookkeeping from git. It
   rebuilds no gate history: a verdict is evidence that checks ran, and git carries branches, not
   evidence
+- `.teammates/<run-id>/` is never removed by any command. `resume` and `rebuild-state` read it,
+  it is gitignored, and deleting it is the operator's call — an age-based sweep would take the
+  only record of a run someone is in the middle of resuming
 
 ## Skills
 
