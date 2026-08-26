@@ -237,8 +237,19 @@ function startReaper() {
 // they are closed by different things and pinned to different depths:
 //
 //   BEFORE RETIREMENT — the number is handed to a new call while the old one is still in this
-//   map. Closed by `registerGroup`, which retires the displaced call on the way in, and PINNED:
-//   the re-registration is itself proof the old group ended, so a test can stage it.
+//   map. Closed by `registerGroup`, which retires the displaced call on the way in. Pinned in
+//   TWO PIECES, and the distinction matters to anyone editing either one:
+//
+//     the HELPER, behaviourally — the re-registration is itself proof the old group ended, so a
+//     test stages the collision directly and asserts the displaced call was latched;
+//
+//     the CALL SITE, as source text only — that `defaultExec` registers THROUGH this helper is
+//     not reachable by any test, because it would need the kernel to hand a staged number to a
+//     real spawn. Rewrite the call below to a bare `liveGroups.set` and every behavioural test
+//     in the suite stays green while this whole hazard is back. What notices is an assertion
+//     that reads this file as text and requires `liveGroups.set` to occur exactly once, inside
+//     `registerGroup`. So: keep it to one call site, and do not read the sentence above as
+//     saying a running test would catch you.
 //
 //   AFTER RETIREMENT — the number is handed out once the old call has already left the map, and
 //   its armed timers still hold it. Closed by the `retired` latch those timers read through

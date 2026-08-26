@@ -3147,11 +3147,22 @@ test('a timed-out check settles on the kill, not on pipes a grandchild escaped t
 // clock alone.
 //
 // IT WAS THE ONLY TEST IN THIS FILE THAT RAN A POSIX COMMAND UNGUARDED. `.github/workflows/
-// test.yml` runs the matrix [ubuntu-latest, windows-latest, macos-latest]; eighteen tests here
-// carry `skip: POSIX_ONLY` and that one did not, while `sleep` is not a cmd.exe builtin — on
-// win32 `spawn('sleep 1', { shell: true })` resolves it off PATH and fails outright unless the
-// runner image happens to carry Git's usr/bin. Every other `sleep` in this file is either inside
-// a POSIX_ONLY test or inside a helper only such tests call.
+// test.yml` runs the matrix [ubuntu-latest, windows-latest, macos-latest], and `sleep` is not a
+// cmd.exe builtin — on win32 `spawn('sleep 1', { shell: true })` resolves it off PATH and fails
+// outright unless the runner image happens to carry Git's usr/bin.
+//
+// THE RULE, WHICH IS WHAT A NEW TEST SHOULD BE CHECKED AGAINST — stated as an invariant and not
+// as a count, because the count was wrong within one commit of being written and the next reader
+// consults this sentence when deciding whether their test needs the guard:
+//
+//   a test that runs a POSIX-only construct — `sleep`, `trap`, a process group, a signal
+//   disposition — carries `skip: POSIX_ONLY`, and so does any helper only such tests call.
+//
+// `heldMember`, `driverSource` and `reaperDriverSource` are those helpers; they contain `sleep`
+// and are invoked from guarded tests only. Do not count `skip: POSIX_ONLY` occurrences and
+// expect the number of guarded TESTS: the declaration at the signal loop below sits inside a
+// four-element `for`, so one occurrence there registers four tests. That is also why this file
+// reports four more tests than it has `test(` lines.
 //
 // AND IT WAS SUBSUMED. The spy test below makes the same no-options call and asserts the delay
 // the timeout was ARMED WITH, so it catches everything the sleep caught (`timeoutMs = 30`)
@@ -3669,38 +3680,95 @@ test('a pid handed to a second call retires the first, which is the one reuse or
   // WHAT THIS DOES NOT REACH, stated because a green run here is narrower than it looks: it
   // drives `registerGroup` directly, so it pins the DISPLACEMENT and not the fact that
   // `defaultExec` goes through it. Measured — rewrite that one call site back to a bare
+  // WHAT THIS DOES NOT REACH, stated because a green run here is narrower than it looks: it
+  // drives `registerGroup` directly, so it pins the DISPLACEMENT and not the fact that
+  // `defaultExec` goes through it. Measured — rewrite that one call site back to a bare
   // `liveGroups.set` and this test stays green, because it never spawns the colliding call.
-  // Pinning that would need the OS to hand a staged number to a real spawn, and staging a
-  // number the module has not itself issued would put a pid on the sweep set that may belong to
-  // someone else's live group — a test that can SIGKILL an unrelated process is not worth the
-  // coverage. What holds it instead is that `liveGroups.set` appears exactly once in the module,
-  // inside `registerGroup`, and rule 1's block names that as the one place a pid enters the set.
+  // Pinning it behaviourally would need the kernel to hand a staged number to a real spawn,
+  // which is not arrangeable. The test below pins that call site as SOURCE TEXT instead, which
+  // needs no pid at all.
+  //
+  // THE STAGED PID IS ONE THE MODULE STILL OWNS, and that is a safety property rather than a
+  // convenience. An earlier version staged a pid from a FINISHED `defaultExec` — already
+  // retired, group already gone — which meant the number belonged to nobody from that instant
+  // and the kernel was free to reissue it. Had it landed on a process-group LEADER,
+  // `retireIfGroupGone` would answer false forever, the pid would still be on `liveGroups` at
+  // exit, and the teardown sweep would have fired `process.kill(-pid, SIGKILL)` into a
+  // stranger's group owned by the same user: the exact hazard cited above to decline the
+  // behavioural pin, reintroduced at a narrower width. A HELD group cannot be reissued — a live
+  // group keeps its pgid reserved, and the kernel skips a number still in use even with the
+  // allocator aimed straight at it — so staging here carries no foreign-group risk at all.
+  //
+  // Taking the registration over from a call that has already SETTLED is what makes that safe:
+  // the check exited 0 in milliseconds and left the member behind, so its timeout is cleared and
+  // no grace was ever armed. There is nothing left for the displaced callback to disarm.
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-reissue-'))
+  const goFile = path.join(dir, 'go')
   let aRetired = false
   let bRetired = false
-  let dead = null
-  // A real pid from a real spawn, whose group is certainly gone and which this module has
-  // already retired — the same state a stale registration is in when the OS reissues its number.
-  await defaultExec('exit 0', process.cwd(), { onSpawn: (pid) => { dead = pid } })
-  assert.ok(Number.isInteger(dead), `setup: expected a pid, got ${dead}`)
-  assert.ok(!liveGroupPids().includes(dead), 'setup: the finished call must already be retired, or this is staging a live group rather than a reissued number')
+  let held = null
   try {
+    await defaultExec(`${heldMember(goFile)} echo started`, process.cwd(), {
+      timeoutMs: 20_000,
+      onSpawn: (pid) => { held = pid },
+    })
+    assert.ok(Number.isInteger(held), `setup: expected a pid, got ${held}`)
+    assert.equal(groupEmpty(held), false, 'setup: the member must still hold the group, or the number is free and this is staging a pid the kernel may have reissued')
+    assert.ok(liveGroupPids().includes(held), 'setup: a group with a member still in it must be registered, or there is no registration to displace')
     // NOTHING AWAITS BETWEEN THE TWO REGISTRATIONS, deliberately: the reaper runs on a timer and
     // a tick between them would retire the first call itself, which is a different event wearing
     // the same result. Synchronous, so only the displacement can be what sets `aRetired`.
-    registerGroup(dead, () => { aRetired = true })
+    registerGroup(held, () => { aRetired = true })
     assert.equal(aRetired, false, 'setup: registering retired the call that was doing the registering')
-    registerGroup(dead, () => { bRetired = true })
+    registerGroup(held, () => { bRetired = true })
     assert.equal(aRetired, true, 'the displaced call was never told its number had been reissued, so nothing can set its `retired` flag and its grace SIGKILL will land on whoever holds the pid now')
     assert.equal(bRetired, false, 'the incoming call was retired by its own registration, which would disarm every signal it is entitled to send')
   } finally {
-    // The stale registration is this test's to clear. A real call restarts the reaper if it had
-    // stopped, and the reaper retires the pid on its first tick because the group answers ESRCH.
-    await defaultExec('exit 0', process.cwd())
+    // Released, then reaped: the member goes because the test says so, the group empties, and
+    // the reaper takes the pid back off the sweep set. The pid is ours for the whole of that.
+    await releaseMember(goFile)
+    if (held) { try { process.kill(-held, 'SIGKILL') } catch { /* already gone */ } }
+    await rm(dir, { recursive: true, force: true })
   }
   assert.notEqual(
-    await waitForRetirement(dead, REAP_BOUND_MS + 2_000),
+    await waitForRetirement(held, REAP_BOUND_MS + 2_000),
     null,
-    'the staged registration was never reaped, so this test has left a pid on the sweep set for the rest of the run (or the OS reissued that number to something live, which would make the staging invalid)',
+    'the staged registration was never reaped, so this test has left a pid on the sweep set for the rest of the run',
+  )
+  assert.equal(bRetired, true, 'the reaper retired the pid without telling the call that then held the registration, which is the same stranding this test exists for, one step later')
+})
+
+test('every registration goes through registerGroup, asserted as source text because no pid can reach it', async () => {
+  // THE CALL SITE THE TEST ABOVE CANNOT PIN. Rewriting `registerGroup(child.pid, ...)` in
+  // `defaultExec` back to a bare `liveGroups.set(...)` reintroduces the entire defect that
+  // function exists to close, and leaves this file and the whole suite green: the displacement
+  // test drives the helper directly and never spawns a colliding call, and a colliding call
+  // cannot be arranged, because it needs the kernel to hand a staged number to a real spawn.
+  //
+  // So it is pinned as TEXT. That needs no pid, no spawn and no signal, it costs nothing, and it
+  // asserts exactly the invariant the module's own comments lean on — that there is ONE place a
+  // pid enters the set. Reading a script and asserting over it is an idiom this suite already
+  // uses: tests/brief.test.mjs reads scripts/cli.mjs the same way to pin the exit codes the
+  // brief documents.
+  //
+  // Its limit, so it is not read as more than it is: this says the call site SPELLS the right
+  // thing, not that the right thing happens when it runs. What happens is the test above.
+  const src = await readFile(new URL('../scripts/gate-runner.mjs', import.meta.url), 'utf8')
+  // COMMENTS STRIPPED FIRST, and this is not fastidiousness: the module's own comments discuss
+  // `liveGroups.set` by name — including the one that documents THIS assertion — so a naive
+  // match over the raw text counts prose as code and the test fails on a documentation edit.
+  // It did, on the first run. Whole-line `//` is the only comment form in that file, checked.
+  const code = src.split('\n').filter((line) => !/^\s*\/\//.test(line)).join('\n')
+  const sets = [...code.matchAll(/liveGroups\.set\b/g)]
+  assert.equal(sets.length, 1, `liveGroups.set occurs ${sets.length} times in the module's code — a second one is a registration that skips registerGroup, so the call it displaces is never told its number was reissued, and the grace SIGKILL that call still holds lands on the new holder's group`)
+  const header = code.indexOf('export function registerGroup(')
+  assert.notEqual(header, -1, 'the module no longer declares registerGroup, so the one place a pid enters the set is somewhere else now')
+  // The first `}` at column zero after the header, which is where a top-level function ends.
+  const end = code.indexOf('\n}', header)
+  assert.notEqual(end, -1, 'registerGroup has no closing brace at column zero')
+  assert.ok(
+    sets[0].index > header && sets[0].index < end,
+    'the single liveGroups.set sits outside registerGroup, so registrations no longer pass through the displacement that retires the call the pid was taken from',
   )
 })
 
