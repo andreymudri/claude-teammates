@@ -35,6 +35,33 @@ export function previewOwnerMarkerPath(dir) {
   return path.join(path.dirname(dir), `${PREVIEW_OWNER_MARKER}-${path.basename(dir)}`)
 }
 
+// A CLAIM is the second kind of holder a preview can have, and it exists because the first
+// kind does not survive its own death.
+//
+// The owner marker answers "which gate created this". A claim answers "is anything still
+// RUNNING in it" — and those come apart exactly when it matters: a SIGKILLed gate runs no
+// `finally`, so its marker survives naming a pid nobody is at, while the suite it spawned
+// is still writing to the tree. Reading the marker alone, the reaper sees an abandoned
+// preview and force-removes it under a live process.
+//
+// ONE FILE PER HOLDER, never one file listing them. A shared file would need
+// read-modify-write to release a holder, and two holders releasing at once is a lost
+// update — the outcome of which is a claim that outlives every process it names, i.e. a
+// preview nothing will ever reap.
+//
+// Named off the owner marker so a claim sorts next to what it claims, and so the reaper
+// derives both from the one thing the two sides share: the preview path git reports.
+export function previewClaimPath(dir, pid) {
+  return `${previewOwnerMarkerPath(dir)}.${pid}`
+}
+
+// What a directory listing has to start with to be a claim on `dir`. The trailing dot is
+// load-bearing: without it this prefix also matches the owner marker itself, and a preview
+// whose owner is dead would be read as holding a live claim by that same dead pid.
+export function previewClaimPrefix(dir) {
+  return `${path.basename(previewOwnerMarkerPath(dir))}.`
+}
+
 // The worktree lives under the system temp directory, never inside the repository. An
 // in-repo worktree is untracked, so `git status --porcelain` reports it and the ownership
 // check reads the main worktree as dirty for the whole run — the deadlock that cost run

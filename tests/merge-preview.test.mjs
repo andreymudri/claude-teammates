@@ -4,7 +4,13 @@ import { existsSync } from 'node:fs'
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { withMergePreview, conflictPairs, previewOwnerMarkerPath } from '../scripts/merge-preview.mjs'
+import {
+  withMergePreview,
+  conflictPairs,
+  previewOwnerMarkerPath,
+  previewClaimPath,
+  previewClaimPrefix,
+} from '../scripts/merge-preview.mjs'
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..')
 
@@ -554,4 +560,13 @@ test('a conflicting merge still marks the preview it created', async () => {
   // span over which this preview is observable.
   assert.deepEqual(seen, [true, true, true])
   assert.equal(existsSync(markerPath), false)
+})
+
+test('a claim path is the owner marker plus the pid, and the prefix excludes the marker', () => {
+  const dir = path.join(tmpdir(), 'tm-preview-abc123')
+  const owner = previewOwnerMarkerPath(dir)
+  assert.equal(previewClaimPath(dir, 4242), `${owner}.4242`)
+  const prefix = previewClaimPrefix(dir)
+  assert.ok(path.basename(previewClaimPath(dir, 4242)).startsWith(prefix))
+  assert.equal(path.basename(owner).startsWith(prefix), false)
 })
