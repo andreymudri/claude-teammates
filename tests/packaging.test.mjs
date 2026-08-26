@@ -1,6 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile, readdir } from 'node:fs/promises'
+import { readFile, readdir, mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { execFileSync } from 'node:child_process'
+import { runCli } from '../scripts/cli.mjs'
 
 const readJson = async (rel) => JSON.parse(await readFile(new URL(rel, import.meta.url), 'utf8'))
 
@@ -42,5 +46,86 @@ test('NOTICE marks the original skills as original', async () => {
 test('the README states that run state is never swept automatically', async () => {
   const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8')
   assert.match(readme, /`\.teammates\/<run-id>\/` is never removed by any command/)
+  // WORDING ONLY. This pins that the README's sentence about `prune-run` deleting a removed
+  // worktree's branch reads a specific way; it is a string match against the README's own prose
+  // and proves nothing about what `prune-run` does on disk. At the time this test was written,
+  // nothing in scripts/cli.mjs deletes a branch — `git.deleteBranch` exists with no caller — so
+  // the sentence is a plan for Task 7, not yet a fact about this branch. Task 7 lands the
+  // behaviour on this same run branch and carries its own behavioural test for the deletion; a
+  // green run of the assertion below, alone, is not evidence that any branch is ever removed.
   assert.match(readme, /delete each removed worktree's branch where the run branch already/)
+})
+
+const PLAN = `### Task 1: A
+
+**Files:**
+- Create: \`a.mjs\`
+
+### Task 2: B
+
+**Files:**
+- Create: \`b.mjs\`
+
+**Depends:** T1
+`
+
+function git(cwd, args) {
+  return execFileSync('git', args, { cwd, encoding: 'utf8' })
+}
+
+// The behavioural counterpart to the prose assertion above. That assertion is a regex over the
+// README's own text and stays green no matter what `prune-run` actually does to
+// `.teammates/<run-id>/` — a reviewer proved this by adding an `rm` of that directory to
+// `prune-run`'s handler and watching the full suite, this file included, stay green. This test
+// builds a real run, prunes it with `--yes`, and checks the directory and its files are still on
+// disk afterwards — the one thing the README's claim is actually about.
+test('prune-run --yes leaves .teammates/<run-id>/ and its files on disk', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-packaging-prune-'))
+  try {
+    git(root, ['init', '--quiet', '--initial-branch=main'])
+    git(root, ['config', 'user.email', 'test@example.com'])
+    git(root, ['config', 'user.name', 'Test'])
+    const planPath = path.join(root, 'plan.md')
+    await writeFile(planPath, PLAN, 'utf8')
+    await writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'x' }), 'utf8')
+    await writeFile(path.join(root, '.gitignore'), '.teammates/\n', 'utf8')
+    git(root, ['add', '.'])
+    git(root, ['commit', '--quiet', '-m', 'initial'])
+    git(root, ['checkout', '--quiet', '-b', 'run-branch'])
+
+    const io = { out: () => {}, err: () => {} }
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'fileset', kind: 'fileset' }] } },
+    }), 'utf8')
+    git(root, ['add', 'teammates.gate.json'])
+    git(root, ['commit', '--quiet', '-m', 'manifest'])
+    git(root, ['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    git(root, ['add', 'a.mjs'])
+    git(root, ['commit', '--quiet', '-m', 'T1 work'])
+    git(root, ['checkout', '--quiet', 'run-branch'])
+    git(root, ['merge', '--no-ff', '--quiet', '-m', 'integrate T1', 'teammates/r1/T1'])
+    const wtPath = path.join(root, '.claude', 'worktrees', 'a1')
+    git(root, ['worktree', 'add', '--quiet', wtPath, 'teammates/r1/T1'])
+
+    const runDir = path.join(root, '.teammates', 'r1')
+    const before = (await readdir(runDir)).sort()
+    assert.ok(before.length > 0, 'init-run must have written run state for this test to pin its survival')
+
+    const code = await runCli(
+      ['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'],
+      io,
+    )
+    assert.equal(code, 0)
+
+    const after = (await readdir(runDir)).sort()
+    assert.deepEqual(after, before, '.teammates/r1 must hold the same entries after prune-run --yes')
+    for (const name of before) {
+      await readFile(path.join(runDir, name))
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })
