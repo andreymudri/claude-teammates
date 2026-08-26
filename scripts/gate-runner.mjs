@@ -24,14 +24,51 @@ function killGroup(pid, signal) {
     spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true }).on('error', () => {})
     return
   }
+  // PROBED FIRST, on every signal path there is, because a pgid whose group has emptied is a
+  // number the OS has already freed to hand out again.
+  if (retireIfGroupGone(pid)) return
   try {
     process.kill(-pid, signal)
-  } catch {
-    // ESRCH: the group is already gone, which is the outcome this wanted.
+  } catch (err) {
+    // ESRCH: the group went away between the probe above and here, which is the outcome this
+    // wanted, and the pid stops being signalled from now on.
+    if (err.code === 'ESRCH') liveGroups.delete(pid)
   }
 }
 
-// Groups still running, so a Ctrl-C does not leave a suite behind.
+// Whether the GROUP is empty — NOT whether its leader died. A group whose leader has exited
+// while members are still running keeps its pgid RESERVED and is still exactly the right thing
+// to kill, so `child.exitCode !== null` is not this test: it would drop a live suite from the
+// sweep and let it outlive the gate. Retires the pid the first time the group answers ESRCH,
+// and answers whether it did.
+//
+// What this closes: the escaped-grandchild path, which is the case the timeout exists for.
+// Measured with a `setsid` run string, the direct child is reaped in about a millisecond and
+// Linux frees a pgid as soon as its group has no members — after which the module used to signal
+// that number three ways, SIGTERM at the timeout, SIGKILL at the grace, and a SIGKILL from the
+// sweep on every Ctrl-C. The `catch` above cannot detect that on its own: once the number is
+// reused no ESRCH is raised, because it names something real.
+//
+// Its limit, stated plainly: this NARROWS the window from the whole timeout to the microseconds
+// between the probe and the signal that follows it. Nothing inside a process can close that
+// window, because pid reuse is not observable from here.
+function retireIfGroupGone(pid) {
+  if (process.platform === 'win32') return false
+  try {
+    process.kill(-pid, 0)
+    return false
+  } catch (err) {
+    // EPERM says the group exists and is not ours, which is a signal that could not land
+    // either way; it stays registered rather than being treated as gone.
+    if (err.code !== 'ESRCH') return false
+    liveGroups.delete(pid)
+    return true
+  }
+}
+
+// Groups still running, so a Ctrl-C does not leave a suite behind. A pid is retired the first
+// time its GROUP is observed empty — at the child's exit, or at the next signal — never merely
+// when its leader dies, because a group with surviving members still holds its pgid.
 //
 // SIGKILL is deliberately absent and cannot be added: it is untrappable, and the
 // 120-second caller kill that orphans a suite inside a merge preview is exactly a SIGKILL.
@@ -56,6 +93,19 @@ function installTeardown() {
   // with the conventional 128 + signal code rather than leaving the process running.
   process.once('SIGINT', () => { sweep(); process.exit(130) })
   process.once('SIGTERM', () => { sweep(); process.exit(143) })
+  // SIGHUP and SIGQUIT terminate by DEFAULT, and a default disposition runs neither a handler
+  // nor the `exit` sweep above — so a closed terminal or a dropped ssh session used to leave the
+  // whole check tree orphaned with its timer gone. `detached` made that worse rather than
+  // better: setsid() moves the check out of node's session, so the hangup the terminal delivers
+  // to node's own group no longer reaches the group node spawned. Measured on that shape: parent
+  // dead, grandchild alive in a session of its own.
+  //
+  // POSIX only. Win32 has no SIGQUIT, its SIGHUP is a console-control event with different
+  // semantics, and its teardown is the `taskkill` tree walk rather than a group signal.
+  if (process.platform !== 'win32') {
+    process.once('SIGHUP', () => { sweep(); process.exit(129) })
+    process.once('SIGQUIT', () => { sweep(); process.exit(131) })
+  }
 }
 
 // `graceMs` overrides KILL_GRACE_MS. It exists so a test can drive the SIGKILL path without
@@ -157,6 +207,14 @@ export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn 
         if (child.pid !== undefined) killGroup(child.pid, 'SIGKILL')
         reject(err)
       })
+    })
+    // Retirement at the FIRST moment the group can be observed empty, which for an escaped
+    // grandchild is here and not at the timeout: the direct child is gone, its group has no
+    // members, and every later signal would aim at a freed number. A group that still has
+    // members keeps its pid registered — see `retireIfGroupGone`, which is what makes that
+    // distinction rather than the exit code this listener carries.
+    child.on('exit', () => {
+      if (child.pid !== undefined) retireIfGroupGone(child.pid)
     })
     child.on('close', (code) => {
       if (timedOut) { resolveTimedOut(code); return }
