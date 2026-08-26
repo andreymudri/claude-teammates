@@ -788,6 +788,79 @@ test('deleteBranch refuses an empty name without asking git', async () => {
   await assert.rejects(() => git.deleteBranch(''), (err) => err instanceof GitError)
 })
 
+// The case the -D exists for, which the test above cannot see: `task` is merged into the run
+// branch and `isAncestor` says so — that is the entire authorisation the caller has — but HEAD
+// is parked on `main`, which does not contain it. `git branch -d task` answers "not fully
+// merged" there (asserted below, not assumed), so a `-d` here would refuse every branch
+// prune-run just proved merged whenever the operator stands anywhere but the run branch.
+test('deleteBranch deletes a branch merged into the run branch while HEAD sits on another', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-delbranch-force-'))
+  const git = createGit({ cwd: root })
+  const sh = (args) => defaultGitExec(args, root)
+  try {
+    await sh(['init', '--initial-branch=main'])
+    await sh(['config', 'user.email', 'test@example.com'])
+    await sh(['config', 'user.name', 'test'])
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'runbr'])
+    await sh(['checkout', '-b', 'task'])
+    await writeFile(path.join(root, 'task.txt'), 'task\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'task work'])
+    await sh(['checkout', 'runbr'])
+    await sh(['merge', '--no-ff', '-m', 'merge task', 'task'])
+    // HEAD ends up anywhere but the run branch — the operator's own checkout, which prune-run
+    // does not control.
+    await sh(['checkout', 'main'])
+
+    // The caller's proof holds: task IS merged into the run branch.
+    assert.equal(await git.isAncestor('task', 'runbr'), true)
+    // And `-d` refuses it anyway, measuring against HEAD instead. Without this the assertion
+    // below proves nothing about the flag.
+    const refused = await sh(['branch', '-d', '--end-of-options', 'task'])
+    assert.notEqual(refused.code, 0)
+    assert.equal(await git.branchExists('task'), true)
+
+    // Bare names only, the cost of skipping qualifyBranch: the argument reaches `git branch -D`
+    // as written, and an already-qualified ref is simply not found.
+    await assert.rejects(() => git.deleteBranch('refs/heads/task'), (err) => err instanceof GitError)
+    assert.equal(await git.branchExists('task'), true)
+
+    assert.equal(await git.deleteBranch('task'), true)
+    assert.equal(await git.branchExists('task'), false)
+    // -D deletes the ref, not the work: the merge commit on runbr still carries it.
+    assert.equal(await git.branchExists('runbr'), true)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+// The limit of that force, pinned so the comment cannot outgrow it: -D is not omnipotent. A
+// branch still checked out in a worktree is refused by git itself, and deleteBranch surfaces
+// that as a GitError rather than reporting a deletion that did not happen.
+test('deleteBranch still fails on a branch checked out in another worktree', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-delbranch-wt-'))
+  const git = createGit({ cwd: root })
+  const sh = (args) => defaultGitExec(args, root)
+  try {
+    await sh(['init', '--initial-branch=main'])
+    await sh(['config', 'user.email', 'test@example.com'])
+    await sh(['config', 'user.name', 'test'])
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['branch', 'parked'])
+    await sh(['worktree', 'add', path.join(root, 'wt'), 'parked'])
+
+    await assert.rejects(() => git.deleteBranch('parked'), (err) => err instanceof GitError)
+    assert.equal(await git.branchExists('parked'), true)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 // --- mergeInto -----------------------------------------------------------------------------
 
 // One merge per branch, each resolved through refs/heads/ first. Handing git three or more
