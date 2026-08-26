@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
+  defaultExec,
   runCommandCheck,
   describePendingCheck,
   runChecks,
@@ -2897,4 +2898,42 @@ test('a base merge whose only contribution is a mode change is explained, not fl
 
     assert.equal(res.status, 'pass', res.output)
   })
+})
+
+test('a timed-out command check kills the whole process group, not just the shell', { skip: process.platform === 'win32' && 'POSIX process groups' }, async () => {
+  const alive = (pid) => { try { process.kill(Number(pid), 0); return true } catch { return false } }
+  // The grandchild's stdio is redirected on purpose. Inheriting the pipe makes `close` wait on
+  // the grandchild no matter who was killed, so the promise would not settle until `sleep`
+  // ended of its own accord — and a test that waits out the sleep passes even when the kill
+  // reached only the shell, which is the one thing it exists to catch.
+  const { code, output } = await defaultExec('sleep 30 >/dev/null 2>&1 & echo GRANDCHILD=$!; wait', process.cwd(), { timeoutMs: 300 })
+  const pid = /GRANDCHILD=(\d+)/.exec(output)?.[1]
+  assert.ok(pid, `the command did not report its grandchild pid: ${JSON.stringify(output)}`)
+  try {
+    // The grace timer is 5s; poll rather than sleeping a fixed interval.
+    for (let i = 0; i < 60 && alive(pid); i += 1) await new Promise((r) => setTimeout(r, 100))
+    assert.equal(alive(pid), false, 'the grandchild outlived the timeout, so only the shell was killed')
+    assert.notEqual(code, 0)
+    assert.match(output, /timed out after 0s; its process group was killed/)
+  } finally {
+    // A failing run has left a live `sleep` behind; it is this test's to clean up.
+    try { process.kill(Number(pid), 'SIGKILL') } catch { /* already gone, which is the pass case */ }
+  }
+})
+
+test('a timed-out command check is a fail carrying its reason, never a pass', async () => {
+  const result = await runCommandCheck(
+    { name: 'slow', kind: 'command', run: 'irrelevant' },
+    { cwd: process.cwd(), exec: async () => ({ code: 1, output: 'partial\n— timed out after 900s; its process group was killed' }) },
+  )
+  assert.equal(result.status, 'fail')
+  assert.match(result.output, /timed out after 900s/)
+})
+
+test('defaultExec hands the spawned pid to onSpawn before the promise resolves', async () => {
+  const seen = []
+  const { code } = await defaultExec('exit 0', process.cwd(), { onSpawn: (pid) => seen.push(pid) })
+  assert.equal(code, 0)
+  assert.equal(seen.length, 1)
+  assert.ok(Number.isInteger(seen[0]) && seen[0] > 0, `expected a pid, got ${seen[0]}`)
 })

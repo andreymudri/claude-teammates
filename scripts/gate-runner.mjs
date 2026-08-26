@@ -3,16 +3,103 @@ import { filesetViolations, ownershipViolations, baseExplainedNote, resolveTaskB
 import { GitError } from './git.mjs'
 import { withMergePreview, conflictPairs } from './merge-preview.mjs'
 
+// 15 minutes. A command check is the project's own suite, so the default has to clear a
+// slow one on a cold cache; what it exists to stop is the check that never returns at all.
+export const COMMAND_TIMEOUT_MS = 15 * 60_000
+
+// Between SIGTERM and SIGKILL. A suite that traps SIGTERM to write a coverage report gets
+// to finish; one that ignores it does not get to outlive the gate.
+const KILL_GRACE_MS = 5_000
+
 const TAIL_LINES = 40
 
-export function defaultExec(cmd, cwd) {
+// The whole process group, not the direct child. With `shell: true` the direct child is
+// `/bin/sh -c`, so killing it alone leaves everything the suite spawned running — measured:
+// `spawn('sleep 300 & wait', { shell: true, timeout: 500, killSignal: 'SIGKILL' })` ends
+// with the shell dead and the grandchild ALIVE. That is why node's own `timeout` option is
+// not what this uses.
+function killGroup(pid, signal) {
+  if (process.platform === 'win32') {
+    // A negative pid is POSIX. On win32 the equivalent is taskkill walking the child tree.
+    spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true }).on('error', () => {})
+    return
+  }
+  try {
+    process.kill(-pid, signal)
+  } catch {
+    // ESRCH: the group is already gone, which is the outcome this wanted.
+  }
+}
+
+// Groups still running, so a Ctrl-C does not leave a suite behind.
+//
+// SIGKILL is deliberately absent and cannot be added: it is untrappable, and the
+// 120-second caller kill that orphans a suite inside a merge preview is exactly a SIGKILL.
+// Nothing in this file can cover that case. What covers it is the claim file the orphan
+// holds itself instead of depending on its parent surviving.
+const liveGroups = new Set()
+let teardownInstalled = false
+
+function installTeardown() {
+  if (teardownInstalled) return
+  teardownInstalled = true
+  const sweep = () => { for (const pid of liveGroups) killGroup(pid, 'SIGKILL') }
+  process.once('exit', sweep)
+  // Installing a handler displaces node's default disposition, so each one exits itself
+  // with the conventional 128 + signal code rather than leaving the process running.
+  process.once('SIGINT', () => { sweep(); process.exit(130) })
+  process.once('SIGTERM', () => { sweep(); process.exit(143) })
+}
+
+export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn = null } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, { cwd, shell: true })
+    installTeardown()
+    const child = spawn(cmd, {
+      cwd,
+      shell: true,
+      // Its own process group, which is the only thing that makes the kill above reach the
+      // suite rather than just the shell.
+      detached: process.platform !== 'win32',
+      // `detached` on win32 otherwise opens a console window.
+      windowsHide: true,
+    })
     let output = ''
+    let timedOut = false
+    let grace = null
+    const timer = setTimeout(() => {
+      timedOut = true
+      killGroup(child.pid, 'SIGTERM')
+      grace = setTimeout(() => killGroup(child.pid, 'SIGKILL'), KILL_GRACE_MS)
+    }, timeoutMs)
+    const done = () => {
+      clearTimeout(timer)
+      clearTimeout(grace)
+      liveGroups.delete(child.pid)
+    }
+    if (child.pid !== undefined) {
+      liveGroups.add(child.pid)
+      // Called synchronously, before this promise can yield, so a holder registered here is
+      // registered before anything can observe the process it names. A throw propagates:
+      // a claim that cannot be written must not read as a check that ran unclaimed.
+      if (onSpawn) onSpawn(child.pid)
+    }
     child.stdout.on('data', (d) => { output += d })
     child.stderr.on('data', (d) => { output += d })
-    child.on('error', reject)
-    child.on('close', (code) => resolve({ code: code ?? 1, output }))
+    child.on('error', (err) => {
+      done()
+      if (child.pid !== undefined) killGroup(child.pid, 'SIGKILL')
+      reject(err)
+    })
+    child.on('close', (code) => {
+      done()
+      if (!timedOut) { resolve({ code: code ?? 1, output }); return }
+      // A killed child reports code null, which `?? 1` turns into the failure this is.
+      const seconds = Math.round(timeoutMs / 1000)
+      resolve({
+        code: code ?? 1,
+        output: `${output}\n— timed out after ${seconds}s; its process group was killed`,
+      })
+    })
   })
 }
 
