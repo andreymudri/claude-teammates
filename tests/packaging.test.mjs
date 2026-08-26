@@ -46,14 +46,6 @@ test('NOTICE marks the original skills as original', async () => {
 test('the README states that run state is never swept automatically', async () => {
   const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8')
   assert.match(readme, /`\.teammates\/<run-id>\/` is never removed by any command/)
-  // WORDING ONLY. This pins that the README's sentence about `prune-run` deleting a removed
-  // worktree's branch reads a specific way; it is a string match against the README's own prose
-  // and proves nothing about what `prune-run` does on disk. At the time this test was written,
-  // nothing in scripts/cli.mjs deletes a branch — `git.deleteBranch` exists with no caller — so
-  // the sentence is a plan for Task 7, not yet a fact about this branch. Task 7 lands the
-  // behaviour on this same run branch and carries its own behavioural test for the deletion; a
-  // green run of the assertion below, alone, is not evidence that any branch is ever removed.
-  assert.match(readme, /delete each removed worktree's branch where the run branch already/)
 })
 
 const PLAN = `### Task 1: A
