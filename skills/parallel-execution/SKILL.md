@@ -161,7 +161,14 @@ cross-task claim judges it on the merge, not on one branch.
 
 ## 5. Clean up the phase
 
-Once the phase has a recorded PASS and its branches are merged, remove what it left:
+Once the phase has a recorded PASS and its branches are merged, remove what it left.
+
+This is irreversible on every prunable worktree, not only a leaked preview: `git worktree
+remove --force` runs whether or not a teammate's worktree still holds edits made after its
+branch merged, and `--force` follows a junction out of the worktree to its target instead of
+stopping at the boundary — verified on Windows, and exactly the shape a dependency install
+during bootstrap (see "Worktree mechanics" below) can leave behind; nothing unlinks it first
+the way a leaked preview's own links are unlinked, because that sweep runs only for previews:
 
     node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" prune-run --run <runId> --plan <planPath> --root <project root> --yes
 
@@ -169,15 +176,22 @@ This is the only supported way to clean up after a phase. It recomputes each pha
 rather than reading `status.gates`, removes only this run's worktrees whose phase passes,
 sweeps every leaked merge-preview worktree under the system temp directory regardless of which
 run left it — even one holding an operator's own uncommitted work — deletes each removed
-worktree's branch where `git merge-base --is-ancestor` proves it is already in the run branch,
-and names every worktree it leaves alone with the reason. Do not remove a worktree or delete a
-teammate branch by hand: `git worktree remove` refuses one holding uncommitted work only until
-`--force` is added, and nothing then stops `--force` from reaching a worktree whose phase has
-not passed yet; `git branch -D` does not measure "merged" at all — it force-deletes
-unconditionally — and `-d`, the flag that does measure, measures against the branch's own
-upstream or HEAD, never against the run branch. The one exception is a task going to a fresh
-implementer before its phase has passed: this command cannot reach that worktree yet, so it
-still has to be removed by hand — see the matching exception in "Worktree mechanics" below.
+worktree's branch where `git merge-base --is-ancestor` proves it is already in the run branch
+— that proof holds only while the run branch's name is unambiguous, so before `--yes` confirm
+`git rev-parse --abbrev-ref HEAD` prints the run branch's plain name and not `heads/<name>` or
+`refs/heads/<name>` — and names every worktree it leaves alone with the reason. Do not remove
+a worktree or delete a teammate branch by hand: `git worktree remove` refuses one holding
+uncommitted work only until `--force` is added, and nothing then stops `--force` from reaching
+a worktree whose phase has not passed yet; `git branch -D` does not measure "merged" at all —
+the one thing it refuses is a branch a registered worktree still has checked out, which is why
+the worktree has to go first, and otherwise it force-deletes regardless of ancestry — and
+`-d`, the flag that does measure, measures against the branch's own upstream or HEAD, never
+against the run branch. The one exception is a task going to a fresh implementer before its
+phase has passed: this command cannot reach that worktree yet, so it still has to be removed
+by hand with `--force` — authorised there because abandoning that teammate's unfinished
+worktree for a fresh dispatch is the deliberate point, and a mid-stall worktree is exactly the
+one most likely to hold modified or untracked files a bare remove refuses over — see the
+matching exception in "Worktree mechanics" below.
 
 Without `--yes` it removes nothing and prints the same prunable and leaked-preview lists; the
 per-branch "left `<branch>` in place: not an ancestor" line is decided only while `--yes` runs
@@ -383,11 +397,15 @@ teammate automatically; a teammate never shares a worktree with another.
   start — it fails with "its worktree no longer exists", and the task's whole context is lost
   with it. Once the phase has a recorded PASS, run `prune-run` to remove the worktree, not
   `git worktree remove` by hand — the command above already covers this case. Only prune
-  worktrees belonging to **this** run. The one exception is a task going to a **fresh**
+  worktrees belonging to **this** run — a leaked preview is swept regardless of which run left
+  it, as above. The one exception is a task going to a **fresh**
   implementer instead of a resume, because resuming stalled: prune that task's worktree first,
   since `prune-run` only removes a worktree whose phase already recomputes to PASS and a
   mid-phase stall has none yet to rest that removal on — do it by hand with
-  `git worktree remove <path>`, then `git worktree prune` — because a returned teammate's
-  worktree keeps its branch checked out and the new dispatch would otherwise fail with "already
-  used by worktree"; then restate the findings, the branch and the file set in its dispatch,
+  `git worktree remove --force <path>`, then `git worktree prune`; `--force` is required and
+  authorised here, because a mid-stall worktree is exactly the one most likely to hold modified
+  or untracked files a bare remove refuses over, and discarding that work is the deliberate
+  point of abandoning it for a fresh implementer — because a returned teammate's worktree keeps
+  its branch checked out and the new dispatch would otherwise fail with "already used by
+  worktree"; then restate the findings, the branch and the file set in its dispatch,
   because none of that survives the handover.
