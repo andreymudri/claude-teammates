@@ -3347,16 +3347,22 @@ async function stagePrunableRun({ root, planPath, io, lines, git: g }, { merged 
 // fifteen minutes each by default and announced by this very command as the slow part — and only
 // then removes anything. Anything a check does to the repository lands in that gap.
 //
-// The check exits 0, so the phase still passes and the worktree is still prunable; otherwise the
-// test would prove nothing but that a failing gate prunes nothing.
+// THE COMMAND RUNS TWICE, once per phase, and the two invocations are not alike. Only the FIRST
+// matters: phase 1 has T1's branch, so its checks run inside a MERGE PREVIEW worktree, and its
+// exit status is what decides whether phase 1 passes and T1's worktree is prunable. Phase 2 has
+// no `teammates/r1/T2` branch, so there is nothing to preview and its checks run at the
+// repository root — and phase 2 has no passing gate either way, so the second invocation's exit
+// status changes nothing. It is not always 0: `git tag run-branch …` a second time is
+// `fatal: tag 'run-branch' already exists` and exit 128 (measured), while `git update-ref` to the
+// same value simply succeeds again. Neither is a failure of the fixture.
 //
-// It is a bare `git …` line rather than a script file, and that is not cosmetic. A command check
-// runs with its cwd inside the MERGE PREVIEW worktree, not at the repository root, so a `node
-// scratch.mjs` written next to the manifest is simply not there — the first attempt at this
-// fixture failed the phase with "Cannot find module" and pruned nothing, which reads exactly like
-// correct behaviour. A linked worktree shares one ref store with the main one, so `git update-ref`
-// or `git tag` run from the preview lands on the same refs this command is about to read, with no
-// path to quote and nothing platform-specific in it.
+// The line is a bare `git …` rather than a script file because of that first invocation, and it
+// is not cosmetic. A check running inside the preview has its cwd there, not at the repository
+// root, so a `node scratch.mjs` written next to the manifest is simply not there — the first
+// attempt at this fixture failed phase 1 with "Cannot find module" and pruned nothing, which
+// reads exactly like correct behaviour. A linked worktree shares one ref store with the main one,
+// so `git update-ref` or `git tag` run from the preview lands on the same refs this command is
+// about to read, with no path to quote and nothing platform-specific in it.
 //
 // The manifest is written and NOT committed: the sha the command needs only exists after
 // `stagePrunableRun` has built the history, and a commit here would move the very tip the caller
@@ -3386,6 +3392,7 @@ test('prune-run --yes proves containment against the run branch as it stands, no
     await stagePrunableRun(ctx)
     // The first parent of the integration merge: the run branch immediately before T1 landed.
     const preMerge = g(['rev-parse', 'run-branch~1']).trim()
+    const tip = g(['rev-parse', 'refs/heads/teammates/r1/T1']).trim()
     await stageMidRunCheck(ctx, `git update-ref refs/heads/run-branch ${preMerge}`)
     lines.length = 0
     const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
@@ -3395,7 +3402,15 @@ test('prune-run --yes proves containment against the run branch as it stands, no
     // now stands reaches none of its commits.
     assert.equal(hasWorktree(root, 'a1'), false)
     assert.equal(hasBranch(root, 'teammates/r1/T1'), true)
-    assert.match(lines.join('\n'), /left teammates\/r1\/T1 in place/)
+    // BOTH shas on the reason line, pinned to the values they claim rather than to their shape.
+    // The run-branch sha is the half that matters here: this fixture is the only one where the
+    // snapshot and the live tip differ, so a revert to `ctx.runSha` prints the pre-move merge
+    // commit — which a `\([0-9a-f]{40}\)` pattern would accept without complaint. An operator
+    // reading this line is being told which two commits the refusal was computed from.
+    assert.match(
+      lines.join('\n'),
+      new RegExp(`left teammates/r1/T1 in place: refs/heads/teammates/r1/T1 \\(${tip}\\) is not an ancestor of run-branch \\(${preMerge}\\)`),
+    )
     assert.doesNotMatch(lines.join('\n'), /deleted teammates\/r1\/T1/)
   })
 })

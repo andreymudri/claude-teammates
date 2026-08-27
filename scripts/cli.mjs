@@ -1666,22 +1666,40 @@ async function derive(root, runId, flags) {
   // run treats as the run branch. All three refs are ordinary; none needs a foothold.
   //
   // In normal operation HEAD IS `refs/heads/<current branch>`, so this compares equal and never
-  // fires. Under the plant it does not, and everything downstream fails closed — which matters
-  // most for `prune-run --yes`, where the run branch is the entire proof behind a `git branch -D`.
+  // fires. Under a plant left at a DIFFERENT sha it does fire, and everything downstream fails
+  // closed — which matters most for `prune-run --yes`, where the run branch is the entire proof
+  // behind a `git branch -D`.
   //
-  // This closes the SHA half only, and says so rather than implying more: the NAME is still the
-  // abbreviated one, so it remains wrong wherever it is printed or compared as a name. Fixing
-  // that means resolving HEAD symbolically (`git symbolic-ref --quiet HEAD`) in scripts/git.mjs,
-  // which is a different file and a separate change.
+  // WHAT IT IS, STATED AT ITS REAL WIDTH: a DERIVE-TIME ROUND-TRIP CHECK, and nothing more. It
+  // is NOT "the sha half, closed". It asks one question at one instant — does the ref that
+  // abbreviated name lands on hold HEAD's sha right now — and every consumer afterwards re-reads
+  // that ref by the same name. Park the planted `refs/heads/refs/heads/<name>` AT HEAD's sha and
+  // this compares equal and never fires; move it afterwards, from a command check minutes later,
+  // and every later resolution follows the attacker. Reproduced end to end against this tree:
+  // `prune-run --yes` printed `deleted teammates/r1/T1 (9df69ac…), which refs/heads/run-branch
+  // (9df69ac…) contains`, exited 0, and the deleted tip was reachable from the REAL run branch
+  // by nothing. So this raises the cost of the plant — it must be parked at HEAD and moved later
+  // rather than simply created — and it does not remove it.
+  //
+  // The only thing that does is resolving HEAD SYMBOLICALLY, `git symbolic-ref --quiet HEAD`, so
+  // the name never passes through git's abbreviation rules at all. That is a helper in
+  // scripts/git.mjs, a different file, and it is a recorded carry-over. See the residual list at
+  // the branch deletion in `prune-run` for the same statement where the damage happens.
   const headSha = await git.headSha()
   const namedSha = await git.resolveRef(`refs/heads/${runBranch}`).catch(() => null)
   if (namedSha !== headSha) {
     throw new Error(
       `HEAD is ${headSha}, but refs/heads/${printable(runBranch)} — the branch name git abbreviates HEAD to —`
       + ` is ${namedSha === null ? 'not a ref at all' : namedSha}.`
-      + ' That disagreement means the reported branch name does not identify the branch HEAD is on,'
-      + ' which happens when a tag or a branch named `heads/…` shadows it. Remove the shadowing ref'
-      + ' and re-run; nothing is verified or removed against a run branch that cannot be named.',
+      // Two reachable causes, and the remedy differs, so neither is asserted as the diagnosis.
+      // `headSha` and `resolveRef` are two subprocesses: an ordinary concurrent commit or merge
+      // on the run branch between them produces exactly this disagreement and is not an attack.
+      // A detached HEAD reaches it too, by way of `--abbrev-ref` answering `HEAD`.
+      + ' The reported name therefore does not identify the branch HEAD is on. Either something'
+      + ' moved the branch while this was reading it — an integrator merging concurrently, or a'
+      + ' HEAD that is detached or mid-rebase — in which case settle the repository and re-run;'
+      + ' or a tag, or a branch named `heads/…`, is shadowing the run branch, in which case remove'
+      + ' that ref. Nothing is verified or removed against a run branch that cannot be named.',
     )
   }
   const baseBranch = await resolveBaseBranch(git, flags.base)
@@ -3059,8 +3077,36 @@ export async function runCli(argv, io = { out: console.log }) {
       // against. A snapshot is exactly as good as the assumption that nothing moved, and the
       // thing being decided is irreversible.
       //
-      // WHAT REMAINS OPEN, listed rather than summarised — none of it is closed by the above:
+      // WHAT REMAINS OPEN. This list is meant to be read as complete, so it carries the item that
+      // defeats the paragraph above as well as the ones that merely bound it. None of it is
+      // closed by anything in this file.
       //
+      //   - THE NAME IS ATTACKER-CHOOSABLE, AND FRESHNESS DOES NOT HELP AGAINST IT. This is the
+      //     one that matters, and it is not a printing defect. `ctx.runBranch` comes from
+      //     `git rev-parse --abbrev-ref HEAD`, which shortens only as far as stays unambiguous:
+      //     a planted tag makes it answer `heads/<name>`, and a planted `heads/<name>` branch on
+      //     top of that makes it answer `refs/heads/<name>`, at which point the `refs/heads/`
+      //     prefix this file adds lands on `refs/heads/refs/heads/<name>` — an ordinary ref an
+      //     unprivileged teammate can create in its own worktree. `derive`'s cross-check is a
+      //     DERIVE-TIME ROUND TRIP, not a closed sha half: it only asks whether that ref equals
+      //     HEAD at the moment `derive` runs. Park the planted ref AT HEAD's sha and it compares
+      //     equal and never fires; then move it later and this loop re-reads it.
+      //
+      //     Reproduced end to end on this tree, with the plant at HEAD's sha and one
+      //     `git update-ref refs/heads/refs/heads/run-branch <T1 tip>` inside a command check:
+      //     `deleted teammates/r1/T1 (9df69ac…), which refs/heads/run-branch (9df69ac…)
+      //     contains`, exit 0 — and `merge-base --is-ancestor <tip> refs/heads/run-branch`
+      //     against the REAL run branch afterwards answers no. The commit is in no ref: the
+      //     worktree that held one reflog was force-removed a moment earlier and `-D` took the
+      //     branch reflog.
+      //
+      //     So per-iteration freshness re-reads a value the ATTACKER controls rather than the
+      //     vetted one, and the bullet below does not absorb this: the move lands minutes
+      //     earlier, inside a check, not inside a two-command window. Closing it needs the run
+      //     branch resolved SYMBOLICALLY — a `currentBranchRef()` over `git symbolic-ref --quiet
+      //     HEAD` — which lives in scripts/git.mjs and is a recorded carry-over, not something
+      //     this file can do. Until then the guarantee here is bounded by "no ref named
+      //     `heads/<run branch>` or tagged like the run branch exists", which nothing enforces.
       //   - Proof-to-delete. The sha is proved and then deleted BY NAME, so a write to
       //     refs/heads/<branch> in between is deleted unproved. Closing it needs a
       //     compare-and-swap (`git update-ref -d <ref> <proved sha>`), which needs a helper
@@ -3068,15 +3114,13 @@ export async function runCli(argv, io = { out: console.log }) {
       //     comment is the record.
       //   - The run branch can still move between this resolve and the `-D` on the same
       //     iteration, and between one iteration and the next. Per-iteration shrinks that window
-      //     to two git commands; it does not remove it.
-      //   - The NAME is still abbreviation-derived. `ctx.runBranch` comes from
-      //     `git rev-parse --abbrev-ref HEAD`, which shortens only as far as stays unambiguous,
-      //     so a planted tag makes it answer `heads/<name>` and a planted `heads/<name>` branch
-      //     makes it answer `refs/heads/<name>`. `derive` now cross-checks that name against HEAD
-      //     and fails closed, which is what protects THIS deletion; the name itself is still
-      //     wrong for `printable(ctx.runBranch)` above and for every other `currentBranch()`
-      //     consumer. The real fix is a `currentBranchRef()` over `git symbolic-ref --quiet HEAD`
-      //     in scripts/git.mjs, which is not this file.
+      //     to two git commands; it does not remove it. It bounds only the honest-race case —
+      //     see the first bullet for the case it does not bound.
+      //   - The WORKTREE REMOVAL a few lines up rests on the pre-check snapshot, not on anything
+      //     re-read here. Whether a phase passed, and therefore whether its worktree is
+      //     `--force`-removed, was decided from `ctx` before the checks ran; only the branch
+      //     deletion is re-proved. That removal is irreversible too, and the fixture that stages
+      //     a mid-run move exercises exactly it: the worktree goes, and only the branch survives.
       try {
         const runSha = await git.resolveRef(`refs/heads/${ctx.runBranch}`)
         const branchSha = await git.resolveRef(`refs/heads/${w.branch}`)
