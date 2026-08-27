@@ -79,22 +79,33 @@ of a teammate branch, stop — that's the wrong direction for this model.
 
 ## Worktree and branch cleanup
 
-A finished run leaves a worktree and a scratch branch per task. Remove both with the command
-that knows which phases passed:
+A finished run leaves a worktree and a scratch branch per task. The `--yes` flag runs `git
+worktree remove --force` on every worktree it lists as prunable, and that discards uncommitted
+and untracked changes in it without asking. Without `--yes` the command removes nothing and
+prints the same plan, which is what to run when you only want to see what is outstanding. Read
+the printed plan, then clean up with:
 
     node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" prune-run --run <runId> --plan <planPath> --root <project root> --yes
 
-It touches only this run's worktrees, never the main worktree and never another run's, and
-it deletes a task branch only where `git merge-base --is-ancestor` proves the run branch
-already contains it. Everything it declines to remove is printed with the reason.
+It removes a task's worktree only where that task's phase gate recomputes to PASS, and it
+deletes the worktree's branch only where `git merge-base --is-ancestor` proves the run branch
+already contains it. That proof is not something a bare `git branch -D` makes on its own: `-D`
+deletes whatever branch it is given, unconditionally, and the plain `-d` measures "merged"
+against the branch's upstream or your current HEAD, never against the run branch. It never
+touches the main worktree, and it never removes another run's task worktree, but it does
+force-remove a leaked merge-preview worktree — a scratch worktree under the system temp
+directory — regardless of which run's gate created it, because a killed gate cannot run its own
+cleanup. Every worktree it examines and declines to remove is printed with the reason; it
+examines worktrees, not bare branches, so a task branch whose worktree is already gone is not
+reported either way.
 
-Do not sweep by hand. `git worktree remove --force` follows a junction and deletes the
-contents of its target, and `git branch -D` measures "merged" against whatever branch you
-have checked out, which is not the run branch whenever you have moved off it.
+Do not sweep by hand: a hand-run `git worktree remove --force` or `git branch -D` supplies
+neither the recomputed phase gate nor the ancestry proof above — it only does what the flag
+itself says, on whatever you point it at.
 
-What this does not clean up: .teammates/<run-id>/ stays on disk on purpose — `resume` and
-`rebuild-state` read it, and it is gitignored. Delete it yourself when you no longer want
-the record.
+What this does not clean up: `.teammates/<run-id>/` stays on disk on purpose. Delete it
+yourself when you no longer want the record — `resume` and `rebuild-state` read it, and it is
+gitignored.
 
 ## Surface unresolved findings
 
