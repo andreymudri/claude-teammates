@@ -3403,10 +3403,15 @@ test('prune-run --yes proves containment against the run branch as it stands, no
     assert.equal(hasWorktree(root, 'a1'), false)
     assert.equal(hasBranch(root, 'teammates/r1/T1'), true)
     // BOTH shas on the reason line, pinned to the values they claim rather than to their shape.
-    // The run-branch sha is the half that matters here: this fixture is the only one where the
-    // snapshot and the live tip differ, so a revert to `ctx.runSha` prints the pre-move merge
-    // commit — which a `\([0-9a-f]{40}\)` pattern would accept without complaint. An operator
-    // reading this line is being told which two commits the refusal was computed from.
+    //
+    // The mutation this half actually catches is the NARROW one: leave the proof reading the
+    // fresh sha and print `ctx.runSha` on this line alone. That is behaviourally invisible — the
+    // branch still survives, the exit code is still 0 — and the line then names the pre-move
+    // integration merge, which a `\([0-9a-f]{40}\)` pattern accepts without complaint. The
+    // wholesale revert of the proof to `ctx.runSha` does NOT reach here: `isAncestor` is then
+    // true, the branch is deleted, this line never prints at all, and the test has already failed
+    // three assertions earlier on `hasBranch`. Both mutations were run; only the narrow one is
+    // evidence about this regex, and the comment names that one.
     assert.match(
       lines.join('\n'),
       new RegExp(`left teammates/r1/T1 in place: refs/heads/teammates/r1/T1 \\(${tip}\\) is not an ancestor of run-branch \\(${preMerge}\\)`),
@@ -3436,6 +3441,28 @@ test('prune-run --yes is not fooled by a tag on the run branch planted while the
     assert.equal(hasBranch(root, 'teammates/r1/T1'), true)
     assert.match(lines.join('\n'), /left teammates\/r1\/T1 in place/)
     assert.doesNotMatch(lines.join('\n'), /deleted teammates\/r1\/T1/)
+  })
+})
+
+// The other arm of the same guard, and it is live rather than defensive. `--abbrev-ref HEAD`
+// answers the literal string `HEAD` on a detached HEAD, `refs/heads/HEAD` is not a ref, and
+// `resolveRef` rejects it — so `namedSha` is null and the comparison fails on the null side. The
+// three-ref test below never reaches this: its plant makes `refs/heads/refs/heads/run-branch` a
+// real ref, so `namedSha` is a sha there and the null branch of the ternary is never taken.
+// Without this fixture, both the `not a ref at all` wording and failing closed on an
+// unresolvable name could be deleted with the whole suite green.
+test('prune-run refuses to act on a detached HEAD rather than deriving from an unresolvable name', async () => {
+  await withRepo(async (ctx) => {
+    const { root, io, lines, git: g } = ctx
+    await stagePrunableRun(ctx, { merged: false })
+    g(['checkout', '--quiet', '--detach', 'HEAD'])
+    assert.equal(g(['rev-parse', '--abbrev-ref', 'HEAD']).trim(), 'HEAD', 'the repository really is detached')
+    lines.length = 0
+    const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
+    assert.equal(hasBranch(root, 'teammates/r1/T1'), true)
+    assert.equal(hasWorktree(root, 'a1'), true)
+    assert.equal(code, 4)
+    assert.match(lines.join('\n'), /cannot decide what is prunable: HEAD is [0-9a-f]{40}, but refs\/heads\/HEAD .* is not a ref at all/)
   })
 })
 
@@ -3477,16 +3504,28 @@ test('prune-run refuses to act when the branch name git abbreviates HEAD to does
 
 test('prune-run --yes deletes a pruned task branch that is merged into the run branch', async () => {
   await withRepo(async (ctx) => {
-    const { root, io, lines } = ctx
+    const { root, io, lines, git: g } = ctx
     await stagePrunableRun(ctx)
+    // Captured before the run, because after it the branch is gone and there is nothing left to
+    // ask. In this fixture the two are DIFFERENT commits — T1's tip, and the integration merge
+    // that carried it — which is what makes the assertion below able to tell them apart.
+    const tip = g(['rev-parse', 'refs/heads/teammates/r1/T1']).trim()
+    const runTip = g(['rev-parse', 'refs/heads/run-branch']).trim()
     const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
     assert.equal(code, 0)
     assert.equal(hasWorktree(root, 'a1'), false)
-    // BOTH shas, in full. After `-D` the branch reflog is gone, `deleteBranch` swallows git's own
-    // "Deleted branch … (was <abbrev>)", and the worktree that held the other reflog was
-    // force-removed a moment earlier — so this line is the only surviving handle for
-    // `git branch <name> <sha>`, and an assertion that stops at the name would not notice it go.
-    assert.match(lines.join('\n'), /deleted teammates\/r1\/T1 \([0-9a-f]{40}\), which run-branch \([0-9a-f]{40}\) contains/)
+    // BOTH shas, pinned to the values they claim rather than to their shape. After `-D` the
+    // branch reflog is gone, `deleteBranch` swallows git's own "Deleted branch … (was <abbrev>)",
+    // and the worktree that held the other reflog was force-removed a moment earlier — so this
+    // line is the only surviving handle for `git branch <name> <sha>`. A `\([0-9a-f]{40}\)`
+    // pattern accepts any two shas in any order: swap the interpolations and the line names the
+    // integration merge as the deleted commit, an operator following it recreates the branch at
+    // the wrong commit, and T1's tip is never recovered. Shape is not enough for a line whose
+    // whole purpose is to carry two specific values.
+    assert.match(
+      lines.join('\n'),
+      new RegExp(`deleted teammates/r1/T1 \\(${tip}\\), which run-branch \\(${runTip}\\) contains`),
+    )
     assert.equal(hasBranch(root, 'teammates/r1/T1'), false)
   })
 })

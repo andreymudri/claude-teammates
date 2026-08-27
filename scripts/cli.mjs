@@ -1678,8 +1678,17 @@ async function derive(root, runId, flags) {
   // and every later resolution follows the attacker. Reproduced end to end against this tree:
   // `prune-run --yes` printed `deleted teammates/r1/T1 (9df69ac…), which refs/heads/run-branch
   // (9df69ac…) contains`, exited 0, and the deleted tip was reachable from the REAL run branch
-  // by nothing. So this raises the cost of the plant — it must be parked at HEAD and moved later
-  // rather than simply created — and it does not remove it.
+  // by nothing.
+  //
+  // And parking at HEAD costs the attacker NOTHING, so do not read this as a maintenance burden
+  // on them: the plant does not have to be a sha at all. `git symbolic-ref refs/heads/refs/heads/
+  // <name> refs/heads/<name>` makes it TRACK the run branch, and `git rev-parse --verify
+  // --end-of-options`, which is what `resolveRef` runs, FOLLOWS a symref — so the comparison
+  // below returns equal forever, through any number of integration merges. Verified in a
+  // throwaway repository: the planted ref answered HEAD's sha before and after two commits moved
+  // HEAD. Detaching it later is `git symbolic-ref -d … && git update-ref … <victim tip>`, which
+  // is the same one line in a check that the bypass needed before this guard existed. So what
+  // this rules out is the naive create-at-the-victim-tip form and nothing more.
   //
   // The only thing that does is resolving HEAD SYMBOLICALLY, `git symbolic-ref --quiet HEAD`, so
   // the name never passes through git's abbreviation rules at all. That is a helper in
@@ -3116,11 +3125,16 @@ export async function runCli(argv, io = { out: console.log }) {
       //     iteration, and between one iteration and the next. Per-iteration shrinks that window
       //     to two git commands; it does not remove it. It bounds only the honest-race case —
       //     see the first bullet for the case it does not bound.
-      //   - The WORKTREE REMOVAL a few lines up rests on the pre-check snapshot, not on anything
-      //     re-read here. Whether a phase passed, and therefore whether its worktree is
-      //     `--force`-removed, was decided from `ctx` before the checks ran; only the branch
-      //     deletion is re-proved. That removal is irreversible too, and the fixture that stages
-      //     a mid-run move exercises exactly it: the worktree goes, and only the branch survives.
+      //   - The WORKTREE REMOVAL a few lines up is authorised by a verdict computed over
+      //     SNAPSHOT RANGES. Not by a stale verdict: `passedPhases` is built by actually running
+      //     this command's checks above, and the worktree list is re-read after them — a check
+      //     that exits non-zero makes the phase FAIL and its worktree is not removed at all. What
+      //     is snapshotted is what those checks measure. `runFilesetCheck` and
+      //     `runOwnershipCheck` read `ctx.anchorSha` and `ctx.runSha`, and the task branch shas
+      //     were resolved at derive time, so a task branch that moved since then is judged on the
+      //     range it used to span — and `git worktree remove --force` discards whatever is
+      //     uncommitted in that worktree regardless. Irreversible, and not re-proved the way the
+      //     deletion below now is.
       try {
         const runSha = await git.resolveRef(`refs/heads/${ctx.runBranch}`)
         const branchSha = await git.resolveRef(`refs/heads/${w.branch}`)
