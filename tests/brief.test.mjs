@@ -388,6 +388,17 @@ test('the scope, environment and claim rules render as one uninterrupted, verbat
   }
 })
 
+// The substring-plus-ordering assertions above pin that a fallback exists and where it sits,
+// but not the INSTRUCTION itself — the clause telling a teammate the workaround is expected and
+// a "blocked" report over it is not. That clause was entirely unasserted, so inverting it stayed
+// green. Reproduced by mutation: rewording 'that way is expected; reporting "blocked" over it is
+// not.' to 'that way is NOT expected; report status "blocked" over it instead of running the
+// gate.' left the whole suite passing while telling every implementer the opposite of what the
+// sentence exists to say. Line-anchored rather than folded into the SCOPE/ENVIRONMENT/CLAIMS
+// block-equality test below: that block is one contiguous span of fully static text, while this
+// clause sits inside verifyStep among lines that interpolate runId, task.id, planPath and
+// baseBranch — hardcoding that whole span would duplicate the fixture's dynamic values a second
+// time in this file for one clause, which is more surface to drift than the single anchor below.
 test('the brief names the script-file fallback for a shell that refuses the complete invocation', () => {
   for (const brief of [composeBrief(FULL), composeBrief({ ...FULL, caveman: 'full' })]) {
     const fallback = 'write the two lines to a file'
@@ -396,6 +407,12 @@ test('the brief names the script-file fallback for a shell that refuses the comp
       'the fallback must sit after the complete invocation')
     assert.ok(at(brief, fallback) < at(brief, 'ROOT must be the MAIN worktree'),
       'the fallback must sit before the ROOT must be the MAIN worktree line')
+    assert.match(brief, /^that way is expected; reporting "blocked" over it is not\.$/m,
+      'the fallback no longer says working around the refusal is expected, or the instruction was inverted')
+    for (const inverted of ['is NOT expected', 'instead of running the gate']) {
+      assert.ok(!brief.includes(inverted),
+        `the fallback instruction reads as inverted — found the phrase "${inverted}"`)
+    }
   }
 })
 
@@ -787,6 +804,24 @@ test('the brief quotes the run-branch/base-branch collision marker scripts/cli.m
   assert.match(rows.get(cannotVerify), /dispatch error/)
   assert.match(rows.get(cannotVerify), /nothing in your worktree produced it/)
   assert.ok(!rows.get(cliExitCode(cli, 'COMPLETE_REJECTED')).includes(marker))
+
+  // The row must hold whether or not THIS invocation carries --base at all: scripts/cli.mjs's
+  // own `brief` command reads `flags.base === true ? '' : (flags.base ?? '')` with no
+  // resolveBaseBranch fallback (cli.mjs:2411), so `cli.mjs brief` with no --base renders a
+  // complete line that omits the flag entirely, while the collision this row describes is still
+  // reachable through complete's own derived default. Reproduced by mutation: wording the row as
+  // "the --base value in this invocation named your own run branch" passed every assertion above
+  // (the marker, "dispatch error" and "nothing in your worktree produced it" are all still
+  // there) while being false in exactly that no-flag rendering — this is the assertion that
+  // catches it. Checked on both a with-base and a no-base brief because the row's own text is
+  // unconditional prose and must read the same in either.
+  for (const brief of [composeBrief(FULL), composeBrief({ ...FULL, baseBranch: '' })]) {
+    const noBaseRows = exitRows(brief)
+    assert.ok(
+      !noBaseRows.get(cannotVerify).includes('the --base value in this'),
+      'the collision row still presupposes an explicit --base flag is present in this invocation',
+    )
+  }
 })
 
 // The specific regression, stated as itself: no row may describe a gate rejection as the code

@@ -198,12 +198,17 @@ const verifyStep = (task, runId, planPath, baseBranch) => (runId && planPath ? [
   '             "could not run:" — a check whose kind this CLI has no runner for, such as an',
   '                "agent" review check, or a mistyped kind in the manifest. It never executed.',
   '                Nothing on your branch can change it, so do not try to make it pass.',
-  // Thrown when this very invocation's --base collides with the run branch — see the comment
-  // above verifyStep. Named here so a teammate reads it as a dispatch error, not something
-  // wrong in its own worktree that checking out a different branch would fix.
-  '             "the run branch and the base branch are both" — the --base value in this',
-  '                invocation named your own run branch. That is a dispatch error: the base and',
-  '                the run branch collided before this brief was ever composed. Report it and',
+  // Thrown when the base this invocation resolves to collides with the run branch — see the
+  // comment above verifyStep. Worded to hold whether that base arrived as an explicit --base
+  // above or was left to complete's own derived default: `cli.mjs brief` renders no --base at
+  // all when none was passed to it (scripts/cli.mjs:2411's `flags.base ?? ''`), so a row that
+  // presupposed the flag would be false exactly there. Named here so a teammate reads it as a
+  // dispatch error, not something wrong in its own worktree that checking out a different
+  // branch would fix.
+  '             "the run branch and the base branch are both" — the base this run resolved to',
+  '                (an explicit --base above, or complete\'s own derived default when none is',
+  '                shown) is the same as your own run branch. That is a dispatch error: the',
+  '                collision existed before this brief was ever composed. Report it and',
   '                proceed; nothing in your worktree produced it.',
   // Each quoted marker stays whole on its own line. Wrapped mid-phrase, the very string a
   // teammate would search its own output for does not appear in the brief that told it to.
