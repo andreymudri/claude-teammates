@@ -511,13 +511,13 @@ test('parallel-execution keeps a returned teammate’s worktree until its phase 
       // contradict the rule above it. `--force` is named and authorised for this one case: a
       // mid-stall worktree is exactly the one most likely to hold modified or untracked files a
       // bare remove refuses over, and discarding that work is the deliberate point.
-      /^The one exception is a task going to a fresh implementer instead of a resume, because resuming stalled: prune that task's worktree first, since prune-run only removes a worktree whose phase already recomputes to PASS and a mid-phase stall has none yet to rest that removal on — do it by hand with git worktree remove --force <path>, then git worktree prune; --force is required and authorised here, because a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over, and discarding that work is the deliberate point of abandoning it for a fresh implementer — because a returned teammate's worktree keeps its branch checked out and the new dispatch would otherwise fail with "already used by worktree"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover\.$/i,
+      /^The one exception is a task going to a fresh implementer instead of a resume, because resuming stalled: prune that task's worktree first, since prune-run only removes a worktree whose phase already recomputes to PASS and a mid-phase stall has none yet to rest that removal on — do it by hand with git worktree remove --force <path>, then git worktree prune; --force is required and authorised here, because a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over, and discarding that work is the deliberate point of abandoning it for a fresh implementer — that authorisation covers the teammate's unfinished work only, not a junction: --force still follows one out of the worktree and deletes its target, and nothing unlinks it first the way it does for a leaked preview, so check the worktree for one before forcing it — because a returned teammate's worktree keeps its branch checked out and the new dispatch would otherwise fail with "already used by worktree"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover\.$/i,
       // Reviewed: the command bullet states the same rule mechanically — it recomputes each
       // phase's gate and removes only worktrees whose phase passes — so it reinforces the claim
       // rather than qualifying it.
       /^Prune with the command rather than by hand:$/i,
       /^It recomputes each phase's gate, removes only this run's worktrees whose phase passes, sweeps every leaked merge-preview worktree under the system temp directory regardless of which run left it, and names every one it left alone and why\.$/i,
-      /^Without --yes it reports and removes nothing\.$/i,
+      /^Without --yes it removes nothing but prints the plan anyway\.$/i,
       // Reviewed: `--enforcement-only` documentation below. Neither sentence qualifies this
       // claim — the first only names `prune-run` as one of the two callers the flag speeds up,
       // the second reinforces the same "PASS resting on a skipped check is not prunable" guardrail
@@ -795,7 +795,7 @@ test('parallel-execution states --enforcement-only refuses a phase with no enfor
       // Reviewed: the fresh-implementer exception's own justification for hand-forcing a
       // worktree removal — an unrelated refusal (git's, on a dirty worktree) used to explain why
       // `--force` is authorised there, not a claim about this flag's exit-2 refusal.
-      /^The one exception is a task going to a fresh implementer instead of a resume, because resuming stalled: prune that task's worktree first, since prune-run only removes a worktree whose phase already recomputes to PASS and a mid-phase stall has none yet to rest that removal on — do it by hand with git worktree remove --force <path>, then git worktree prune; --force is required and authorised here, because a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over, and discarding that work is the deliberate point of abandoning it for a fresh implementer — because a returned teammate's worktree keeps its branch checked out and the new dispatch would otherwise fail with "already used by worktree"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover\.$/i,
+      /^The one exception is a task going to a fresh implementer instead of a resume, because resuming stalled: prune that task's worktree first, since prune-run only removes a worktree whose phase already recomputes to PASS and a mid-phase stall has none yet to rest that removal on — do it by hand with git worktree remove --force <path>, then git worktree prune; --force is required and authorised here, because a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over, and discarding that work is the deliberate point of abandoning it for a fresh implementer — that authorisation covers the teammate's unfinished work only, not a junction: --force still follows one out of the worktree and deletes its target, and nothing unlinks it first the way it does for a leaked preview, so check the worktree for one before forcing it — because a returned teammate's worktree keeps its branch checked out and the new dispatch would otherwise fail with "already used by worktree"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover\.$/i,
     ],
   })
 })
@@ -816,14 +816,14 @@ test('parallel-execution states --enforcement-only never authorises a prune on a
       // behaviour, for a PASS it computed itself — a different claim than this flag's guardrail
       // on a PASS resting on what the flag skipped.
       /^It recomputes each phase's gate, removes only this run's worktrees whose phase passes, sweeps every leaked merge-preview worktree under the system temp directory regardless of which run left it, and names every one it left alone and why\.$/i,
-      /^Without --yes it reports and removes nothing\.$/i,
+      /^Without --yes it removes nothing but prints the plan anyway\.$/i,
       // Reviewed: the worktree-pruning bullet's own removal instruction for the ordinary case of
       // a recorded PASS — again a different claim than this flag's guardrail.
       /^Once the phase has a recorded PASS, run prune-run to remove the worktree, not git worktree remove by hand — the command above already covers this case\.$/i,
       // Reviewed: the same bullet's fresh-implementer exception. A named, justified hand removal
       // for the one case prune-run cannot yet reach — again a different claim than this flag's
       // guardrail, which is about a PASS resting on what the flag itself skipped.
-      /^The one exception is a task going to a fresh implementer instead of a resume, because resuming stalled: prune that task's worktree first, since prune-run only removes a worktree whose phase already recomputes to PASS and a mid-phase stall has none yet to rest that removal on — do it by hand with git worktree remove --force <path>, then git worktree prune; --force is required and authorised here, because a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over, and discarding that work is the deliberate point of abandoning it for a fresh implementer — because a returned teammate's worktree keeps its branch checked out and the new dispatch would otherwise fail with "already used by worktree"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover\.$/i,
+      /^The one exception is a task going to a fresh implementer instead of a resume, because resuming stalled: prune that task's worktree first, since prune-run only removes a worktree whose phase already recomputes to PASS and a mid-phase stall has none yet to rest that removal on — do it by hand with git worktree remove --force <path>, then git worktree prune; --force is required and authorised here, because a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over, and discarding that work is the deliberate point of abandoning it for a fresh implementer — that authorisation covers the teammate's unfinished work only, not a junction: --force still follows one out of the worktree and deletes its target, and nothing unlinks it first the way it does for a leaked preview, so check the worktree for one before forcing it — because a returned teammate's worktree keeps its branch checked out and the new dispatch would otherwise fail with "already used by worktree"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover\.$/i,
     ],
   })
 })
@@ -843,10 +843,30 @@ test('parallel-execution makes prune-run the only supported cleanup', async () =
     /^node "\$CLAUDE_PLUGIN_ROOT\/scripts\/cli\.mjs" prune-run --run <runId> --plan <planPath> --root <project root> --yes$/,
     'the cleanup section must show the exact prune-run invocation the claim is about, and nothing else in the same block',
   )
+  // `assertCode` is `scope.code.find()` — it finds ONE matching block and says nothing about
+  // any others, so anchoring the pattern (above) closes the same-block sandwich but not a
+  // second, unpinned block placed anywhere else in the section: a hand-sweep block two blank
+  // lines below the real invocation still passes. The section may carry exactly one code block,
+  // full stop.
+  assert.equal(
+    cleanup.code.length,
+    1,
+    `the cleanup section must contain exactly one code block, found ${cleanup.code.length}`,
+  )
   assertClaim(cleanup, {
     label: 'cleanup command',
     claim: /^This is the only supported way to clean up after a phase\.$/i,
-    then: /It recomputes each phase's gate rather than reading status\.gates, removes only this run's worktrees whose phase passes, sweeps every leaked merge-preview worktree under the system temp directory regardless of which run left it/i,
+    // Anchored end to end, not a prefix: `assertClaim` exempts the `then` consequence from the
+    // subject inventory below (tests/md-contract.mjs:441-459 compares against `consequence`
+    // by identity, so the allow list can never see it), so an unanchored prefix match would
+    // leave the sentence's TAIL — including the ancestor-proof bound — pinned nowhere. This
+    // regex is the one and only place that bound is checked.
+    // Reviewed: the ancestor-proof bound. `git rev-parse --abbrev-ref HEAD` resolves the run
+    // branch BY NAME (scripts/git.mjs:147), and a teammate that plants a same-named tag plus a
+    // `refs/heads/heads/<name>` branch can make an unmerged branch read as contained — verified
+    // end to end (scripts/cli.mjs:3092-3117). Stated as the observable symptom, not the two
+    // known plant shapes, because an enumeration goes stale the moment a third exists.
+    then: /^It recomputes each phase's gate rather than reading status\.gates, removes only this run's worktrees whose phase passes, sweeps every leaked merge-preview worktree under the system temp directory regardless of which run left it — even one holding an operator's own uncommitted work — deletes each removed worktree's branch where git merge-base --is-ancestor proves it is already in the run branch — that proof holds only while the run branch's name is unambiguous, so before --yes confirm git rev-parse --abbrev-ref HEAD prints the run branch's plain name and not heads\/<name> or refs\/heads\/<name> — and names every worktree it leaves alone with the reason\.$/i,
     // Widened to match the sibling lock at :813 in this file: the behaviour claims themselves
     // ("removes only...", "sweeps every...", "deletes each...") are the substance of this
     // section, and the narrower `prune-run|by hand|...` lexicon alone does not reach a rewrite of
@@ -869,12 +889,6 @@ test('parallel-execution makes prune-run the only supported cleanup', async () =
       // junction hazard a bootstrap step in Worktree mechanics can leave behind, verified on
       // Windows at scripts/cli.mjs:1322-1326.
       /^This is irreversible on every prunable worktree, not only a leaked preview: git worktree remove --force runs whether or not a teammate's worktree still holds edits made after its branch merged, and --force follows a junction out of the worktree to its target instead of stopping at the boundary — verified on Windows, and exactly the shape a dependency install during bootstrap \(see "Worktree mechanics" below\) can leave behind; nothing unlinks it first the way a leaked preview's own links are unlinked, because that sweep runs only for previews:$/i,
-      // Reviewed: the ancestor-proof bound. `git rev-parse --abbrev-ref HEAD` resolves the run
-      // branch BY NAME (scripts/git.mjs:147), and a teammate that plants a same-named tag plus a
-      // `refs/heads/heads/<name>` branch can make an unmerged branch read as contained — verified
-      // end to end (scripts/cli.mjs:3092-3117). Stated as the observable symptom, not the two
-      // known plant shapes, because an enumeration goes stale the moment a third exists.
-      /^It recomputes each phase's gate rather than reading status\.gates, removes only this run's worktrees whose phase passes, sweeps every leaked merge-preview worktree under the system temp directory regardless of which run left it — even one holding an operator's own uncommitted work — deletes each removed worktree's branch where git merge-base --is-ancestor proves it is already in the run branch — that proof holds only while the run branch's name is unambiguous, so before --yes confirm git rev-parse --abbrev-ref HEAD prints the run branch's plain name and not heads\/<name> or refs\/heads\/<name> — and names every worktree it leaves alone with the reason\.$/i,
       // Reviewed: the corrected git facts. `git worktree remove` (no `--force`) refuses on
       // uncommitted work, so the hazard is `--force` reaching an unpassed worktree, not the bare
       // command; `git branch -D` refuses only a branch a registered worktree still holds
@@ -886,7 +900,7 @@ test('parallel-execution makes prune-run the only supported cleanup', async () =
       // than left to contradict the prohibition above it, `--force` named and authorised for this
       // one case (a mid-stall worktree is exactly the one most likely to refuse a bare remove),
       // and its pointer down to the matching exception in Worktree mechanics.
-      /^The one exception is a task going to a fresh implementer before its phase has passed: this command cannot reach that worktree yet, so it still has to be removed by hand with --force — authorised there because abandoning that teammate's unfinished worktree for a fresh dispatch is the deliberate point, and a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over — see the matching exception in "Worktree mechanics" below\.$/i,
+      /^The one exception is a task going to a fresh implementer before its phase has passed: this command cannot reach that worktree yet, so it still has to be removed by hand with --force — authorised there because abandoning that teammate's unfinished worktree for a fresh dispatch is the deliberate point, and a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over — and that authorisation covers the teammate's unfinished work only: --force still follows a junction out of the worktree the same way, and nothing unlinks it first there either, so check the worktree for one before forcing it — see the matching exception in "Worktree mechanics" below\.$/i,
       // Reviewed: the dry-run scoping. `renderPrunePlan` runs before the `--yes` check and shows
       // the prunable and leaked-preview lists either way (scripts/cli.mjs:3031-3037), but the
       // per-branch ancestor decision itself is at scripts/cli.mjs:3141, printed at :3149, both

@@ -190,8 +190,11 @@ against the run branch. The one exception is a task going to a fresh implementer
 phase has passed: this command cannot reach that worktree yet, so it still has to be removed
 by hand with `--force` — authorised there because abandoning that teammate's unfinished
 worktree for a fresh dispatch is the deliberate point, and a mid-stall worktree is exactly the
-one most likely to hold modified or untracked files a bare remove refuses over — see the
-matching exception in "Worktree mechanics" below.
+one most likely to hold modified or untracked files a bare remove refuses over — and that
+authorisation covers the teammate's unfinished work only: `--force` still follows a
+junction out of the worktree the same way, and nothing unlinks it first there either, so
+check the worktree for one before forcing it — see the matching exception in "Worktree
+mechanics" below.
 
 Without `--yes` it removes nothing and prints the same prunable and leaked-preview lists; the
 per-branch "left `<branch>` in place: not an ancestor" line is decided only while `--yes` runs
@@ -378,8 +381,8 @@ teammate automatically; a teammate never shares a worktree with another.
 
   It recomputes each phase's gate, removes only this run's worktrees whose phase passes, sweeps
   every leaked merge-preview worktree under the system temp directory regardless of which run
-  left it, and names every one it left alone and why. Without `--yes` it reports and removes
-  nothing.
+  left it, and names every one it left alone and why. Without `--yes` it removes nothing but
+  prints the plan anyway.
 - **Skip the slow part with `--enforcement-only`:**
 
       node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" prune-run --run <runId> --plan <planPath> --root <project root> --enforcement-only [--yes]
@@ -405,7 +408,10 @@ teammate automatically; a teammate never shares a worktree with another.
   `git worktree remove --force <path>`, then `git worktree prune`; `--force` is required and
   authorised here, because a mid-stall worktree is exactly the one most likely to hold modified
   or untracked files a bare remove refuses over, and discarding that work is the deliberate
-  point of abandoning it for a fresh implementer — because a returned teammate's worktree keeps
+  point of abandoning it for a fresh implementer — that authorisation covers the teammate's
+  unfinished work only, not a junction: `--force` still follows one out of the worktree and
+  deletes its target, and nothing unlinks it first the way it does for a leaked preview, so
+  check the worktree for one before forcing it — because a returned teammate's worktree keeps
   its branch checked out and the new dispatch would otherwise fail with "already used by
   worktree"; then restate the findings, the branch and the file set in its dispatch,
   because none of that survives the handover.
