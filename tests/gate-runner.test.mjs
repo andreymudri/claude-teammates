@@ -2324,8 +2324,12 @@ function previewCtx(overrides = {}) {
   }
 }
 
-const recordingExec = (calls, result = { code: 0, output: '' }) => async (cmd, cwd) => {
-  calls.push({ cmd, cwd })
+// `onSpawn` is captured alongside `cmd`/`cwd` so a call site can assert it is exactly `null`
+// outside a preview — `runCommandCheck` only builds a real claim writer when it is handed a
+// non-null `previewDir`, and a caller that wired the wrong value in either direction (a real
+// path where there should be none, or `null` where a preview really exists) shows up here.
+const recordingExec = (calls, result = { code: 0, output: '' }) => async (cmd, cwd, opts) => {
+  calls.push({ cmd, cwd, onSpawn: opts?.onSpawn ?? null })
   return result
 }
 
@@ -2479,6 +2483,9 @@ test('a solo run builds no merge preview and runs command checks against the pro
     assert.equal(results[0].status, 'pass')
   }
   assert.deepEqual(calls.map((c) => c.cwd), ['/project/root', '/project/root'])
+  // A solo run stands in the repository itself, not a preview: a claim written there is
+  // litter naming nothing the reaper reads, so `onSpawn` must never reach `exec` at all.
+  assert.deepEqual(calls.map((c) => c.onSpawn), [null, null])
 })
 
 test('a phase with no task branches passes the merge check and runs commands against the run tree', async () => {
@@ -2493,6 +2500,9 @@ test('a phase with no task branches passes the merge check and runs commands aga
   const results = await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], ctx)
   assert.deepEqual(results.map((r) => [r.name, r.status]), [['merge', 'pass'], ['test', 'pass']])
   assert.deepEqual(calls.map((c) => c.cwd), ['/project/root'])
+  // `path` is null here — nothing was merged — and null is not a preview: a claim written
+  // beside the run branch's own tree would name nothing the reaper reads either.
+  assert.deepEqual(calls.map((c) => c.onSpawn), [null])
 })
 
 test('a manifest entry claiming kind "merge" finds no runner and lands as pending, blocking the phase', async () => {
