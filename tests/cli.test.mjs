@@ -22,7 +22,7 @@ import {
   MAX_TASK_ID_BYTES,
   planSectionsRefusal,
 } from '../scripts/cli.mjs'
-import { previewOwnerMarkerPath } from '../scripts/merge-preview.mjs'
+import { previewOwnerMarkerPath, previewClaimPath } from '../scripts/merge-preview.mjs'
 import { renderRunSummary } from '../scripts/finish.mjs'
 import { PlanSectionError } from '../scripts/plan-sections.mjs'
 
@@ -8667,16 +8667,30 @@ test('livePreviewPaths reads the same sibling path the owner writes', async () =
 })
 
 // ---------------------------------------------------------------------------
-// The second kind of holder: a claim file sitting beside the owner marker, and the uid check
-// that keeps a claim from being plantable by another local user.
+// The second kind of holder: a claim file sitting beside the owner marker, vetted before it is
+// trusted rather than merely read.
+//
+// Every `stat` double below is deliberately platform-agnostic: it never calls
+// `process.getuid()` (which is undefined on win32 and would throw before the mechanism under
+// test ever ran, passing the assertion for the wrong reason or failing it for an unrelated one
+// — either way the mechanism goes unpinned on that platform). Production compares a claim's uid
+// against the PREVIEW DIRECTORY's owner uid, never against the reader's own, so a fixed
+// synthetic uid pins the same branches on every platform the suite runs on.
 // ---------------------------------------------------------------------------
+
+// An arbitrary uid the preview directory is "owned" by in these doubles, and a second, distinct
+// one for a claim planted by somebody else. Neither is tied to this test process's real uid —
+// the comparison under test is directory-owner-vs-claim, not reader-vs-claim — so a real uid
+// would only coincidentally, not reliably, differ from these.
+const OWNER_UID = 424242
+const FOREIGN_UID = 999999
 
 test('a preview whose owner is dead but whose claim is live is not reaped', async () => {
   const dir = path.join(tmpdir(), 'tm-preview-live')
   const live = await livePreviewPaths([dir], {
     read: async (p) => (p.endsWith('.4242') ? '4242\n' : '999999\n'),
     list: async () => [path.basename(previewOwnerMarkerPath(dir)), `${path.basename(previewOwnerMarkerPath(dir))}.4242`],
-    stat: async () => ({ uid: process.getuid() }),
+    stat: async () => ({ uid: OWNER_UID, isFile: () => true }),
     probe: (pid) => { if (pid !== 4242) { const e = new Error('no such process'); e.code = 'ESRCH'; throw e } },
   })
   assert.equal(live.has(dir), true)
@@ -8687,7 +8701,7 @@ test('a preview whose owner and every claim are dead is reaped', async () => {
   const live = await livePreviewPaths([dir], {
     read: async () => '999999\n',
     list: async () => [path.basename(previewOwnerMarkerPath(dir)), `${path.basename(previewOwnerMarkerPath(dir))}.999998`],
-    stat: async () => ({ uid: process.getuid() }),
+    stat: async () => ({ uid: OWNER_UID, isFile: () => true }),
     probe: () => { const e = new Error('no such process'); e.code = 'ESRCH'; throw e },
   })
   assert.equal(live.has(dir), false)
@@ -8701,7 +8715,7 @@ test('an unreadable claim file leaves the preview live', async () => {
       const e = new Error('permission denied'); e.code = 'EACCES'; throw e
     },
     list: async () => [`${path.basename(previewOwnerMarkerPath(dir))}.4242`],
-    stat: async () => ({ uid: process.getuid() }),
+    stat: async () => ({ uid: OWNER_UID, isFile: () => true }),
     probe: () => { const e = new Error('no such process'); e.code = 'ESRCH'; throw e },
   })
   assert.equal(live.has(dir), true)
@@ -8717,38 +8731,61 @@ test('a listing that fails leaves the preview live', async () => {
   assert.equal(live.has(dir), true)
 })
 
-// A claim's ownership guarantee: only a claim owned by THIS process's uid may keep a preview
-// alive. Without the uid comparison, either test below fails — the foreign-uid claim would keep
-// a dead-owner preview alive forever (a local denial-of-service via a planted claim file), and
-// dropping the comparison entirely would be indistinguishable from always honouring the claim,
-// which the second test alone cannot catch.
+// A claim's ownership guarantee: only a claim owned by the PREVIEW DIRECTORY's own uid may keep
+// a preview alive — never the reader's uid, which `sudo prune-run` runs as 0 while the
+// legitimate claimant does not. Without the uid comparison, or comparing against the wrong
+// operand, either test below fails: the foreign-uid claim would keep a dead-owner preview alive
+// forever (a local denial-of-service via a planted claim file), and dropping the comparison
+// entirely would be indistinguishable from always honouring the claim, which the second test
+// alone cannot catch. Windows-void, in the same breath as the production comment: Node's fs
+// reports uid 0 for every path on that platform, so a real foreign-uid claim there would read as
+// owned regardless of this test, which is why this pin uses a synthetic uid rather than the
+// process's real one — it pins the COMPARISON, not a guarantee this platform cannot keep.
 test('a claim owned by a different uid is ignored, even naming a live pid', async () => {
   const dir = path.join(tmpdir(), 'tm-preview-foreign-uid')
   const live = await livePreviewPaths([dir], {
     read: async (p) => {
-      if (!p.endsWith(`.${process.pid}`)) { const e = new Error('no such file'); e.code = 'ENOENT'; throw e }
-      return `${process.pid}\n`
+      if (!p.endsWith('.4242')) { const e = new Error('no such file'); e.code = 'ENOENT'; throw e }
+      return '4242\n'
     },
-    list: async () => [`${path.basename(previewOwnerMarkerPath(dir))}.${process.pid}`],
-    stat: async () => ({ uid: process.getuid() + 1 }),
+    list: async () => [`${path.basename(previewOwnerMarkerPath(dir))}.4242`],
+    stat: async (p) => (p === dir ? { uid: OWNER_UID, isFile: () => false } : { uid: FOREIGN_UID, isFile: () => true }),
     // Would report the preview live if the foreign-uid claim were honoured either way.
     probe: () => true,
   })
   assert.equal(live.has(dir), false)
 })
 
-test('a claim owned by the same uid still keeps a live pid live', async () => {
+test('a claim owned by the same uid as the preview directory still keeps a live pid live', async () => {
   const dir = path.join(tmpdir(), 'tm-preview-same-uid')
   const live = await livePreviewPaths([dir], {
     read: async (p) => {
-      if (!p.endsWith(`.${process.pid}`)) { const e = new Error('no such file'); e.code = 'ENOENT'; throw e }
-      return `${process.pid}\n`
+      if (!p.endsWith('.4242')) { const e = new Error('no such file'); e.code = 'ENOENT'; throw e }
+      return '4242\n'
     },
-    list: async () => [`${path.basename(previewOwnerMarkerPath(dir))}.${process.pid}`],
-    stat: async () => ({ uid: process.getuid() }),
+    list: async () => [`${path.basename(previewOwnerMarkerPath(dir))}.4242`],
+    stat: async () => ({ uid: OWNER_UID, isFile: () => true }),
     probe: () => true,
   })
   assert.equal(live.has(dir), true)
+})
+
+// A claim entry that is not a REGULAR FILE — a directory, a symlink, a fifo — is ignored even
+// when its uid matches, pinned on its own so dropping just the `isFile` half of the vetting
+// check (and keeping the uid half) cannot go unnoticed.
+test('a claim that is not a regular file is ignored even when its uid matches', async () => {
+  const dir = path.join(tmpdir(), 'tm-preview-not-a-file')
+  const live = await livePreviewPaths([dir], {
+    read: async (p) => {
+      if (!p.endsWith('.4242')) { const e = new Error('no such file'); e.code = 'ENOENT'; throw e }
+      return '4242\n'
+    },
+    list: async () => [`${path.basename(previewOwnerMarkerPath(dir))}.4242`],
+    stat: async () => ({ uid: OWNER_UID, isFile: () => false }),
+    // Would report the preview live if the non-regular claim were honoured either way.
+    probe: () => true,
+  })
+  assert.equal(live.has(dir), false)
 })
 
 test('a stat failure on a claim other than ENOENT leaves the preview live', async () => {
@@ -8756,7 +8793,10 @@ test('a stat failure on a claim other than ENOENT leaves the preview live', asyn
   const live = await livePreviewPaths([dir], {
     read: async () => { const e = new Error('no such file'); e.code = 'ENOENT'; throw e },
     list: async () => [`${path.basename(previewOwnerMarkerPath(dir))}.4242`],
-    stat: async () => { const e = new Error('permission denied'); e.code = 'EACCES'; throw e },
+    stat: async (p) => {
+      if (p === dir) return { uid: OWNER_UID, isFile: () => false }
+      const e = new Error('permission denied'); e.code = 'EACCES'; throw e
+    },
     probe: () => { const e = new Error('no such process'); e.code = 'ESRCH'; throw e },
   })
   assert.equal(live.has(dir), true)
@@ -8767,10 +8807,81 @@ test('a claim released before it could be stat-ed does not keep the preview live
   const live = await livePreviewPaths([dir], {
     read: async () => { const e = new Error('no such file'); e.code = 'ENOENT'; throw e },
     list: async () => [`${path.basename(previewOwnerMarkerPath(dir))}.4242`],
-    stat: async () => { const e = new Error('no such file'); e.code = 'ENOENT'; throw e },
+    stat: async (p) => {
+      if (p === dir) return { uid: OWNER_UID, isFile: () => false }
+      const e = new Error('no such file'); e.code = 'ENOENT'; throw e
+    },
     probe: () => { const e = new Error('no such process'); e.code = 'ESRCH'; throw e },
   })
   assert.equal(live.has(dir), false)
+})
+
+// The fifth fail-safe branch: the preview directory itself cannot be vetted against.
+test('a stat failure on the preview directory itself leaves the preview live', async () => {
+  const dir = path.join(tmpdir(), 'tm-preview-dir-eacces')
+  const live = await livePreviewPaths([dir], {
+    read: async () => { const e = new Error('no such file'); e.code = 'ENOENT'; throw e },
+    list: async () => [`${path.basename(previewOwnerMarkerPath(dir))}.4242`],
+    stat: async (p) => {
+      if (p === dir) { const e = new Error('permission denied'); e.code = 'EACCES'; throw e }
+      return { uid: OWNER_UID, isFile: () => true }
+    },
+    probe: () => { const e = new Error('no such process'); e.code = 'ESRCH'; throw e },
+  })
+  assert.equal(live.has(dir), true)
+})
+
+// A preview directory that is already gone (ENOENT) leaves nothing to vet a claim against, so
+// every candidate under it is ignored — not counted as unknown, not honoured either.
+test('a preview directory that no longer exists causes any claim under it to be ignored rather than trusted', async () => {
+  const dir = path.join(tmpdir(), 'tm-preview-dir-gone')
+  const live = await livePreviewPaths([dir], {
+    read: async () => { const e = new Error('no such file'); e.code = 'ENOENT'; throw e },
+    list: async () => [`${path.basename(previewOwnerMarkerPath(dir))}.4242`],
+    stat: async (p) => {
+      if (p === dir) { const e = new Error('no such file'); e.code = 'ENOENT'; throw e }
+      return { uid: OWNER_UID, isFile: () => true }
+    },
+    // Would report the preview live if the unverifiable claim were, wrongly, honoured.
+    probe: () => true,
+  })
+  assert.equal(live.has(dir), false)
+})
+
+// ---------------------------------------------------------------------------
+// End-to-end, no injected dependencies at all: the default `read`, `list`, `stat` and `probe`
+// bindings, exercised against a REAL preview directory, a REAL owner marker and a REAL claim
+// file. Every test above supplies its own doubles, so none of them ever calls the defaults —
+// these two are the only coverage those bindings have at all.
+// ---------------------------------------------------------------------------
+
+test('a real preview held by a real claim file survives even though its owner marker names a dead pid', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'tm-preview-realclaim-'))
+  const preview = path.join(scratch, 'preview')
+  await mkdir(preview)
+  try {
+    await writeFile(previewOwnerMarkerPath(preview), `${deadPid()}\n`, 'utf8')
+    await writeFile(previewClaimPath(preview, process.pid), `${process.pid}\n`, 'utf8')
+    const live = await livePreviewPaths([preview])
+    assert.equal(live.has(preview), true)
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
+test('a real preview whose owner marker and real claim both name dead pids is reaped', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'tm-preview-realclaim-dead-'))
+  const preview = path.join(scratch, 'preview')
+  await mkdir(preview)
+  try {
+    const dead = deadPid()
+    await writeFile(previewOwnerMarkerPath(preview), `${dead}\n`, 'utf8')
+    await writeFile(previewClaimPath(preview, dead), `${dead}\n`, 'utf8')
+    const live = await livePreviewPaths([preview])
+    assert.equal(live.has(preview), false)
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
 })
 
 test('prune-run leaves a preview whose marker names a running process', async () => {
