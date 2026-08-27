@@ -3341,6 +3341,125 @@ async function stagePrunableRun({ root, planPath, io, lines, git: g }, { merged 
   lines.length = 0
 }
 
+// A command check that runs WHILE `prune-run` is deciding. This is the only way to stage a
+// mid-run mutation of the refs the deletion rests on, and it is not a contrived one: `prune-run`
+// derives its context once, then runs every phase's checks — arbitrary shell commands, bounded at
+// fifteen minutes each by default and announced by this very command as the slow part — and only
+// then removes anything. Anything a check does to the repository lands in that gap.
+//
+// The check exits 0, so the phase still passes and the worktree is still prunable; otherwise the
+// test would prove nothing but that a failing gate prunes nothing.
+//
+// It is a bare `git …` line rather than a script file, and that is not cosmetic. A command check
+// runs with its cwd inside the MERGE PREVIEW worktree, not at the repository root, so a `node
+// scratch.mjs` written next to the manifest is simply not there — the first attempt at this
+// fixture failed the phase with "Cannot find module" and pruned nothing, which reads exactly like
+// correct behaviour. A linked worktree shares one ref store with the main one, so `git update-ref`
+// or `git tag` run from the preview lands on the same refs this command is about to read, with no
+// path to quote and nothing platform-specific in it.
+//
+// The manifest is written and NOT committed: the sha the command needs only exists after
+// `stagePrunableRun` has built the history, and a commit here would move the very tip the caller
+// just measured. Only an `ownership` check would notice the dirty file, and this manifest
+// declares none.
+async function stageMidRunCheck({ root }, run) {
+  await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+    phases: {
+      default: {
+        checks: [
+          { name: 'fileset', kind: 'fileset' },
+          { name: 'midrun', kind: 'command', run },
+        ],
+      },
+    },
+  }), 'utf8')
+}
+
+// `ctx.runSha` is captured by `derive` before any check runs. Proving containment against that
+// snapshot is proving something about a branch that may no longer be where it was — and the
+// consequence is a `-D`. Staged with a check that moves the run branch BACKWARD, past the merge
+// that carried T1: `git update-ref` is used rather than `git branch -f`, which git refuses for a
+// checked-out branch.
+test('prune-run --yes proves containment against the run branch as it stands, not as it stood when the run was derived', async () => {
+  await withRepo(async (ctx) => {
+    const { root, io, lines, git: g } = ctx
+    await stagePrunableRun(ctx)
+    // The first parent of the integration merge: the run branch immediately before T1 landed.
+    const preMerge = g(['rev-parse', 'run-branch~1']).trim()
+    await stageMidRunCheck(ctx, `git update-ref refs/heads/run-branch ${preMerge}`)
+    lines.length = 0
+    const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
+    assert.equal(code, 0)
+    assert.equal(g(['rev-parse', 'refs/heads/run-branch']).trim(), preMerge, 'the check really did move the run branch')
+    // The worktree still goes; it is the branch that must survive, because the run branch as it
+    // now stands reaches none of its commits.
+    assert.equal(hasWorktree(root, 'a1'), false)
+    assert.equal(hasBranch(root, 'teammates/r1/T1'), true)
+    assert.match(lines.join('\n'), /left teammates\/r1\/T1 in place/)
+    assert.doesNotMatch(lines.join('\n'), /deleted teammates\/r1\/T1/)
+  })
+})
+
+// The same gap, used for the other half of the pair: not moving the run branch but SHADOWING it.
+// A tag planted after `derive` has read the branch name makes a bare `run-branch` resolve to the
+// attacker's commit, so an ancestry question asked on the name — rather than on the sha
+// `refs/heads/run-branch` holds — is answered by the tag.
+test('prune-run --yes is not fooled by a tag on the run branch planted while the run is in flight', async () => {
+  await withRepo(async (ctx) => {
+    const { root, io, lines, git: g } = ctx
+    await stagePrunableRun(ctx, { merged: false })
+    // The tag points at T1's own unmerged tip, which trivially contains itself.
+    const tip = g(['rev-parse', 'refs/heads/teammates/r1/T1']).trim()
+    await stageMidRunCheck(ctx, `git tag run-branch ${tip}`)
+    lines.length = 0
+    const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
+    assert.equal(code, 0)
+    assert.equal(g(['rev-parse', 'refs/tags/run-branch']).trim(), tip, 'the check really did plant the tag')
+    // The worktree really was pruned, so the deletion arm really was reached — without this the
+    // assertions below would also hold on a run that pruned nothing at all.
+    assert.equal(hasWorktree(root, 'a1'), false)
+    assert.equal(hasBranch(root, 'teammates/r1/T1'), true)
+    assert.match(lines.join('\n'), /left teammates\/r1\/T1 in place/)
+    assert.doesNotMatch(lines.join('\n'), /deleted teammates\/r1\/T1/)
+  })
+})
+
+// The run branch's own NAME is abbreviation-derived — `git rev-parse --abbrev-ref HEAD` shortens
+// only as far as stays unambiguous — so three ordinary refs, all creatable by an unprivileged
+// teammate in its own worktree, make it answer `refs/heads/run-branch`; the CLI then prefixes
+// `refs/heads/` again and reads the sha out of a ref the planter owns. The enabling defect
+// predates this task, and a stray tag on its own already fails closed. What is new is that this
+// command now runs `git branch -D` on the strength of that sha, so the name is cross-checked
+// against HEAD before anything is derived from it.
+test('prune-run refuses to act when the branch name git abbreviates HEAD to does not resolve back to HEAD', async () => {
+  await withRepo(async (ctx) => {
+    const { root, io, lines, git: g } = ctx
+    await stagePrunableRun(ctx, { merged: false })
+    const tip = g(['rev-parse', 'refs/heads/teammates/r1/T1']).trim()
+    // 1. a tag named like the run branch: --abbrev-ref now answers `heads/run-branch`.
+    g(['tag', 'run-branch', 'main'])
+    // 2. a branch literally named `heads/run-branch`: it now answers `refs/heads/run-branch`.
+    g(['branch', 'heads/run-branch', 'main'])
+    // 3. the ref that name lands on once `refs/heads/` is prefixed, holding a commit of the
+    //    planter's choosing — here T1's own unmerged tip, which would make T1 look contained.
+    g(['update-ref', 'refs/heads/refs/heads/run-branch', tip])
+    assert.equal(g(['rev-parse', '--abbrev-ref', 'HEAD']).trim(), 'refs/heads/run-branch', 'the plant really did redirect the name')
+    lines.length = 0
+    const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
+    assert.equal(hasBranch(root, 'teammates/r1/T1'), true)
+    assert.equal(hasWorktree(root, 'a1'), true)
+    // Fails closed WITH A STATED REASON, and that is what this pins. Measured with the
+    // cross-check disabled, this fixture does not lose the branch: the phase gate rejects it
+    // downstream, because a fileset check computed against a run branch nothing was merged into
+    // finds nothing landed, so no phase passes and nothing is prunable. The run then exits 0
+    // saying "nothing to prune" — a silent pass on a repository whose run branch is a ref the
+    // planter chose. This guard is the layer that says so instead, ahead of a downstream refusal
+    // that only holds while the planted sha happens to be one the gate dislikes.
+    assert.equal(code, 4)
+    assert.match(lines.join('\n'), /cannot decide what is prunable: HEAD is [0-9a-f]{40}, but refs\/heads\/refs\/heads\/run-branch/)
+  })
+})
+
 test('prune-run --yes deletes a pruned task branch that is merged into the run branch', async () => {
   await withRepo(async (ctx) => {
     const { root, io, lines } = ctx
@@ -3348,7 +3467,11 @@ test('prune-run --yes deletes a pruned task branch that is merged into the run b
     const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
     assert.equal(code, 0)
     assert.equal(hasWorktree(root, 'a1'), false)
-    assert.match(lines.join('\n'), /deleted teammates\/r1\/T1/)
+    // BOTH shas, in full. After `-D` the branch reflog is gone, `deleteBranch` swallows git's own
+    // "Deleted branch … (was <abbrev>)", and the worktree that held the other reflog was
+    // force-removed a moment earlier — so this line is the only surviving handle for
+    // `git branch <name> <sha>`, and an assertion that stops at the name would not notice it go.
+    assert.match(lines.join('\n'), /deleted teammates\/r1\/T1 \([0-9a-f]{40}\), which run-branch \([0-9a-f]{40}\) contains/)
     assert.equal(hasBranch(root, 'teammates/r1/T1'), false)
   })
 })
