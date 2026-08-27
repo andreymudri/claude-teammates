@@ -612,3 +612,29 @@ test('withMergePreview writes the owner marker naming its own pid', async () => 
   assert.equal(contents, `${process.pid}\n`)
   assert.equal(readWhileDirExisted, true, 'the marker must be readable while the preview directory still exists')
 })
+
+// The write is placed on the first line INSIDE withMergePreview's `try`, specifically so a
+// refused write still reaches the `finally` that removes the preview directory. Nothing above
+// drives that placement through withMergePreview itself — the writeOwnerMarker tests exercise
+// the helper in isolation. `makeTempDir` lets this test hand withMergePreview a directory that
+// already has a marker collision planted at it, deterministically, without monkey-patching
+// node:fs/promises or racing the real mkdtemp.
+test('a marker write that fails still removes the preview directory the seam handed it', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-preview-'))
+  const marker = previewOwnerMarkerPath(dir)
+  // Planted before withMergePreview ever runs, at the exact path it will try to write.
+  await writeFile(marker, 'planted-before-withMergePreview\n', 'utf8')
+  const git = fakeGit()
+  await assert.rejects(
+    () => withMergePreview({
+      git, base: 'main', branches: ['T1'],
+      makeTempDir: async () => dir,
+      run: async () => {},
+    }),
+    (err) => err.code === 'EEXIST',
+  )
+  assert.equal(
+    existsSync(dir), false,
+    'the preview directory the seam handed in must not be stranded when the marker write fails',
+  )
+})

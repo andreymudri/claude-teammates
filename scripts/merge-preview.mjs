@@ -94,7 +94,16 @@ export async function writeOwnerMarker(marker, pid) {
 // in-repo worktree is untracked, so `git status --porcelain` reports it and the ownership
 // check reads the main worktree as dirty for the whole run — the deadlock that cost run
 // `fixloop` an entire phase gate.
-export async function withMergePreview({ git, base, branches = [], link = [], repoRoot, run }) {
+export async function withMergePreview({
+  git, base, branches = [], link = [], repoRoot, run,
+  // Injectable so a test can hand withMergePreview a directory it already controls — with a
+  // marker collision already planted at previewOwnerMarkerPath(dir) — without monkey-patching
+  // node:fs/promises or racing the real mkdtemp. The same seam livePreviewPaths in
+  // scripts/cli.mjs already takes for read/list/stat/probe, and for the same reason: some
+  // branches cannot be staged end to end without one. Production never passes this; the default
+  // is the only path it takes.
+  makeTempDir = () => mkdtemp(path.join(tmpdir(), 'tm-preview-')),
+}) {
   // Validated before the worktree exists, so a bad manifest costs nothing.
   const invalid = validateLinkPaths(link)
   if (invalid) throw new Error(invalid)
@@ -106,7 +115,7 @@ export async function withMergePreview({ git, base, branches = [], link = [], re
     throw new Error('merge preview cannot resolve preview.link entries: no repoRoot was given')
   }
   if (branches.length === 0) return run({ path: null, merged: [] })
-  const dir = await mkdtemp(path.join(tmpdir(), 'tm-preview-'))
+  const dir = await makeTempDir()
   // Claimed BEFORE the worktree is added, because git registers the worktree at the start of the
   // add and not at its end (see previewOwnerMarkerPath). Inside the `try`, so a write that fails
   // still reaches the `finally` that cleans the directory up.
