@@ -81,13 +81,13 @@ test('timeoutMs at the ceiling itself is accepted, not just one below it', async
 })
 
 test('a malformed timeoutMs fails its entry and never falls back to the default', async () => {
-  for (const bad of ['600000', 0, -1, 1.5, null, true, 500, 60 * 60_000 + 1]) {
+  for (const bad of ['600000', 0, -1, 1.5, null, true, 60 * 60_000 + 1]) {
     const results = await runChecks(
       [{ name: 'test', kind: 'command', run: 'true', timeoutMs: bad }],
       { cwd: process.cwd(), solo: true, exec: async () => { throw new Error('the check must not run') } },
     )
     assert.equal(results[0].status, 'fail', `timeoutMs ${JSON.stringify(bad)} should not have run`)
-    assert.match(results[0].output, /timeoutMs must (?:be a positive integer|not exceed|be at least)/)
+    assert.match(results[0].output, /timeoutMs must (?:be a positive integer|not exceed)/)
     assert.match(results[0].output, /entry #0 in this phase's check list/)
   }
 })
@@ -1298,6 +1298,27 @@ test('a filtered check list still reports the manifest position of a malformed e
 })
 // The no-positions fallback — an unfiltered list's own index IS the manifest position — needs no
 // test of its own here: the nameless-entry test above supplies no positions and asserts #0 and #2.
+
+// The malformed-timeoutMs path builds its result through `manifestPosition(ctx, index)` too, and
+// nothing above exercises that with a non-trivial `checkPositions`: every timeoutMs test in this
+// file hands `runChecks` a ctx with no positions, where `manifestPosition` degenerates to the
+// bare `index` and cannot tell the two apart. `gate --no-fleet` keeps command checks (unlike
+// `--enforcement-only`, which filters them out) and can still filter OTHER checks ahead of one,
+// so this offset is reachable in production the same way the kind path's is above.
+test('a filtered check list still reports the manifest position of a malformed timeoutMs entry', async () => {
+  // Manifest = [tests(command), lint(command), <malformed timeoutMs, no name>, fileset]; the two
+  // well-formed command checks are filtered out ahead of it, so the malformed entry sits at
+  // list index 0 but manifest index 2. Nameless on purpose, so the fallback name pins the
+  // position too, the same way the kind-path test above does.
+  const results = await runChecks(
+    [{ kind: 'command', run: 'true', timeoutMs: 0 }, { name: 'fileset', kind: 'fileset' }],
+    { cwd: process.cwd(), checkPositions: [2, 3], exec: async () => { throw new Error('the check must not run') } },
+  )
+  assert.equal(results[0].status, 'fail')
+  assert.match(results[0].output, /entry #2 in this phase's check list/)
+  assert.doesNotMatch(results[0].output, /entry #0 in this phase's check list/)
+  assert.equal(results[0].name, "entry #2 in this phase's check list")
+})
 
 // The `JSON.stringify` fallback in `malformedKindResult`. Unreachable from `teammates.gate.json`,
 // which is `JSON.parse`-only — every shape that file can express serialises. It guards the
@@ -3118,7 +3139,7 @@ test('a timed-out command check kills the whole process group, not just the shel
   try {
     assert.equal(await waitForExit(pid, 6_000), true, 'the grandchild outlived the timeout, so only the shell was killed')
     assert.notEqual(code, 0)
-    assert.match(output, /timed out after 0s; its process group was killed/)
+    assert.match(output, /timed out after 300ms; its process group was killed/)
   } finally {
     // A failing run has left a live `sleep` behind; it is this test's to clean up.
     killPid(pid)
@@ -3167,7 +3188,7 @@ test('a timed-out command check is a fail carrying its reason, never a pass', { 
   assert.equal(result.status, 'fail', `a suite killed by the timeout must not read as a pass: ${JSON.stringify(result)}`)
   assert.notEqual(result.exitCode, 0)
   assert.match(result.output, /coverage written/)
-  assert.match(result.output, /timed out after 0s; its process group was killed/)
+  assert.match(result.output, /timed out after 300ms; its process group was killed/)
 })
 
 test('a check that ignores SIGTERM is SIGKILLed when the grace expires', { skip: POSIX_ONLY, timeout: 20_000 }, async () => {
@@ -3192,7 +3213,7 @@ test('a check that ignores SIGTERM is SIGKILLed when the grace expires', { skip:
     assert.match(kid, /^\d+$/, `the command did not report its child pid: ${JSON.stringify(kid)}`)
     assert.equal(await waitForExit(kid, 5_000), true, 'a SIGTERM-ignoring child outlived the gate, so the grace SIGKILL never landed')
     assert.notEqual(code, 0)
-    assert.match(output, /timed out after 0s; its process group was killed/)
+    assert.match(output, /timed out after 400ms; its process group was killed/)
   } finally {
     if (kid) killPid(kid)
     await rm(dir, { recursive: true, force: true })
@@ -3242,7 +3263,7 @@ test('a timed-out check settles on the kill, not on pipes a grandchild escaped t
     assert.notEqual(code, 0)
     // The output collected before the kill still reaches the caller.
     assert.match(output, /ESCAPED=\d+/)
-    assert.match(output, /timed out after 1s; its process group was killed/)
+    assert.match(output, /timed out after 900ms; its process group was killed/)
   } finally {
     if (pid) killPid(pid)
   }
@@ -3467,7 +3488,7 @@ test('a member that survives the SIGTERM is still SIGKILLed at the grace, though
     // the gate open for the full five-second default after it had already reported.
     assert.equal(armedTimers(), before, 'the surviving grace was left holding the event loop open, so a check that has reported its verdict still delays the gate')
     assert.notEqual(code, 0)
-    assert.match(output, /timed out after 0s; its process group was killed/)
+    assert.match(output, /timed out after 400ms; its process group was killed/)
     // The note above is the spec's wording (docs/specs/2026-08-26-purge-and-teardown-design.md)
     // and this is what has to make it true: the SIGKILL the grace was armed for still lands,
     // graceMs after the note was written. What no wording can promise is a member that left the
@@ -3942,7 +3963,7 @@ test('the per-call retirement latch withholds nothing from a group that is still
     assert.equal(aimedAtTheGroup[0]?.sig, 'SIGTERM', `the latch withheld the timeout's SIGTERM from a group that was still this call's own: ${JSON.stringify(aimedAtTheGroup)} — a gate that signals nothing is not a safer gate, it is one that leaves every timed-out suite running`)
     assert.deepEqual(aimedAtTheGroup.filter((s) => !s.registered), [], `a signal was sent after the pid stopped being registered: ${JSON.stringify(aimedAtTheGroup)}`)
     assert.notEqual(code, 0)
-    assert.match(output, /timed out after 0s; its process group was killed/)
+    assert.match(output, /timed out after 200ms; its process group was killed/)
     // THE SETUP, DIAGNOSED BEFORE THE STRONGER HALF IS ASKED FOR. The grace SIGKILL is only
     // reachable if the member SURVIVES the SIGTERM, which needs `trap '' TERM` to have run
     // inside the 200ms window — and at 48 busy loops pinned to one core the shell does not get
@@ -4021,7 +4042,7 @@ test('a retired pid is never signalled again, even when the probe says something
     assert.deepEqual(signalledAfterRetirement, [], `signalled a pid this module had already retired: ${JSON.stringify(signalledAfterRetirement)} — the probe cannot save it, because a reused pgid answers the probe exactly as our own group would`)
     // The timer path really did run, which is what stops the assertion above being vacuous: the
     // note only reaches the output through the timeout, and the grace ran behind it.
-    assert.match(output, /timed out after 1s; its process group was killed/)
+    assert.match(output, /timed out after 700ms; its process group was killed/)
     assert.notEqual(code, 0)
     // Needed only for cleanup, so its absence is reported rather than thrown — and what it
     // reports is a WEAKER RUN, not a defect: with no escapee, the retirement observed above came
@@ -4066,7 +4087,7 @@ test('a group whose leader has exited but whose members are still running is kil
     assert.match(kid, /^\d+$/, `the command did not report its child pid: ${JSON.stringify(kid)}`)
     assert.equal(await waitForExit(kid, 5_000), true, 'the kill never reached a group whose leader had exited, so a member of a still-reserved pgid outlived the gate')
     assert.notEqual(code, 0)
-    assert.match(output, /timed out after 1s; its process group was killed/)
+    assert.match(output, /timed out after 600ms; its process group was killed/)
   } finally {
     if (kid) killPid(kid)
     await rm(dir, { recursive: true, force: true })

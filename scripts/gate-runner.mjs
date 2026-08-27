@@ -402,10 +402,15 @@ export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn 
     // which genuinely finished 0 in the race between the timer firing and `close` is reported as
     // a fail — for a gate, that is failing closed, which is the direction to be wrong in.
     const resolveTimedOut = (code) => settle(() => {
-      const seconds = Math.round(timeoutMs / 1000)
+      // Whole seconds at a second or more; the exact millisecond count below that. Rounding to
+      // seconds for the whole domain reports EVERY bound under 500ms as "0s" and everything from
+      // 500ms to 999ms as "1s" — both wrong, and `timeoutMs` is a manifest-validated value with
+      // no floor of its own (see `timeoutFault`), so a sub-second bound is a real value this
+      // notice has to be able to name.
+      const notice = timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)}s` : `${timeoutMs}ms`
       resolve({
         code: code || 1,
-        output: `${output}\n— timed out after ${seconds}s; its process group was killed`,
+        output: `${output}\n— timed out after ${notice}; its process group was killed`,
       })
     })
 
@@ -615,29 +620,24 @@ function malformedKindResult(check, index) {
 // 60 minutes. A manifest may lower the default; it may not raise it past here.
 const TIMEOUT_CEILING_MS = 60 * 60_000
 
-// A floor, not just a ceiling. `defaultExec`'s timeout notice reports whole seconds
-// (`Math.round(timeoutMs / 1000)`), and every value below 500ms rounds to `0` — "timed out
-// after 0s" tells the operator nothing about how long the check actually ran. The other way to
-// close that gap is to report the notice in milliseconds instead, but that wording is already
-// pinned at whole seconds by tests this bound cannot see: the `defaultExec` tests below call it
-// directly with their own `timeoutMs`, bypassing `timeoutFault` entirely, so changing the notice
-// would touch a class of caller a floor here does not reach. A floor on the manifest path is the
-// narrower fix.
-const TIMEOUT_FLOOR_MS = 1000
-
 // `timeoutMs` is read off an entry of a file any teammate can write, and `validateGate` in
 // scripts/config.mjs checks only that `phases[*].checks` is an ARRAY — the same hole
 // `hasUsableKind` exists to plug, so this takes the same answer: diagnose the entry and
 // fail it. It must never fall back to the default, because a silent fallback is exactly
 // how an edit that disables the bound would look like a bound that held.
+//
+// NO FLOOR, by design — docs/specs/2026-08-26-purge-and-teardown-design.md defines the accepted
+// domain as "a positive integer no greater than a hard 60-minute ceiling", and a sub-second
+// bound is a valid value in that domain, not a defect in this function. What used to look like a
+// defect in a sub-second bound was `defaultExec`'s timeout notice rounding to whole seconds and
+// reporting "timed out after 0s" — fixed at its source instead, in `resolveTimedOut`, which is
+// where every caller of `defaultExec` reaches it, not just the manifest path through this
+// function.
 export function timeoutFault(check) {
   const value = check?.timeoutMs
   if (value === undefined) return null
   if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
     return `timeoutMs must be a positive integer of milliseconds, got ${JSON.stringify(value)}`
-  }
-  if (value < TIMEOUT_FLOOR_MS) {
-    return `timeoutMs must be at least ${TIMEOUT_FLOOR_MS} (1 second), got ${value}`
   }
   if (value > TIMEOUT_CEILING_MS) {
     return `timeoutMs must not exceed ${TIMEOUT_CEILING_MS} (60 minutes), got ${value}`
