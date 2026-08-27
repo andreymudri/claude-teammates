@@ -15,7 +15,11 @@ Two things are settled before the first task and shape several of them:
    `skills/finishing-a-development-branch/SKILL.md:92` and `skills/parallel-execution/SKILL.md:180`
    are answered by rewriting those sentences to describe symbolic resolution, not by adding the
    validity-window clause the reviewers suggested for a world where the hazard stays open.
-2. **The operator feedback from this run is in scope.** Sub-agent work shipped defects and
+2. **Task 1 was absorbed into Task 7 mid-run, on 2026-08-27**, after phase 1 had already run.
+   The symbolic-resolution change and the `tests/cli.test.mjs` fixture it invalidates cannot be
+   separated into two phases — see the note under Task 7 for the measurement. The work committed
+   as `89a2853` on `teammates/purgefix/T1` is preserved and Task 7 starts from that branch.
+3. **The operator feedback from this run is in scope.** Sub-agent work shipped defects and
    overconfident claims that only surfaced two or three review rounds later; changes were made
    from stale or over-inferred context; and long stretches were burned attempting `sudo`,
    `pkexec` and interactive 2FA from a shell that cannot prompt. Those are dispatch-time
@@ -69,121 +73,6 @@ discipline before it starts rather than after three review rounds.
 
 ---
 
-### Task 1: resolve the run branch's name symbolically
-
-**Files:**
-- Modify: `scripts/git.mjs`
-- Test: `tests/git.test.mjs`
-
-- [ ] **Step 1:** In `scripts/git.mjs`, add `currentBranchRef()` to the object `createGit`
-  returns, immediately above the existing `currentBranch()` at line 146. It uses `runRaw`, not
-  `run`, because a detached HEAD is an ordinary state that must come back as a value rather
-  than as a thrown `GitError`:
-
-      // HEAD RESOLVED SYMBOLICALLY, never through git's abbreviation rules. `git rev-parse
-      // --abbrev-ref HEAD` shortens only as far as stays UNAMBIGUOUS: plant a tag named like
-      // the run branch and it answers `heads/<name>`; add a branch literally named
-      // `heads/<name>` on top and it answers `refs/heads/<name>`. Every caller then prefixes
-      // `refs/heads/`, so that last one resolves `refs/heads/refs/heads/<name>` — an ordinary
-      // ref an unprivileged teammate can create in its own worktree, and thereby choose the sha
-      // a whole run treats as the run branch. `symbolic-ref` reads the ref HEAD literally
-      // points at and abbreviates nothing, so no ref any third party can create changes its
-      // answer.
-      //
-      // `--quiet` is what makes a detached HEAD a value: it exits 1 with EMPTY stdout and EMPTY
-      // stderr rather than writing a diagnostic, so an empty stderr on a non-zero exit is
-      // detachment and anything else is a real failure that still throws.
-      async currentBranchRef() {
-        const { code, stdout, stderr } = await runRaw(['symbolic-ref', '--quiet', 'HEAD'])
-        if (code === 0) return stdout.trim()
-        if (stderr.trim() === '') return null
-        throw new GitError(describeGitFailure(['symbolic-ref', '--quiet', 'HEAD'], code, stderr))
-      },
-
-- [ ] **Step 2:** In the same file, reimplement `currentBranch()` over it, replacing the
-  `rev-parse --abbrev-ref HEAD` body at line 147:
-
-      // The short name, taken off the SYMBOLIC ref rather than from abbreviation — see
-      // `currentBranchRef`. The name and `refs/heads/<name>` therefore round-trip by
-      // construction: the prefix every caller adds lands back on the ref HEAD actually points
-      // at, whatever else exists in the ref namespace.
-      //
-      // `'HEAD'` on a detached HEAD is the PRESERVED CONTRACT of the old `--abbrev-ref` form,
-      // not an accident. `derive` reads that value, prefixes it, finds `refs/heads/HEAD` is not
-      // a ref and refuses with a stated reason; `scripts/cli.mjs`'s init-run and map paths
-      // compare it against the base branch name and tolerate it. Returning null or throwing
-      // here would change all three at once, for a state every one of them already handles.
-      async currentBranch() {
-        const ref = await this.currentBranchRef()
-        return ref === null ? 'HEAD' : ref.replace(/^refs\/heads\//, '')
-      },
-
-- [ ] **Step 3:** `currentBranch()` now calls a sibling method, so it must not be destructured
-  away from the object. Grep for `const { currentBranch }` and any other destructuring of the
-  `createGit` result across `scripts/` and `tests/`; if any exists, capture the object first and
-  call the method on it. Report `blocked` rather than widening your file set if a call site
-  outside these two files has to change.
-
-- [ ] **Step 4:** Replace the test at `tests/git.test.mjs:154` (`currentBranch trims the
-  abbreviated ref`). The fake `exec` there returns a fixed stdout; the new tests need `code`,
-  `stdout` and `stderr`. Write four:
-
-      test('currentBranchRef returns the ref HEAD symbolically points at', async () => {
-        const calls = []
-        const exec = async (args) => {
-          calls.push(args)
-          return { code: 0, stdout: 'refs/heads/run-branch\n', stderr: '' }
-        }
-        assert.equal(await createGit({ exec }).currentBranchRef(), 'refs/heads/run-branch')
-        assert.deepEqual(calls[0], ['symbolic-ref', '--quiet', 'HEAD'])
-      })
-
-      test('currentBranchRef answers null on a detached HEAD rather than throwing', async () => {
-        const exec = async () => ({ code: 1, stdout: '', stderr: '' })
-        assert.equal(await createGit({ exec }).currentBranchRef(), null)
-      })
-
-      test('currentBranchRef throws when symbolic-ref fails for a reason that is not detachment', async () => {
-        const exec = async () => ({ code: 128, stdout: '', stderr: 'fatal: not a git repository\n' })
-        await assert.rejects(() => createGit({ exec }).currentBranchRef(), GitError)
-      })
-
-      test('currentBranch strips refs/heads/ and reports HEAD when detached', async () => {
-        const named = async () => ({ code: 0, stdout: 'refs/heads/run-branch\n', stderr: '' })
-        assert.equal(await createGit({ exec: named }).currentBranch(), 'run-branch')
-        const detached = async () => ({ code: 1, stdout: '', stderr: '' })
-        assert.equal(await createGit({ exec: detached }).currentBranch(), 'HEAD')
-      })
-
-  Import `GitError` in `tests/git.test.mjs` if it is not already imported.
-
-- [ ] **Step 5:** Add the end-to-end test that the three-ref plant no longer redirects the name.
-  This is the finding's own reproduction, inverted into a regression test. If
-  `tests/git.test.mjs` has no real-repository helper, build a throwaway repo with `mkdtemp` and
-  raw `execFileSync('git', …)` calls inside the test:
-
-      test('a tag, a heads/<name> branch and refs/heads/refs/heads/<name> do not redirect the resolved name', async () => {
-        // The exact plant from the followups document: three ordinary ref writes, each of which
-        // an unprivileged teammate can make in its own worktree. Under `--abbrev-ref` they made
-        // HEAD's name answer `refs/heads/run-branch`, so `refs/heads/` + that name landed on the
-        // planted ref. `symbolic-ref` reads HEAD itself, so all three are inert.
-        // ... stage a repo on branch `run-branch`, then:
-        //   git tag run-branch <sha>
-        //   git branch heads/run-branch <sha>
-        //   git update-ref refs/heads/refs/heads/run-branch <other sha>
-        // assert `git rev-parse --abbrev-ref HEAD` really does answer `refs/heads/run-branch`
-        // (the plant works against the OLD resolution), and that currentBranch() answers
-        // `run-branch` and currentBranchRef() answers `refs/heads/run-branch` anyway.
-      })
-
-  Write the body out in full; the comment above is the shape, not the code.
-
-- [ ] **Step 6:** Run `npm test`. `tests/cli.test.mjs` has two fixtures that assert on the old
-  resolution — the three-ref plant at `tests/cli.test.mjs:3469` and possibly the detached-HEAD
-  fixture at `:3452`. Those files are **not yours**. If they go red, record the exact failing
-  test names and their output in your `summary`; do not touch them. Task 7 owns them.
-
----
 
 ### Task 2: refuse a planted merge-preview owner marker instead of writing through it
 
@@ -631,16 +520,46 @@ discipline before it starts rather than after three review rounds.
 
 ---
 
-### Task 7: say what the run branch resolution now guarantees
+### Task 7: resolve the run branch symbolically, and say what that now guarantees
 
 **Files:**
+- Modify: `scripts/git.mjs`
+- Test: `tests/git.test.mjs`
 - Modify: `scripts/cli.mjs`
 - Test: `tests/cli.test.mjs`
 
-**Depends:** T1, T6
+**Depends:** T6
+
+This task absorbed what was Task 1. The two are one unit of work and could not be split: the
+change to `scripts/git.mjs` turns `tests/cli.test.mjs:3476` red by construction, and only a tree
+that already carries that change can correct the fixture — so a separate earlier task could never
+recompute to PASS, and a separate later task could never see the change until the earlier one had
+integrated. Circular either way. The measured proof is on `teammates/purgefix/T1`: with
+`89a2853` alone the suite is 2051 tests | 2047 pass | **1 fail** | 3 skipped, failing only
+`prune-run refuses to act when the branch name git abbreviates HEAD to does not resolve back to
+HEAD`.
+
+- [ ] **Step 0:** START FROM THE EXISTING BRANCH. The `scripts/git.mjs` and `tests/git.test.mjs`
+  half of this task is already implemented, verified and committed as `89a2853` on
+  `teammates/purgefix/T1`. Do not redo it and do not branch from the run branch:
+
+      git checkout -B teammates/purgefix/T7 teammates/purgefix/T1
+      git log --oneline -2
+
+  The log must show `89a2853 fix(git): resolve the run branch name via symbolic-ref, not
+  abbreviation` on top of the base. Read `scripts/git.mjs`'s `currentBranchRef` and
+  `currentBranch` before doing anything else — every step below rests on what they now do. Run
+  `npm test` and confirm you see exactly the one failure named above; that failure is your
+  starting point, and Step 5 is what fixes it.
+
+  What `89a2853` did, for reference rather than for redoing: added `currentBranchRef()` over
+  `git symbolic-ref --quiet HEAD`, returning the full ref, `null` on a detached HEAD (exit 1 with
+  empty stdout AND empty stderr) and throwing on any other failure; and reimplemented
+  `currentBranch()` over it, stripping `refs/heads/`, preserving the literal string `HEAD` as the
+  detached-HEAD contract that `derive` and two other call sites already handle.
 
 - [ ] **Step 1:** Rewrite the `THE NAME HAS TO ROUND-TRIP` comment block in `derive`
-  (`scripts/cli.mjs:1660-1696`). Task 1 made `currentBranch()` resolve HEAD symbolically, so the
+  (`scripts/cli.mjs:1660-1696`). Step 0's commit made `currentBranch()` resolve HEAD symbolically, so the
   paragraph's entire premise — that the name is attacker-choosable — is gone, and every
   measurement in it is about the old resolution. The guard itself stays; what it is for changes:
 
@@ -736,7 +655,7 @@ discipline before it starts rather than after three review rounds.
   `/cannot decide what is prunable/` would leave a test that passes with the null arm gone. Do
   not weaken the regex.
 
-- [ ] **Step 7:** Run `npm test` and confirm it is green, including the two fixtures Task 1 left
+- [ ] **Step 7:** Run `npm test` and confirm it is green, including the fixture Step 0's commit left
   red. Paste the final counts into your `summary`.
 
 ---
@@ -822,7 +741,7 @@ discipline before it starts rather than after three review rounds.
 - Modify: `skills/phase-gate/SKILL.md`
 - Test: `tests/skill-contracts.test.mjs`
 
-**Depends:** T1, T3, T8
+**Depends:** T3, T8
 
 - [ ] **Step 1:** In `skills/parallel-execution/SKILL.md` § 5, replace the ancestor-proof bound
   inside the long `then:` sentence. The clause reading `— that proof holds only while the run
@@ -933,7 +852,7 @@ discipline before it starts rather than after three review rounds.
 - Modify: `skills/finishing-a-development-branch/SKILL.md`
 - Test: `tests/skill-finishing-branch.test.mjs`
 
-**Depends:** T1, T3
+**Depends:** T3
 
 - [ ] **Step 1:** Replace the run-branch-name precondition at
   `skills/finishing-a-development-branch/SKILL.md:92`. The sentence `That proof is only as good
@@ -1015,7 +934,7 @@ discipline before it starts rather than after three review rounds.
 **Files:**
 - Modify: `docs/followups/2026-08-27-purge-open-findings.md`
 
-**Depends:** T1, T2, T3, T4, T5, T6, T7, T8, T9, T10
+**Depends:** T2, T3, T4, T5, T6, T7, T8, T9, T10
 
 - [ ] **Step 1:** Rewrite the document as a record of this plan's outcome rather than a list of
   open findings. Keep its structure and its opening paragraph about run `purge`, and add a dated
