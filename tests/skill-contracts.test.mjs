@@ -511,7 +511,7 @@ test('parallel-execution keeps a returned teammate’s worktree until its phase 
       // phase's gate and removes only worktrees whose phase passes — so it reinforces the claim
       // rather than qualifying it.
       /^Prune with the command rather than by hand:$/i,
-      /^It recomputes each phase's gate, removes only this run's worktrees whose phase passes, and names every one it left alone and why\.$/i,
+      /^It recomputes each phase's gate, removes only this run's worktrees whose phase passes, sweeps every leaked merge-preview worktree under the system temp directory regardless of which run left it, and names every one it left alone and why\.$/i,
       /^Without --yes it reports and removes nothing\.$/i,
       // Reviewed: `--enforcement-only` documentation below. Neither sentence qualifies this
       // claim — the first only names `prune-run` as one of the two callers the flag speeds up,
@@ -804,7 +804,7 @@ test('parallel-execution states --enforcement-only never authorises a prune on a
       // Reviewed: the prune-run command bullet's own description of its ordinary removal
       // behaviour, for a PASS it computed itself — a different claim than this flag's guardrail
       // on a PASS resting on what the flag skipped.
-      /^It recomputes each phase's gate, removes only this run's worktrees whose phase passes, and names every one it left alone and why\.$/i,
+      /^It recomputes each phase's gate, removes only this run's worktrees whose phase passes, sweeps every leaked merge-preview worktree under the system temp directory regardless of which run left it, and names every one it left alone and why\.$/i,
       /^Without --yes it reports and removes nothing\.$/i,
       // Reviewed: the worktree-pruning bullet's own removal instruction for the ordinary case of
       // a recorded PASS — again a different claim than this flag's guardrail.
@@ -820,17 +820,46 @@ test('parallel-execution states --enforcement-only never authorises a prune on a
 test('parallel-execution makes prune-run the only supported cleanup', async () => {
   const doc = parseDoc(await readFile(new URL('parallel-execution/SKILL.md', dir), 'utf8'), 'parallel-execution')
   const cleanup = doc.section(/^5\. Clean up the phase$/)
+  // The claim's antecedent ("This") is the code block above it. `statementsOf` never sees a code
+  // block — only paragraphs and list items — so the `subject:` lock below cannot reach it, and a
+  // swap of the invocation for an unguarded `rm -rf` sweep plus a `--merged`-relative
+  // `git branch -D` would read as this same claim with every sentence untouched. Pin the block by
+  // its own content instead.
+  assertCode(
+    cleanup,
+    /prune-run --run <runId> --plan <planPath> --root <project root> --yes/,
+    'the cleanup section must show the exact prune-run invocation the claim is about',
+  )
   assertClaim(cleanup, {
     label: 'cleanup command',
     claim: /^This is the only supported way to clean up after a phase\.$/i,
-    subject: /prune-run|by hand|git worktree remove|git branch -D/i,
+    then: /It recomputes each phase's gate rather than reading status\.gates, removes only this run's worktrees whose phase passes, sweeps every leaked merge-preview worktree under the system temp directory regardless of which run left it/i,
+    // Widened to match the sibling lock at :798 in this file: the behaviour claims themselves
+    // ("removes only...", "sweeps every...", "deletes each...") are the substance of this
+    // section, and the narrower `prune-run|by hand|...` lexicon alone does not reach a rewrite of
+    // any of them, as long as the rewrite avoids those four exact phrases. Proven by mutation:
+    // "removes every worktree in the repository whether or not its phase passes" is caught by
+    // this subject though it shares none of the narrower lexicon's wording.
+    subject: /prune-run|by hand|git worktree remove|git branch -D|remov(e|es|ed|ing)|delet(e|es|ed|ing)/i,
     allow: [
       // `normalize()` strips backticks before matching (tests/md-contract.mjs:73-81), so these
       // patterns are written without them, matching the convention every other allow entry in
       // this file already follows — a pattern that kept the backticks in would never match and
       // this test would fail permanently rather than on a real regression.
-      /^Do not remove a worktree or delete a teammate branch by hand: git worktree remove run from the wrong place takes a teammate's uncommitted work, and git branch -D measures "merged" against whatever branch you are standing on rather than against the run branch\.$/i,
-      /^Without --yes it removes nothing and prints the same plan, which is what to run when you only want to see what is outstanding\.$/i,
+      // Reviewed: the paragraph introducing the code block. Names the timing gate (PASS plus
+      // merged branches), not a removal mechanism, so it does not qualify the claim.
+      /^Once the phase has a recorded PASS and its branches are merged, remove what it left:$/i,
+      /^Do not remove a worktree or delete a teammate branch by hand: git worktree remove refuses one holding uncommitted work only until --force is added, and nothing then stops --force from reaching a worktree whose phase has not passed yet; git branch -D does not measure "merged" at all — it force-deletes unconditionally — and -d, the flag that does measure, measures against the branch's own upstream or HEAD, never against the run branch\.$/i,
+      // Reviewed: the fresh-implementer exception — named and justified in the same breath rather
+      // than left to contradict the prohibition above it — and its pointer down to the matching
+      // exception in Worktree mechanics.
+      /^The one exception is a task going to a fresh implementer before its phase has passed: this command cannot reach that worktree yet, so it still has to be removed by hand — see the matching exception in "Worktree mechanics" below\.$/i,
+      // Reviewed: the dry-run scoping. `renderPrunePlan` runs before the `--yes` check and shows
+      // the prunable and leaked-preview lists either way (scripts/cli.mjs:3031-3037), but the
+      // per-branch ancestor decision is made only inside the removal loop `--yes` reaches
+      // (scripts/cli.mjs:3040-3057), so this states what a dry run does NOT yet show rather than
+      // repeating the removal claim above.
+      /^Without --yes it removes nothing and prints the same prunable and leaked-preview lists; the per-branch "left <branch> in place: not an ancestor" line is decided only while --yes runs the removal, so a dry run does not yet show which merged worktree's branch would survive\.$/i,
     ],
   })
 })

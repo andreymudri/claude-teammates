@@ -141,23 +141,6 @@ Run `phase-gate`. Only on PASS, dispatch `tm-integrator` to merge the teammate b
 dependency order with `--no-ff`. The integrator is the sole writer to the run branch and runs
 alone. No bookkeeping call follows the merge: the next phase is derived from what is merged.
 
-## 5. Clean up the phase
-
-Once the phase has a recorded PASS and its branches are merged, remove what it left:
-
-    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" prune-run --run <runId> --plan <planPath> --root <project root> --yes
-
-This is the only supported way to clean up after a phase. It recomputes each phase's gate
-rather than reading `status.gates`, removes only this run's worktrees whose phase passes,
-deletes each removed worktree's branch where `git merge-base --is-ancestor` proves it is
-already in the run branch, and names every worktree and branch it left alone with the
-reason. Do not remove a worktree or delete a teammate branch by hand: `git worktree remove`
-run from the wrong place takes a teammate's uncommitted work, and `git branch -D` measures
-"merged" against whatever branch you are standing on rather than against the run branch.
-
-Without `--yes` it removes nothing and prints the same plan, which is what to run when you
-only want to see what is outstanding.
-
 ### Import coupling across tasks
 
 A task whose file set imports a symbol another task introduces cannot build on its own branch.
@@ -175,6 +158,30 @@ integrator for that reason.
 
 Both forms share one rule: the integrator merges in dependency order, and a reviewer judging a
 cross-task claim judges it on the merge, not on one branch.
+
+## 5. Clean up the phase
+
+Once the phase has a recorded PASS and its branches are merged, remove what it left:
+
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" prune-run --run <runId> --plan <planPath> --root <project root> --yes
+
+This is the only supported way to clean up after a phase. It recomputes each phase's gate
+rather than reading `status.gates`, removes only this run's worktrees whose phase passes,
+sweeps every leaked merge-preview worktree under the system temp directory regardless of which
+run left it — even one holding an operator's own uncommitted work — deletes each removed
+worktree's branch where `git merge-base --is-ancestor` proves it is already in the run branch,
+and names every worktree it leaves alone with the reason. Do not remove a worktree or delete a
+teammate branch by hand: `git worktree remove` refuses one holding uncommitted work only until
+`--force` is added, and nothing then stops `--force` from reaching a worktree whose phase has
+not passed yet; `git branch -D` does not measure "merged" at all — it force-deletes
+unconditionally — and `-d`, the flag that does measure, measures against the branch's own
+upstream or HEAD, never against the run branch. The one exception is a task going to a fresh
+implementer before its phase has passed: this command cannot reach that worktree yet, so it
+still has to be removed by hand — see the matching exception in "Worktree mechanics" below.
+
+Without `--yes` it removes nothing and prints the same prunable and leaked-preview lists; the
+per-branch "left `<branch>` in place: not an ancestor" line is decided only while `--yes` runs
+the removal, so a dry run does not yet show which merged worktree's branch would survive.
 
 ## Choosing a model per dispatch
 
@@ -355,8 +362,10 @@ teammate automatically; a teammate never shares a worktree with another.
 
       node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" prune-run --run <runId> --plan <planPath> --root <project root> [--yes]
 
-  It recomputes each phase's gate, removes only this run's worktrees whose phase passes, and
-  names every one it left alone and why. Without `--yes` it reports and removes nothing.
+  It recomputes each phase's gate, removes only this run's worktrees whose phase passes, sweeps
+  every leaked merge-preview worktree under the system temp directory regardless of which run
+  left it, and names every one it left alone and why. Without `--yes` it reports and removes
+  nothing.
 - **Skip the slow part with `--enforcement-only`:**
 
       node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" prune-run --run <runId> --plan <planPath> --root <project root> --enforcement-only [--yes]
