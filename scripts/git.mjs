@@ -464,6 +464,29 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
       await run(['worktree', 'remove', '--force', '--end-of-options', dir])
       return true
     },
+    // -D, not -d. `-d` measures "merged" against the branch's configured upstream, or against
+    // HEAD when it has no upstream (both verified on git 2.55.0) — never against the run
+    // branch. So it refuses branches that ARE merged into the run branch, whenever the
+    // operator's worktree happens to sit on any other branch, and accepts branches that are
+    // NOT, whenever some upstream contains them. Either way its answer is a fact about where
+    // the caller stands, not about the run. The proof belongs to the caller (`isAncestor`
+    // against the run branch) and this deletes what the caller proved.
+    //
+    // The force ends there, and the limit is the one prune-run will meet: -D still refuses a
+    // branch checked out in a worktree. That arrives here as a GitError, never as a deletion
+    // that did not happen, so removing the worktree has to come first.
+    //
+    // No `qualifyBranch` here, deliberately: `git branch -D` resolves its argument in
+    // refs/heads only, so the tag-precedence hazard that helper exists for cannot apply. The
+    // cost of that: bare branch names only — `git branch -D refs/heads/x` answers "branch
+    // 'refs/heads/x' not found".
+    async deleteBranch(name) {
+      if (!isNonEmptyString(name)) {
+        throw new GitError(`deleteBranch requires a non-empty branch name, got ${JSON.stringify(name)}`)
+      }
+      await run(['branch', '-D', '--end-of-options', name])
+      return true
+    },
     // Returns null when every branch merged, or the conflicted paths when one did not.
     // Throws a GitError when the merge FAILED rather than conflicted — the two are different
     // answers and the caller cannot act on them the same way.
