@@ -68,7 +68,7 @@ from fresh output, and proceed the same way.
 Two kinds of branch exist in this plugin, and they are not interchangeable:
 
 - **Teammate branches** are scratch. Each teammate does its work on its own branch, inside its
-  own worktree, and that branch is disposable the moment it merges into the run branch.
+  own worktree, and that branch is deleted by `prune-run` once the run branch provably contains it.
 - **The run branch** is the deliverable. It is the only branch that matters once the run is
   done, and **`tm-integrator` is the sole writer of it.** Teammate branches merge into the run
   branch; the run branch never merges into a teammate branch, and no other role pushes to it
@@ -77,20 +77,24 @@ Two kinds of branch exist in this plugin, and they are not interchangeable:
 If you find yourself about to commit implementation work straight onto the run branch instead
 of a teammate branch, stop — that's the wrong direction for this model.
 
-## Worktree cleanup
+## Worktree and branch cleanup
 
-Teammate branches leave worktrees behind even after their branch has merged and the branch
-itself is deleted. Inspect what's left:
+A finished run leaves a worktree and a scratch branch per task. Remove both with the command
+that knows which phases passed:
 
-    git worktree list
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" prune-run --run <runId> --plan <planPath> --root <project root> --yes
 
-Prune only the worktrees that belong to this run — matching this run's teammate branch names
-or paths. Leave worktrees for other runs or other work alone; do not sweep indiscriminately.
-For each stale worktree that belongs to this run:
+It touches only this run's worktrees, never the main worktree and never another run's, and
+it deletes a task branch only where `git merge-base --is-ancestor` proves the run branch
+already contains it. Everything it declines to remove is printed with the reason.
 
-    git worktree remove <path>
+Do not sweep by hand. `git worktree remove --force` follows a junction and deletes the
+contents of its target, and `git branch -D` measures "merged" against whatever branch you
+have checked out, which is not the run branch whenever you have moved off it.
 
-If a worktree has uncommitted changes `remove` will refuse — look before forcing anything.
+What this does not clean up: .teammates/<run-id>/ stays on disk on purpose — `resume` and
+`rebuild-state` read it, and it is gitignored. Delete it yourself when you no longer want
+the record.
 
 ## Surface unresolved findings
 

@@ -19,8 +19,17 @@ test('names tm-integrator as the sole writer of the run branch', async () => {
   assert.match(await body(), /tm-integrator/)
 })
 
-test('covers cleaning up teammate worktrees', async () => {
-  assert.match(await body(), /worktree/i)
+test('routes worktree and branch cleanup through prune-run rather than by hand', async () => {
+  const b = await body()
+  assert.match(b, /prune-run --run/)
+  assert.match(b, /Do not sweep by hand/)
+  assert.match(b, /merge-base --is-ancestor/)
+})
+
+test('says .teammates is kept deliberately and is the operator\'s to delete', async () => {
+  const b = await body()
+  assert.match(b, /\.teammates\/<run-id>\/ stays on disk on purpose/)
+  assert.match(b, /rebuild-state/)
 })
 
 test('is original and carries no upstream attribution', async () => {
