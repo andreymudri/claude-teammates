@@ -8884,6 +8884,56 @@ test('a real preview whose owner marker and real claim both name dead pids is re
   }
 })
 
+// The claim-vetting entry has to be read with `lstat`, never a symlink-following `stat`: a
+// symlink under `previewClaimPrefix(dir)` pointing at a regular file this process owns, naming a
+// LIVE pid, must still be ignored — because what a planted symlink CONTROLS is the link itself,
+// never bound to a directory an attacker owns, and the entry `lstat` reports is a symlink, not a
+// regular file. Neither `writeFile`-built real-fs test above can pin this: both build their
+// claim directly, where `lstat` and a symlink-following `stat` cannot disagree. This one plants a
+// symlink deliberately so they do.
+test('livePreviewPaths does not follow a claim entry that is a symlink to a live-naming file', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'tm-preview-symlink-'))
+  const preview = path.join(scratch, 'preview')
+  await mkdir(preview)
+  try {
+    await writeFile(previewOwnerMarkerPath(preview), `${deadPid()}\n`, 'utf8')
+    // The bait: an ordinary file, owned by this process (so uid vetting alone cannot reject it),
+    // naming a pid that really is alive.
+    const bait = path.join(scratch, 'bait')
+    await writeFile(bait, `${process.pid}\n`, 'utf8')
+    // The claim itself is a SYMLINK to the bait, not a copy of it.
+    await symlink(bait, previewClaimPath(preview, 4242))
+    const live = await livePreviewPaths([preview])
+    assert.equal(live.has(preview), false)
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
+// The trailing dot in `previewClaimPrefix` is load-bearing (see scripts/merge-preview.mjs for
+// why): without it, one preview's prefix also matches a SIBLING preview's claim whenever one
+// directory's name is a literal prefix of the other's, e.g. "preview" and "preview2". Two
+// previews sharing one parent is also the only way to exercise the shared listing memo at all —
+// every other test in this file passes `livePreviewPaths` a single-element array.
+test('a claim under one preview in a shared parent is not attributed to a sibling preview', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'tm-preview-siblings-'))
+  const preview = path.join(scratch, 'preview')
+  const sibling = path.join(scratch, 'preview2')
+  await mkdir(preview)
+  await mkdir(sibling)
+  try {
+    await writeFile(previewOwnerMarkerPath(preview), `${deadPid()}\n`, 'utf8')
+    await writeFile(previewOwnerMarkerPath(sibling), `${deadPid()}\n`, 'utf8')
+    // Only the SIBLING holds a live claim; `preview` itself holds none of its own.
+    await writeFile(previewClaimPath(sibling, process.pid), `${process.pid}\n`, 'utf8')
+    const live = await livePreviewPaths([preview, sibling])
+    assert.equal(live.has(preview), false, "a sibling's claim must not keep this preview alive")
+    assert.equal(live.has(sibling), true, "the sibling's own claim must still keep it alive")
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
 test('prune-run leaves a preview whose marker names a running process', async () => {
   await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)

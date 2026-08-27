@@ -1419,8 +1419,12 @@ async function unlinkPreviewLinks(dir, depth = 0) {
 //   - TOCTOU on a world-writable parent without the sticky bit. Vetting a claim and reading it
 //     are two syscalls, not one; between them another local user could remove the file this
 //     `lstat` approved and put a different one at the same name. A STICKY parent — the system
-//     temp directory always is — closes this: that user cannot remove a file this process owns
-//     out from under it. Without the sticky bit, the race reopens.
+//     temp directory always is — closes this because a sticky directory keys who may remove an
+//     entry on the ENTRY's own owner, never on who is doing the removing: another local user
+//     cannot delete a file the preview directory's uid owns, regardless of which uid is running
+//     this reaper. Under `sudo prune-run` that reaper uid is 0, not the vetted file's uid — the
+//     sticky bit still closes the race because it never consulted the reader's identity to begin
+//     with. Without the sticky bit, the race reopens.
 //
 // `read`, `list`, `stat` and `probe` are injectable because several of the branches above cannot
 // be staged end to end: EPERM needs a process owned by another user, EACCES needs a file this
