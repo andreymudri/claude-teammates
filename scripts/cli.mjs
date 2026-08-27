@@ -1419,12 +1419,29 @@ async function unlinkPreviewLinks(dir, depth = 0) {
 //   - TOCTOU on a world-writable parent without the sticky bit. Vetting a claim and reading it
 //     are two syscalls, not one; between them another local user could remove the file this
 //     `lstat` approved and put a different one at the same name. A STICKY parent — the system
-//     temp directory always is — closes this because a sticky directory keys who may remove an
-//     entry on the ENTRY's own owner, never on who is doing the removing: another local user
-//     cannot delete a file the preview directory's uid owns, regardless of which uid is running
-//     this reaper. Under `sudo prune-run` that reaper uid is 0, not the vetted file's uid — the
-//     sticky bit still closes the race because it never consulted the reader's identity to begin
-//     with. Without the sticky bit, the race reopens.
+//     temp directory always is — narrows who may remove an entry inside it. Per unlink(2) and
+//     rename(2), a sticky directory only lets a removal through when the REMOVING process's euid
+//     equals the FILE's own owner, OR equals the DIRECTORY's owner, OR the process holds
+//     CAP_FOWNER — three ways through, not one. The reaper's own uid plays no part in that check,
+//     which is why `sudo prune-run` stays safe here: root satisfies CAP_FOWNER regardless, and an
+//     unprivileged reaper satisfies neither of the other two just by running this code, so this
+//     race is closed for both.
+//
+//     What is NOT closed: the directory-owner exception. If the PARENT directory itself — not
+//     the vetted file — is owned by someone other than the claim's writer, that owner may still
+//     unlink the vetted claim and re-plant a file at the same name between the lstat and the
+//     read, despite owning neither the claim nor its preview. Reachable in principle:
+//     `os.tmpdir()` honours `TMPDIR`, and scripts/merge-preview.mjs mkdtemps a preview wherever
+//     that points, so an environment pointing it at a sticky directory owned by someone else
+//     hands that owner exactly this window. Closed under this repository's deployed default of a
+//     root-owned system temp directory, which is the only reason this is a comment and not a
+//     blocking finding.
+//
+//     A second, narrower gap in the same spirit: sticky blocks another user's REMOVAL of a claim
+//     that is still there, but not its RE-CREATION once the legitimate holder releases its own.
+//     That window does not exist yet, because nothing under scripts/ calls `previewClaimPath` to
+//     WRITE or release a claim — this function only reads candidates a later task provisions —
+//     so there is no releaser today for another user to race.
 //
 // `read`, `list`, `stat` and `probe` are injectable because several of the branches above cannot
 // be staged end to end: EPERM needs a process owned by another user, EACCES needs a file this

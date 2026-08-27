@@ -8884,6 +8884,17 @@ test('a real preview whose owner marker and real claim both name dead pids is re
   }
 })
 
+// This is a FILE symlink (the target is `bait`, a regular file, not a directory), so `'junction'`
+// — the type every other symlink in this file passes to stay cross-platform — is not an option:
+// junctions are directory-only. With no type, `fs.promises.symlink` autodetects `'file'` against
+// the existing target and creation then needs Developer Mode or an elevated shell on Windows;
+// without either it rejects with EPERM, which would fail the fixture builder itself rather than
+// skip, and take CI red on that leg for a reason unrelated to the behaviour under test. Same
+// convention as tests/usage-store.test.mjs:624. Losing nothing by skipping: the uid half of the
+// vetting this test exists to pin is a documented no-op on Windows already (see the Windows-void
+// note at scripts/cli.mjs), so there is no assertion this platform could make either way.
+const NO_FILE_SYMLINKS_ON_WIN32 = { skip: process.platform === 'win32' }
+
 // The claim-vetting entry has to be read with `lstat`, never a symlink-following `stat`: a
 // symlink under `previewClaimPrefix(dir)` pointing at a regular file this process owns, naming a
 // LIVE pid, must still be ignored — because what a planted symlink CONTROLS is the link itself,
@@ -8891,7 +8902,7 @@ test('a real preview whose owner marker and real claim both name dead pids is re
 // regular file. Neither `writeFile`-built real-fs test above can pin this: both build their
 // claim directly, where `lstat` and a symlink-following `stat` cannot disagree. This one plants a
 // symlink deliberately so they do.
-test('livePreviewPaths does not follow a claim entry that is a symlink to a live-naming file', async () => {
+test('livePreviewPaths does not follow a claim entry that is a symlink to a live-naming file', NO_FILE_SYMLINKS_ON_WIN32, async () => {
   const scratch = await mkdtemp(path.join(tmpdir(), 'tm-preview-symlink-'))
   const preview = path.join(scratch, 'preview')
   await mkdir(preview)
@@ -8931,6 +8942,35 @@ test('a claim under one preview in a shared parent is not attributed to a siblin
     assert.equal(live.has(sibling), true, "the sibling's own claim must still keep it alive")
   } finally {
     await rm(scratch, { recursive: true, force: true })
+  }
+})
+
+// The listing memo is keyed per PARENT directory, and the test above cannot pin that key because
+// both its previews share one parent — a cache keyed by a constant instead of `dir` would pass it
+// unnoticed. `previewCandidates` is not guaranteed a shared parent in production either:
+// scripts/prune.mjs's `under()` admits any path strictly inside the temp root, not only direct
+// children. Two previews under two DIFFERENT parents are the only way to pin the key itself: if
+// the memo ever reused one parent's listing for another's lookup, a live claim under the second
+// parent would go unseen, that preview would read as leaked, and `git worktree remove --force`
+// would follow its junctions — the exact outcome this whole function exists to prevent.
+test('previews under different parents do not share the per-parent listing memo', async () => {
+  const scratchA = await mkdtemp(path.join(tmpdir(), 'tm-preview-parentA-'))
+  const scratchB = await mkdtemp(path.join(tmpdir(), 'tm-preview-parentB-'))
+  const leaked = path.join(scratchA, 'preview')
+  const claimed = path.join(scratchB, 'preview')
+  await mkdir(leaked)
+  await mkdir(claimed)
+  try {
+    // `leaked` carries no marker and no claim at all — an ordinary leaked preview, and the FIRST
+    // one processed, so its parent's listing is whatever primes the memo.
+    await writeFile(previewOwnerMarkerPath(claimed), `${deadPid()}\n`, 'utf8')
+    await writeFile(previewClaimPath(claimed, process.pid), `${process.pid}\n`, 'utf8')
+    const live = await livePreviewPaths([leaked, claimed])
+    assert.equal(live.has(leaked), false)
+    assert.equal(live.has(claimed), true, "claimed's own claim, under its OWN parent, must still be found")
+  } finally {
+    await rm(scratchA, { recursive: true, force: true })
+    await rm(scratchB, { recursive: true, force: true })
   }
 })
 
