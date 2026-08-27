@@ -72,8 +72,16 @@ function hasWorktree(cwd, leaf) {
 // on that, so "the branch is gone" and "the git call failed" would arrive as the same
 // exception. `for-each-ref` takes a full ref pattern, matches whole path components, and exits
 // 0 with empty output when nothing matches, which separates the two.
+//
+// `%(refname)`, never `%(refname:short)`. The short form abbreviates only as far as stays
+// UNAMBIGUOUS, so the moment a tag of the same name exists the very branch this asks about comes
+// back as `heads/teammates/r1/T1` and an equality test against the bare name reads it as absent.
+// That is the same tag-shadowing hazard the command itself has to defend against, landing in the
+// helper that checks the defence — first written the short way, and it reported the branch gone
+// on a run that had correctly left it in place.
 function hasBranch(cwd, name) {
-  return git(cwd, ['for-each-ref', '--format=%(refname:short)', `refs/heads/${name}`]).trim() === name
+  const ref = `refs/heads/${name}`
+  return git(cwd, ['for-each-ref', '--format=%(refname)', ref]).trim() === ref
 }
 
 // The two shapes that actually broke the bare-substring match, pinned so a future
@@ -3283,14 +3291,15 @@ test('prune-run with --yes removes this run’s worktree once its phase passes',
 
 // The BRANCH half of a prune, which the README's retention clause promised and the code did not
 // do: before this, `--yes` removed the worktree and left `teammates/<run>/<task>` behind, so a
-// finished run accumulated one dead ref per task forever. The three tests below are the
-// behavioural pin the prose was written ahead of.
+// finished run accumulated one dead ref per task forever. The tests below are the behavioural
+// pin the prose was written ahead of.
 //
-// One fixture serves all three, because the difference between them is one commit and one flag.
+// One fixture serves all of them, because what separates them is a commit, a flag and a plant.
 // `merged: false` puts a commit on the task branch that the run branch has never seen, which is
 // the case `--yes` must refuse rather than force — `git.deleteBranch` is `-D` and would not stop
-// on its own, so the proof is the caller's and this is where it is checked.
-async function stagePrunableRun({ root, planPath, io, lines, git: g }, { merged = true } = {}) {
+// on its own, so the proof is the caller's and this is where it is checked. `second: true` adds
+// a second prunable worktree, which is what tells `continue` apart from `break`.
+async function stagePrunableRun({ root, planPath, io, lines, git: g }, { merged = true, second = false } = {}) {
   await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
   await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
     phases: { default: { checks: [{ name: 'fileset', kind: 'fileset' }] } },
@@ -3316,6 +3325,19 @@ async function stagePrunableRun({ root, planPath, io, lines, git: g }, { merged 
   }
   const wtPath = path.join(root, '.claude', 'worktrees', 'a1')
   g(['worktree', 'add', '--quiet', wtPath, 'teammates/r1/T1'])
+  if (second) {
+    // A SECOND prunable worktree, registered after the first so it comes second in the order
+    // `git worktree list` reports and the loop therefore walks. T2 is phase 2 in the shared
+    // PLAN fixture and declares b.mjs, so landing exactly that file is what makes its phase
+    // pass its gate and its worktree prunable alongside T1's.
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T2', 'run-branch'])
+    await writeFile(path.join(root, 'b.mjs'), 'export const b = 1\n', 'utf8')
+    g(['add', 'b.mjs'])
+    g(['commit', '--quiet', '-m', 'T2 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--no-ff', '--quiet', '-m', 'integrate T2', 'teammates/r1/T2'])
+    g(['worktree', 'add', '--quiet', path.join(root, '.claude', 'worktrees', 'a2'), 'teammates/r1/T2'])
+  }
   lines.length = 0
 }
 
@@ -3340,7 +3362,9 @@ test('prune-run --yes leaves an unmerged task branch in place and says why', asy
     // It is the BRANCH that holds the commit no other ref can reach.
     assert.equal(code, 0)
     assert.equal(hasWorktree(root, 'a1'), false)
-    assert.match(lines.join('\n'), /left teammates\/r1\/T1 in place: it is not an ancestor of run-branch/)
+    // The reason names the ref that was actually examined, refs/heads/…, and both shas — not a
+    // bare branch name, which is precisely the spelling a tag can stand in for.
+    assert.match(lines.join('\n'), /left teammates\/r1\/T1 in place: refs\/heads\/teammates\/r1\/T1 \([0-9a-f]{40}\) is not an ancestor of run-branch \([0-9a-f]{40}\)/)
     assert.equal(hasBranch(root, 'teammates/r1/T1'), true)
   })
 })
@@ -3368,7 +3392,12 @@ test('prune-run without --yes deletes no branch', async () => {
 test('prune-run --yes does not touch the branch of a worktree it could not remove', async () => {
   await withRepo(async (ctx) => {
     const { root, io, lines } = ctx
-    await stagePrunableRun(ctx)
+    // TWO prunable worktrees, and the FIRST one is the one that fails. With only one, `continue`
+    // and `break` are indistinguishable — the loop had nothing left to do either way — and the
+    // difference between them is the whole point: `break` would abandon T2's worktree AND its
+    // branch on T1's failure, and the operator would see one failure line and nothing at all
+    // about T2.
+    await stagePrunableRun(ctx, { second: true })
     // Locking is how the failure is staged: `git worktree remove --force` still refuses a locked
     // worktree and asks for `-f -f` (verified against git 2.55.0), so the removal fails through
     // git's own refusal rather than by breaking the filesystem underneath the test. Portable —
@@ -3378,10 +3407,64 @@ test('prune-run --yes does not touch the branch of a worktree it could not remov
     assert.equal(code, 1)
     assert.equal(hasWorktree(root, 'a1'), true)
     assert.match(lines.join('\n'), /could not remove/)
-    // Exactly one failure is reported, and the branch is neither deleted nor complained about.
+    // Exactly one failure is reported, and T1's branch is neither deleted nor complained about.
     assert.doesNotMatch(lines.join('\n'), /could not delete teammates\/r1\/T1/)
     assert.doesNotMatch(lines.join('\n'), /deleted teammates\/r1\/T1/)
     assert.equal(hasBranch(root, 'teammates/r1/T1'), true)
+    // And the loop carried on: T2 is neither skipped nor silently dropped.
+    assert.equal(hasWorktree(root, 'a2'), false)
+    assert.match(lines.join('\n'), /deleted teammates\/r1\/T2/)
+    assert.equal(hasBranch(root, 'teammates/r1/T2'), false)
+  })
+})
+
+// A prune that could not finish must not report success. `prune-run --yes && <next step>` is the
+// shape an orchestrator writes, so an exit 0 on a branch this command failed to delete tells that
+// orchestrator the run was torn down when a ref is still standing.
+test('prune-run --yes reports a branch it could not delete and exits non-zero', async () => {
+  await withRepo(async (ctx) => {
+    const { root, io, lines } = ctx
+    await stagePrunableRun(ctx)
+    // A STALE lock file is what makes `git branch -D` fail, without breaking anything the test
+    // then has to repair: git refuses to write a ref whose `.lock` already exists.
+    const refFile = path.join(root, '.git', 'refs', 'heads', 'teammates', 'r1', 'T1')
+    // Asserted, not assumed. This fixture depends on the "files" ref backend, where a branch is
+    // a loose file and `<file>.lock` is the path git must create to rewrite it. A reftable
+    // repository has no such path, the plant would be a silent no-op, and the test would decay
+    // into asserting that a successful prune exits 0 — so fail here, loudly, instead.
+    try {
+      await stat(refFile)
+    } catch {
+      assert.fail(`this test needs the files ref backend: no loose ref at ${refFile}`)
+    }
+    await writeFile(`${refFile}.lock`, '', 'utf8')
+    const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
+    assert.equal(code, 1)
+    assert.match(lines.join('\n'), /could not delete teammates\/r1\/T1: /)
+    assert.equal(hasBranch(root, 'teammates/r1/T1'), true)
+  })
+})
+
+// The proof and the deletion have to name the SAME ref. Git resolves a bare name through
+// refs/tags/ before refs/heads/, warning on stderr only and exiting 0, while `git branch -D`
+// resolves refs/heads only — so an ancestry proof taken on the bare name can be a fact about a
+// tag while the thing deleted is the branch. `scripts/git.mjs`'s `qualifyBranch` states the
+// invariant every ref-consuming call site here obeys; `tests/adversarial.test.mjs` plants the
+// same shadow against `gate`. Planted here against the destructive path, where the loss is
+// silent: the worktree is force-removed first, so its reflog goes with it, and `-D` takes the
+// branch reflog, leaving the commit reachable only by `git fsck --unreachable` until gc.
+test('prune-run --yes will not delete an unmerged branch a same-named tag shadows', async () => {
+  await withRepo(async (ctx) => {
+    const { root, io, lines } = ctx
+    await stagePrunableRun(ctx, { merged: false })
+    // An ordinary tag, at a commit the run branch really does contain. Nothing privileged: a
+    // teammate can create this inside its own worktree.
+    ctx.git(['tag', 'teammates/r1/T1', 'run-branch'])
+    const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
+    assert.equal(code, 0)
+    assert.equal(hasBranch(root, 'teammates/r1/T1'), true)
+    assert.match(lines.join('\n'), /left teammates\/r1\/T1 in place/)
+    assert.doesNotMatch(lines.join('\n'), /deleted teammates\/r1\/T1/)
   })
 })
 

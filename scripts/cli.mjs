@@ -1436,17 +1436,27 @@ async function unlinkPreviewLinks(dir, depth = 0) {
 //     one being deceived — so citing root's CAP_FOWNER as a reason the race is closed had it
 //     backwards: that capability is a way THROUGH the check, held by nobody the check must stop.
 //
-//     Sticky is the weaker of the two shapes the system temp directory actually takes, not a
-//     universal one. On Linux and Windows it is the shared, world-writable `drwxrwxrwt` reasoned
-//     about above. On macOS `os.tmpdir()` is the per-user `/var/folders/.../T`, which is
-//     `drwx------` and NOT sticky — strictly STRONGER, because no other unprivileged user can
-//     traverse it, let alone plant or unlink inside it. So the sticky argument covers both: what
-//     holds there holds a fortiori under a 0700 private parent.
+//     That reasoning is about POSIX sticky semantics, and the temp root is not sticky everywhere.
+//     Linux is the case reasoned about above: the shared, world-writable `drwxrwxrwt`. macOS is
+//     strictly STRONGER — `os.tmpdir()` there is the per-user `/var/folders/.../T`, `drwx------`
+//     and not sticky at all, which no other unprivileged user can even traverse — so what holds
+//     under sticky holds a fortiori under it.
 //
-//     The limit, stated in the same breath: this rests entirely on the parent being sticky (or
-//     otherwise not writable by the attacker). Point the preview root at a plain world-writable
-//     directory with no sticky bit and the race reopens in full — any local user may then unlink
-//     the vetted claim and re-plant at that name.
+//     Windows is NEITHER, and the paragraph must not be read as covering it. `os.tmpdir()` there
+//     returns %TEMP%/%TMP%, which for an interactive account is the per-user
+//     `C:\Users\<user>\AppData\Local\Temp` — no POSIX mode string describes it, so it is
+//     neither the shared world-writable case nor `drwx------`. And where the temp root IS shared
+//     — a service account with TEMP and TMP unset falls back to `%SystemRoot%\Temp`, writable by
+//     Users on stock installs — NTFS has no sticky semantics whatever, so nothing narrows who may
+//     unlink the vetted claim between the `lstat` and the `read`. On that configuration this
+//     vetting has NEITHER half: the uid comparison is void there for the reason above, and this
+//     race is wide open rather than closed. No leg of this suite runs on win32, so nothing here
+//     will fail if that sentence is wrong again; it is held true by reading, not by a test.
+//
+//     The limit for the POSIX cases, stated in the same breath: the argument rests entirely on
+//     the parent being sticky (or otherwise not writable by the attacker). Point the preview root
+//     at a plain world-writable directory with no sticky bit and the race reopens in full — any
+//     local user may then unlink the vetted claim and re-plant at that name.
 //
 //     What is NOT closed: the directory-owner exception. If the PARENT directory itself — not
 //     the vetted file — is owned by someone other than the claim's writer, that owner may still
@@ -2988,12 +2998,35 @@ export async function runCli(argv, io = { out: console.log }) {
       // last thing that ever saw them. The proof is the caller's job precisely because the
       // helper does not do it. The refusal is reported by name, like every other refusal this
       // command makes, so an operator who wanted the branch gone learns why it is still there.
+      //
+      // BOTH SIDES ARE SHAS, and that is the whole safety of it. The proof and the deletion have
+      // to be about the SAME ref. Git resolves a bare name through refs/tags/ BEFORE refs/heads/,
+      // warns on stderr only and exits 0 (`isAncestor` reads no stderr), while `git branch -D`
+      // resolves refs/heads only — so an ancestry question asked on the bare name `w.branch` is
+      // answerable by a TAG while the thing deleted is the branch. One ordinary
+      // `git tag teammates/r1/T1 <any commit the run branch contains>`, which a teammate can
+      // create inside its own worktree, then turns this guard into a rubber stamp: verified end
+      // to end, the unmerged branch was deleted and `deleted …` printed. It also fires by
+      // accident wherever a release tag and a branch share a name. `refs/heads/` here, and
+      // `ctx.runSha` — already resolved through `resolveRef` in `deriveContext` for this exact
+      // reason — on the other side. This is the invariant scripts/git.mjs states as "every name
+      // that reaches a ref-consuming git command goes through here first".
+      //
+      // What this does NOT close: the sha is resolved, proved and then deleted by NAME, so a
+      // concurrent write to refs/heads/<branch> between the proof and the `-D` would be deleted
+      // unproved. Closing that needs a compare-and-swap (`git update-ref -d <ref> <proved sha>`),
+      // which needs a helper scripts/git.mjs does not have yet; it is filed as a follow-up. The
+      // window is between two commands of one process, not the operator-scale window a tag
+      // planted in advance opens.
       try {
-        if (await git.isAncestor(w.branch, ctx.runBranch)) {
+        const branchSha = await git.resolveRef(`refs/heads/${w.branch}`)
+        if (await git.isAncestor(branchSha, ctx.runSha)) {
           await git.deleteBranch(w.branch)
-          io.out(`deleted ${w.branch}`)
+          // The sha is named because it is what was actually proved and actually deleted — an
+          // operator who wants it back can `git branch <name> <sha>` straight off this line.
+          io.out(`deleted ${w.branch} (${branchSha}), which ${printable(ctx.runBranch)} contains`)
         } else {
-          io.out(`left ${w.branch} in place: it is not an ancestor of ${printable(ctx.runBranch)}, so deleting it would drop commits that are in no other branch`)
+          io.out(`left ${w.branch} in place: refs/heads/${w.branch} (${branchSha}) is not an ancestor of ${printable(ctx.runBranch)} (${ctx.runSha}), so deleting it would drop commits that are in no other branch`)
         }
       } catch (err) {
         if (!(err instanceof GitError)) throw err
@@ -3033,12 +3066,20 @@ export async function runCli(argv, io = { out: console.log }) {
     //     reaped as leaked. That is the pre-existing hazard, unchanged and no worse.
     //   - The worktree list and the markers are read once, above, and acted on here. A preview
     //     that appears in between is not in the list at all, so it cannot be reaped; a preview
-    //     already in the list cannot acquire an owner, because its owner would have had to write
-    //     the marker before the add that put it there.
+    //     already in the list cannot acquire an OWNER MARKER, because its owner would have had to
+    //     write that marker before the add that put it there.
+    //   - It CAN acquire a CLAIM, and that is a real window, not a hypothetical one. A claim is
+    //     written per spawned pid while a check runs, long after the add — and `livePreviewPaths`
+    //     lists each parent directory once per pass and reuses that listing, so a claim written
+    //     during the pass is invisible to it, including for previews it has already examined.
+    //     Such a preview reads as unowned and is reaped here. See the claim-vetting comment above
+    //     `livePreviewPaths` for the same limit stated at the reading end.
     //
-    // The destructive direction — a live preview read as dead — is closed by construction rather
-    // than narrowed, because the marker is HELD across a span that contains the whole span over
-    // which the preview is observable, instead of being sampled at one instant.
+    // So the destructive direction — a live preview read as dead — is closed by construction for
+    // the OWNER MARKER, because that marker is HELD across a span containing the whole span over
+    // which the preview is observable, instead of being sampled at one instant. It is only
+    // NARROWED for claims, by the bullet above. The two are not interchangeable, and this comment
+    // said "closed by construction" of both before claims had a writer.
     //
     // WHAT THE PATTERN MATCHES, since the reaper is force-removing directories nobody named:
     // every detached, branchless worktree registered in this repository whose path lies under
