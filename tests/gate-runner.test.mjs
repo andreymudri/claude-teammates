@@ -67,14 +67,27 @@ test('a command check with no timeoutMs gets the default', async () => {
   assert.equal(seen.timeoutMs, COMMAND_TIMEOUT_MS)
 })
 
+// The error string names 3600000 as the boundary ("must not exceed ... (60 minutes)"), which
+// means the boundary value itself must be ACCEPTED, not rejected. `value > TIMEOUT_CEILING_MS`
+// does that; `value >= TIMEOUT_CEILING_MS` would not, and nothing else here would catch that —
+// the malformed-value table below only exercises the reject side, one past the ceiling.
+test('timeoutMs at the ceiling itself is accepted, not just one below it', async () => {
+  let seen = null
+  await runCommandCheck(
+    { name: 'quick', kind: 'command', run: 'true', timeoutMs: 60 * 60_000 },
+    { cwd: process.cwd(), exec: async (_cmd, _cwd, opts) => { seen = opts; return { code: 0, output: '' } } },
+  )
+  assert.equal(seen.timeoutMs, 60 * 60_000)
+})
+
 test('a malformed timeoutMs fails its entry and never falls back to the default', async () => {
-  for (const bad of ['600000', 0, -1, 1.5, null, true, 60 * 60_000 + 1]) {
+  for (const bad of ['600000', 0, -1, 1.5, null, true, 500, 60 * 60_000 + 1]) {
     const results = await runChecks(
       [{ name: 'test', kind: 'command', run: 'true', timeoutMs: bad }],
       { cwd: process.cwd(), solo: true, exec: async () => { throw new Error('the check must not run') } },
     )
     assert.equal(results[0].status, 'fail', `timeoutMs ${JSON.stringify(bad)} should not have run`)
-    assert.match(results[0].output, /timeoutMs must (?:be a positive integer|not exceed)/)
+    assert.match(results[0].output, /timeoutMs must (?:be a positive integer|not exceed|be at least)/)
     assert.match(results[0].output, /entry #0 in this phase's check list/)
   }
 })
@@ -85,6 +98,22 @@ test('a malformed timeoutMs cannot be waved through with optional: true', async 
     { cwd: process.cwd(), solo: true },
   )
   assert.equal(aggregateVerdict(results).verdict, 'FAIL')
+})
+
+// `runChecks` -> `runCheckList` rejects a faulty bound before any runner is called (see the
+// malformed-timeoutMs tests above), so the guard at the top of `runCommandCheck` itself is
+// unreachable from that path. It exists for the EXPORTED api: `runCommandCheck` is called
+// directly from tests and could be called directly by a programmatic caller, and without this
+// guard a malformed bound reaching it here would silently apply COMMAND_TIMEOUT_MS instead of
+// being refused — the exact silent fallback the comment above the guard forbids.
+test('runCommandCheck itself rejects a malformed timeoutMs before calling exec', async () => {
+  await assert.rejects(
+    () => runCommandCheck(
+      { name: 'quick', kind: 'command', run: 'true', timeoutMs: 0 },
+      { cwd: process.cwd(), exec: async () => { throw new Error('exec must not run') } },
+    ),
+    /timeoutMs must be a positive integer/,
+  )
 })
 
 test('agent and mcp checks come back pending', () => {
@@ -1234,6 +1263,20 @@ test('a named malformed entry keeps its name and still reports its position', as
   assert.match(result.output, /entry #0 in this phase's check list/)
 })
 
+// The same substitution `malformedKindResult` gets, now pinned on `malformedTimeoutResult` too: a
+// malformed `timeoutMs` entry with no `name` must report its position as the name, not `check.name`
+// unchanged — which would surface as `{"failed":[null]}`, same defect the comment above the
+// nameless-entry test at the top of this describes for a bad `kind`.
+test('a nameless malformed timeoutMs entry is reported by its position, not as null', async () => {
+  const results = await runChecks(
+    [{ kind: 'command', run: 'true', timeoutMs: 0 }],
+    { cwd: process.cwd(), solo: true, exec: async () => { throw new Error('the check must not run') } },
+  )
+  assert.equal(results[0].status, 'fail')
+  assert.equal(results[0].name, "entry #0 in this phase's check list")
+  assert.match(results[0].output, /entry #0 in this phase's check list/)
+})
+
 // The number in that message tells the operator which entry of `teammates.gate.json` to go and
 // fix, so it has to survive a caller that hands `runChecks` a SUBSET of the manifest's list.
 // `cli.mjs` does exactly that for `--enforcement-only`, which `complete`, `finish` and `prune-run`
@@ -2195,6 +2238,33 @@ test('a conflicting phase fails the merge check with the pair report and skips e
 
   assert.deepEqual(rest.map((r) => r.status), ['skip', 'skip'])
   for (const r of rest) assert.match(r.output, /does not merge cleanly/)
+  assert.equal(calls.length, 0, 'no command may run against the unmerged tree')
+})
+
+// The timeoutMs guard in runCheckList runs BEFORE the merge-conflict skip on purpose: a
+// malformed bound is a configuration fault, and a phase that does not merge is exactly where it
+// would otherwise go unreported — reordered below the skip, this same entry would report a
+// benign `skip` carrying CONFLICT_SKIP instead of the fault, and the fault would stay invisible
+// until the conflict was fixed and the check finally ran. Pinned the same way the neighbouring
+// hasUsableKind-before-the-skip claim is pinned: this needs a conflicted preview to reach at
+// all, which is why it lives here and not next to the other timeoutMs tests.
+test('a malformed timeoutMs fails its entry even when the phase does not merge cleanly', async () => {
+  const calls = []
+  const ctx = previewCtx({
+    git: previewGit({ mergeInto: async () => ['a.mjs', 'b.mjs'] }),
+    exec: recordingExec(calls),
+    tasks: [T1_TASK, T2_PHASE1_TASK],
+  })
+  const results = await runChecks(
+    [{ name: 'test', kind: 'command', run: 'npm test', timeoutMs: 0 }],
+    ctx,
+  )
+  const [merge, entry] = results
+  assert.equal(merge.name, 'merge')
+  assert.equal(merge.status, 'fail')
+  assert.equal(entry.status, 'fail')
+  assert.match(entry.output, /timeoutMs must be a positive integer/)
+  assert.doesNotMatch(entry.output, /does not merge cleanly/)
   assert.equal(calls.length, 0, 'no command may run against the unmerged tree')
 })
 
@@ -3178,11 +3248,21 @@ test('a timed-out check settles on the kill, not on pipes a grandchild escaped t
   }
 })
 
-// THE ONLY TIMEOUT PRODUCTION EVER USES is the default: `runCommandCheck` calls
-// `exec(check.run, cwd)` with no options object, so every real gate runs on it. It is held by
-// the two tests below and, until this round, by a third that ran `defaultExec('sleep 1')` and
-// asserted it was not killed. That one is gone, for two reasons and not for its second of wall
-// clock alone.
+// THE TWO TESTS BELOW PIN DEFAULTEXEC'S OWN NO-OPTIONS DEFAULT, not production's call site.
+// `runCommandCheck` no longer calls `exec(check.run, cwd)` with no options object — since the
+// per-check `timeoutMs` bound was added it always passes one:
+// `exec(check.run, cwd, { timeoutMs: check.timeoutMs ?? COMMAND_TIMEOUT_MS })`, so a manifest
+// entry can lower its own timeout. What now pins the default production actually APPLIES,
+// through that options object, is `'a command check with no timeoutMs gets the default'` above:
+// it drives `runCommandCheck` itself and asserts the options its stub `exec` receives carry
+// `COMMAND_TIMEOUT_MS`.
+//
+// The two tests below still earn their keep: they pin `defaultExec`'s OWN behaviour when handed
+// no options at all, which stays a real code path — every direct `defaultExec(...)` call in this
+// file that omits the third argument exercises it, and so would a programmatic caller of
+// `defaultExec` that is not `runCommandCheck`. Until this round a third test in this group ran
+// `defaultExec('sleep 1')` and asserted it was not killed. That one is gone, for two reasons and
+// not for its second of wall clock alone.
 //
 // IT WAS THE ONLY TEST IN THIS FILE THAT RAN A POSIX COMMAND UNGUARDED. `.github/workflows/
 // test.yml` runs the matrix [ubuntu-latest, windows-latest, macos-latest], and `sleep` is not a
@@ -3236,8 +3316,13 @@ test('the default a no-options call applies IS COMMAND_TIMEOUT_MS, not merely so
   let pending
   try {
     globalThis.setTimeout = (fn, ms, ...rest) => { delays.push(ms); return realSetTimeout(fn, ms, ...rest) }
-    // NO OPTIONS OBJECT AT ALL, which is exactly how `runCommandCheck` calls it: `exec(check.run,
-    // cwd)`. Anything passed here would pin the argument rather than the default.
+    // NO OPTIONS OBJECT AT ALL — this pins `defaultExec`'s OWN default for that shape, which is
+    // still a real call site (every direct `defaultExec(...)` call in this file that omits a
+    // third argument takes it). It is no longer how `runCommandCheck` calls `exec`: since the
+    // per-check `timeoutMs` bound was added, production always passes
+    // `{ timeoutMs: check.timeoutMs ?? COMMAND_TIMEOUT_MS }`, pinned separately by
+    // `'a command check with no timeoutMs gets the default'`. Passing anything here would pin
+    // the argument rather than this function's own default.
     pending = defaultExec('exit 0', process.cwd())
   } finally {
     globalThis.setTimeout = realSetTimeout

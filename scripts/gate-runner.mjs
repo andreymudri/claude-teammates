@@ -615,6 +615,16 @@ function malformedKindResult(check, index) {
 // 60 minutes. A manifest may lower the default; it may not raise it past here.
 const TIMEOUT_CEILING_MS = 60 * 60_000
 
+// A floor, not just a ceiling. `defaultExec`'s timeout notice reports whole seconds
+// (`Math.round(timeoutMs / 1000)`), and every value below 500ms rounds to `0` — "timed out
+// after 0s" tells the operator nothing about how long the check actually ran. The other way to
+// close that gap is to report the notice in milliseconds instead, but that wording is already
+// pinned at whole seconds by tests this bound cannot see: the `defaultExec` tests below call it
+// directly with their own `timeoutMs`, bypassing `timeoutFault` entirely, so changing the notice
+// would touch a class of caller a floor here does not reach. A floor on the manifest path is the
+// narrower fix.
+const TIMEOUT_FLOOR_MS = 1000
+
 // `timeoutMs` is read off an entry of a file any teammate can write, and `validateGate` in
 // scripts/config.mjs checks only that `phases[*].checks` is an ARRAY — the same hole
 // `hasUsableKind` exists to plug, so this takes the same answer: diagnose the entry and
@@ -625,6 +635,9 @@ export function timeoutFault(check) {
   if (value === undefined) return null
   if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
     return `timeoutMs must be a positive integer of milliseconds, got ${JSON.stringify(value)}`
+  }
+  if (value < TIMEOUT_FLOOR_MS) {
+    return `timeoutMs must be at least ${TIMEOUT_FLOOR_MS} (1 second), got ${value}`
   }
   if (value > TIMEOUT_CEILING_MS) {
     return `timeoutMs must not exceed ${TIMEOUT_CEILING_MS} (60 minutes), got ${value}`
@@ -638,9 +651,19 @@ export function timeoutFault(check) {
 // `ALWAYS_ENFORCED_KINDS` have nothing to catch it on and `checkResult` would honour the entry's
 // own `optional`. `optional: false` is forced here, on the copy handed to `checkResult`, so a
 // `{"timeoutMs": 0, "optional": true}` entry cannot fail and be waved through at once.
+//
+// `name` is substituted the same way `malformedKindResult` substitutes it, and for the same
+// reason: a malformed entry frequently carries no `name`, `name` is the only field
+// `aggregateVerdict` reports, and passing `check.name` through unchanged would surface a
+// nameless entry as `{"failed":[null]}` — a verdict line that tells the operator nothing about
+// which entry to fix.
 function malformedTimeoutResult(check, index, fault) {
   const position = `entry #${index} in this phase's check list`
-  return checkResult({ ...check, optional: false }, 'fail', `${fault} (${position})`)
+  return checkResult(
+    { ...check, name: typeof check?.name === 'string' ? check.name : position, optional: false },
+    'fail',
+    `${fault} (${position})`,
+  )
 }
 
 export function describePendingCheck(check) {
