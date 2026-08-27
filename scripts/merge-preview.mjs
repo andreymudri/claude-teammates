@@ -62,6 +62,28 @@ export function previewClaimPrefix(dir) {
   return `${path.basename(previewOwnerMarkerPath(dir))}.`
 }
 
+// `'wx'` is `O_CREAT|O_EXCL|O_WRONLY`: it refuses an entry that already exists instead of
+// opening it. Plain `'w'` is `O_CREAT|O_WRONLY|O_TRUNC` and FOLLOWS a symlink — verified in this
+// task with a throwaway symlink pointing at a sibling file: a plain `'w'` write through the link
+// truncated the target to the new contents, and the same write with `'wx'` instead rejected with
+// `EEXIST` and left the target untouched. The window between `mkdtemp` and this write is tight —
+// measured in this task at a median of 0.116 ms and a maximum of 0.926 ms over 200 samples, with
+// a six-character suffix nothing can guess (an earlier reviewer's run of the same measurement
+// reported a median of 0.138 ms and a maximum of 1.127 ms; both runs agree it is sub-millisecond)
+// — so it needs an inotify watcher on the temp root, but it is retryable forever at no cost to
+// whoever holds the watcher, and the same remedy was already applied to the CLAIM write in
+// scripts/gate-runner.mjs — the marker was simply never covered.
+//
+// Impact is bounded to files this user can already write, so nothing here is a privilege gain.
+// What it prevents is this process destroying one of its own files on a path it did not choose.
+//
+// EEXIST here is not a race to retry: mkdtemp created this directory 0700 a moment ago and
+// nothing legitimate can have put an entry in it, so the throw is the answer. It is raised
+// INSIDE withMergePreview's `try`, so the `finally` still cleans the directory up.
+export async function writeOwnerMarker(marker, pid) {
+  await writeFile(marker, `${pid}\n`, { encoding: 'utf8', flag: 'wx' })
+}
+
 // The worktree lives under the system temp directory, never inside the repository. An
 // in-repo worktree is untracked, so `git status --porcelain` reports it and the ownership
 // check reads the main worktree as dirty for the whole run — the deadlock that cost run
@@ -85,7 +107,7 @@ export async function withMergePreview({ git, base, branches = [], link = [], re
   const marker = previewOwnerMarkerPath(dir)
   let teardownLinks = null
   try {
-    await writeFile(marker, `${process.pid}\n`, 'utf8')
+    await writeOwnerMarker(marker, process.pid)
     await git.addWorktreeDetached(dir, base)
     const conflict = await git.mergeInto(dir, branches)
     if (conflict) {

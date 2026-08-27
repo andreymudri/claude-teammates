@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
-import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
@@ -10,6 +10,7 @@ import {
   previewOwnerMarkerPath,
   previewClaimPath,
   previewClaimPrefix,
+  writeOwnerMarker,
 } from '../scripts/merge-preview.mjs'
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..')
@@ -569,4 +570,45 @@ test('a claim path is the owner marker plus the pid, and the prefix excludes the
   const prefix = previewClaimPrefix(dir)
   assert.ok(path.basename(previewClaimPath(dir, 4242)).startsWith(prefix))
   assert.equal(path.basename(owner).startsWith(prefix), false)
+})
+
+// ---------------------------------------------------------------------------
+// writeOwnerMarker, tested directly against a real filesystem entry rather than asserted from
+// source text — 'wx' is a flag the exec fakes above cannot exercise, since they never touch a
+// real file.
+// ---------------------------------------------------------------------------
+
+test('writeOwnerMarker refuses a path that already exists rather than truncating it', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-marker-'))
+  const marker = path.join(dir, 'marker')
+  await writeFile(marker, 'pre-existing\n', 'utf8')
+  await assert.rejects(() => writeOwnerMarker(marker, 4242), (err) => err.code === 'EEXIST')
+  assert.equal(await readFile(marker, 'utf8'), 'pre-existing\n')
+  await rm(dir, { recursive: true, force: true })
+})
+
+test('writeOwnerMarker does not follow a symlink planted at the marker path', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-marker-'))
+  const victim = path.join(dir, 'victim')
+  const marker = path.join(dir, 'marker')
+  await writeFile(victim, 'do not truncate me\n', 'utf8')
+  await symlink(victim, marker)
+  await assert.rejects(() => writeOwnerMarker(marker, 4242), (err) => err.code === 'EEXIST')
+  assert.equal(await readFile(victim, 'utf8'), 'do not truncate me\n')
+  await rm(dir, { recursive: true, force: true })
+})
+
+test('withMergePreview writes the owner marker naming its own pid', async () => {
+  const git = fakeGit()
+  let contents = null
+  let readWhileDirExisted = false
+  await withMergePreview({
+    git, base: 'main', branches: ['T1'],
+    run: async ({ path: dir }) => {
+      contents = await readFile(previewOwnerMarkerPath(dir), 'utf8')
+      readWhileDirExisted = existsSync(dir)
+    },
+  })
+  assert.equal(contents, `${process.pid}\n`)
+  assert.equal(readWhileDirExisted, true, 'the marker must be readable while the preview directory still exists')
 })
