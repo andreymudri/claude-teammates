@@ -151,10 +151,83 @@ test('isDirty does not exempt a lookalike path', async () => {
   assert.equal(await createGit({ exec }).isDirty(), true)
 })
 
-test('currentBranch trims the abbreviated ref', async () => {
-  const { calls, exec } = recorder({ code: 0, stdout: 'master\n', stderr: '' })
-  assert.equal(await createGit({ exec }).currentBranch(), 'master')
-  assert.deepEqual(calls[0], ['rev-parse', '--abbrev-ref', 'HEAD'])
+test('currentBranchRef returns the ref HEAD symbolically points at', async () => {
+  const calls = []
+  const exec = async (args) => {
+    calls.push(args)
+    return { code: 0, stdout: 'refs/heads/run-branch\n', stderr: '' }
+  }
+  assert.equal(await createGit({ exec }).currentBranchRef(), 'refs/heads/run-branch')
+  assert.deepEqual(calls[0], ['symbolic-ref', '--quiet', 'HEAD'])
+})
+
+// Verified against the real git installed here (2.55.0): on a detached HEAD, `symbolic-ref
+// --quiet HEAD` exits 1 with empty stdout AND empty stderr, while the bare form exits 128
+// printing a diagnostic. The empty stderr is what makes detachment distinguishable from a
+// failure without parsing any message.
+test('currentBranchRef answers null on a detached HEAD rather than throwing', async () => {
+  const exec = async () => ({ code: 1, stdout: '', stderr: '' })
+  assert.equal(await createGit({ exec }).currentBranchRef(), null)
+})
+
+// The stderr here is the real one: running the same command outside a repository was measured
+// on that git as exit 128 with `fatal: not a git repository` on stderr.
+test('currentBranchRef throws when symbolic-ref fails for a reason that is not detachment', async () => {
+  const exec = async () => ({ code: 128, stdout: '', stderr: 'fatal: not a git repository\n' })
+  await assert.rejects(() => createGit({ exec }).currentBranchRef(), GitError)
+})
+
+test('currentBranch strips refs/heads/ and reports HEAD when detached', async () => {
+  const named = async () => ({ code: 0, stdout: 'refs/heads/run-branch\n', stderr: '' })
+  assert.equal(await createGit({ exec: named }).currentBranch(), 'run-branch')
+  const detached = async () => ({ code: 1, stdout: '', stderr: '' })
+  assert.equal(await createGit({ exec: detached }).currentBranch(), 'HEAD')
+})
+
+// The exact plant from the followups document: three ordinary ref writes, each of which an
+// unprivileged teammate can make in its own worktree. Under `--abbrev-ref` they made HEAD's
+// name answer `refs/heads/run-branch`, so `refs/heads/` + that name landed on the planted ref
+// — the assertions below measure that hijack against the real git rather than assuming it.
+// `symbolic-ref` reads HEAD itself, so all three are inert.
+test('a tag, a heads/<name> branch and refs/heads/refs/heads/<name> do not redirect the resolved name', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-'))
+  const git = createGit({ cwd: root })
+  const sh = (args) => defaultGitExec(args, root)
+  const out = async (args) => (await sh(args)).stdout.trim()
+  try {
+    await sh(['init', '--initial-branch=run-branch'])
+    await sh(['config', 'user.email', 'test@example.com'])
+    await sh(['config', 'user.name', 'test'])
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    const real = await out(['rev-parse', 'HEAD'])
+    // A second commit, then rewound: it gives the plant a sha to redirect the run branch to
+    // that is not the sha HEAD actually points at.
+    await writeFile(path.join(root, 'other.txt'), 'other\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'other'])
+    const planted = await out(['rev-parse', 'HEAD'])
+    await sh(['reset', '--hard', real])
+    assert.notEqual(planted, real)
+
+    await sh(['tag', 'run-branch', real])
+    await sh(['branch', 'heads/run-branch', real])
+    await sh(['update-ref', 'refs/heads/refs/heads/run-branch', planted])
+
+    // The plant works against the OLD resolution: abbreviation gives back a name that, once a
+    // caller prefixes `refs/heads/`, resolves to the sha the planter chose rather than HEAD's.
+    const abbreviated = await out(['rev-parse', '--abbrev-ref', 'HEAD'])
+    assert.equal(abbreviated, 'refs/heads/run-branch')
+    assert.equal(await out(['rev-parse', `refs/heads/${abbreviated}`]), planted)
+
+    // Symbolic resolution is unmoved by all three, and its name round-trips back to HEAD.
+    assert.equal(await git.currentBranchRef(), 'refs/heads/run-branch')
+    assert.equal(await git.currentBranch(), 'run-branch')
+    assert.equal(await out(['rev-parse', `refs/heads/${await git.currentBranch()}`]), real)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('against a real repository, changedFiles reports the branch-only change', async () => {
