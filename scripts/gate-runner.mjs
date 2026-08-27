@@ -3,16 +3,493 @@ import { filesetViolations, ownershipViolations, baseExplainedNote, resolveTaskB
 import { GitError } from './git.mjs'
 import { withMergePreview, conflictPairs } from './merge-preview.mjs'
 
+// 15 minutes. A command check is the project's own suite, so the default has to clear a
+// slow one on a cold cache; what it exists to stop is the check that never returns at all.
+export const COMMAND_TIMEOUT_MS = 15 * 60_000
+
+// Between SIGTERM and SIGKILL. A suite that traps SIGTERM to write a coverage report gets
+// to finish; one that ignores it does not get to outlive the gate.
+//
+// WHAT THE TESTS HOLD AND WHAT THEY DO NOT, because this comment used to imply a two-sided
+// bound it never had. The LOWER side is behavioural: a trap that does real work — 300ms of it —
+// must reach its `echo`, so a zero or near-zero grace fails. The UPPER side is not behavioural
+// at all and cannot cheaply be made so: raising this to 60_000 leaves every test green, because
+// the only run that lets the constant's own value reach a signal is the one whose trap exits
+// inside the window, and `cleanup` then clears the timer as soon as the group is observed empty.
+// So the upper side is held by a change-detector on the number and nothing else, and the cost it
+// guards against is a SIGTERM-ignoring member surviving that much longer after the verdict.
+export const KILL_GRACE_MS = 5_000
+
+// How often a registered pid is re-probed once nothing else is left to announce its group's
+// end. See `startReaper`: this is the width of the window in rule 2 below, and it is the only
+// number that bounds it.
+//
+// Held the same two ways for the same reason: the retirement tests allow REAP_BOUND_MS, which is
+// deliberately loose against flake, so raising this to 2_000 would leave them green. The
+// change-detector is what makes that edit deliberate.
+export const REAP_INTERVAL_MS = 250
+
 const TAIL_LINES = 40
 
-export function defaultExec(cmd, cwd) {
+// ── WHO OWNS A GROUP'S LIFETIME, DECIDED ONCE ────────────────────────────────────────────────
+// Four separate defects turned out to be four readings of one question, so the answer is written
+// here and every call site below obeys it rather than deciding again.
+//
+// The question: `defaultExec`'s promise SETTLING and the check's process group BEING OVER are
+// different events, and `cleanup` used to treat them as the same one. They come apart in the
+// ordinary case: `close` fires when OUR END OF THE PIPES closes, which is the top-level
+// `/bin/sh` dying — and `/bin/sh` takes SIGTERM's DEFAULT disposition. A member that ignores
+// SIGTERM with its stdio redirected keeps running while `close` fires milliseconds later. That
+// member is precisely the population KILL_GRACE_MS exists for; if nothing ever survived a
+// SIGTERM the grace SIGKILL would have no purpose.
+//
+// The three rules:
+//
+//   1. THE GROUP DECIDES, NEVER THE PROMISE. A pid leaves `liveGroups` only when the group it
+//      names is OBSERVED empty. Not when a verdict is reported, not when the leader dies — a
+//      group with surviving members keeps its pgid reserved and is still exactly the right
+//      thing to kill.
+//   2. RETIREMENT IS TERMINAL, AND TERMINAL PER CALL RATHER THAN PER NUMBER. Once a pid leaves
+//      the set, nothing in this module signals it again, on any platform. The number is free for
+//      the OS to hand out and the probe is a LIVENESS test, not an identity test, so a second
+//      look would answer "alive" for a stranger — a second look is not a second chance.
+//      "Per call" is the part membership alone cannot express: a timer armed by check A fires
+//      against A's registration, not against whoever holds that number when it fires, so each
+//      call latches its own retirement and stops signalling from that instant. `startReaper` is
+//      what keeps the interval between "the group emptied" and "we noticed" down to one probe
+//      period instead of one timeout.
+//   3. AFTER THE VERDICT THE GATE NEVER WAITS. Anything still owed to a surviving group is owed
+//      by an UNREF'D timer or by the exit sweep, so a group that outlives every signal we can
+//      send cannot hold node open. Holding node open is the unbounded check the timeout exists
+//      to stop, and it must not come back in through the cleanup path.
+//
+// The residual, stated plainly rather than implied: rule 1 keeps a live group on the sweep list,
+// rule 2 takes it off within REAP_INTERVAL_MS of it emptying, and neither can survive pid reuse
+// inside that interval, because reuse is not observable from inside a process.
+
+// The whole process group, not the direct child. With `shell: true` the direct child is
+// `/bin/sh -c`, so killing it alone leaves everything the suite spawned running — measured:
+// `spawn('sleep 300 & wait', { shell: true, timeout: 500, killSignal: 'SIGKILL' })` ends
+// with the shell dead and the grandchild ALIVE. That is why node's own `timeout` option is
+// not what this uses.
+function killGroup(pid, signal) {
+  // RULE 2, checked before anything else and on BOTH platforms, because it is the only part of
+  // this that win32 can honour. `taskkill /pid <pid> /T /F` force-kills an entire process TREE
+  // at a number Windows recycles aggressively; a retired pid no longer names our tree, and this
+  // is what stops that command being aimed at it.
+  //
+  // NO TEST CAN SEE THIS GUARD ALONE ANY MORE, and that is worth knowing before deleting it.
+  // Since every signal `defaultExec` sends goes through `signalGroup`, whose per-call `retired`
+  // latch refuses first, the two are INDEPENDENTLY SUFFICIENT on every path that exists: measured,
+  // removing this line leaves the suite green, removing the latch leaves the suite green, and
+  // only removing BOTH turns the retired-pid test red. It is kept because it is the invariant
+  // `killGroup` itself enforces — the latch belongs to one call, this belongs to the function,
+  // and the sweep in `installTeardown` calls it without any latch of its own. A future caller
+  // that is not `signalGroup` gets rule 2 from here or not at all.
+  if (!liveGroups.has(pid)) return
+  // RULE 1's probe, and it runs BEFORE the win32 branch rather than after it — the ordering is
+  // the same on both platforms even though only one of them learns anything from the call.
+  //
+  // The platform limit, stated where the claim is made rather than left to be inferred: this is
+  // probed on every signal path ON POSIX. On win32 `retireIfGroupGone` answers false
+  // unconditionally, because there is no process group to probe — `detached` is false there, the
+  // child is `cmd.exe`, and the teardown is the tree walk below. What retires a win32 pid is the
+  // direct child's own exit, in `defaultExec`. All of this is UNVERIFIED ON-PLATFORM: every test
+  // that drives a signal path in this file is behind POSIX_ONLY.
+  if (retireIfGroupGone(pid)) return
+  if (process.platform === 'win32') {
+    // A negative pid is POSIX. On win32 the equivalent is taskkill walking the child tree.
+    spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true }).on('error', () => {})
+    return
+  }
+  try {
+    process.kill(-pid, signal)
+  } catch (err) {
+    // ESRCH: the group went away between the probe above and here, which is the outcome this
+    // wanted, and the pid stops being signalled from now on.
+    if (err.code === 'ESRCH') retire(pid)
+  }
+}
+
+// Whether the GROUP is empty — NOT whether its leader died. A group whose leader has exited
+// while members are still running keeps its pgid RESERVED and is still exactly the right thing
+// to kill, so `child.exitCode !== null` is not this test: it would drop a live suite from the
+// sweep and let it outlive the gate. Retires the pid the first time the group answers ESRCH,
+// and answers whether it did.
+//
+// What this closes: the escaped-grandchild path, which is the case the timeout exists for.
+// Measured with a `setsid` run string, the direct child is reaped in about a millisecond and
+// Linux frees a pgid as soon as its group has no members — after which the module used to signal
+// that number three ways, SIGTERM at the timeout, SIGKILL at the grace, and a SIGKILL from the
+// sweep on every Ctrl-C. The `catch` above cannot detect that on its own: once the number is
+// reused no ESRCH is raised, because it names something real.
+//
+// ITS LIMIT, AND THE EARLIER VERSION OF THIS COMMENT CLAIMED A TIGHTER ONE THAN THE CODE HELD.
+// This is a LIVENESS test, not an identity test: it answers "does some group still hold this
+// pgid", and a pgid the OS has already handed back out answers YES. So the exposure is not the
+// microseconds between the probe and the signal after it. It is the WHOLE interval from the
+// group emptying to the next time anything looks — and on a call-site-driven probe alone that
+// interval is the timeout. Measured: group empty at 310ms, pid still registered at 5016ms with
+// timeoutMs 5000, which on the 15-minute production default is fifteen minutes.
+//
+// `startReaper` below is what closes the closable part of that: the minutes shrink to
+// REAP_INTERVAL_MS. What stays open is one probe period, and nothing inside a process can close
+// THAT, because pid reuse is not observable from here.
+function retireIfGroupGone(pid) {
+  // No process group to probe: `detached` is false on win32 and the teardown is a tree walk. A
+  // win32 pid is retired by the direct child's exit instead — see `defaultExec`.
+  if (process.platform === 'win32') return false
+  try {
+    process.kill(-pid, 0)
+    return false
+  } catch (err) {
+    // EPERM says the group exists and is not ours, which is a signal that could not land
+    // either way; it stays registered rather than being treated as gone. Rated low and pinned
+    // anyway: retiring here would drop a LIVE group from the sweep on the strength of an error
+    // that says the opposite, and the claim is only worth making if something checks it.
+    if (err.code !== 'ESRCH') return false
+    retire(pid)
+    return true
+  }
+}
+
+// The one place a pid leaves the set, so it is the one place that can tell the call which
+// registered it. Everything else — the ESRCH catch in `killGroup`, the win32 exit branch,
+// `cleanup`, the reaper — goes through here rather than deleting from the map itself, because a
+// deletion nobody is told about is precisely the hole rule 2's "per call" clause closes.
+function retire(pid) {
+  const onRetire = liveGroups.get(pid)
+  liveGroups.delete(pid)
+  onRetire?.()
+}
+
+// The one place a pid ENTERS the set, and it exists because `Map.set` on an occupied key
+// discards the old value silently — and the value IS the displaced call's only channel for
+// learning it was retired.
+//
+// THE ORDERING THIS CLOSES, which is the mirror image of the one rule 2 already handles. Rule 2
+// covers reuse AFTER retirement: the pid left the set, the OS handed the number on, and a late
+// timer must not chase it. This is reuse BEFORE retirement — `cleanup` keeps a pid registered
+// with its grace armed whenever it probes a non-empty group, that group's last member then
+// exits, and the pgid is free from that instant while the reaper does not look for up to
+// REAP_INTERVAL_MS. Inside that window the number can be handed to a NEW spawn. Overwriting the
+// map entry there would strand the first call's callback: nothing could ever set its `retired`
+// flag, because `retireIfGroupGone` answers false for a group that is now the SECOND call's and
+// very much alive. The first call's grace would then fire with `retired === false`, find the pid
+// registered (to someone else), probe a group that answers alive (someone else's), and deliver
+// its SIGKILL into the middle of a running check — a spurious FAIL, which is the exact harm the
+// Map was added to prevent.
+//
+// AND THIS ONE IS TESTABLE, unlike its mirror. Being handed a pid that is ALREADY in this map is
+// itself proof that the previous holder's group has ended, because a live group keeps its pgid
+// reserved and the OS cannot hand it out twice. That makes the re-registration the observable
+// event — the single moment pid reuse is visible from inside a process — so `retire` is called
+// on the way in and the displaced call learns of it. Exported for the test that pins exactly
+// that, alongside `liveGroupPids`.
+export function registerGroup(pid, onRetire) {
+  // A no-op unless the number was still registered to an earlier call: `retire` on an absent
+  // pid gets `undefined`, deletes nothing and calls nothing. Routed through `retire` rather than
+  // reading the map here so that "the one place a pid leaves the set" stays literally true.
+  retire(pid)
+  liveGroups.set(pid, onRetire)
+}
+
+// RULE 2's clock. Once a check's promise has settled there is no `close`, no `exit` and no
+// signal left to notice its last member finally going, so without this a pid registered under
+// rule 1 sits on the sweep list until the next signal attempt — the timeout, or a Ctrl-C.
+// Re-probing on a timer turns that into one probe period.
+//
+// UNREF'D, which is the whole reason this is safe to add and is rule 3 in one line. A ref'd
+// repeating timer would hold node open for as long as any group survived — for a grandchild that
+// escaped the group, forever — and that is the unbounded gate the timeout exists to stop. Unref'd
+// it narrows the window while the gate is alive anyway and vanishes the moment node wants to
+// exit; what covers the group from then on is the `exit` sweep, which sends the same SIGKILL.
+let reaper = null
+function startReaper() {
+  // Nothing to probe on win32, so this would spin without ever retiring anything.
+  if (process.platform === 'win32' || reaper) return
+  reaper = setInterval(() => {
+    // A copy: `retireIfGroupGone` deletes from the set it is iterating.
+    for (const pid of [...liveGroups.keys()]) retireIfGroupGone(pid)
+    if (liveGroups.size === 0) { clearInterval(reaper); reaper = null }
+  }, REAP_INTERVAL_MS)
+  reaper.unref?.()
+}
+
+// Groups still running, so a Ctrl-C does not leave a suite behind. A pid is retired the first
+// time its GROUP is observed empty — at the child's exit, at the settle, at the next signal, or
+// at the next reaper tick — never merely when its leader dies, and never merely because the
+// check's promise settled, because a group with surviving members still holds its pgid and the
+// promise settles on a pipe closing. Membership is the invariant the whole file rests on and it
+// is stated in full above `killGroup`.
+//
+// SIGKILL is deliberately absent and cannot be added: it is untrappable, and the
+// 120-second caller kill that orphans a suite inside a merge preview is exactly a SIGKILL.
+// Nothing in this file can cover that case. What covers it is the claim file the orphan
+// holds itself instead of depending on its parent surviving.
+// A MAP, pid -> the retirement callback of the call that registered it, not a bare Set. The
+// callback is rule 2's "per call" clause and the value is never read for anything else: the
+// membership test is still what withholds a signal from a number nobody owns, and this is what
+// tells a call it no longer owns the number it is about to signal.
+//
+// EXACTLY WHAT THAT COVERS, because this used to say "withholds one from a number SOMEBODY ELSE
+// now owns" flatly and that is true of only one of the two orderings. Reuse comes in two, and
+// they are closed by different things and pinned to different depths:
+//
+//   BEFORE RETIREMENT — the number is handed to a new call while the old one is still in this
+//   map. Closed by `registerGroup`, which retires the displaced call on the way in. Pinned in
+//   TWO PIECES, and the distinction matters to anyone editing either one:
+//
+//     the HELPER, behaviourally — the re-registration is itself proof the old group ended, so a
+//     test stages the collision directly and asserts the displaced call was latched;
+//
+//     the CALL SITE, as source text only — that `defaultExec` registers THROUGH this helper is
+//     not reachable by any test, because it would need the kernel to hand a staged number to a
+//     real spawn. Rewrite the call below to a bare `liveGroups.set` and every behavioural test
+//     in the suite stays green while this whole hazard is back. What notices is an assertion
+//     that reads this file as text and requires `liveGroups.set` to occur exactly once, inside
+//     `registerGroup`. So: keep it to one call site, and do not read the sentence above as
+//     saying a running test would catch you.
+//
+//   AFTER RETIREMENT — the number is handed out once the old call has already left the map, and
+//   its armed timers still hold it. Closed by the `retired` latch those timers read through
+//   `signalGroup`, and NOT pinned, because reaching it needs the OS to recycle a pid inside a
+//   grace window and that is not arrangeable from inside a process.
+//
+// The hole it closes, which the Set could not: `killGroup`'s guard was a test on the NUMBER. A
+// grace timer armed by check A and fired 3.1s after A's pid was retired was withheld only by A's
+// pid being absent from the set — and a later `defaultExec` spawn puts that same number back the
+// moment the OS hands it out, after which the probe answers "alive" for the NEW holder and the
+// SIGKILL is delivered to it. The victim is bounded to one of our own later checks, which dies
+// mid-run and reads as a spurious FAIL.
+//
+// STATED, NOT TESTED, and it cannot be otherwise: reaching it requires the OS to hand the same
+// pid back inside a grace window, which is not arrangeable from inside a process — the same
+// unreachable class as the reuse hazard rule 2 exists for. What the tests DO hold is the other
+// direction, that the latch never withholds a signal from a group that is still ours: latch
+// `retired` at its declaration and seven tests go red, one of them named for the reason.
+//
+// The corollary, so nobody draws the wrong conclusion from a green run: DELETING the latch is
+// also invisible, because `killGroup`'s membership guard catches the same signals one frame
+// later on every path a test can reach. The two are independently sufficient today and only
+// removing both is visible. See the note above that guard.
+const liveGroups = new Map()
+let teardownInstalled = false
+
+// A SNAPSHOT of that set, never the set itself — a caller that could mutate it could disarm the
+// sweep. A snapshot and nothing more: a pid it lists may have exited between the read and the
+// caller's use of it, so this answers "was this registered" and never "is this alive".
+export function liveGroupPids() {
+  return [...liveGroups.keys()]
+}
+
+function installTeardown() {
+  if (teardownInstalled) return
+  teardownInstalled = true
+  const sweep = () => { for (const pid of [...liveGroups.keys()]) killGroup(pid, 'SIGKILL') }
+  process.once('exit', sweep)
+  // Installing a handler displaces node's default disposition, so each one exits itself
+  // with the conventional 128 + signal code rather than leaving the process running.
+  process.once('SIGINT', () => { sweep(); process.exit(130) })
+  process.once('SIGTERM', () => { sweep(); process.exit(143) })
+  // SIGHUP and SIGQUIT terminate by DEFAULT, and a default disposition runs neither a handler
+  // nor the `exit` sweep above — so a closed terminal or a dropped ssh session used to leave the
+  // whole check tree orphaned with its timer gone. `detached` made that worse rather than
+  // better: setsid() moves the check out of node's session, so the hangup the terminal delivers
+  // to node's own group no longer reaches the group node spawned. Measured on that shape: parent
+  // dead, grandchild alive in a session of its own.
+  //
+  // POSIX only. Win32 has no SIGQUIT, its SIGHUP is a console-control event with different
+  // semantics, and its teardown is the `taskkill` tree walk rather than a group signal.
+  if (process.platform !== 'win32') {
+    process.once('SIGHUP', () => { sweep(); process.exit(129) })
+    process.once('SIGQUIT', () => { sweep(); process.exit(131) })
+  }
+}
+
+// `graceMs` overrides KILL_GRACE_MS. It exists so a test can drive the SIGKILL path without
+// five seconds of wall clock; production callers pass neither it nor anything but `timeoutMs`
+// and `onSpawn`, and shortening it changes only when the second signal is sent, never which
+// path runs.
+export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn = null, graceMs = KILL_GRACE_MS } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, { cwd, shell: true })
+    installTeardown()
+    const child = spawn(cmd, {
+      cwd,
+      shell: true,
+      // Its own process group, which is the only thing that makes the kill above reach the
+      // suite rather than just the shell.
+      detached: process.platform !== 'win32',
+      // `detached` on win32 otherwise opens a console window.
+      windowsHide: true,
+    })
     let output = ''
+    let timedOut = false
+    let timer = null
+    let grace = null
+    let settled = false
+    // RULE 2's "per call" clause, latched from THIS call's registration and never re-read from
+    // the set. Set by the retirement callback registered below, so every retirement path sets it
+    // — the exit listener, `cleanup`, the ESRCH catch, and the reaper, which is the one no
+    // call-site flag could otherwise see. Once it is true the timers this call armed are inert:
+    // they still FIRE, because the timeout timer is what settles the promise, but they signal
+    // nothing.
+    let retired = false
+    // Every signal this call sends goes through here rather than calling `killGroup` directly.
+    // `killGroup`'s own guard asks whether the NUMBER is registered; this one asks whether it is
+    // still registered TO US, which is the only question a timer armed seconds ago can answer
+    // safely.
+    const signalGroup = (sig) => { if (!retired && child.pid !== undefined) killGroup(child.pid, sig) }
+
+    // Runs on EVERY exit path there is — a normal close, a spawn error, a throw out of
+    // `onSpawn`, and the grace expiry that settles without a close.
+    //
+    // WHAT IT MAY ASSUME, and this is the decision the three rules above are written for: THAT
+    // THIS PROMISE HAS SETTLED. No further resolve or reject, our end of the pipes ours to drop.
+    // It may NOT assume the work is over, because `close` is the pipes closing and nothing more.
+    // Undoing the timeout is safe on that assumption alone; retiring the pid and cancelling the
+    // pending SIGKILL are not, and used to be done anyway.
+    const cleanup = () => {
+      // The timeout, unconditionally: its job was to bound how long this promise waits, and this
+      // promise has stopped waiting. Leaving it armed to SIGTERM a leftover group at the
+      // fifteen-minute mark would buy nothing the exit sweep does not already do, and would keep
+      // a timer per finished check.
+      clearTimeout(timer)
+      timer = null
+      if (child.pid === undefined) { clearTimeout(grace); grace = null; return }
+      // RULE 1: the group decides. Empty — retire the pid, and drop the pending SIGKILL with it,
+      // because there is nothing left to kill and the number is now free to be handed out.
+      if (retireIfGroupGone(child.pid)) { clearTimeout(grace); grace = null; return }
+      // NON-EMPTY: keep both. The pid stays registered so the sweep still reaches the group, and
+      // the grace stays ARMED so the escalation this check already committed to still fires.
+      //
+      // Chosen over the alternative deliberately. The other candidate fix was to send the
+      // SIGKILL inline on the timed-out `close` path — it passes every test here, and it is
+      // WRONG for the case KILL_GRACE_MS promises: a member legitimately flushing a coverage report
+      // with its stdio redirected would be killed the instant the shell died, with none of the
+      // grace it was granted. Leaving the timer armed spends the grace on exactly the group that
+      // still exists, and spends nothing on the group that does not.
+      //
+      // UNREF'D from here on, which is rule 3: before the verdict the gate waits for this
+      // SIGKILL, after the verdict it does not. If node exits first the `exit` sweep sends the
+      // same signal, so the kill is delivered either way and a survivor cannot delay the gate.
+      grace?.unref()
+    }
+    // Our end of the pipes. Dropping them is what stops a process that escaped the group from
+    // holding this promise open; the limit is that anything it writes afterwards is lost, which
+    // is output from a process the gate has already given up on.
+    const dropPipes = () => {
+      child.stdout?.destroy()
+      child.stderr?.destroy()
+    }
+    // FIRST SETTLE WINS, and cleanup happens with it. A timeout that settles on the grace expiry
+    // usually DOES see a `close` afterwards — destroying the pipes below tends to produce one —
+    // and that must not re-run a cleanup whose `liveGroups.delete` would by then name whatever
+    // holds that pid. Stated, not tested: the second `resolve` a missing guard allows is a no-op
+    // the promise machinery swallows, and the delete only misfires once the OS has recycled the
+    // pid, which no test here can make happen on demand.
+    const settle = (fn) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      fn()
+    }
+    // `code || 1`, not `code ?? 1`. `?? 1` converts the `null` of a signal-killed child but not
+    // a `0` — and a suite that TRAPS SIGTERM and exits cleanly inside the grace, the exact case
+    // the grace exists to accommodate, closes with 0. `runCommandCheck` reads `code === 0` as a
+    // pass and blanks the output on that branch, taking the timeout notice with it: a green
+    // check with no output for a suite that never finished. The price of `||` is that a command
+    // which genuinely finished 0 in the race between the timer firing and `close` is reported as
+    // a fail — for a gate, that is failing closed, which is the direction to be wrong in.
+    const resolveTimedOut = (code) => settle(() => {
+      const seconds = Math.round(timeoutMs / 1000)
+      resolve({
+        code: code || 1,
+        output: `${output}\n— timed out after ${seconds}s; its process group was killed`,
+      })
+    })
+
+    timer = setTimeout(() => {
+      timedOut = true
+      signalGroup('SIGTERM')
+      grace = setTimeout(() => {
+        signalGroup('SIGKILL')
+        // SETTLED ON THE KILL BEING DELIVERED, not on `close`. `close` waits for the stdio
+        // pipes rather than for the direct child, and a grandchild that left the group while
+        // inheriting them — a `setsid`, or a `spawn(..., { detached: true, stdio: 'inherit' })`
+        // — survives everything this can signal and holds them open. Waiting on that is the
+        // unbounded check the timeout exists to stop, reachable from an ordinary manifest `run`
+        // string. So the bound is timeoutMs + graceMs and nothing here waits past it.
+        //
+        // The limit: this says the kill was SENT, not that the suite is gone. Nothing in a
+        // process can end a process that left its group, and the output that grandchild would
+        // still have written is lost with the pipes.
+        dropPipes()
+        resolveTimedOut(null)
+      }, graceMs)
+    }, timeoutMs)
+
+    // ATTACHED BEFORE `onSpawn` RUNS. `onSpawn` writes the preview claim file and so can throw
+    // on EACCES or ENOSPC; called first, its throw left no `close` or `error` listener attached
+    // at all, so nothing ever ran the cleanup — both timers stayed armed, the pid stayed in
+    // `liveGroups`, the pipes were never drained, and a later `error` event was an uncaught
+    // exception. Measured on that shape: the promise rejected at 9ms and the process stayed
+    // alive to 8016ms.
     child.stdout.on('data', (d) => { output += d })
     child.stderr.on('data', (d) => { output += d })
-    child.on('error', reject)
-    child.on('close', (code) => resolve({ code: code ?? 1, output }))
+    child.on('error', (err) => {
+      settle(() => {
+        signalGroup('SIGKILL')
+        reject(err)
+      })
+    })
+    // Retirement at the earliest moment the group can be OBSERVED empty — for an escaped
+    // grandchild the direct child is already gone and its group already has no members, so a
+    // pid held past here names a number the OS is free to hand out. A group that still has
+    // members keeps its pid registered: `retireIfGroupGone` is what makes that distinction,
+    // never the exit code this listener carries.
+    //
+    // WHAT THIS BUYS IS LATENCY, NOT CORRECTNESS, and the earlier comment claimed otherwise.
+    // `startReaper` reaches the same pid within REAP_INTERVAL_MS of the same moment, so deleting
+    // this call leaves the whole suite green — every retirement test allows REAP_BOUND_MS, which
+    // is ten probe intervals, and nothing in the file distinguishes retirement-at-exit from
+    // retirement-at-reap. Making that distinction testable would mean asserting a sub-probe
+    // latency, which races the delivery of this very event under load. So: one probe period
+    // earlier, pinned by nothing, and the safety it is often read as providing is the reaper's.
+    child.on('exit', () => {
+      if (child.pid === undefined) return
+      // WIN32 HAS NO GROUP, so the probe cannot answer and the direct child's exit is the last
+      // moment this pid names anything addressable: `taskkill /T` walks the tree under `cmd.exe`
+      // and finds nothing once that root is gone. Holding the pid past it only aims `/T /F` at a
+      // number Windows recycles aggressively. The gap this leaves, stated rather than hidden: a
+      // win32 grandchild that outlives `cmd.exe` is not reachable by anything in this file. The
+      // POSIX group kill has no such gap. Unverified on-platform — nothing here runs on win32.
+      if (process.platform === 'win32') { retire(child.pid); return }
+      retireIfGroupGone(child.pid)
+    })
+    child.on('close', (code) => {
+      if (timedOut) { resolveTimedOut(code); return }
+      settle(() => resolve({ code: code ?? 1, output }))
+    })
+
+    if (child.pid !== undefined) {
+      registerGroup(child.pid, () => { retired = true })
+      startReaper()
+      // Called synchronously, before this promise can yield, so a holder registered here is
+      // registered before anything can observe the process it names. A throw propagates — a
+      // claim that cannot be written must not read as a check that ran unclaimed — but it
+      // propagates through the SAME cleanup an ordinary exit runs, plus the kill, so a gate
+      // that reports this failure can still exit and leaves nothing of the child behind.
+      try {
+        if (onSpawn) onSpawn(child.pid)
+      } catch (err) {
+        settle(() => {
+          signalGroup('SIGKILL')
+          dropPipes()
+          reject(err)
+        })
+      }
+    }
   })
 }
 
