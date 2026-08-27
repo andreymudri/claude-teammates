@@ -1410,22 +1410,61 @@ async function unlinkPreviewLinks(dir, depth = 0) {
 // directory that contains it, which is exactly the access an attacker planting a claim has.
 //
 // TWO LIMITS to the guarantee above, stated rather than left implicit:
-//   - Windows-void. Node's fs reports uid 0 for every path on that platform, so the ownership
-//     comparison can never tell one local account from another there; a claim reads as "owned"
-//     unconditionally and this defense gives no protection on Windows. Nothing here calls
-//     `process.getuid` at all — the comparison is between two `lstat` results, never against
-//     the reader's own identity — so there is no platform branch to skip, only a check that is
-//     silently a no-op on that platform.
+//   - Windows-void, and only the UID half of it. Node's fs reports uid 0 for every path on that
+//     platform, so the ownership comparison can never tell one local account from another there;
+//     a claim reads as "owned" unconditionally and that half gives no protection on Windows.
+//     Nothing here calls `process.getuid` at all — the comparison is between two `lstat` results,
+//     never against the reader's own identity — so there is no platform branch to skip, only a
+//     check that is silently a no-op on that platform. The REGULAR-FILE half is emphatically not
+//     a no-op there: an unprivileged Windows user needs no privilege at all to plant a junction,
+//     which is exactly what that check rejects. Do not read this note as licence to drop
+//     `!info.isFile()` behind a platform branch.
 //   - TOCTOU on a world-writable parent without the sticky bit. Vetting a claim and reading it
 //     are two syscalls, not one; between them another local user could remove the file this
-//     `lstat` approved and put a different one at the same name. A STICKY parent — the system
-//     temp directory always is — narrows who may remove an entry inside it. Per unlink(2) and
-//     rename(2), a sticky directory only lets a removal through when the REMOVING process's euid
-//     equals the FILE's own owner, OR equals the DIRECTORY's owner, OR the process holds
-//     CAP_FOWNER — three ways through, not one. The reaper's own uid plays no part in that check,
-//     which is why `sudo prune-run` stays safe here: root satisfies CAP_FOWNER regardless, and an
-//     unprivileged reaper satisfies neither of the other two just by running this code, so this
-//     race is closed for both.
+//     `lstat` approved and put a different one at the same name. A STICKY parent narrows who may
+//     remove an entry inside it. Per unlink(2) and rename(2), a sticky directory only lets a
+//     removal through when the REMOVING process's euid equals the FILE's own owner, OR equals the
+//     DIRECTORY's owner, OR that process holds CAP_FOWNER — three ways through, not one.
+//
+//     Those three are measured against the ATTACKER, not against this reader: the euid unlink(2)
+//     tests is the REMOVING process's, so who runs `prune-run` does not enter into it at all.
+//     What closes the race is the vetting above, which forces the claim's uid to equal the
+//     PREVIEW DIRECTORY's uid. Against a root-owned sticky temp root, another local user
+//     attacking a claim is none of the three: not the file's owner (that is the preview's owner),
+//     not the directory's owner (that is root), and not privileged. `sudo prune-run` changes
+//     nothing here — the sudo'd reaper is not the removing process in this scenario, it is the
+//     one being deceived — so citing root's CAP_FOWNER as a reason the race is closed had it
+//     backwards: that capability is a way THROUGH the check, held by nobody the check must stop.
+//
+//     That reasoning is about POSIX sticky semantics, and the temp root is not sticky everywhere.
+//     Linux is the case reasoned about above: the shared, world-writable `drwxrwxrwt`. macOS is
+//     strictly STRONGER — `os.tmpdir()` there is the per-user `/var/folders/.../T`, `drwx------`
+//     and not sticky at all, which no other unprivileged user can even traverse — so what holds
+//     under sticky holds a fortiori under it.
+//
+//     Windows reaches the same place by a mechanism with no sticky bit in it, so state the
+//     mechanism rather than the mode string. `os.tmpdir()` there is %TEMP%/%TMP%, which for an
+//     interactive account is the per-user `C:\Users\<user>\AppData\Local\Temp` — in practice
+//     the macOS case: private to one account. A service account with TEMP and TMP unset falls
+//     back to `%SystemRoot%\Temp`, which IS shared, and that is the case worth spelling out:
+//     deleting a file on NTFS requires DELETE on the file or FILE_DELETE_CHILD on the directory,
+//     and the stock ACL there is SYSTEM/Administrators (OI)(CI)(F) with
+//     `BUILTIN\Users:(CI)(S,WD,AD,X)` — container-inherit create and traverse, and NO
+//     delete-child — while new files inherit CREATOR OWNER (F). So another unprivileged user can
+//     plant a NEW name but cannot unlink the gate user's vetted claim: exactly the set sticky
+//     reaches, by a different mechanism. What is NOT reached is the uid half, which is void on
+//     that platform for the reason stated above.
+//
+//     No leg of this suite runs on win32, so nothing here will fail if those ACL claims are
+//     wrong; they are held true by reading, not by a test. This is the fifth revision of this
+//     paragraph — the first three overstated the guarantee, the fourth overstated the hazard by
+//     reading "no sticky bit" as "no protection" — which is the reason it is written as a
+//     mechanism that can be checked against `icacls %SystemRoot%\Temp` rather than as a verdict.
+//
+//     The limit for the POSIX cases, stated in the same breath: the argument rests entirely on
+//     the parent being sticky (or otherwise not writable by the attacker). Point the preview root
+//     at a plain world-writable directory with no sticky bit and the race reopens in full — any
+//     local user may then unlink the vetted claim and re-plant at that name.
 //
 //     What is NOT closed: the directory-owner exception. If the PARENT directory itself — not
 //     the vetted file — is owned by someone other than the claim's writer, that owner may still
@@ -1439,9 +1478,22 @@ async function unlinkPreviewLinks(dir, depth = 0) {
 //
 //     A second, narrower gap in the same spirit: sticky blocks another user's REMOVAL of a claim
 //     that is still there, but not its RE-CREATION once the legitimate holder releases its own.
-//     That window does not exist yet, because nothing under scripts/ calls `previewClaimPath` to
-//     WRITE or release a claim — this function only reads candidates a later task provisions —
-//     so there is no releaser today for another user to race.
+//     That window is LIVE, not hypothetical: `runCommandCheck` in scripts/gate-runner.mjs writes
+//     claims. It takes a `previewDir`, and its `onSpawn` writes `previewClaimPath(previewDir,
+//     pid)` synchronously with `{ encoding: 'utf8', flag: 'wx' }` for each pid it spawns, then
+//     releases every claim it created in a `finally`. So there IS a releaser, and the instant
+//     between its release and the next legitimate claim is one another local user may take at
+//     that name. Two properties bound the exposure and neither closes it: a claim is held only
+//     on the clean-merge path, since a conflicted phase gets `previewDir: null` and writes
+//     nothing at all; and EEXIST is tolerated and never unlinked, so a claim that writer did not
+//     create is never released by it.
+//
+//     Stated in the same breath, because the same writer makes it reachable: this function
+//     samples each parent directory's listing ONCE per pass and reuses it for every candidate
+//     underneath (see `listingFor` below). A claim written after that listing was taken is
+//     invisible for the remainder of the pass, including to previews already examined in it —
+//     so a preview whose owner claims it mid-pass can still be read as unowned and reaped. That
+//     was unreachable while nothing wrote claims. It is reachable now.
 //
 // `read`, `list`, `stat` and `probe` are injectable because several of the branches above cannot
 // be staged end to end: EPERM needs a process owned by another user, EACCES needs a file this
@@ -1605,6 +1657,60 @@ async function resolveBranchShas(git, tasks, runId) {
 async function derive(root, runId, flags) {
   const git = createGit({ cwd: root })
   const runBranch = await git.currentBranch()
+  // THE NAME HAS TO ROUND-TRIP. `currentBranch` is `git rev-parse --abbrev-ref HEAD`, which
+  // shortens only as far as stays UNAMBIGUOUS — the same rule that makes `%(refname:short)`
+  // unusable. Plant a tag named like the run branch and it answers `heads/<name>`; add a branch
+  // literally named `heads/<name>` and it answers `refs/heads/<name>`. Every caller here then
+  // prefixes `refs/heads/`, so that last one resolves `refs/heads/refs/heads/<name>` — a ref an
+  // unprivileged teammate can create in its own worktree and thereby choose the sha this whole
+  // run treats as the run branch. All three refs are ordinary; none needs a foothold.
+  //
+  // In normal operation HEAD IS `refs/heads/<current branch>`, so this compares equal and never
+  // fires. Under a plant left at a DIFFERENT sha it does fire, and everything downstream fails
+  // closed — which matters most for `prune-run --yes`, where the run branch is the entire proof
+  // behind a `git branch -D`.
+  //
+  // WHAT IT IS, STATED AT ITS REAL WIDTH: a DERIVE-TIME ROUND-TRIP CHECK, and nothing more. It
+  // is NOT "the sha half, closed". It asks one question at one instant — does the ref that
+  // abbreviated name lands on hold HEAD's sha right now — and every consumer afterwards re-reads
+  // that ref by the same name. Park the planted `refs/heads/refs/heads/<name>` AT HEAD's sha and
+  // this compares equal and never fires; move it afterwards, from a command check minutes later,
+  // and every later resolution follows the attacker. Reproduced end to end against this tree:
+  // `prune-run --yes` printed `deleted teammates/r1/T1 (9df69ac…), which refs/heads/run-branch
+  // (9df69ac…) contains`, exited 0, and the deleted tip was reachable from the REAL run branch
+  // by nothing.
+  //
+  // And parking at HEAD costs the attacker NOTHING, so do not read this as a maintenance burden
+  // on them: the plant does not have to be a sha at all. `git symbolic-ref refs/heads/refs/heads/
+  // <name> refs/heads/<name>` makes it TRACK the run branch, and `git rev-parse --verify
+  // --end-of-options`, which is what `resolveRef` runs, FOLLOWS a symref — so the comparison
+  // below returns equal forever, through any number of integration merges. Verified in a
+  // throwaway repository: the planted ref answered HEAD's sha before and after two commits moved
+  // HEAD. Detaching it later is `git symbolic-ref -d … && git update-ref … <victim tip>`, which
+  // is the same one line in a check that the bypass needed before this guard existed. So what
+  // this rules out is the naive create-at-the-victim-tip form and nothing more.
+  //
+  // The only thing that does is resolving HEAD SYMBOLICALLY, `git symbolic-ref --quiet HEAD`, so
+  // the name never passes through git's abbreviation rules at all. That is a helper in
+  // scripts/git.mjs, a different file, and it is a recorded carry-over. See the residual list at
+  // the branch deletion in `prune-run` for the same statement where the damage happens.
+  const headSha = await git.headSha()
+  const namedSha = await git.resolveRef(`refs/heads/${runBranch}`).catch(() => null)
+  if (namedSha !== headSha) {
+    throw new Error(
+      `HEAD is ${headSha}, but refs/heads/${printable(runBranch)} — the branch name git abbreviates HEAD to —`
+      + ` is ${namedSha === null ? 'not a ref at all' : namedSha}.`
+      // Two reachable causes, and the remedy differs, so neither is asserted as the diagnosis.
+      // `headSha` and `resolveRef` are two subprocesses: an ordinary concurrent commit or merge
+      // on the run branch between them produces exactly this disagreement and is not an attack.
+      // A detached HEAD reaches it too, by way of `--abbrev-ref` answering `HEAD`.
+      + ' The reported name therefore does not identify the branch HEAD is on. Either something'
+      + ' moved the branch while this was reading it — an integrator merging concurrently, or a'
+      + ' HEAD that is detached or mid-rebase — in which case settle the repository and re-run;'
+      + ' or a tag, or a branch named `heads/…`, is shadowing the run branch, in which case remove'
+      + ' that ref. Nothing is verified or removed against a run branch that cannot be named.',
+    )
+  }
   const baseBranch = await resolveBaseBranch(git, flags.base)
   // Every other failure path here fails closed; a plain operator mistake — running the
   // gate while checked out on the base branch itself — must not be the one that fails
@@ -2928,7 +3034,7 @@ export async function runCli(argv, io = { out: console.log }) {
     // happen. `--yes` is the caller stating the intent, in the same spelling every other
     // valueless flag in this CLI uses.
     if (flags.yes !== true) {
-      io.out('dry run: nothing was removed. Re-run with --yes to remove the worktrees listed as prunable.')
+      io.out('dry run: nothing was removed. Re-run with --yes to remove the worktrees listed as prunable and delete each one\'s branch where it is already an ancestor of the run branch.')
       return 0
     }
 
@@ -2941,6 +3047,111 @@ export async function runCli(argv, io = { out: console.log }) {
         if (!(err instanceof GitError)) throw err
         failed += 1
         io.out(`could not remove ${w.path}: ${err.message}`)
+        // Its branch is still checked out in a worktree git still knows about, so the deletion
+        // below could not succeed anyway — `git branch -D` refuses a branch a registered
+        // worktree holds. And a branch whose worktree survived is one an operator may still be
+        // looking at. Falling through would turn one reported failure into two.
+        continue
+      }
+      // The worktree is gone; its branch is scratch, but only once that is PROVED. A task branch
+      // that is not an ancestor of the run branch carries commits that are in no other ref, and
+      // `-D` — which is what `deleteBranch` runs, deliberately, because `-d` measures "merged"
+      // against the caller's HEAD or upstream rather than against the run branch — would be the
+      // last thing that ever saw them. The proof is the caller's job precisely because the
+      // helper does not do it. The refusal is reported by name, like every other refusal this
+      // command makes, so an operator who wanted the branch gone learns why it is still there.
+      //
+      // BOTH SIDES ARE SHAS, RESOLVED HERE, and that is the whole safety of it.
+      //
+      // QUALIFIED, because the proof and the deletion have to be about the SAME ref. Git resolves
+      // a bare name through refs/tags/ BEFORE refs/heads/, warns on stderr only and exits 0
+      // (`isAncestor` reads no stderr), while `git branch -D` resolves refs/heads only — so an
+      // ancestry question asked on the bare name `w.branch` is answerable by a TAG while the
+      // thing deleted is the branch. One ordinary `git tag teammates/r1/T1 <any commit the run
+      // branch contains>`, which a teammate can create inside its own worktree, then turns this
+      // guard into a rubber stamp: verified end to end, the unmerged branch was deleted and
+      // `deleted …` printed. It also fires by accident wherever a release tag and a branch share
+      // a name. This is the invariant scripts/git.mjs states as "every name that reaches a
+      // ref-consuming git command goes through here first".
+      //
+      // FRESH, because `ctx.runSha` is a SNAPSHOT. `ctx` is built once by `derive` before any of
+      // this command's phases run their checks, and each of those checks is an arbitrary shell
+      // command bounded at fifteen minutes by default — this command announces them as the slow
+      // part. Nothing re-resolves the run branch in between. Reproduced with a check that runs
+      // `git update-ref refs/heads/<run branch> <pre-merge sha>` (note `git branch -f` is refused
+      // for a checked-out branch and `update-ref` is not): against the snapshot the branch was
+      // deleted and reported as contained, while `merge-base --is-ancestor` against the run
+      // branch afterwards said it was not. So the run branch is resolved per iteration, at the
+      // moment its answer is used, and the sha that is printed is the one that was proved
+      // against. A snapshot is exactly as good as the assumption that nothing moved, and the
+      // thing being decided is irreversible.
+      //
+      // WHAT REMAINS OPEN. This list is meant to be read as complete, so it carries the item that
+      // defeats the paragraph above as well as the ones that merely bound it. None of it is
+      // closed by anything in this file.
+      //
+      //   - THE NAME IS ATTACKER-CHOOSABLE, AND FRESHNESS DOES NOT HELP AGAINST IT. This is the
+      //     one that matters, and it is not a printing defect. `ctx.runBranch` comes from
+      //     `git rev-parse --abbrev-ref HEAD`, which shortens only as far as stays unambiguous:
+      //     a planted tag makes it answer `heads/<name>`, and a planted `heads/<name>` branch on
+      //     top of that makes it answer `refs/heads/<name>`, at which point the `refs/heads/`
+      //     prefix this file adds lands on `refs/heads/refs/heads/<name>` — an ordinary ref an
+      //     unprivileged teammate can create in its own worktree. `derive`'s cross-check is a
+      //     DERIVE-TIME ROUND TRIP, not a closed sha half: it only asks whether that ref equals
+      //     HEAD at the moment `derive` runs. Park the planted ref AT HEAD's sha and it compares
+      //     equal and never fires; then move it later and this loop re-reads it.
+      //
+      //     Reproduced end to end on this tree, with the plant at HEAD's sha and one
+      //     `git update-ref refs/heads/refs/heads/run-branch <T1 tip>` inside a command check:
+      //     `deleted teammates/r1/T1 (9df69ac…), which refs/heads/run-branch (9df69ac…)
+      //     contains`, exit 0 — and `merge-base --is-ancestor <tip> refs/heads/run-branch`
+      //     against the REAL run branch afterwards answers no. The commit is in no ref: the
+      //     worktree that held one reflog was force-removed a moment earlier and `-D` took the
+      //     branch reflog.
+      //
+      //     So per-iteration freshness re-reads a value the ATTACKER controls rather than the
+      //     vetted one, and the bullet below does not absorb this: the move lands minutes
+      //     earlier, inside a check, not inside a two-command window. Closing it needs the run
+      //     branch resolved SYMBOLICALLY — a `currentBranchRef()` over `git symbolic-ref --quiet
+      //     HEAD` — which lives in scripts/git.mjs and is a recorded carry-over, not something
+      //     this file can do. Until then the guarantee here is bounded by "no ref named
+      //     `heads/<run branch>` or tagged like the run branch exists", which nothing enforces.
+      //   - Proof-to-delete. The sha is proved and then deleted BY NAME, so a write to
+      //     refs/heads/<branch> in between is deleted unproved. Closing it needs a
+      //     compare-and-swap (`git update-ref -d <ref> <proved sha>`), which needs a helper
+      //     scripts/git.mjs does not have. There is no tracking issue for that helper: this
+      //     comment is the record.
+      //   - The run branch can still move between this resolve and the `-D` on the same
+      //     iteration, and between one iteration and the next. Per-iteration shrinks that window
+      //     to two git commands; it does not remove it. It bounds only the honest-race case —
+      //     see the first bullet for the case it does not bound.
+      //   - The WORKTREE REMOVAL a few lines up is authorised by a verdict computed over
+      //     SNAPSHOT RANGES. Not by a stale verdict: `passedPhases` is built by actually running
+      //     this command's checks above, and the worktree list is re-read after them — a check
+      //     that exits non-zero makes the phase FAIL and its worktree is not removed at all. What
+      //     is snapshotted is what those checks measure. `runFilesetCheck` and
+      //     `runOwnershipCheck` read `ctx.anchorSha` and `ctx.runSha`, and the task branch shas
+      //     were resolved at derive time, so a task branch that moved since then is judged on the
+      //     range it used to span — and `git worktree remove --force` discards whatever is
+      //     uncommitted in that worktree regardless. Irreversible, and not re-proved the way the
+      //     deletion below now is.
+      try {
+        const runSha = await git.resolveRef(`refs/heads/${ctx.runBranch}`)
+        const branchSha = await git.resolveRef(`refs/heads/${w.branch}`)
+        if (await git.isAncestor(branchSha, runSha)) {
+          await git.deleteBranch(w.branch)
+          // Both shas are named because they are what was actually proved. `-D` discards the
+          // branch reflog and `deleteBranch` swallows git's own "Deleted branch … (was <abbrev>)",
+          // and the worktree — whose own reflog is the other copy — was force-removed a few lines
+          // up, so this line is the ONLY surviving handle for `git branch <name> <sha>`.
+          io.out(`deleted ${w.branch} (${branchSha}), which ${printable(ctx.runBranch)} (${runSha}) contains`)
+        } else {
+          io.out(`left ${w.branch} in place: refs/heads/${w.branch} (${branchSha}) is not an ancestor of ${printable(ctx.runBranch)} (${runSha}), so deleting it would drop commits that are in no other branch`)
+        }
+      } catch (err) {
+        if (!(err instanceof GitError)) throw err
+        failed += 1
+        io.out(`could not delete ${w.branch}: ${err.message}`)
       }
     }
 
@@ -2959,12 +3170,20 @@ export async function runCli(argv, io = { out: console.log }) {
     // owner is DEAD — the links it finds are the ones a killed gate's `finally` never tore down,
     // and they are gone before anything is removed. For a LIVE preview the sweep alone could
     // never close it, because a junction the owner creates in the window BETWEEN this sweep and
-    // the removal below would still be followed. What closes that window is that a live preview
-    // does not reach this loop at all: `livePreviewPaths` above found the marker its owner holds
-    // from before `git worktree add` registers the preview until after `removeWorktree`
-    // deregisters it, and the preview is excluded from `plan.previews` and reported as owned
-    // instead. The teardown is inside that span, not after it: a preview mid-teardown still
-    // holds its junctions, and reading it as unowned there would follow them.
+    // the removal below would still be followed. What closes that window for a preview held by
+    // its OWNER MARKER is that such a preview does not reach this loop at all: `livePreviewPaths`
+    // above found the marker its owner holds from before `git worktree add` registers the preview
+    // until after `removeWorktree` deregisters it, and the preview is excluded from
+    // `plan.previews` and reported as owned instead. The teardown is inside that span, not after
+    // it: a preview mid-teardown still holds its junctions, and reading it as unowned there would
+    // follow them.
+    //
+    // "Live" is NOT synonymous with "marker held", and the sentence above must not be read that
+    // way. `livePreviewPaths` counts a vetted CLAIM as a holder exactly as it counts the marker,
+    // and a claim is written per spawned pid long after the add — see the bullet below on the
+    // once-per-pass listing. A preview whose only holder is a claim written during the pass can
+    // therefore reach this loop with a spawned check still inside it, and for that one the
+    // junction argument above does not hold: the sweep is all there is, and it is not enough.
     //
     // THE RESIDUALS, stated as what is true rather than as what would be convenient.
     //
@@ -2975,12 +3194,20 @@ export async function runCli(argv, io = { out: console.log }) {
     //     reaped as leaked. That is the pre-existing hazard, unchanged and no worse.
     //   - The worktree list and the markers are read once, above, and acted on here. A preview
     //     that appears in between is not in the list at all, so it cannot be reaped; a preview
-    //     already in the list cannot acquire an owner, because its owner would have had to write
-    //     the marker before the add that put it there.
+    //     already in the list cannot acquire an OWNER MARKER, because its owner would have had to
+    //     write that marker before the add that put it there.
+    //   - It CAN acquire a CLAIM, and that is a real window, not a hypothetical one. A claim is
+    //     written per spawned pid while a check runs, long after the add — and `livePreviewPaths`
+    //     lists each parent directory once per pass and reuses that listing, so a claim written
+    //     during the pass is invisible to it, including for previews it has already examined.
+    //     Such a preview reads as unowned and is reaped here. See the claim-vetting comment above
+    //     `livePreviewPaths` for the same limit stated at the reading end.
     //
-    // The destructive direction — a live preview read as dead — is closed by construction rather
-    // than narrowed, because the marker is HELD across a span that contains the whole span over
-    // which the preview is observable, instead of being sampled at one instant.
+    // So the destructive direction — a live preview read as dead — is closed by construction for
+    // the OWNER MARKER, because that marker is HELD across a span containing the whole span over
+    // which the preview is observable, instead of being sampled at one instant. It is only
+    // NARROWED for claims, by the bullet above. The two are not interchangeable, and this comment
+    // said "closed by construction" of both before claims had a writer.
     //
     // WHAT THE PATTERN MATCHES, since the reaper is force-removing directories nobody named:
     // every detached, branchless worktree registered in this repository whose path lies under
