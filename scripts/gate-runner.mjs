@@ -402,10 +402,15 @@ export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn 
     // which genuinely finished 0 in the race between the timer firing and `close` is reported as
     // a fail — for a gate, that is failing closed, which is the direction to be wrong in.
     const resolveTimedOut = (code) => settle(() => {
-      const seconds = Math.round(timeoutMs / 1000)
+      // Whole seconds at a second or more; the exact millisecond count below that. Rounding to
+      // seconds for the whole domain reports EVERY bound under 500ms as "0s" and everything from
+      // 500ms to 999ms as "1s" — both wrong, and `timeoutMs` is a manifest-validated value with
+      // no floor of its own (see `timeoutFault`), so a sub-second bound is a real value this
+      // notice has to be able to name.
+      const notice = timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)}s` : `${timeoutMs}ms`
       resolve({
         code: code || 1,
-        output: `${output}\n— timed out after ${seconds}s; its process group was killed`,
+        output: `${output}\n— timed out after ${notice}; its process group was killed`,
       })
     })
 
@@ -499,7 +504,14 @@ function tail(text, n) {
 }
 
 export async function runCommandCheck(check, { cwd = process.cwd(), exec = defaultExec } = {}) {
-  const { code, output } = await exec(check.run, cwd)
+  // `runCheckList` refuses a faulty bound before reaching here, so this guards the EXPORTED
+  // api — `runChecks` is called directly from cli.mjs and from tests, and a programmatic
+  // caller can pass a shape the manifest path already rejected. Throwing lands as
+  // `check threw:` in the list, which is a stated failure rather than a default applied
+  // behind the caller's back.
+  const fault = timeoutFault(check)
+  if (fault) throw new Error(fault)
+  const { code, output } = await exec(check.run, cwd, { timeoutMs: check.timeoutMs ?? COMMAND_TIMEOUT_MS })
   const passed = code === 0
   return {
     name: check.name,
@@ -602,6 +614,55 @@ function malformedKindResult(check, index) {
     `check kind must be a string, got ${shown} (${position})`
     + ' — a manifest entry this gate cannot understand is a configuration fault, not a check.'
     + ' Fix the `kind` in teammates.gate.json.',
+  )
+}
+
+// 60 minutes. A manifest may lower the default; it may not raise it past here.
+const TIMEOUT_CEILING_MS = 60 * 60_000
+
+// `timeoutMs` is read off an entry of a file any teammate can write, and `validateGate` in
+// scripts/config.mjs checks only that `phases[*].checks` is an ARRAY — the same hole
+// `hasUsableKind` exists to plug, so this takes the same answer: diagnose the entry and
+// fail it. It must never fall back to the default, because a silent fallback is exactly
+// how an edit that disables the bound would look like a bound that held.
+//
+// NO FLOOR, by design — docs/specs/2026-08-26-purge-and-teardown-design.md defines the accepted
+// domain as "a positive integer no greater than a hard 60-minute ceiling", and a sub-second
+// bound is a valid value in that domain, not a defect in this function. What used to look like a
+// defect in a sub-second bound was `defaultExec`'s timeout notice rounding to whole seconds and
+// reporting "timed out after 0s" — fixed at its source instead, in `resolveTimedOut`, which is
+// where every caller of `defaultExec` reaches it, not just the manifest path through this
+// function.
+export function timeoutFault(check) {
+  const value = check?.timeoutMs
+  if (value === undefined) return null
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
+    return `timeoutMs must be a positive integer of milliseconds, got ${JSON.stringify(value)}`
+  }
+  if (value > TIMEOUT_CEILING_MS) {
+    return `timeoutMs must not exceed ${TIMEOUT_CEILING_MS} (60 minutes), got ${value}`
+  }
+  return null
+}
+
+// Built through `checkResult` for the same reason `malformedKindResult` is: `optional` is
+// decided in one place. Unlike a malformed `kind`, a malformed `timeoutMs` reaches `checkResult`
+// with a genuinely usable, non-enforced `kind` — `'command'` — so `hasUsableKind` and
+// `ALWAYS_ENFORCED_KINDS` have nothing to catch it on and `checkResult` would honour the entry's
+// own `optional`. `optional: false` is forced here, on the copy handed to `checkResult`, so a
+// `{"timeoutMs": 0, "optional": true}` entry cannot fail and be waved through at once.
+//
+// `name` is substituted the same way `malformedKindResult` substitutes it, and for the same
+// reason: a malformed entry frequently carries no `name`, `name` is the only field
+// `aggregateVerdict` reports, and passing `check.name` through unchanged would surface a
+// nameless entry as `{"failed":[null]}` — a verdict line that tells the operator nothing about
+// which entry to fix.
+function malformedTimeoutResult(check, index, fault) {
+  const position = `entry #${index} in this phase's check list`
+  return checkResult(
+    { ...check, name: typeof check?.name === 'string' ? check.name : position, optional: false },
+    'fail',
+    `${fault} (${position})`,
   )
 }
 
@@ -1522,6 +1583,13 @@ async function runCheckList(checks, ctx, commandCwd, mergeConflicted) {
     if (!hasUsableKind(check)) {
       results.push(malformedKindResult(check, manifestPosition(ctx, index)))
       continue
+    }
+    // Before the conflict skip on purpose: a malformed bound is a configuration fault, and a
+    // phase that does not merge is exactly where it would otherwise go unreported until the
+    // conflict was fixed and the check finally ran.
+    if (check.kind === 'command') {
+      const fault = timeoutFault(check)
+      if (fault) { results.push(malformedTimeoutResult(check, manifestPosition(ctx, index), fault)); continue }
     }
     // A `command` check exists to answer "does the integrated tree work". Without a merged
     // tree there is no honest answer, and running it against the run branch's own tree would
