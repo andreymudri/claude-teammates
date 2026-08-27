@@ -1410,22 +1410,43 @@ async function unlinkPreviewLinks(dir, depth = 0) {
 // directory that contains it, which is exactly the access an attacker planting a claim has.
 //
 // TWO LIMITS to the guarantee above, stated rather than left implicit:
-//   - Windows-void. Node's fs reports uid 0 for every path on that platform, so the ownership
-//     comparison can never tell one local account from another there; a claim reads as "owned"
-//     unconditionally and this defense gives no protection on Windows. Nothing here calls
-//     `process.getuid` at all — the comparison is between two `lstat` results, never against
-//     the reader's own identity — so there is no platform branch to skip, only a check that is
-//     silently a no-op on that platform.
+//   - Windows-void, and only the UID half of it. Node's fs reports uid 0 for every path on that
+//     platform, so the ownership comparison can never tell one local account from another there;
+//     a claim reads as "owned" unconditionally and that half gives no protection on Windows.
+//     Nothing here calls `process.getuid` at all — the comparison is between two `lstat` results,
+//     never against the reader's own identity — so there is no platform branch to skip, only a
+//     check that is silently a no-op on that platform. The REGULAR-FILE half is emphatically not
+//     a no-op there: an unprivileged Windows user needs no privilege at all to plant a junction,
+//     which is exactly what that check rejects. Do not read this note as licence to drop
+//     `!info.isFile()` behind a platform branch.
 //   - TOCTOU on a world-writable parent without the sticky bit. Vetting a claim and reading it
 //     are two syscalls, not one; between them another local user could remove the file this
-//     `lstat` approved and put a different one at the same name. A STICKY parent — the system
-//     temp directory always is — narrows who may remove an entry inside it. Per unlink(2) and
-//     rename(2), a sticky directory only lets a removal through when the REMOVING process's euid
-//     equals the FILE's own owner, OR equals the DIRECTORY's owner, OR the process holds
-//     CAP_FOWNER — three ways through, not one. The reaper's own uid plays no part in that check,
-//     which is why `sudo prune-run` stays safe here: root satisfies CAP_FOWNER regardless, and an
-//     unprivileged reaper satisfies neither of the other two just by running this code, so this
-//     race is closed for both.
+//     `lstat` approved and put a different one at the same name. A STICKY parent narrows who may
+//     remove an entry inside it. Per unlink(2) and rename(2), a sticky directory only lets a
+//     removal through when the REMOVING process's euid equals the FILE's own owner, OR equals the
+//     DIRECTORY's owner, OR that process holds CAP_FOWNER — three ways through, not one.
+//
+//     Those three are measured against the ATTACKER, not against this reader: the euid unlink(2)
+//     tests is the REMOVING process's, so who runs `prune-run` does not enter into it at all.
+//     What closes the race is the vetting above, which forces the claim's uid to equal the
+//     PREVIEW DIRECTORY's uid. Against a root-owned sticky temp root, another local user
+//     attacking a claim is none of the three: not the file's owner (that is the preview's owner),
+//     not the directory's owner (that is root), and not privileged. `sudo prune-run` changes
+//     nothing here — the sudo'd reaper is not the removing process in this scenario, it is the
+//     one being deceived — so citing root's CAP_FOWNER as a reason the race is closed had it
+//     backwards: that capability is a way THROUGH the check, held by nobody the check must stop.
+//
+//     Sticky is the weaker of the two shapes the system temp directory actually takes, not a
+//     universal one. On Linux and Windows it is the shared, world-writable `drwxrwxrwt` reasoned
+//     about above. On macOS `os.tmpdir()` is the per-user `/var/folders/.../T`, which is
+//     `drwx------` and NOT sticky — strictly STRONGER, because no other unprivileged user can
+//     traverse it, let alone plant or unlink inside it. So the sticky argument covers both: what
+//     holds there holds a fortiori under a 0700 private parent.
+//
+//     The limit, stated in the same breath: this rests entirely on the parent being sticky (or
+//     otherwise not writable by the attacker). Point the preview root at a plain world-writable
+//     directory with no sticky bit and the race reopens in full — any local user may then unlink
+//     the vetted claim and re-plant at that name.
 //
 //     What is NOT closed: the directory-owner exception. If the PARENT directory itself — not
 //     the vetted file — is owned by someone other than the claim's writer, that owner may still
@@ -2928,7 +2949,7 @@ export async function runCli(argv, io = { out: console.log }) {
     // happen. `--yes` is the caller stating the intent, in the same spelling every other
     // valueless flag in this CLI uses.
     if (flags.yes !== true) {
-      io.out('dry run: nothing was removed. Re-run with --yes to remove the worktrees listed as prunable.')
+      io.out('dry run: nothing was removed. Re-run with --yes to remove the worktrees listed as prunable and delete each one\'s branch where it is already an ancestor of the run branch.')
       return 0
     }
 
@@ -2941,6 +2962,30 @@ export async function runCli(argv, io = { out: console.log }) {
         if (!(err instanceof GitError)) throw err
         failed += 1
         io.out(`could not remove ${w.path}: ${err.message}`)
+        // Its branch is still checked out in a worktree git still knows about, so the deletion
+        // below could not succeed anyway — `git branch -D` refuses a branch a registered
+        // worktree holds. And a branch whose worktree survived is one an operator may still be
+        // looking at. Falling through would turn one reported failure into two.
+        continue
+      }
+      // The worktree is gone; its branch is scratch, but only once that is PROVED. A task branch
+      // that is not an ancestor of the run branch carries commits that are in no other ref, and
+      // `-D` — which is what `deleteBranch` runs, deliberately, because `-d` measures "merged"
+      // against the caller's HEAD or upstream rather than against the run branch — would be the
+      // last thing that ever saw them. The proof is the caller's job precisely because the
+      // helper does not do it. The refusal is reported by name, like every other refusal this
+      // command makes, so an operator who wanted the branch gone learns why it is still there.
+      try {
+        if (await git.isAncestor(w.branch, ctx.runBranch)) {
+          await git.deleteBranch(w.branch)
+          io.out(`deleted ${w.branch}`)
+        } else {
+          io.out(`left ${w.branch} in place: it is not an ancestor of ${printable(ctx.runBranch)}, so deleting it would drop commits that are in no other branch`)
+        }
+      } catch (err) {
+        if (!(err instanceof GitError)) throw err
+        failed += 1
+        io.out(`could not delete ${w.branch}: ${err.message}`)
       }
     }
 

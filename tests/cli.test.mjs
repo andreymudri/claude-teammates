@@ -66,6 +66,16 @@ function hasWorktree(cwd, leaf) {
   return worktreeLeaves(git(cwd, ['worktree', 'list', '--porcelain'])).includes(leaf)
 }
 
+// Whether a branch exists, asked by its EXACT name. Not `git branch --list <name>`, whose
+// argument is a glob and whose output is decorated with a leading `* ` on the current branch,
+// and not `rev-parse --verify`, which exits non-zero for an absent ref — `execFileSync` throws
+// on that, so "the branch is gone" and "the git call failed" would arrive as the same
+// exception. `for-each-ref` takes a full ref pattern, matches whole path components, and exits
+// 0 with empty output when nothing matches, which separates the two.
+function hasBranch(cwd, name) {
+  return git(cwd, ['for-each-ref', '--format=%(refname:short)', `refs/heads/${name}`]).trim() === name
+}
+
 // The two shapes that actually broke the bare-substring match, pinned so a future
 // simplification of `worktreeLeaves` back to a substring test fails here rather than
 // intermittently in a phase gate.
@@ -3268,6 +3278,110 @@ test('prune-run with --yes removes this run’s worktree once its phase passes',
     const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
     assert.equal(code, 0)
     assert.equal(hasWorktree(root, 'a1'), false)
+  })
+})
+
+// The BRANCH half of a prune, which the README's retention clause promised and the code did not
+// do: before this, `--yes` removed the worktree and left `teammates/<run>/<task>` behind, so a
+// finished run accumulated one dead ref per task forever. The three tests below are the
+// behavioural pin the prose was written ahead of.
+//
+// One fixture serves all three, because the difference between them is one commit and one flag.
+// `merged: false` puts a commit on the task branch that the run branch has never seen, which is
+// the case `--yes` must refuse rather than force — `git.deleteBranch` is `-D` and would not stop
+// on its own, so the proof is the caller's and this is where it is checked.
+async function stagePrunableRun({ root, planPath, io, lines, git: g }, { merged = true } = {}) {
+  await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+  await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+    phases: { default: { checks: [{ name: 'fileset', kind: 'fileset' }] } },
+  }), 'utf8')
+  g(['add', 'teammates.gate.json'])
+  g(['commit', '--quiet', '-m', 'manifest'])
+  g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+  await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+  g(['add', 'a.mjs'])
+  g(['commit', '--quiet', '-m', 'T1 work'])
+  g(['checkout', '--quiet', 'run-branch'])
+  g(['merge', '--no-ff', '--quiet', '-m', 'integrate T1', 'teammates/r1/T1'])
+  if (!merged) {
+    // One further commit on the task branch, AFTER the integration and touching only the file
+    // T1 declares — so the fileset gate still passes and the phase is still prunable. The only
+    // thing that changes is that the run branch no longer contains the branch tip, which is
+    // exactly the state in which `-D` would be the last thing that ever saw that commit.
+    g(['checkout', '--quiet', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 2\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 more work'])
+    g(['checkout', '--quiet', 'run-branch'])
+  }
+  const wtPath = path.join(root, '.claude', 'worktrees', 'a1')
+  g(['worktree', 'add', '--quiet', wtPath, 'teammates/r1/T1'])
+  lines.length = 0
+}
+
+test('prune-run --yes deletes a pruned task branch that is merged into the run branch', async () => {
+  await withRepo(async (ctx) => {
+    const { root, io, lines } = ctx
+    await stagePrunableRun(ctx)
+    const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
+    assert.equal(code, 0)
+    assert.equal(hasWorktree(root, 'a1'), false)
+    assert.match(lines.join('\n'), /deleted teammates\/r1\/T1/)
+    assert.equal(hasBranch(root, 'teammates/r1/T1'), false)
+  })
+})
+
+test('prune-run --yes leaves an unmerged task branch in place and says why', async () => {
+  await withRepo(async (ctx) => {
+    const { root, io, lines } = ctx
+    await stagePrunableRun(ctx, { merged: false })
+    const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
+    // A refusal to delete is not a failure: nothing went wrong, and the worktree still goes.
+    // It is the BRANCH that holds the commit no other ref can reach.
+    assert.equal(code, 0)
+    assert.equal(hasWorktree(root, 'a1'), false)
+    assert.match(lines.join('\n'), /left teammates\/r1\/T1 in place: it is not an ancestor of run-branch/)
+    assert.equal(hasBranch(root, 'teammates/r1/T1'), true)
+  })
+})
+
+test('prune-run without --yes deletes no branch', async () => {
+  await withRepo(async (ctx) => {
+    const { root, io, lines } = ctx
+    await stagePrunableRun(ctx)
+    const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    assert.equal(code, 0)
+    assert.equal(hasBranch(root, 'teammates/r1/T1'), true)
+    assert.doesNotMatch(lines.join('\n'), /deleted teammates/)
+    // And the dry run says BOTH halves of what `--yes` would do. A sentence that mentions only
+    // the worktrees is how a caller consents to a branch deletion without being told of it.
+    assert.match(lines.join('\n'), /delete each one's branch where it is already an ancestor of the run branch/)
+  })
+})
+
+// The other half of the pairing, and the reason the removal loop's catch ends in `continue`: a
+// branch is scratch only because its worktree is GONE, so a worktree that survived the removal
+// must take its branch with it. Without the `continue` this is not merely untidy — `git branch
+// -D` refuses a branch a registered worktree holds, so the fall-through turns one honest
+// "could not remove" into a second, derived "could not delete" for a deletion that was never
+// going to happen and that nobody asked for.
+test('prune-run --yes does not touch the branch of a worktree it could not remove', async () => {
+  await withRepo(async (ctx) => {
+    const { root, io, lines } = ctx
+    await stagePrunableRun(ctx)
+    // Locking is how the failure is staged: `git worktree remove --force` still refuses a locked
+    // worktree and asks for `-f -f` (verified against git 2.55.0), so the removal fails through
+    // git's own refusal rather than by breaking the filesystem underneath the test. Portable —
+    // `git worktree lock` is not a POSIX-only trick.
+    ctx.git(['worktree', 'lock', path.join(root, '.claude', 'worktrees', 'a1')])
+    const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
+    assert.equal(code, 1)
+    assert.equal(hasWorktree(root, 'a1'), true)
+    assert.match(lines.join('\n'), /could not remove/)
+    // Exactly one failure is reported, and the branch is neither deleted nor complained about.
+    assert.doesNotMatch(lines.join('\n'), /could not delete teammates\/r1\/T1/)
+    assert.doesNotMatch(lines.join('\n'), /deleted teammates\/r1\/T1/)
+    assert.equal(hasBranch(root, 'teammates/r1/T1'), true)
   })
 })
 
@@ -8890,9 +9004,16 @@ test('a real preview whose owner marker and real claim both name dead pids is re
 // the existing target and creation then needs Developer Mode or an elevated shell on Windows;
 // without either it rejects with EPERM, which would fail the fixture builder itself rather than
 // skip, and take CI red on that leg for a reason unrelated to the behaviour under test. Same
-// convention as tests/usage-store.test.mjs:624. Losing nothing by skipping: the uid half of the
-// vetting this test exists to pin is a documented no-op on Windows already (see the Windows-void
-// note at scripts/cli.mjs), so there is no assertion this platform could make either way.
+// convention as tests/usage-store.test.mjs:624.
+//
+// Losing nothing by skipping, for a reason about the FIXTURE and not about the vetting: what
+// this test needs is a file symlink, and win32 will not give an unprivileged process one. The
+// earlier rationale here — that the uid half is a documented no-op on Windows, so no assertion
+// is possible — named the wrong half. The bait below is deliberately owned by this process
+// precisely so uid vetting cannot reject it; what rejects it is `!info.isFile()`, and THAT is
+// not a no-op on Windows, where an unprivileged user can plant a junction with no privilege at
+// all. Read the Windows-void note at scripts/cli.mjs as scoped to uid alone: it is not licence
+// to put `!info.isFile()` behind a platform branch, which no leg of this matrix would catch.
 const NO_FILE_SYMLINKS_ON_WIN32 = { skip: process.platform === 'win32' }
 
 // The claim-vetting entry has to be read with `lstat`, never a symlink-following `stat`: a
