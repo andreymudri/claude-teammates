@@ -147,6 +147,7 @@ test('runCommandCheck itself rejects a malformed timeoutMs before calling exec',
 test('a command check holds a claim on the preview while it runs and releases it after', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'tm-preview-'))
   let duringRun = null
+  let duringContent = null
   const result = await runCommandCheck(
     { name: 'test', kind: 'command', run: 'true' },
     {
@@ -155,26 +156,38 @@ test('a command check holds a claim on the preview while it runs and releases it
       exec: async (_cmd, _cwd, { onSpawn }) => {
         onSpawn(999999)
         duringRun = existsSync(previewClaimPath(dir, 999999))
+        // The reaper parses this content to get the pid it probes (scripts/cli.mjs). A claim
+        // naming the WRONG pid is worse than no claim at all: it either names a process that is
+        // not running, so the preview is reaped out from under a live check, or it names a
+        // process that never exits, so the preview is never reaped once this check is done.
+        duringContent = await readFile(previewClaimPath(dir, 999999), 'utf8')
         return { code: 0, output: '' }
       },
     },
   )
   assert.equal(result.status, 'pass')
   assert.equal(duringRun, true, 'the claim must exist while the check is running')
+  assert.equal(duringContent, '999999\n', 'the claim must name the pid the reaper will probe')
   assert.equal(existsSync(previewClaimPath(dir, 999999)), false, 'the claim must be released')
   await rm(dir, { recursive: true, force: true })
 })
 
 test('a claim is released even when the check throws', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'tm-preview-'))
+  let duringContent = null
   await assert.rejects(runCommandCheck(
     { name: 'test', kind: 'command', run: 'true' },
     {
       cwd: dir,
       previewDir: dir,
-      exec: async (_cmd, _cwd, { onSpawn }) => { onSpawn(999998); throw new Error('boom') },
+      exec: async (_cmd, _cwd, { onSpawn }) => {
+        onSpawn(999998)
+        duringContent = await readFile(previewClaimPath(dir, 999998), 'utf8')
+        throw new Error('boom')
+      },
     },
   ))
+  assert.equal(duringContent, '999998\n', 'the claim must name the pid the reaper will probe')
   assert.equal(existsSync(previewClaimPath(dir, 999998)), false)
   await rm(dir, { recursive: true, force: true })
 })
@@ -209,6 +222,10 @@ test('a claim path that already exists is left alone, and the check still runs',
   )
   assert.equal(result.status, 'pass', 'the pre-existing claim must not fail the check')
   assert.equal(await readFile(claim, 'utf8'), 'not ours\n', 'the pre-existing claim must be untouched')
+  // `previewClaimPath` names a SIBLING of `dir` (`${previewOwnerMarkerPath(dir)}.${pid}`), not
+  // a path inside it, so `rm(dir, { recursive: true })` below cannot reach it. Removed
+  // explicitly rather than left to leak into the shared temp root on every run.
+  await rm(claim, { force: true })
   await rm(dir, { recursive: true, force: true })
 })
 
@@ -2324,6 +2341,33 @@ test('a command check runs inside the merge preview worktree when the phase merg
   assert.equal(calls.length, 1)
   assert.notEqual(calls[0].cwd, '/project/root', 'the command must not run against the project root')
   assert.match(calls[0].cwd, /tm-preview-/)
+})
+
+// `runCommandCheck` only holds a claim when it is HANDED a real `previewDir` — proven above by
+// unit tests that call it directly and supply `previewDir` by hand. Neither of those tests can
+// see whether `runChecks`/`runCheckList` actually WIRE the real preview path through to it: a
+// dropped fifth argument at the `runCheckList` call site, or a dropped `previewDir` from the
+// ctx spread inside `runCheckList`, both silently default back to `null` and leave the rest of
+// the suite green, because every other test either doubles `previewDir` itself or never
+// inspects `onSpawn`. This test goes through `runChecks` end to end, against the real preview
+// directory `withMergePreview` creates on disk, and fails loudly — via the exec double's own
+// throw — the moment that wiring is missing.
+test('a command check inside a real merge preview is actually handed a claim writer, not just told it could be', async () => {
+  let duringExists = null
+  let claimPath = null
+  const exec = async (_cmd, cwd, { onSpawn }) => {
+    if (typeof onSpawn !== 'function') throw new Error('a check inside a preview must be handed a claim writer')
+    onSpawn(999996)
+    claimPath = previewClaimPath(cwd, 999996)
+    duringExists = existsSync(claimPath)
+    return { code: 0, output: '' }
+  }
+  const ctx = previewCtx({ git: previewGit(), exec })
+  const results = await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], ctx)
+
+  assert.equal(results[1].status, 'pass', results[1].output)
+  assert.equal(duringExists, true, 'the claim must exist on disk in the real preview while the check runs')
+  assert.equal(existsSync(claimPath), false, 'the claim must be released once the check returns')
 })
 
 test('the computed merge check can never be marked optional by a manifest', async () => {
