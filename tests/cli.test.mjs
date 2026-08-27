@@ -9330,6 +9330,43 @@ test('a vetted marker naming a live pid still holds the preview', async () => {
   assert.deepEqual(readPaths, [previewOwnerMarkerPath(dir)], 'a vetted marker is the one that gets opened')
 })
 
+// A preview directory that is GONE has no owner to compare a uid against, and the uid half of the
+// vetting is skipped rather than failed: a regular-file marker naming a live pid still holds the
+// preview. Without this the ENOENT case reaped a preview whose marker positively named a living
+// owner — the one thing the whole function's contract says may never happen, since only ENOENT
+// and ESRCH are answers that positively mean "no owner". The REGULAR-FILE half is not skipped
+// with it, which the second half of this test pins: a fifo or a junction at that path is still
+// never opened, so what the missing directory costs is the uid comparison alone.
+//
+// Claims are deliberately NOT part of this: with the directory gone they stay ignored, which is
+// the behaviour on the base branch and is left exactly as it stands.
+test('a marker naming a live pid still holds a preview whose directory is already gone', async () => {
+  const dir = path.join(tmpdir(), 'tm-preview-dir-gone-live-marker')
+  const gone = (p) => (p === dir ? Promise.reject(Object.assign(new Error('no such file'), { code: 'ENOENT' })) : null)
+  const readPaths = []
+  const live = await livePreviewPaths([dir], {
+    read: async (p) => { readPaths.push(p); return '4242\n' },
+    list: async () => [],
+    stat: async (p) => gone(p) ?? { uid: OWNER_UID, isFile: () => true },
+    probe: (pid) => { if (pid !== 4242) { const e = new Error('no such process'); e.code = 'ESRCH'; throw e } },
+  })
+  assert.equal(live.has(dir), true, 'a live pid in the marker holds the preview even with no directory to vet against')
+  assert.deepEqual(readPaths, [previewOwnerMarkerPath(dir)], 'the marker is the entry that gets opened')
+
+  // Same missing directory, but the marker is not a regular file: still never opened, still not
+  // live. A fifo here would park `read` in open(2) forever, which is exactly what must not
+  // survive a missing preview directory.
+  const notAFile = []
+  const stillDead = await livePreviewPaths([dir], {
+    read: async (p) => { notAFile.push(p); return '4242\n' },
+    list: async () => [],
+    stat: async (p) => gone(p) ?? { uid: OWNER_UID, isFile: () => false },
+    probe: () => true,
+  })
+  assert.equal(stillDead.has(dir), false)
+  assert.deepEqual(notAFile, [], 'a non-regular marker is not opened just because the directory is gone')
+})
+
 // The listing is taken once per PREVIEW, not once per sweep. Under the memo this function used
 // to keep, the first preview's `list(parent)` result was reused for every later preview under
 // the same parent, so a claim written after that call was invisible for the rest of the pass —

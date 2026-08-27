@@ -1368,11 +1368,15 @@ async function unlinkPreviewLinks(dir, depth = 0) {
 // nobody is at, while the suite it spawned is still writing to the tree. Every sibling file
 // matching `previewClaimPrefix(dir)` is a CANDIDATE claim, VETTED below before it is trusted.
 //
-// The MARKER is a candidate on exactly the same terms, and is vetted by the same triple before
-// it is read. It sits at a path derived from the preview directory's name and nothing secret, in
-// the same directory as the claims, so anyone who can plant a claim can plant a marker; reading
-// it unvetted, which this function used to do, trusted an entry the claim path would have
-// rejected.
+// The MARKER is a candidate too, and is vetted by the same triple before it is read. It sits at
+// a path derived from the preview directory's name and nothing secret, in the same directory as
+// the claims, so anyone who can plant a claim can plant a marker; reading it unvetted, which this
+// function used to do, trusted an entry the claim path would have rejected.
+//
+// The two part company in ONE case, argued where the code makes the choice: a preview directory
+// that is GONE leaves the uid half of the marker's vetting with no referent, so the marker is
+// read on `isFile()` alone rather than reaped out of hand, while claims stay ignored as they
+// always were.
 //
 // FAIL-SAFE BRANCHES, all deliberate, all saying the same thing: a holder that cannot be RULED
 // OUT is a holder.
@@ -1534,14 +1538,20 @@ export async function livePreviewPaths(previewPaths, {
     // to vet the marker and every candidate claim alike. Who a candidate has to be owned by: see
     // the vetting section above this function.
     let ownerUid
+    // Distinguished from `ownerUid === undefined`, which an `lstat` that failed for some OTHER
+    // reason also produces. Only the ENOENT case means the referent is absent rather than
+    // unreadable, and only that case relaxes anything below.
+    let ownerGone = false
     try {
       ownerUid = (await stat(dir)).uid
     } catch (err) {
-      // The preview directory is gone (ENOENT): there is no owner left to vet a candidate
-      // against, so the marker and every claim below are UNVERIFIABLE rather than unknown — each
-      // falls through the uid comparison and is ignored, exactly like a foreign-owned one.
-      // Anything else leaves the whole preview unknown, same as an unreadable marker.
-      if (err?.code !== 'ENOENT') unknown = true
+      // The preview directory is gone (ENOENT). Every CLAIM below is then UNVERIFIABLE rather
+      // than unknown — it falls through the uid comparison and is ignored, exactly like a
+      // foreign-owned one. That is the behaviour on the base branch, it is not changed here, and
+      // it is deliberately left alone. Anything else leaves the whole preview unknown, same as an
+      // unreadable marker.
+      if (err?.code === 'ENOENT') ownerGone = true
+      else unknown = true
     }
     // THE MARKER IS VETTED THE SAME WAY A CLAIM IS. It was not, and the asymmetry had teeth: any
     // local user who can see this prefix can plant an entry at the marker's exact path, which is
@@ -1569,6 +1579,39 @@ export async function livePreviewPaths(previewPaths, {
     // either direction merely by existing. Only a marker that is a regular file owned by the
     // preview directory's own uid is read at all.
     //
+    // NOT ON THE SAME FOOTING AS CLAIMS, and the difference is worth stating rather than
+    // implying. Ignoring an unverifiable CLAIM is pre-existing behaviour, unchanged here. Vetting
+    // the MARKER is a change this branch makes, so its edge cases are this branch's to answer,
+    // and one of them bites: when `stat(dir)` answers ENOENT there is no uid to compare against,
+    // and a strict `markerInfo.uid === ownerUid` is then false for EVERY marker — including a
+    // regular file, owned by the right user, positively naming a LIVE pid. Vetting turned into
+    // reaping a preview whose owner was demonstrably alive, which contradicts the rule the rest of
+    // this function restates three times: only ENOENT and ESRCH may let a preview through.
+    //
+    // `ownerGone` skips the UID half in that one case, and only that one. The reasoning, since
+    // the alternative is defensible and was rejected on a concrete consequence rather than on
+    // taste: treating a missing preview directory as UNKNOWN would also honour the rule, but
+    // `unknown` means live, so a registration whose directory is already gone could never be
+    // reaped again — and that state is reachable by the very path documented above, where
+    // merge-preview.mjs's `removeWorktree(...).catch(() => {})` swallows a failure and the
+    // following `rm` deletes the directory anyway. Making it permanent would disable exactly the
+    // cleanup this command exists to perform. So: with no directory there is no tree and no
+    // junctions to follow, nothing the uid comparison protects and no referent for it to compare
+    // against, and the marker is read on `isFile()` alone.
+    //
+    // The REGULAR-FILE half is NOT relaxed with it, and that is the half that matters here: it is
+    // what keeps a planted fifo from parking `read` in open(2) and a junction from being followed,
+    // neither of which needs a preview directory to exist. The invariants hold either way — a
+    // marker that fails `isFile()` is still IGNORED, and one that cannot be READ for any reason
+    // but ENOENT is still UNKNOWN.
+    //
+    // Measured by driving this function's doubles with `stat(dir)` answering ENOENT, against the
+    // base branch and against both revisions of this one. Marker a regular file naming a live
+    // pid: live before the vetting landed, NOT live with the strict comparison, live again now —
+    // so this restores the base answer rather than inventing a third. Marker not a regular file:
+    // live on the base branch, not live here — the one place this is deliberately stricter than
+    // what it replaced.
+    //
     // PRE-EXISTING, not introduced by the claim work. `git log -S` on the unvetted read puts it
     // in e6e1a6e, the commit that introduced the marker; the claim work is 4797c98, eighteen days
     // later. The window is not theoretical either: merge-preview.mjs releases the marker LAST in
@@ -1586,7 +1629,7 @@ export async function livePreviewPaths(previewPaths, {
       // the unreadable-marker rule.
       if (err?.code !== 'ENOENT') unknown = true
     }
-    if (markerInfo && markerInfo.isFile() && markerInfo.uid === ownerUid) {
+    if (markerInfo && markerInfo.isFile() && (ownerGone || markerInfo.uid === ownerUid)) {
       try {
         holders.push(await read(markerPath))
       } catch (err) {
