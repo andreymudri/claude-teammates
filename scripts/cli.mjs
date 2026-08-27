@@ -1460,9 +1460,22 @@ async function unlinkPreviewLinks(dir, depth = 0) {
 //
 //     A second, narrower gap in the same spirit: sticky blocks another user's REMOVAL of a claim
 //     that is still there, but not its RE-CREATION once the legitimate holder releases its own.
-//     That window does not exist yet, because nothing under scripts/ calls `previewClaimPath` to
-//     WRITE or release a claim — this function only reads candidates a later task provisions —
-//     so there is no releaser today for another user to race.
+//     That window is LIVE, not hypothetical: `runCommandCheck` in scripts/gate-runner.mjs writes
+//     claims. It takes a `previewDir`, and its `onSpawn` writes `previewClaimPath(previewDir,
+//     pid)` synchronously with `{ encoding: 'utf8', flag: 'wx' }` for each pid it spawns, then
+//     releases every claim it created in a `finally`. So there IS a releaser, and the instant
+//     between its release and the next legitimate claim is one another local user may take at
+//     that name. Two properties bound the exposure and neither closes it: a claim is held only
+//     on the clean-merge path, since a conflicted phase gets `previewDir: null` and writes
+//     nothing at all; and EEXIST is tolerated and never unlinked, so a claim that writer did not
+//     create is never released by it.
+//
+//     Stated in the same breath, because the same writer makes it reachable: this function
+//     samples each parent directory's listing ONCE per pass and reuses it for every candidate
+//     underneath (see `listingFor` below). A claim written after that listing was taken is
+//     invisible for the remainder of the pass, including to previews already examined in it —
+//     so a preview whose owner claims it mid-pass can still be read as unowned and reaped. That
+//     was unreachable while nothing wrote claims. It is reachable now.
 //
 // `read`, `list`, `stat` and `probe` are injectable because several of the branches above cannot
 // be staged end to end: EPERM needs a process owned by another user, EACCES needs a file this
