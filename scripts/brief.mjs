@@ -136,12 +136,29 @@ const locateStep = (task, runId) => (runId ? [
 // conflated a rejection with a cannot-verify and only the text could separate them; 3 separates
 // them programmatically, which is what the hook needed and what makes this table simple enough
 // for a teammate to act on.
-// `--base` carries the SAME value `checkoutSteps` branched from, not a second guess at it.
+// `--base` carries the SAME value `checkoutSteps` branched from, not a second guess at it. The
+// contract this rests on: `baseBranch` names the run's base branch, and under `checkoutSteps`'
+// own wording ("Your worktree does not start on this run's base") that is also the commit the
+// teammate's own branch forks from — one value, not two that happen to agree.
+//
 // `complete` derives a base itself when none is given — `main` or `master` — and anchors the
-// plan lookup there; on a run whose base is neither, that anchor holds no plan at all, and the
-// failure names the plan rather than the base, which is what sent three teammates in run
-// `purge` looking at the wrong thing. Passing the checkout's own base closes that: the anchor
-// the gate derives is the ref the teammate's branch actually forked from.
+// plan lookup there; on a run whose base is neither, that derived anchor holds no plan at all.
+// The plan-not-found failure DOES name a base — `${baseBranch}` is interpolated verbatim into
+// "confirm the plan is committed on <base>" in scripts/cli.mjs — so what misled three teammates
+// in run `purge` was not an absent base in the message, it was the WRONG one: `master`, the
+// derived default, standing in for `run/purge`, the run's actual base. Passing the checkout's
+// own base closes that: the anchor `complete` derives is now the ref the teammate's branch
+// actually forked from, and the base a failure names is the real one.
+//
+// NOT closed by this in every topology: docs/plans/2026-08-09-gaps-followups.md:162 stages a
+// run where task branches fork straight off the RUN branch itself (`git checkout -B
+// teammates/r/T5 run/r`, no separate base ahead of it). There `baseBranch` and the run branch
+// are the same name, so this line's `--base` sets the gate's base equal to its own run branch,
+// and `complete` refuses with "the run branch and the base branch are both '<name>'" — one
+// exit-4 non-verdict traded for another. `composeBrief` is pure and receives only `baseBranch`,
+// with nothing that distinguishes the two topologies, so it cannot detect the collision itself
+// — that message is named in the exit 4 guidance below, so a teammate who hits it reads a
+// dispatch error rather than something in its own worktree to fix.
 //
 // Omitted when no base branch was supplied — the same case `checkoutSteps` already refuses to
 // name a starting commit for. Inventing one here would assert a base the checkout step itself
@@ -181,6 +198,13 @@ const verifyStep = (task, runId, planPath, baseBranch) => (runId && planPath ? [
   '             "could not run:" — a check whose kind this CLI has no runner for, such as an',
   '                "agent" review check, or a mistyped kind in the manifest. It never executed.',
   '                Nothing on your branch can change it, so do not try to make it pass.',
+  // Thrown when this very invocation's --base collides with the run branch — see the comment
+  // above verifyStep. Named here so a teammate reads it as a dispatch error, not something
+  // wrong in its own worktree that checking out a different branch would fix.
+  '             "the run branch and the base branch are both" — the --base value in this',
+  '                invocation named your own run branch. That is a dispatch error: the base and',
+  '                the run branch collided before this brief was ever composed. Report it and',
+  '                proceed; nothing in your worktree produced it.',
   // Each quoted marker stays whole on its own line. Wrapped mid-phrase, the very string a
   // teammate would search its own output for does not appear in the brief that told it to.
   '             "no gate manifest", "cannot verify completion",',
