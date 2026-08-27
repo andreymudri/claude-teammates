@@ -498,11 +498,15 @@ test('parallel-execution keeps a returned teammate’s worktree until its phase 
   assertClaim(section, {
     label: 'worktree pruning',
     claim: /^Prune after the phase passes its gate, not when a teammate returns:.*a resumed teammate whose worktree is gone cannot start/i,
-    then: /Remove the worktree once the phase has a recorded PASS \(git worktree remove <path>\), then git worktree prune/i,
+    then: /Once the phase has a recorded PASS, run prune-run to remove the worktree, not git worktree remove by hand/i,
     subject: /\bprun(e|es|ed|ing)\b/i,
     allow: [
       /^Only prune worktrees belonging to this run\.$/i,
-      /^If a task must go to a fresh implementer instead — because resuming stalled — prune that task's worktree first, since a returned teammate's worktree keeps its branch checked out and the new dispatch would fail with "already used by worktree"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover\.$/i,
+      // Reviewed: the fresh-implementer exception. `prune-run` only removes a worktree once its
+      // phase already recomputes to PASS, and a mid-phase stall has none yet — so this one case
+      // still needs a hand removal, named and justified in the same breath rather than left to
+      // contradict the rule above it.
+      /^The one exception is a task going to a fresh implementer instead of a resume, because resuming stalled: prune that task's worktree first, since prune-run only removes a worktree whose phase already recomputes to PASS and a mid-phase stall has none yet to rest that removal on — do it by hand with git worktree remove <path>, then git worktree prune — because a returned teammate's worktree keeps its branch checked out and the new dispatch would otherwise fail with "already used by worktree"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover\.$/i,
       // Reviewed: the command bullet states the same rule mechanically — it recomputes each
       // phase's gate and removes only worktrees whose phase passes — so it reinforces the claim
       // rather than qualifying it.
@@ -804,7 +808,29 @@ test('parallel-execution states --enforcement-only never authorises a prune on a
       /^Without --yes it reports and removes nothing\.$/i,
       // Reviewed: the worktree-pruning bullet's own removal instruction for the ordinary case of
       // a recorded PASS — again a different claim than this flag's guardrail.
-      /^Remove the worktree once the phase has a recorded PASS \(git worktree remove <path>\), then git worktree prune\.$/i,
+      /^Once the phase has a recorded PASS, run prune-run to remove the worktree, not git worktree remove by hand — the command above already covers this case\.$/i,
+      // Reviewed: the same bullet's fresh-implementer exception. A named, justified hand removal
+      // for the one case prune-run cannot yet reach — again a different claim than this flag's
+      // guardrail, which is about a PASS resting on what the flag itself skipped.
+      /^The one exception is a task going to a fresh implementer instead of a resume, because resuming stalled: prune that task's worktree first, since prune-run only removes a worktree whose phase already recomputes to PASS and a mid-phase stall has none yet to rest that removal on — do it by hand with git worktree remove <path>, then git worktree prune — because a returned teammate's worktree keeps its branch checked out and the new dispatch would otherwise fail with "already used by worktree"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover\.$/i,
+    ],
+  })
+})
+
+test('parallel-execution makes prune-run the only supported cleanup', async () => {
+  const doc = parseDoc(await readFile(new URL('parallel-execution/SKILL.md', dir), 'utf8'), 'parallel-execution')
+  const cleanup = doc.section(/^5\. Clean up the phase$/)
+  assertClaim(cleanup, {
+    label: 'cleanup command',
+    claim: /^This is the only supported way to clean up after a phase\.$/i,
+    subject: /prune-run|by hand|git worktree remove|git branch -D/i,
+    allow: [
+      // `normalize()` strips backticks before matching (tests/md-contract.mjs:73-81), so these
+      // patterns are written without them, matching the convention every other allow entry in
+      // this file already follows — a pattern that kept the backticks in would never match and
+      // this test would fail permanently rather than on a real regression.
+      /^Do not remove a worktree or delete a teammate branch by hand: git worktree remove run from the wrong place takes a teammate's uncommitted work, and git branch -D measures "merged" against whatever branch you are standing on rather than against the run branch\.$/i,
+      /^Without --yes it removes nothing and prints the same plan, which is what to run when you only want to see what is outstanding\.$/i,
     ],
   })
 })

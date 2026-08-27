@@ -141,6 +141,23 @@ Run `phase-gate`. Only on PASS, dispatch `tm-integrator` to merge the teammate b
 dependency order with `--no-ff`. The integrator is the sole writer to the run branch and runs
 alone. No bookkeeping call follows the merge: the next phase is derived from what is merged.
 
+## 5. Clean up the phase
+
+Once the phase has a recorded PASS and its branches are merged, remove what it left:
+
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" prune-run --run <runId> --plan <planPath> --root <project root> --yes
+
+This is the only supported way to clean up after a phase. It recomputes each phase's gate
+rather than reading `status.gates`, removes only this run's worktrees whose phase passes,
+deletes each removed worktree's branch where `git merge-base --is-ancestor` proves it is
+already in the run branch, and names every worktree and branch it left alone with the
+reason. Do not remove a worktree or delete a teammate branch by hand: `git worktree remove`
+run from the wrong place takes a teammate's uncommitted work, and `git branch -D` measures
+"merged" against whatever branch you are standing on rather than against the run branch.
+
+Without `--yes` it removes nothing and prints the same plan, which is what to run when you
+only want to see what is outstanding.
+
 ### Import coupling across tasks
 
 A task whose file set imports a symbol another task introduces cannot build on its own branch.
@@ -355,9 +372,13 @@ teammate automatically; a teammate never shares a worktree with another.
 - **Prune after the phase passes its gate, not when a teammate returns:** `phase-gate` resolves a
   `retry` by resuming the same teammate, and a resumed teammate whose worktree is gone cannot
   start — it fails with "its worktree no longer exists", and the task's whole context is lost
-  with it. Remove the worktree once the phase has a recorded PASS (`git worktree remove <path>`),
-  then `git worktree prune`. Only prune worktrees belonging to **this** run. If a task must go to
-  a **fresh** implementer instead — because resuming stalled — prune that task's worktree first,
-  since a returned teammate's worktree keeps its branch checked out and the new dispatch would
-  fail with "already used by worktree"; then restate the findings, the branch and the file set in
-  its dispatch, because none of that survives the handover.
+  with it. Once the phase has a recorded PASS, run `prune-run` to remove the worktree, not
+  `git worktree remove` by hand — the command above already covers this case. Only prune
+  worktrees belonging to **this** run. The one exception is a task going to a **fresh**
+  implementer instead of a resume, because resuming stalled: prune that task's worktree first,
+  since `prune-run` only removes a worktree whose phase already recomputes to PASS and a
+  mid-phase stall has none yet to rest that removal on — do it by hand with
+  `git worktree remove <path>`, then `git worktree prune` — because a returned teammate's
+  worktree keeps its branch checked out and the new dispatch would otherwise fail with "already
+  used by worktree"; then restate the findings, the branch and the file set in its dispatch,
+  because none of that survives the handover.
