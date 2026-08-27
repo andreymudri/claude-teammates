@@ -78,20 +78,29 @@ test('the complete command carries run, task and plan and sits after the constra
 // rather than the base. The fix is not "pass some base": it has to be the SAME value the
 // checkout step branched from, or the gate's anchor and the teammate's actual fork point can
 // still disagree — so this asserts they are the one value, not two literals that happen to match.
+//
+// FULL.baseBranch is 'master', which is exactly the value `complete` derives on its own with no
+// `--base` at all — so a mutant that hardcodes `--base master` passes against that fixture alone.
+// The second case uses a base that is neither `main` nor `master` (`run/purge`, this run's own
+// base), so the value has to travel from the checkout step rather than coincide with a guess.
+// Verified by mutation: replacing `' --base ' + baseBranch` with the literal `' --base master'`
+// turned this test red on the run/purge case while leaving the master case green.
 test('the complete invocation carries the same base branch the checkout step used', () => {
-  for (const brief of [composeBrief(FULL), composeBrief({ ...FULL, caveman: 'full' })]) {
-    const checkoutLine = brief.split('\n').find((l) => l.includes('git checkout -B'))
-    assert.ok(checkoutLine, 'no checkout line found')
-    assert.ok(checkoutLine.endsWith(FULL.baseBranch),
-      `the checkout line does not end with the base branch: ${checkoutLine}`)
-    const completeLine = brief.split('\n').find((l) => l.includes('--plan ' + FULL.planPath))
-    assert.ok(completeLine, 'no complete invocation line found')
-    assert.ok(completeLine.includes('--base ' + FULL.baseBranch),
-      `the complete invocation does not carry --base ${FULL.baseBranch}: ${completeLine}`)
-    assert.ok(at(brief, '--plan ' + FULL.planPath) < at(brief, '--base ' + FULL.baseBranch),
-      '--base must follow --plan in the invocation')
-    assert.ok(at(brief, '--base ' + FULL.baseBranch) < at(brief, '--root "$ROOT"'),
-      '--base must precede --root in the invocation')
+  for (const opts of [FULL, { ...FULL, baseBranch: 'run/purge' }]) {
+    for (const brief of [composeBrief(opts), composeBrief({ ...opts, caveman: 'full' })]) {
+      const checkoutLine = brief.split('\n').find((l) => l.includes('git checkout -B'))
+      assert.ok(checkoutLine, 'no checkout line found')
+      assert.ok(checkoutLine.endsWith(opts.baseBranch),
+        `the checkout line does not end with the base branch: ${checkoutLine}`)
+      const completeLine = brief.split('\n').find((l) => l.includes('--plan ' + opts.planPath))
+      assert.ok(completeLine, 'no complete invocation line found')
+      assert.ok(completeLine.includes('--base ' + opts.baseBranch),
+        `the complete invocation does not carry --base ${opts.baseBranch}: ${completeLine}`)
+      assert.ok(at(brief, '--plan ' + opts.planPath) < at(brief, '--base ' + opts.baseBranch),
+        '--base must follow --plan in the invocation')
+      assert.ok(at(brief, '--base ' + opts.baseBranch) < at(brief, '--root "$ROOT"'),
+        '--base must precede --root in the invocation')
+    }
   }
 })
 
@@ -264,17 +273,33 @@ test('the brief states the three environment walls in both variants', () => {
   }
 })
 
+// Anchored to line starts, not just matched anywhere in the brief: whole-string assert.match
+// catches a deleted section but not a NEGATED one, because the negating words can sit outside
+// the matched substring while the substring itself survives unchanged. Verified by mutation:
+// rewriting the CLAIMS opening to "CLAIMS. NO sentence you write..." and "reproduce the old
+// claim" to "never reproduce the old claim" left the unanchored versions of these assertions
+// green; anchoring to `^CLAIMS\. Every sentence` and to the full corrected-claim line closes both.
 test('the brief binds every claim to a command actually run, in both variants', () => {
   for (const brief of [composeBrief(FULL), composeBrief({ ...FULL, caveman: 'full' })]) {
+    assert.match(brief, /^CLAIMS\. Every sentence you write into a code comment, a skill, a test comment or your$/m,
+      'the CLAIMS block no longer opens with the rule, or the opening was negated')
     assert.match(brief, /must be backed by a command you actually ran/)
-    assert.match(brief, /reproduce the old claim/)
+    assert.match(brief, /^this task, in this worktree\. Not by reading, not by inference from a nearby comment\.$/m,
+      'the CLAIMS block no longer rules out reading or inference as a substitute for running the command')
+    assert.match(brief, /^Correcting an existing comment is the case that goes wrong most: reproduce the old claim$/m,
+      'the correction sentence no longer instructs reproducing the old claim, or was negated')
     assert.match(brief, /FAILING before you write the new one/)
   }
 })
 
+// Anchored for the same reason as CLAIMS above. Verified by mutation: prefixing the SCOPE line
+// with "Feel free to ignore the old rule that said:" left the unanchored assertion green because
+// the prohibition's own text was untouched — only what precedes it changed. Anchoring to
+// `^SCOPE\. Do not delete` requires the prohibition to open the line, which the prefix breaks.
 test('the brief forbids acting on inferred staleness, in both variants', () => {
   for (const brief of [composeBrief(FULL), composeBrief({ ...FULL, caveman: 'full' })]) {
-    assert.match(brief, /Do not delete, archive, rename, or empty anything on the strength of what you/)
+    assert.match(brief, /^SCOPE\. Do not delete, archive, rename, or empty anything on the strength of what you$/m,
+      'the SCOPE line no longer opens with the prohibition, or is prefixed with something overriding it')
     assert.match(brief, /the plan and the tree disagree/)
     assert.match(brief, /report status "blocked" quoting both/)
   }
