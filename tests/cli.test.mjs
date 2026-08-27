@@ -8989,34 +8989,51 @@ function deadPid() {
 
 const failing = (code) => () => { throw Object.assign(new Error(code), { code }) }
 
+// An arbitrary uid the preview directory is "owned" by in the doubles below, and a second,
+// distinct one for an entry planted by somebody else. Neither is tied to this test process's
+// real uid — every comparison under test is directory-owner-vs-entry, not reader-vs-entry — so a
+// real uid would only coincidentally, not reliably, differ from these. `process.getuid()` is
+// undefined on win32 and would throw before the mechanism under test ever ran.
+const OWNER_UID = 424242
+const FOREIGN_UID = 999999
+
+// A `stat` double that approves whatever it is asked about: a regular file whose uid is the
+// preview directory's own. The marker is vetted before it is read, so a fixture that injects
+// only `read` never reaches its own double — the preview directories these tests name do not
+// exist on disk, and the default `lstat` would reject the marker before the branch under test
+// could decide anything. Staging an approving owner keeps each test pinning the branch it names.
+const vetted = async () => ({ uid: OWNER_UID, isFile: () => true })
+
 test('a probe failure that is not ESRCH leaves the preview live', async () => {
   const dir = path.join(tmpdir(), 'tm-preview-eperm')
   const read = async () => '4242\n'
+  const stat = vetted
   // EPERM: the pid exists and belongs to another user, which is a gate this process may not
   // signal — not a gate that is gone.
-  assert.deepEqual([...await livePreviewPaths([dir], { read, probe: failing('EPERM') })], [dir])
-  assert.deepEqual([...await livePreviewPaths([dir], { read, probe: failing('EINVAL') })], [dir])
+  assert.deepEqual([...await livePreviewPaths([dir], { read, stat, probe: failing('EPERM') })], [dir])
+  assert.deepEqual([...await livePreviewPaths([dir], { read, stat, probe: failing('EINVAL') })], [dir])
   // A probe error carrying no code at all is just as unresolved.
-  assert.deepEqual([...await livePreviewPaths([dir], { read, probe: () => { throw new Error('x') } })], [dir])
+  assert.deepEqual([...await livePreviewPaths([dir], { read, stat, probe: () => { throw new Error('x') } })], [dir])
   // ESRCH is the one answer that really means gone, and it is the ONLY one.
-  assert.deepEqual([...await livePreviewPaths([dir], { read, probe: failing('ESRCH') })], [])
+  assert.deepEqual([...await livePreviewPaths([dir], { read, stat, probe: failing('ESRCH') })], [])
   // A probe that returns is a living owner.
-  assert.deepEqual([...await livePreviewPaths([dir], { read, probe: () => true })], [dir])
+  assert.deepEqual([...await livePreviewPaths([dir], { read, stat, probe: () => true })], [dir])
 })
 
 test('a marker that cannot be read leaves the preview live, and only a missing one does not', async () => {
   const dir = path.join(tmpdir(), 'tm-preview-eacces')
   const probe = () => true
+  const stat = vetted
   for (const code of ['EACCES', 'EPERM', 'EBUSY', 'EIO', 'EISDIR']) {
     assert.deepEqual(
-      [...await livePreviewPaths([dir], { read: failing(code), probe })],
+      [...await livePreviewPaths([dir], { read: failing(code), stat, probe })],
       [dir],
       `${code} left the owner unknown and must not be read as no owner`,
     )
   }
   // ENOENT is the one that really means "no marker": a preview from before markers existed, or
   // one whose owner already released it. That is the pre-existing leaked case.
-  assert.deepEqual([...await livePreviewPaths([dir], { read: failing('ENOENT'), probe })], [])
+  assert.deepEqual([...await livePreviewPaths([dir], { read: failing('ENOENT'), stat, probe })], [])
 })
 
 test('a marker that will not parse leaves the preview live', async () => {
@@ -9024,11 +9041,12 @@ test('a marker that will not parse leaves the preview live', async () => {
   // The probe would say ESRCH for anything it was handed, so a preview that survives here
   // survived on the parse branch alone.
   const probe = failing('ESRCH')
+  const stat = vetted
   for (const raw of ['not-a-pid\n', '', '   ', '0\n', '-4\n', 'NaN']) {
-    assert.deepEqual([...await livePreviewPaths([dir], { read: async () => raw, probe })], [dir], `parsed ${JSON.stringify(raw)}`)
+    assert.deepEqual([...await livePreviewPaths([dir], { read: async () => raw, stat, probe })], [dir], `parsed ${JSON.stringify(raw)}`)
   }
   // A parseable, living pid still reaches the probe rather than short-circuiting.
-  assert.deepEqual([...await livePreviewPaths([dir], { read: async () => '77\n', probe: () => true })], [dir])
+  assert.deepEqual([...await livePreviewPaths([dir], { read: async () => '77\n', stat, probe: () => true })], [dir])
 })
 
 // The reaper and the owner have to agree on WHERE the marker is, and they share only the preview
@@ -9036,7 +9054,7 @@ test('a marker that will not parse leaves the preview live', async () => {
 test('livePreviewPaths reads the same sibling path the owner writes', async () => {
   const dir = path.join(tmpdir(), 'tm-preview-agree')
   const asked = []
-  await livePreviewPaths([dir], { read: async (p) => { asked.push(p); return '1\n' }, probe: () => true })
+  await livePreviewPaths([dir], { read: async (p) => { asked.push(p); return '1\n' }, stat: vetted, probe: () => true })
   assert.deepEqual(asked, [previewOwnerMarkerPath(dir)])
 })
 
@@ -9052,12 +9070,8 @@ test('livePreviewPaths reads the same sibling path the owner writes', async () =
 // synthetic uid pins the same branches on every platform the suite runs on.
 // ---------------------------------------------------------------------------
 
-// An arbitrary uid the preview directory is "owned" by in these doubles, and a second, distinct
-// one for a claim planted by somebody else. Neither is tied to this test process's real uid —
-// the comparison under test is directory-owner-vs-claim, not reader-vs-claim — so a real uid
-// would only coincidentally, not reliably, differ from these.
-const OWNER_UID = 424242
-const FOREIGN_UID = 999999
+// `OWNER_UID` and `FOREIGN_UID` are declared beside the marker doubles further up: the marker
+// and the claims are vetted against the same operands, so one pair serves both.
 
 test('a preview whose owner is dead but whose claim is live is not reaped', async () => {
   const dir = path.join(tmpdir(), 'tm-preview-live')
@@ -9162,6 +9176,8 @@ test('a claim that is not a regular file is ignored even when its uid matches', 
   assert.equal(live.has(dir), false)
 })
 
+// The marker's own `lstat` answers ENOENT here — "no marker", the one answer that is not
+// unknown — so the EACCES that decides this verdict can only be the CLAIM's.
 test('a stat failure on a claim other than ENOENT leaves the preview live', async () => {
   const dir = path.join(tmpdir(), 'tm-preview-stat-eacces')
   const live = await livePreviewPaths([dir], {
@@ -9169,6 +9185,7 @@ test('a stat failure on a claim other than ENOENT leaves the preview live', asyn
     list: async () => [`${path.basename(previewOwnerMarkerPath(dir))}.4242`],
     stat: async (p) => {
       if (p === dir) return { uid: OWNER_UID, isFile: () => false }
+      if (p === previewOwnerMarkerPath(dir)) { const e = new Error('no such file'); e.code = 'ENOENT'; throw e }
       const e = new Error('permission denied'); e.code = 'EACCES'; throw e
     },
     probe: () => { const e = new Error('no such process'); e.code = 'ESRCH'; throw e },
@@ -9220,6 +9237,125 @@ test('a preview directory that no longer exists causes any claim under it to be 
     probe: () => true,
   })
   assert.equal(live.has(dir), false)
+})
+
+// ---------------------------------------------------------------------------
+// The OWNER MARKER is vetted the same way a claim is, and the listing is taken fresh for each
+// preview rather than once per sweep.
+//
+// Injected doubles again, and for the reason the block above states: the entries these tests
+// need — a marker that is a fifo, a marker owned by another local account, a marker whose
+// `lstat` fails with EACCES — cannot be staged from this process. A fifo would be worse than
+// unstageable: the read would park in open(2) with no reader on the other end and the test run
+// would never finish. `stat`, `read`, `list` and `probe` exist precisely so those branches can
+// be pinned without staging them.
+// ---------------------------------------------------------------------------
+
+// A fifo, a directory or a symlink planted at the marker's exact path — which is derived from
+// the preview directory's name and nothing secret — must be IGNORED, not turned into `unknown`.
+// `unknown` means live, so an ignored-vs-unknown mix-up here makes the preview unreapable
+// forever by planting one entry. Pinned together with the read: a marker that fails vetting is
+// never opened at all.
+test('a marker that is not a regular file is ignored rather than making the preview unknown', async () => {
+  const dir = path.join(tmpdir(), 'tm-preview-marker-not-a-file')
+  const readPaths = []
+  const live = await livePreviewPaths([dir], {
+    read: async (p) => { readPaths.push(p); return `${process.pid}\n` },
+    // No claims at all, so the marker is the only candidate holder.
+    list: async () => [],
+    stat: async (p) => (p === dir
+      ? { uid: OWNER_UID, isFile: () => false }
+      : { uid: OWNER_UID, isFile: () => false }),
+    // Would report the preview live if the unvetted marker were read and honoured.
+    probe: () => true,
+  })
+  assert.equal(live.has(dir), false)
+  assert.deepEqual(readPaths, [], 'a marker that failed vetting must never be opened')
+})
+
+// The uid half, on the marker. Same operands as the claim path: the marker's own uid against
+// the PREVIEW DIRECTORY's, never against the reader's — `sudo prune-run` runs the reaper as uid
+// 0 while the gate that legitimately owns the preview does not. Windows-void in the same breath
+// as the production comment: Node's fs reports uid 0 for every path there, so a real
+// foreign-uid marker would read as owned regardless of this test, which is why the uids here
+// are synthetic and pin the COMPARISON rather than a guarantee that platform cannot keep.
+test('a marker owned by a different uid than the preview directory is ignored', async () => {
+  const dir = path.join(tmpdir(), 'tm-preview-marker-foreign-uid')
+  const readPaths = []
+  const live = await livePreviewPaths([dir], {
+    read: async (p) => { readPaths.push(p); return `${process.pid}\n` },
+    list: async () => [],
+    stat: async (p) => (p === dir
+      ? { uid: OWNER_UID, isFile: () => false }
+      : { uid: FOREIGN_UID, isFile: () => true }),
+    probe: () => true,
+  })
+  assert.equal(live.has(dir), false)
+  assert.deepEqual(readPaths, [], 'a foreign-uid marker must never be opened')
+})
+
+// Vetting a marker adds an `lstat` that can fail on its own, and its failure follows the
+// unreadable-marker rule rather than the vetting rule: ENOENT is the one answer that means "no
+// marker", everything else leaves the owner unknown, and unknown means live. The preview
+// directory's own `lstat` succeeds here, so nothing but the marker's `lstat` can account for
+// the verdict.
+test('a marker whose lstat fails for a reason other than ENOENT leaves the preview live', async () => {
+  const dir = path.join(tmpdir(), 'tm-preview-marker-stat-eacces')
+  const live = await livePreviewPaths([dir], {
+    read: async () => { const e = new Error('no such file'); e.code = 'ENOENT'; throw e },
+    list: async () => [],
+    stat: async (p) => {
+      if (p === dir) return { uid: OWNER_UID, isFile: () => false }
+      const e = new Error('permission denied'); e.code = 'EACCES'; throw e
+    },
+    // Would report the preview reapable if the failed `lstat` were read as "no marker".
+    probe: () => { const e = new Error('no such process'); e.code = 'ESRCH'; throw e },
+  })
+  assert.equal(live.has(dir), true)
+})
+
+// The happy path, so the three tests above cannot be satisfied by vetting that rejects
+// everything: a regular file owned by the preview directory's uid IS read, and the live pid it
+// names still holds the preview.
+test('a vetted marker naming a live pid still holds the preview', async () => {
+  const dir = path.join(tmpdir(), 'tm-preview-marker-vetted')
+  const readPaths = []
+  const live = await livePreviewPaths([dir], {
+    read: async (p) => { readPaths.push(p); return '4242\n' },
+    list: async () => [],
+    stat: async () => ({ uid: OWNER_UID, isFile: () => true }),
+    probe: (pid) => { if (pid !== 4242) { const e = new Error('no such process'); e.code = 'ESRCH'; throw e } },
+  })
+  assert.equal(live.has(dir), true)
+  assert.deepEqual(readPaths, [previewOwnerMarkerPath(dir)], 'a vetted marker is the one that gets opened')
+})
+
+// The listing is taken once per PREVIEW, not once per sweep. Under the memo this function used
+// to keep, the first preview's `list(parent)` result was reused for every later preview under
+// the same parent, so a claim written after that call was invisible for the rest of the pass —
+// and in production every preview is a direct child of the temp root, so one call covered them
+// all. `list` here answers empty the first time and reports preview two's claim the second, the
+// shape a claim written mid-pass has: under the memo the second call never happened and preview
+// two was reaped with a live pid inside it.
+test('a claim written after the first preview was examined is still seen for the next one', async () => {
+  const parent = path.join(tmpdir(), 'tm-preview-midpass')
+  const first = path.join(parent, 'preview1')
+  const second = path.join(parent, 'preview2')
+  const claimName = path.basename(previewClaimPath(second, 4242))
+  let calls = 0
+  const live = await livePreviewPaths([first, second], {
+    read: async (p) => {
+      if (p === path.join(parent, claimName)) return '4242\n'
+      const e = new Error('no such file'); e.code = 'ENOENT'; throw e
+    },
+    // The claim appears between the first preview's listing and the second's.
+    list: async () => { calls += 1; return calls === 1 ? [] : [claimName] },
+    stat: async () => ({ uid: OWNER_UID, isFile: () => true }),
+    probe: (pid) => { if (pid !== 4242) { const e = new Error('no such process'); e.code = 'ESRCH'; throw e } },
+  })
+  assert.equal(calls, 2, 'each preview gets its own listing')
+  assert.equal(live.has(first), false, 'the first preview held nothing when it was examined')
+  assert.equal(live.has(second), true, 'the claim written after the first listing still holds preview two')
 })
 
 // ---------------------------------------------------------------------------
@@ -9305,8 +9441,8 @@ test('livePreviewPaths does not follow a claim entry that is a symlink to a live
 // The trailing dot in `previewClaimPrefix` is load-bearing (see scripts/merge-preview.mjs for
 // why): without it, one preview's prefix also matches a SIBLING preview's claim whenever one
 // directory's name is a literal prefix of the other's, e.g. "preview" and "preview2". Two
-// previews sharing one parent is also the only way to exercise the shared listing memo at all —
-// every other test in this file passes `livePreviewPaths` a single-element array.
+// previews sharing one parent is also the only way to exercise two listings of the SAME
+// directory — every other test in this file passes `livePreviewPaths` a single-element array.
 test('a claim under one preview in a shared parent is not attributed to a sibling preview', async () => {
   const scratch = await mkdtemp(path.join(tmpdir(), 'tm-preview-siblings-'))
   const preview = path.join(scratch, 'preview')
@@ -9326,15 +9462,18 @@ test('a claim under one preview in a shared parent is not attributed to a siblin
   }
 })
 
-// The listing memo is keyed per PARENT directory, and the test above cannot pin that key because
-// both its previews share one parent — a cache keyed by a constant instead of `dir` would pass it
-// unnoticed. `previewCandidates` is not guaranteed a shared parent in production either:
-// scripts/prune.mjs's `under()` admits any path strictly inside the temp root, not only direct
-// children. Two previews under two DIFFERENT parents are the only way to pin the key itself: if
-// the memo ever reused one parent's listing for another's lookup, a live claim under the second
-// parent would go unseen, that preview would read as leaked, and `git worktree remove --force`
-// would follow its junctions — the exact outcome this whole function exists to prevent.
-test('previews under different parents do not share the per-parent listing memo', async () => {
+// Each preview is listed against its OWN parent, and the test above cannot pin that because both
+// its previews share one parent — a lookup against a constant directory instead of `dir`'s parent
+// would pass it unnoticed. `previewCandidates` is not guaranteed a shared parent in production
+// either: scripts/prune.mjs's `under()` admits any path strictly inside the temp root, not only
+// direct children. Two previews under two DIFFERENT parents are the only way to pin which
+// directory is listed: if one parent's listing were ever used for another preview's lookup, a
+// live claim under the second parent would go unseen, that preview would read as leaked, and
+// `git worktree remove --force` would follow its junctions — the exact outcome this whole
+// function exists to prevent. This stood as a guard on the per-parent listing memo and still
+// holds now the memo is gone, because the failure it describes is about the DIRECTORY listed,
+// not about reuse.
+test('previews under different parents are each listed against their own parent', async () => {
   const scratchA = await mkdtemp(path.join(tmpdir(), 'tm-preview-parentA-'))
   const scratchB = await mkdtemp(path.join(tmpdir(), 'tm-preview-parentB-'))
   const leaked = path.join(scratchA, 'preview')

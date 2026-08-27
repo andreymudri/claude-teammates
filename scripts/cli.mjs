@@ -1368,6 +1368,12 @@ async function unlinkPreviewLinks(dir, depth = 0) {
 // nobody is at, while the suite it spawned is still writing to the tree. Every sibling file
 // matching `previewClaimPrefix(dir)` is a CANDIDATE claim, VETTED below before it is trusted.
 //
+// The MARKER is a candidate on exactly the same terms, and is vetted by the same triple before
+// it is read. It sits at a path derived from the preview directory's name and nothing secret, in
+// the same directory as the claims, so anyone who can plant a claim can plant a marker; reading
+// it unvetted, which this function used to do, trusted an entry the claim path would have
+// rejected.
+//
 // FAIL-SAFE BRANCHES, all deliberate, all saying the same thing: a holder that cannot be RULED
 // OUT is a holder.
 //
@@ -1387,12 +1393,12 @@ async function unlinkPreviewLinks(dir, depth = 0) {
 // repository's build inputs. Only ENOENT and ESRCH — the two answers that positively mean "no
 // owner" — let a preview through.
 //
-// VETTING a candidate claim is a DIFFERENT move from the five branches above: a candidate that
-// fails vetting is not "unknown", it is IGNORED — dropped from the vote entirely, contributing
-// neither a holder nor an `unknown`. That distinction is the whole point: any local user can see
-// this prefix and `touch` a file under it, so a candidate has to prove it is a genuine claim
-// before its content is trusted at all, and a forged one must never be able to force `live` in
-// EITHER direction merely by existing.
+// VETTING a candidate — the marker and every claim alike — is a DIFFERENT move from the five
+// branches above: a candidate that fails vetting is not "unknown", it is IGNORED — dropped from
+// the vote entirely, contributing neither a holder nor an `unknown`. That distinction is the
+// whole point: any local user can see this prefix and `touch` a file under it, so a candidate has
+// to prove it is a genuine holder before its content is trusted at all, and a forged one must
+// never be able to force `live` in EITHER direction merely by existing.
 //
 //   - It must be a REGULAR FILE. A directory, a symlink, a fifo, a device — none of those is
 //     ever opened; `read` is only called on something `lstat` first confirmed is a plain file.
@@ -1488,18 +1494,24 @@ async function unlinkPreviewLinks(dir, depth = 0) {
 //     nothing at all; and EEXIST is tolerated and never unlinked, so a claim that writer did not
 //     create is never released by it.
 //
-//     Stated in the same breath, because the same writer makes it reachable: this function
-//     samples each parent directory's listing ONCE per pass and reuses it for every candidate
-//     underneath (see `listingFor` below). A claim written after that listing was taken is
-//     invisible for the remainder of the pass, including to previews already examined in it —
-//     so a preview whose owner claims it mid-pass can still be read as unowned and reaped. That
-//     was unreachable while nothing wrote claims. It is reachable now.
+//     Stated in the same breath, because the same writer bounds how wide that window is: this
+//     function takes each preview's parent listing FRESH, inside the loop, for every preview it
+//     examines. It used to memoise one listing per parent for the whole pass, which made a claim
+//     written after that snapshot invisible for the remainder of it — including to previews the
+//     pass had not reached yet, since in production every preview is a direct child of the temp
+//     root and one readdir covered them all. That was unreachable while nothing wrote claims and
+//     is reachable now, which is why the memo is gone. What remains is the ordinary TOCTOU width
+//     of listing, vetting and reading as separate syscalls: a claim written after THIS preview's
+//     own listing is still unseen for THIS preview, and no later one.
 //
 // `read`, `list`, `stat` and `probe` are injectable because several of the branches above cannot
 // be staged end to end: EPERM needs a process owned by another user, EACCES needs a file this
-// user cannot read, and a foreign-uid or non-regular claim needs a filesystem entry `write`
-// alone cannot fabricate. Exported for the same reason `isMissingPreviewRoot` is — each branch
-// is on the destructive path and has to be pinned on its own.
+// user cannot read, and a foreign-uid or non-regular marker or claim needs a filesystem entry
+// `write` alone cannot fabricate. The fifo case is worse than merely unstageable — a real one
+// with no writer on the other end would park the staging test in open(2) for as long as the
+// suite was allowed to run — so it is pinned through these doubles rather than on disk. Exported
+// for the same reason `isMissingPreviewRoot` is — each branch is on the destructive path and has
+// to be pinned on its own.
 export async function livePreviewPaths(previewPaths, {
   read = (p) => readFile(p, 'utf8'),
   list = (dir) => readdir(dir),
@@ -1511,15 +1523,6 @@ export async function livePreviewPaths(previewPaths, {
   probe = (pid) => process.kill(pid, 0),
 } = {}) {
   const live = new Set()
-  // One listing per parent directory, reused across every candidate under it. `null` is
-  // recorded for a listing that FAILED, which is not the same as an empty one.
-  const listings = new Map()
-  const listingFor = async (dir) => {
-    if (!listings.has(dir)) {
-      try { listings.set(dir, await list(dir)) } catch { listings.set(dir, null) }
-    }
-    return listings.get(dir)
-  }
 
   for (const dir of previewPaths) {
     // Every holder's marker contents, and whether anything about them is UNKNOWN. The rule the
@@ -1527,15 +1530,95 @@ export async function livePreviewPaths(previewPaths, {
     // the two answers that positively mean "no owner" — let a preview through.
     const holders = []
     let unknown = false
+    // ONE owner uid per preview, resolved before anything under this prefix is trusted, and used
+    // to vet the marker and every candidate claim alike. Who a candidate has to be owned by: see
+    // the vetting section above this function.
+    let ownerUid
     try {
-      holders.push(await read(previewOwnerMarkerPath(dir)))
+      ownerUid = (await stat(dir)).uid
     } catch (err) {
-      // ENOENT is the only "no marker": a preview from before markers existed, or one whose
-      // owner has already released it. Every other failure leaves the owner unknown.
+      // The preview directory is gone (ENOENT): there is no owner left to vet a candidate
+      // against, so the marker and every claim below are UNVERIFIABLE rather than unknown — each
+      // falls through the uid comparison and is ignored, exactly like a foreign-owned one.
+      // Anything else leaves the whole preview unknown, same as an unreadable marker.
       if (err?.code !== 'ENOENT') unknown = true
     }
+    // THE MARKER IS VETTED THE SAME WAY A CLAIM IS. It was not, and the asymmetry had teeth: any
+    // local user who can see this prefix can plant an entry at the marker's exact path, which is
+    // derived from the preview directory name and nothing secret.
+    //
+    // A FIFO there makes `read` block forever, and `process.exit()` cannot interrupt it because
+    // the libuv thread is parked in open(2), so only SIGINT recovers the shell. That is a PRIOR
+    // reproduction, recorded in docs/followups/2026-08-27-purge-open-findings.md, NOT a
+    // measurement taken here: staging a fifo whose read never returns would hang the suite that
+    // staged it, which is why `read` and `stat` are injectable and why the tests pin this branch
+    // through the doubles instead.
+    //
+    // One detail of that write-up does not survive checking, and is corrected rather than
+    // repeated: the await does NOT precede every print. `prune-run` announces its command checks
+    // and runs the phases before it reaches `livePreviewPaths(previewCandidates)`. What is true
+    // is that the await precedes the prune plan and every removal, so a marker read that never
+    // returns strands the command after that announcement with no plan, no verdict and nothing
+    // removed.
+    //
+    // A junk file, a symlink or a directory makes the preview unreapable forever, because a
+    // marker that cannot be read is `unknown` and `unknown` means live.
+    //
+    // A candidate that fails vetting is IGNORED, not `unknown` — the same distinction the claim
+    // path makes, and for the same reason: a forged entry must not be able to force `live` in
+    // either direction merely by existing. Only a marker that is a regular file owned by the
+    // preview directory's own uid is read at all.
+    //
+    // PRE-EXISTING, not introduced by the claim work. `git log -S` on the unvetted read puts it
+    // in e6e1a6e, the commit that introduced the marker; the claim work is 4797c98, eighteen days
+    // later. The window is not theoretical either: merge-preview.mjs releases the marker LAST in
+    // its `finally`, and its `removeWorktree(dir).catch(() => {})` swallows a rejection while the
+    // marker's own `rm` sits in an outer `finally` that always runs — so a removal that fails
+    // leaves a still-REGISTERED preview whose marker is already gone and whose marker path, in a
+    // temp root that outlives it, is free for anyone to plant at.
+    const markerPath = previewOwnerMarkerPath(dir)
+    let markerInfo
+    try {
+      markerInfo = await stat(markerPath)
+    } catch (err) {
+      // ENOENT is the only "no marker": a preview from before markers existed, or one whose
+      // owner has already released it. Every other failure leaves the owner unknown, matching
+      // the unreadable-marker rule.
+      if (err?.code !== 'ENOENT') unknown = true
+    }
+    if (markerInfo && markerInfo.isFile() && markerInfo.uid === ownerUid) {
+      try {
+        holders.push(await read(markerPath))
+      } catch (err) {
+        // A marker released between the lstat and this read is ENOENT and means exactly what it
+        // says. Every other failure leaves the owner unknown.
+        if (err?.code !== 'ENOENT') unknown = true
+      }
+    }
     const parent = path.dirname(dir)
-    const names = await listingFor(parent)
+    // ONE LISTING PER PREVIEW, not one per sweep. The memo that used to stand here took each
+    // parent directory's listing once and reused it for every candidate underneath, so a claim
+    // written after that snapshot was invisible for the remainder of the pass — including to
+    // previews the pass had not reached yet. In production every preview is a direct child of the
+    // temp root, so that was a single readdir of the temp directory covering every preview in the
+    // run.
+    //
+    // It was unreachable while nothing wrote claims. `runCommandCheck` in scripts/gate-runner.mjs
+    // writes one per spawned pid, so it is reachable now, and it fails in the destructive
+    // direction: listing taken, gate spawns a check and writes its claim, gate is SIGKILLed so its
+    // `finally` never releases anything, the loop reaches that preview, the marker probes ESRCH,
+    // the cached listing shows no claim — and `git worktree remove --force` follows the preview's
+    // junctions into the repository's real node_modules with the child still writing to that tree.
+    //
+    // The cost is one readdir per preview instead of one per sweep. A sweep examines the previews
+    // in one temp directory, so that is a small multiple of a cheap syscall against an
+    // irreversible removal. The window does not close — vetting and reading are still two
+    // syscalls, and the TOCTOU note above still applies — it narrows from one sweep wide to one
+    // readdir wide, which is the same bound the claim vetting already lives with.
+    //
+    // `null` records a listing that FAILED, which is not the same as an empty one.
+    let names
+    try { names = await list(parent) } catch { names = null }
     if (names === null) {
       // The directory could not be listed, so whether a claim exists is unknown, so the preview
       // is live. An unreaped preview costs a directory; a followed junction costs the
@@ -1545,18 +1628,9 @@ export async function livePreviewPaths(previewPaths, {
       const prefix = previewClaimPrefix(dir)
       const claimNames = names.filter((name) => name.startsWith(prefix))
       if (claimNames.length > 0) {
-        // Who a candidate claim on THIS preview has to be owned by: see the vetting section
-        // above this function.
-        let ownerUid
-        try {
-          ownerUid = (await stat(dir)).uid
-        } catch (err) {
-          // The preview directory is gone (ENOENT): there is no owner left to vet a candidate
-          // against, so every claim below is UNVERIFIABLE rather than unknown — it falls
-          // through the uid comparison and is ignored, exactly like a foreign-owned one.
-          // Anything else leaves the whole preview unknown, same as an unreadable marker.
-          if (err?.code !== 'ENOENT') unknown = true
-        }
+        // `ownerUid` was resolved once at the top of this iteration — the same value that vetted
+        // the marker vets every claim here, so the two cannot disagree about who owns this
+        // preview.
         for (const name of claimNames) {
           const claimPath = path.join(parent, name)
           let info
@@ -3181,7 +3255,7 @@ export async function runCli(argv, io = { out: console.log }) {
     // "Live" is NOT synonymous with "marker held", and the sentence above must not be read that
     // way. `livePreviewPaths` counts a vetted CLAIM as a holder exactly as it counts the marker,
     // and a claim is written per spawned pid long after the add — see the bullet below on the
-    // once-per-pass listing. A preview whose only holder is a claim written during the pass can
+    // listing window. A preview whose only holder is a claim written during the pass can
     // therefore reach this loop with a spawned check still inside it, and for that one the
     // junction argument above does not hold: the sweep is all there is, and it is not enough.
     //
@@ -3198,10 +3272,11 @@ export async function runCli(argv, io = { out: console.log }) {
     //     write that marker before the add that put it there.
     //   - It CAN acquire a CLAIM, and that is a real window, not a hypothetical one. A claim is
     //     written per spawned pid while a check runs, long after the add — and `livePreviewPaths`
-    //     lists each parent directory once per pass and reuses that listing, so a claim written
-    //     during the pass is invisible to it, including for previews it has already examined.
-    //     Such a preview reads as unowned and is reaped here. See the claim-vetting comment above
-    //     `livePreviewPaths` for the same limit stated at the reading end.
+    //     lists, vets and reads as separate syscalls, so a claim written after THAT preview's own
+    //     listing is invisible to it and the preview reads as unowned and is reaped here. The
+    //     window is one readdir wide per preview, not one sweep wide: the per-parent listing memo
+    //     that made a mid-pass claim invisible to every later preview too is gone. See the
+    //     vetting comment above `livePreviewPaths` for the same limit stated at the reading end.
     //
     // So the destructive direction — a live preview read as dead — is closed by construction for
     // the OWNER MARKER, because that marker is HELD across a span containing the whole span over
