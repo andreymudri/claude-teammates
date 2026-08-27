@@ -77,9 +77,15 @@ export function previewClaimPrefix(dir) {
 // Impact is bounded to files this user can already write, so nothing here is a privilege gain.
 // What it prevents is this process destroying one of its own files on a path it did not choose.
 //
-// EEXIST here is not a race to retry: mkdtemp created this directory 0700 a moment ago and
-// nothing legitimate can have put an entry in it, so the throw is the answer. It is raised
-// INSIDE withMergePreview's `try`, so the `finally` still cleans the directory up.
+// EEXIST here is not a race to retry: the marker's parent is the world-writable system temp
+// root, not the 0700 preview directory (see `:22-28` above — the marker is a SIBLING, precisely
+// so it can be written before `git worktree add` creates that directory at all). Verified in
+// this task: `mkdtemp('/tmp/tm-preview-…')` made a directory mode 700, but `previewOwnerMarkerPath`
+// resolves to a sibling of it under `/tmp` itself, mode 1777. What makes a collision improbable
+// is `mkdtemp`'s unguessable six-character suffix, not directory permissions, so an entry already
+// sitting at that path may well be one another local user planted on purpose — and that is
+// exactly why it must be refused rather than unlinked and retried. It is raised INSIDE
+// withMergePreview's `try`, so the `finally` still cleans the directory up.
 export async function writeOwnerMarker(marker, pid) {
   await writeFile(marker, `${pid}\n`, { encoding: 'utf8', flag: 'wx' })
 }
