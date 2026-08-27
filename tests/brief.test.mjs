@@ -221,6 +221,43 @@ test('an empty neighbours array renders no blast radius header', () => {
     'the section around the blast radius is still rendered')
 })
 
+test('the brief states the three environment walls in both variants', () => {
+  for (const brief of [composeBrief(FULL), composeBrief({ ...FULL, caveman: 'full' })]) {
+    assert.match(brief, /Your shell cannot prompt/)
+    assert.match(brief, /Do not run sudo/)
+    assert.match(brief, /device-code flow/)
+    assert.match(brief, /report status "blocked" and name the exact/)
+    assert.match(brief, /command and what it asked for/)
+  }
+})
+
+test('the brief binds every claim to a command actually run, in both variants', () => {
+  for (const brief of [composeBrief(FULL), composeBrief({ ...FULL, caveman: 'full' })]) {
+    assert.match(brief, /must be backed by a command you actually ran/)
+    assert.match(brief, /reproduce the old claim/)
+    assert.match(brief, /FAILING before you write the new one/)
+  }
+})
+
+test('the brief forbids acting on inferred staleness, in both variants', () => {
+  for (const brief of [composeBrief(FULL), composeBrief({ ...FULL, caveman: 'full' })]) {
+    assert.match(brief, /Do not delete, archive, rename, or empty anything on the strength of what you/)
+    assert.match(brief, /the plan and the tree disagree/)
+    assert.match(brief, /report status "blocked" quoting both/)
+  }
+})
+
+test('the brief names the script-file fallback for a shell that refuses the complete invocation', () => {
+  for (const brief of [composeBrief(FULL), composeBrief({ ...FULL, caveman: 'full' })]) {
+    const fallback = 'write the two lines to a file'
+    assert.ok(brief.includes(fallback), 'the fallback sentence is missing')
+    assert.ok(at(brief, 'cli.mjs" complete') < at(brief, fallback),
+      'the fallback must sit after the complete invocation')
+    assert.ok(at(brief, fallback) < at(brief, 'ROOT must be the MAIN worktree'),
+      'the fallback must sit before the ROOT must be the MAIN worktree line')
+  }
+})
+
 test('the caveman variant keeps every load-bearing instruction', () => {
   const brief = composeBrief({ ...FULL, caveman: 'full' })
   assert.ok(brief.includes('git checkout -B teammates/substop/T4 master'))

@@ -143,6 +143,11 @@ const verifyStep = (task, runId, planPath) => (runId && planPath ? [
   '    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" complete \\',
   '      --run ' + runId + ' --task ' + task.id + ' --plan ' + planPath + ' --root "$ROOT"',
   '',
+  'If your shell refuses that invocation — some sandboxes reject a multi-line command or a',
+  'string containing an absolute path they did not authorise — write the two lines to a file',
+  'and run that file. The refusal is your shell\'s, not the gate\'s, and working around it',
+  'that way is expected; reporting "blocked" over it is not.',
+  '',
   'ROOT must be the MAIN worktree, which is what that command computes — run from inside your',
   'own worktree the CLI would resolve the run branch to your task branch and answer the wrong',
   'question. Read the exit code first: 3 is the only one that is a verdict about YOUR work.',
@@ -191,6 +196,58 @@ const verifyStep = (task, runId, planPath) => (runId && planPath ? [
   '',
 ] : [])
 
+// THE THREE WALLS, stated before the work rather than discovered during it. Each one cost
+// a teammate in run `purge` a long stretch of retrying, and each is a property of the
+// harness rather than of the task: a subagent has no terminal, so nothing it runs can
+// prompt, and a command that waits for a prompt waits forever rather than failing.
+//
+// Named as a REPORT, not as a prohibition alone: "do not run sudo" without "report blocked
+// naming the command" leaves a teammate that genuinely needs privilege with no move.
+const environmentRules = () => [
+  'ENVIRONMENT. Your shell cannot prompt: there is no terminal attached to it and no human',
+  'watching it. Three consequences, and none of them is worth retrying:',
+  '1. Do not run sudo, pkexec, doas, or anything else that asks for a password. They do not',
+  '   fail fast — they wait for input that can never arrive.',
+  '2. Do not start an interactive login, a device-code flow, or any 2FA prompt. A CLI that',
+  '   opens a browser or waits for a code is the same wall in a different shape.',
+  '3. Do not run a command that pages, opens an editor, or waits on a confirmation. Pass the',
+  '   non-interactive flag the tool provides, or do not run it.',
+  'If the task genuinely needs any of those, report status "blocked" and name the exact',
+  'command and what it asked for. That is a finished answer, not a failure.',
+  '',
+]
+
+// WHY THIS IS IN THE BRIEF AND NOT ONLY IN THE AGENT DEFINITION: the defect it addresses
+// was not a teammate ignoring a rule, it was a teammate writing a sentence about code it
+// had not run and no step asking it to. In run `purge` one residual bullet was rewritten
+// wrongly three times in a row, each version reproduced-and-refuted a round later, because
+// the claim read plausibly and nothing in the dispatch bound it to an execution.
+const claimRules = () => [
+  'CLAIMS. Every sentence you write into a code comment, a skill, a test comment or your',
+  'summary that says what the code DOES must be backed by a command you actually ran in',
+  'this task, in this worktree. Not by reading, not by inference from a nearby comment.',
+  'If you could not run it, write what you did verify and say the rest is unverified —',
+  'an unverified sentence marked as such costs a reader nothing; one stated as fact costs',
+  'a review round.',
+  'Correcting an existing comment is the case that goes wrong most: reproduce the old claim',
+  'FAILING before you write the new one, so you know which half was wrong.',
+  '',
+]
+
+// The FILES line says which paths may change. This says what may not be INFERRED, which is
+// a different failure: a teammate that decides a project is dormant, a file is dead, or a
+// record is stale, and acts on it. Nothing in the file set stops that, because archiving
+// or deleting inside your own declared paths is inside the set.
+const scopeRules = () => [
+  'SCOPE. Do not delete, archive, rename, or empty anything on the strength of what you',
+  'inferred about it. Being inside your declared file set is permission to edit those',
+  'paths for THIS task, not a judgement that whatever they contain is stale.',
+  'If the plan and the tree disagree — a step that describes code that is not there, a file',
+  'the plan says is unused — report status "blocked" quoting both. Do not reconcile them by',
+  'guessing which one is out of date.',
+  '',
+]
+
 const full = ({ task, runId, planPath, baseBranch, constraints }) => [
   'You are tm-implementer for task ' + task.id + ': ' + task.title + '.',
   '',
@@ -213,6 +270,9 @@ const full = ({ task, runId, planPath, baseBranch, constraints }) => [
   'Touching any other file fails the phase gate.',
   '',
   ...blastRadius(task),
+  ...scopeRules(),
+  ...environmentRules(),
+  ...claimRules(),
   constraints.length ? 'GLOBAL CONSTRAINTS:' : '',
   ...constraints.map((c) => '- ' + c),
   '',
@@ -246,6 +306,9 @@ const terse = ({ task, runId, planPath, baseBranch, constraints, caveman }) => [
   'Touching any other file fails the phase gate.',
   '',
   ...blastRadius(task),
+  ...scopeRules(),
+  ...environmentRules(),
+  ...claimRules(),
   constraints.length ? 'GLOBAL CONSTRAINTS:' : '',
   ...constraints.map((c) => '- ' + c),
   '',
