@@ -357,6 +357,25 @@ test('the implementer names the locate and complete commands it must run, with -
   )
 })
 
+// The line above pins the INVOCATION. It does not pin the two-sentence gloss right below it that
+// says what `<base branch>` means — measured: rewriting that gloss to "--base must name your run
+// branch ... That is the run branch, not the base branch you checked out from" left every test in
+// this file at 27/27, because nothing bound those two sentences at all. `then:` requires them
+// adjacent, and both patterns are anchored end to end, so a swap of "base branch" and "run branch"
+// inside either sentence — not only a deletion — fails to match and goes red. No `subject:` here:
+// "run branch" and "base branch" are used throughout Hard rules for the unrelated fork-point-diff
+// bullet (`git merge-base <run branch> ...`) and the branch-convention bullets, so a section-wide
+// vocabulary lock on those two phrases would flag statements this claim has nothing to do with.
+test("the implementer's --base gloss names the base branch, not the run branch", async () => {
+  const { doc } = await agent('tm-implementer.md')
+  const hardRules = doc.section('Hard rules')
+  assertClaim(hardRules, {
+    label: 'implementer --base gloss',
+    claim: /^--base must name the same branch your worktree checked out from, or the gate anchors its plan lookup where the plan does not exist\.$/,
+    then: /^That is the base branch, not the run branch: complete refuses outright when --base names the run branch itself\.$/,
+  })
+})
+
 // Bare `assertStatement` matches a phrase ANYWHERE inside a statement, so an inverted rewrite
 // that keeps the phrase as a quoted fragment inside a negated sentence — "Nothing you write …
 // must be backed by a command you ran in this worktree. Reading it … is enough." — still
@@ -375,6 +394,16 @@ test('the implementer names the locate and complete commands it must run, with -
 // vocabulary, with `allow` naming exactly the two further sentences each bullet legitimately
 // carries — so a REWORDING of one of those (not only an insertion) leaves it matching `subject`
 // but not `allow`, and becomes a stray the test refuses.
+//
+// `^...$` anchoring closes the TAIL-of-the-pinned-statement hole; it has no reach past the last
+// statement `then:` binds. A NEW sentence appended after the consequence — a permissive escape
+// hatch a teammate would actually read as annulling the rule above it, e.g. "In practice a
+// couple of retries clears most of them, so try again before giving up." — is neither the claim,
+// nor the consequence, nor (before this) named by `subject:`, so nothing saw it: measured, that
+// exact sentence appended to this bullet left the whole suite green. `retr(y|ies)`, `try again`
+// and `giving up` extend the lexicon into that permissive register without colliding with any
+// other statement in Hard rules — verified by listing every statement in this section and
+// confirming none of the other 40-odd already contain those words.
 test('the implementer is told its shell cannot prompt and what to do instead', async () => {
   const { doc } = await agent('tm-implementer.md')
   const hardRules = doc.section('Hard rules')
@@ -383,7 +412,7 @@ test('the implementer is told its shell cannot prompt and what to do instead', a
     claim: /^Your shell cannot prompt — no terminal is attached and no human is watching\.$/,
     then: /^Do not run sudo, pkexec or doas; do not start an interactive login, a device-code flow or any 2FA prompt; do not run a command that pages, opens an editor, or waits on a confirmation\.$/,
     subject:
-      /\bsudo\b|\bpkexec\b|\bdoas\b|\b2FA\b|device-code flow|cannot prompt|fail fast|naming the exact command/i,
+      /\bsudo\b|\bpkexec\b|\bdoas\b|\b2FA\b|device-code flow|cannot prompt|fail fast|naming the exact command|\bretr(y|ies)\b|\btry again\b|\bgiving up\b|\bin practice\b/i,
     allow: [
       /^None of those fail fast: they wait for input that can never arrive\.$/,
       /^If the task genuinely needs one, return status: "blocked" naming the exact command and what it asked for\.$/,
@@ -391,6 +420,12 @@ test('the implementer is told its shell cannot prompt and what to do instead', a
   })
 })
 
+// Same class of gap as above, closed the same way: "For a short comment this is more than is
+// needed, so a careful read of the surrounding code is enough there." reads as permission to
+// skip running anything for a "short" claim, appended after the bound consequence where neither
+// `then:` nor the old `subject:` reached. `careful read`, `more than is needed`, `short comment`
+// and `surrounding code` are specific enough to this permissive phrasing that none collides with
+// the rest of Hard rules.
 test('the implementer must back every behavioural claim with a command it ran', async () => {
   const { doc } = await agent('tm-implementer.md')
   const hardRules = doc.section('Hard rules')
@@ -399,7 +434,7 @@ test('the implementer must back every behavioural claim with a command it ran', 
     claim: /^Every sentence you write that says what the code does — in a comment, a skill, a test comment, or your summary — must be backed by a command you ran in this worktree\.$/,
     then: /^Not by reading, and not by inference from a neighbouring comment\.$/,
     subject:
-      /backed by a command you ran in this worktree|neighbouring comment|mark the rest unverified|reproduce the old one failing first/i,
+      /backed by a command you ran in this worktree|neighbouring comment|mark the rest unverified|reproduce the old one failing first|\bcareful read\b|\bmore than is needed\b|\bshort comment\b|\bsurrounding code\b/i,
     allow: [
       /^If you could not run it, write what you did verify and mark the rest unverified\.$/,
       /^When you are correcting an existing claim, reproduce the old one failing first: that is how you learn which half of it was wrong, and a correction written without it is how the same sentence comes back wrong a third time\.$/,
@@ -407,6 +442,9 @@ test('the implementer must back every behavioural claim with a command it ran', 
   })
 })
 
+// Same gap, same fix: "Where a path is obviously dead weight, removing it is a courtesy to the
+// next teammate." reads as an exception carved out for exactly the case the bullet forbids.
+// `dead weight`, `courtesy` and `next teammate` do not appear anywhere else in Hard rules.
 test('the implementer may not act on inferred staleness inside its own file set', async () => {
   const { doc } = await agent('tm-implementer.md')
   const hardRules = doc.section('Hard rules')
@@ -415,7 +453,7 @@ test('the implementer may not act on inferred staleness inside its own file set'
     claim: /^Do not delete, archive, rename or empty anything on the strength of what you inferred about it\.$/,
     then: /^Being inside your declared file set is permission to edit those paths for this task, not a judgement that what they hold is stale\.$/,
     subject:
-      /permission to edit those paths|judgement that what they hold is stale|plan and the tree disagree|reconciling them by guessing/i,
+      /permission to edit those paths|judgement that what they hold is stale|plan and the tree disagree|reconciling them by guessing|\bdead weight\b|\bcourtesy\b|\bnext teammate\b/i,
     allow: [
       /^Where the plan and the tree disagree, return status: "blocked" quoting both rather than reconciling them by guessing\.$/,
     ],
@@ -430,6 +468,11 @@ test('the implementer may not act on inferred staleness inside its own file set'
 // end (`^...$`), so that inserted sentence does not satisfy either. It is ALSO caught a second,
 // independent way: `assertClaim` scans the whole scope for `BACK_REFERENCE` phrasing regardless
 // of `subject:`, and "the previous guidance" is exactly that lexicon (tests/md-contract.mjs).
+//
+// Same appended-sentence gap as the implementer bullets: "On a small diff a careful read is
+// usually enough on its own." reads as licence to skip the reproduction this rule requires,
+// added after the bound consequence where `then:` and the old `subject:` had no reach. `careful
+// read`, `small diff` and `on its own` do not appear anywhere else in this section.
 test('the reviewer reports a finding it could not reproduce as unreproduced', async () => {
   const { doc } = await agent('tm-reviewer.md')
   const rules = doc.section('Rules')
@@ -437,7 +480,8 @@ test('the reviewer reports a finding it could not reproduce as unreproduced', as
     label: 'reviewer reproduction discipline',
     claim: /^A finding is a reproduction, not a reading\.$/,
     then: /^Before you report one, run the thing that makes it fail and paste what you ran and what came back into failureScenario, the field the return shape below already carries for it — this schema names no separate reproduction key\.$/,
-    subject: /\breproduc\w*\b|\bfailureScenario\b|\bunreproduced\b/i,
+    subject:
+      /\breproduc\w*\b|\bfailureScenario\b|\bunreproduced\b|\bcareful read\b|\bsmall diff\b|\bon its own\b/i,
     allow: [
       /^A finding you could not reproduce is reported as unreproduced, with what you tried — it is still worth reporting, and mislabelling it as reproduced is what turns one review round into three\.$/,
     ],
