@@ -49,6 +49,44 @@ test('failed command output is truncated to the last 40 lines', async () => {
   assert.match(res.output, /line 199/)
 })
 
+test('a command check may lower its own timeout', async () => {
+  let seen = null
+  await runCommandCheck(
+    { name: 'quick', kind: 'command', run: 'true', timeoutMs: 1000 },
+    { cwd: process.cwd(), exec: async (_cmd, _cwd, opts) => { seen = opts; return { code: 0, output: '' } } },
+  )
+  assert.equal(seen.timeoutMs, 1000)
+})
+
+test('a command check with no timeoutMs gets the default', async () => {
+  let seen = null
+  await runCommandCheck(
+    { name: 'quick', kind: 'command', run: 'true' },
+    { cwd: process.cwd(), exec: async (_cmd, _cwd, opts) => { seen = opts; return { code: 0, output: '' } } },
+  )
+  assert.equal(seen.timeoutMs, COMMAND_TIMEOUT_MS)
+})
+
+test('a malformed timeoutMs fails its entry and never falls back to the default', async () => {
+  for (const bad of ['600000', 0, -1, 1.5, null, true, 60 * 60_000 + 1]) {
+    const results = await runChecks(
+      [{ name: 'test', kind: 'command', run: 'true', timeoutMs: bad }],
+      { cwd: process.cwd(), solo: true, exec: async () => { throw new Error('the check must not run') } },
+    )
+    assert.equal(results[0].status, 'fail', `timeoutMs ${JSON.stringify(bad)} should not have run`)
+    assert.match(results[0].output, /timeoutMs must (?:be a positive integer|not exceed)/)
+    assert.match(results[0].output, /entry #0 in this phase's check list/)
+  }
+})
+
+test('a malformed timeoutMs cannot be waved through with optional: true', async () => {
+  const results = await runChecks(
+    [{ name: 'test', kind: 'command', run: 'true', timeoutMs: 0, optional: true }],
+    { cwd: process.cwd(), solo: true },
+  )
+  assert.equal(aggregateVerdict(results).verdict, 'FAIL')
+})
+
 test('agent and mcp checks come back pending', () => {
   const res = describePendingCheck({ name: 'review', kind: 'agent', agent: 'tm-reviewer' })
   assert.equal(res.status, 'pending')
