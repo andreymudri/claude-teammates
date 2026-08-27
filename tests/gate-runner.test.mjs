@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -23,6 +24,7 @@ import {
   creditRunTipTasks,
 } from '../scripts/gate-runner.mjs'
 import { GitError, createGit, defaultGitExec } from '../scripts/git.mjs'
+import { previewClaimPath } from '../scripts/merge-preview.mjs'
 
 const fakeExec = (table) => async (cmd) => table[cmd] ?? { code: 127, output: `not stubbed: ${cmd}` }
 
@@ -133,6 +135,81 @@ test('runCommandCheck itself rejects a malformed timeoutMs before calling exec',
     ),
     /timeoutMs must be a positive integer/,
   )
+})
+
+// --- runCommandCheck preview claims ------------------------------------------------------------
+//
+// A `command` check that runs inside a merge preview holds a claim naming its own pid for as
+// long as the check runs, so the reaper never removes the preview out from under a check that
+// is still using it. No preview, no claim — see the `previewDir === null` guard in
+// `runCommandCheck` itself.
+
+test('a command check holds a claim on the preview while it runs and releases it after', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-preview-'))
+  let duringRun = null
+  const result = await runCommandCheck(
+    { name: 'test', kind: 'command', run: 'true' },
+    {
+      cwd: dir,
+      previewDir: dir,
+      exec: async (_cmd, _cwd, { onSpawn }) => {
+        onSpawn(999999)
+        duringRun = existsSync(previewClaimPath(dir, 999999))
+        return { code: 0, output: '' }
+      },
+    },
+  )
+  assert.equal(result.status, 'pass')
+  assert.equal(duringRun, true, 'the claim must exist while the check is running')
+  assert.equal(existsSync(previewClaimPath(dir, 999999)), false, 'the claim must be released')
+  await rm(dir, { recursive: true, force: true })
+})
+
+test('a claim is released even when the check throws', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-preview-'))
+  await assert.rejects(runCommandCheck(
+    { name: 'test', kind: 'command', run: 'true' },
+    {
+      cwd: dir,
+      previewDir: dir,
+      exec: async (_cmd, _cwd, { onSpawn }) => { onSpawn(999998); throw new Error('boom') },
+    },
+  ))
+  assert.equal(existsSync(previewClaimPath(dir, 999998)), false)
+  await rm(dir, { recursive: true, force: true })
+})
+
+test('a check outside a preview writes no claim', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-solo-'))
+  let handed
+  await runCommandCheck(
+    { name: 'test', kind: 'command', run: 'true' },
+    { cwd: dir, exec: async (_cmd, _cwd, opts) => { handed = opts.onSpawn; return { code: 0, output: '' } } },
+  )
+  assert.equal(handed, null)
+  await rm(dir, { recursive: true, force: true })
+})
+
+// EEXIST at the claim path means something already holds that exact path — a stale claim of
+// our own left by a recycled pid, or a plant. `onSpawn` must neither throw (the spawn site has
+// nothing to do with the check that is about to run) nor unlink what it did not create (the
+// `finally` releases only what THIS call recorded in `claims`). The pre-existing file must
+// survive the whole check unchanged.
+test('a claim path that already exists is left alone, and the check still runs', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-preview-'))
+  const claim = previewClaimPath(dir, 999997)
+  await writeFile(claim, 'not ours\n', 'utf8')
+  const result = await runCommandCheck(
+    { name: 'test', kind: 'command', run: 'true' },
+    {
+      cwd: dir,
+      previewDir: dir,
+      exec: async (_cmd, _cwd, { onSpawn }) => { onSpawn(999997); return { code: 0, output: '' } },
+    },
+  )
+  assert.equal(result.status, 'pass', 'the pre-existing claim must not fail the check')
+  assert.equal(await readFile(claim, 'utf8'), 'not ours\n', 'the pre-existing claim must be untouched')
+  await rm(dir, { recursive: true, force: true })
 })
 
 test('agent and mcp checks come back pending', () => {

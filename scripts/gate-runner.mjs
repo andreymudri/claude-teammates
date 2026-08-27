@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process'
+import { writeFileSync, unlinkSync } from 'node:fs'
 import { filesetViolations, ownershipViolations, baseExplainedNote, resolveTaskBranch, derivePhase, planHash, normalizePath } from './enforce.mjs'
 import { GitError } from './git.mjs'
-import { withMergePreview, conflictPairs } from './merge-preview.mjs'
+import { withMergePreview, conflictPairs, previewClaimPath } from './merge-preview.mjs'
 
 // 15 minutes. A command check is the project's own suite, so the default has to clear a
 // slow one on a cold cache; what it exists to stop is the check that never returns at all.
@@ -503,7 +504,7 @@ function tail(text, n) {
   return lines.slice(Math.max(0, lines.length - n)).join('\n')
 }
 
-export async function runCommandCheck(check, { cwd = process.cwd(), exec = defaultExec } = {}) {
+export async function runCommandCheck(check, { cwd = process.cwd(), previewDir = null, exec = defaultExec } = {}) {
   // `runCheckList` refuses a faulty bound before reaching here, so this guards the EXPORTED
   // api — `runChecks` is called directly from cli.mjs and from tests, and a programmatic
   // caller can pass a shape the manifest path already rejected. Throwing lands as
@@ -511,15 +512,58 @@ export async function runCommandCheck(check, { cwd = process.cwd(), exec = defau
   // behind the caller's back.
   const fault = timeoutFault(check)
   if (fault) throw new Error(fault)
-  const { code, output } = await exec(check.run, cwd, { timeoutMs: check.timeoutMs ?? COMMAND_TIMEOUT_MS })
-  const passed = code === 0
-  return {
-    name: check.name,
-    kind: 'command',
-    status: passed ? 'pass' : 'fail',
-    exitCode: code,
-    output: passed ? '' : tail(output, TAIL_LINES),
-    optional: check.optional === true,
+  const claims = []
+  // No preview means no claim to hold: a solo run's checks stand in the repository itself,
+  // and a claim file written next to it would be litter naming nothing the reaper reads.
+  const onSpawn = previewDir === null ? null : (pid) => {
+    const claim = previewClaimPath(previewDir, pid)
+    // Synchronous on purpose, and the only sync filesystem calls in this file: `onSpawn` is
+    // called from inside the spawn site before the promise yields, so the claim has to be on
+    // disk by the time that call returns. An `await` there would put the claim behind an
+    // event-loop turn the spawned process is already running in.
+    //
+    // `wx` (O_CREAT|O_EXCL) rather than the default `w` (O_CREAT|O_TRUNC): the default follows
+    // a symlink and truncates whatever it points at, so a planted symlink at this exact path
+    // redirects the write into any file this process can write and destroys it. `wx` refuses to
+    // follow a symlink and refuses to overwrite an existing file, which is exactly what a claim
+    // write needs — the pid this claim path names is not supposed to already hold one.
+    try {
+      writeFileSync(claim, `${pid}\n`, { encoding: 'utf8', flag: 'wx' })
+      claims.push(claim)
+    } catch (err) {
+      // EEXIST means something is already at this exact path — a stale claim of our own left
+      // by a recycled pid, or a plant. Neither can be told apart from here, and neither may be
+      // unlinked: not the stale claim, because a claim this call did not create is not this
+      // call's to release (the `finally` below only unlinks what `claims` recorded, and this
+      // path deliberately never pushes to it); not a plant, for the same reason a stale claim
+      // is not one either — this call has no way to know which it is. So the failure to create
+      // is swallowed rather than thrown: `onSpawn` runs inside the spawn site, and a throw
+      // there fails the check for a reason that has nothing to do with what the check ran. The
+      // consequence, stated rather than hidden: a claim this call could not create is a claim
+      // this call is not holding, so the preview this check runs inside may be reaped while the
+      // check is still using it. That gap is smaller than the alternatives — deleting a claim
+      // this call does not own, or failing an unrelated check — but it is real.
+      if (err?.code !== 'EEXIST') throw err
+    }
+  }
+  try {
+    const { code, output } = await exec(check.run, cwd, { timeoutMs: check.timeoutMs ?? COMMAND_TIMEOUT_MS, onSpawn })
+    const passed = code === 0
+    return {
+      name: check.name,
+      kind: 'command',
+      status: passed ? 'pass' : 'fail',
+      exitCode: code,
+      output: passed ? '' : tail(output, TAIL_LINES),
+      optional: check.optional === true,
+    }
+  } finally {
+    // Released whatever happened, including a throw. A claim left behind by a check that
+    // returned normally is worse than no claim at all: it keeps a preview unreapable until
+    // its pid is recycled.
+    for (const claim of claims) {
+      try { unlinkSync(claim) } catch { /* already gone */ }
+    }
   }
 }
 
@@ -1556,7 +1600,7 @@ const MERGE_CHECK = { name: 'merge', kind: 'merge' }
 
 const CONFLICT_SKIP = 'the phase does not merge cleanly; no merged tree exists to test'
 
-async function runCheckList(checks, ctx, commandCwd, mergeConflicted) {
+async function runCheckList(checks, ctx, commandCwd, mergeConflicted, previewDir = null) {
   const results = []
   // Counted rather than `checks.entries()`, which would narrow this loop from any iterable to an
   // array and yield `[value, value]` for a Set.
@@ -1606,7 +1650,7 @@ async function runCheckList(checks, ctx, commandCwd, mergeConflicted) {
     try {
       // Only `command` checks are relocated. `fileset` and `ownership` read git, not a
       // working tree, and must keep reading the real repository.
-      results.push(await runner(check, check.kind === 'command' ? { ...ctx, cwd: commandCwd } : ctx))
+      results.push(await runner(check, check.kind === 'command' ? { ...ctx, cwd: commandCwd, previewDir } : ctx))
     } catch (err) {
       // A throwing check previously propagated out of the CLI, so no verdict was recorded
       // and the previous phase's PASS stood.
@@ -1671,9 +1715,12 @@ export async function runChecks(checks, ctx = {}) {
           return [merged, ...await runCheckList(checks, ctx, ctx.cwd, true)]
         }
         const merged = checkResult(MERGE_CHECK, 'pass', '')
-        // `path` is null only when the phase has no branches to merge: nothing to preview, so
-        // the run branch's own tree is the tree integration would produce.
-        return [merged, ...await runCheckList(checks, ctx, path ?? ctx.cwd, false)]
+        // `path` is the preview, or null when the phase had no branches to merge and the
+        // checks stand in the run branch's own tree — which is not a preview and holds no
+        // claim. Passed explicitly rather than inferred from the cwd: an explicit null is
+        // the difference between "not previewing" and "previewing somewhere this code
+        // failed to recognise".
+        return [merged, ...await runCheckList(checks, ctx, path ?? ctx.cwd, false, path)]
       },
     })
   } catch (err) {
