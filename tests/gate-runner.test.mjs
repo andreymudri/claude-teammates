@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -23,6 +24,7 @@ import {
   creditRunTipTasks,
 } from '../scripts/gate-runner.mjs'
 import { GitError, createGit, defaultGitExec } from '../scripts/git.mjs'
+import { previewClaimPath } from '../scripts/merge-preview.mjs'
 
 const fakeExec = (table) => async (cmd) => table[cmd] ?? { code: 127, output: `not stubbed: ${cmd}` }
 
@@ -133,6 +135,98 @@ test('runCommandCheck itself rejects a malformed timeoutMs before calling exec',
     ),
     /timeoutMs must be a positive integer/,
   )
+})
+
+// --- runCommandCheck preview claims ------------------------------------------------------------
+//
+// A `command` check that runs inside a merge preview holds a claim naming its own pid for as
+// long as the check runs, so the reaper never removes the preview out from under a check that
+// is still using it. No preview, no claim — see the `previewDir === null` guard in
+// `runCommandCheck` itself.
+
+test('a command check holds a claim on the preview while it runs and releases it after', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-preview-'))
+  let duringRun = null
+  let duringContent = null
+  const result = await runCommandCheck(
+    { name: 'test', kind: 'command', run: 'true' },
+    {
+      cwd: dir,
+      previewDir: dir,
+      exec: async (_cmd, _cwd, { onSpawn }) => {
+        onSpawn(999999)
+        duringRun = existsSync(previewClaimPath(dir, 999999))
+        // The reaper parses this content to get the pid it probes (scripts/cli.mjs). A claim
+        // naming the WRONG pid is worse than no claim at all: it either names a process that is
+        // not running, so the preview is reaped out from under a live check, or it names a
+        // process that never exits, so the preview is never reaped once this check is done.
+        duringContent = await readFile(previewClaimPath(dir, 999999), 'utf8')
+        return { code: 0, output: '' }
+      },
+    },
+  )
+  assert.equal(result.status, 'pass')
+  assert.equal(duringRun, true, 'the claim must exist while the check is running')
+  assert.equal(duringContent, '999999\n', 'the claim must name the pid the reaper will probe')
+  assert.equal(existsSync(previewClaimPath(dir, 999999)), false, 'the claim must be released')
+  await rm(dir, { recursive: true, force: true })
+})
+
+test('a claim is released even when the check throws', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-preview-'))
+  let duringContent = null
+  await assert.rejects(runCommandCheck(
+    { name: 'test', kind: 'command', run: 'true' },
+    {
+      cwd: dir,
+      previewDir: dir,
+      exec: async (_cmd, _cwd, { onSpawn }) => {
+        onSpawn(999998)
+        duringContent = await readFile(previewClaimPath(dir, 999998), 'utf8')
+        throw new Error('boom')
+      },
+    },
+  ))
+  assert.equal(duringContent, '999998\n', 'the claim must name the pid the reaper will probe')
+  assert.equal(existsSync(previewClaimPath(dir, 999998)), false)
+  await rm(dir, { recursive: true, force: true })
+})
+
+test('a check outside a preview writes no claim', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-solo-'))
+  let handed
+  await runCommandCheck(
+    { name: 'test', kind: 'command', run: 'true' },
+    { cwd: dir, exec: async (_cmd, _cwd, opts) => { handed = opts.onSpawn; return { code: 0, output: '' } } },
+  )
+  assert.equal(handed, null)
+  await rm(dir, { recursive: true, force: true })
+})
+
+// EEXIST at the claim path means something already holds that exact path — a stale claim of
+// our own left by a recycled pid, or a plant. `onSpawn` must neither throw (the spawn site has
+// nothing to do with the check that is about to run) nor unlink what it did not create (the
+// `finally` releases only what THIS call recorded in `claims`). The pre-existing file must
+// survive the whole check unchanged.
+test('a claim path that already exists is left alone, and the check still runs', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-preview-'))
+  const claim = previewClaimPath(dir, 999997)
+  await writeFile(claim, 'not ours\n', 'utf8')
+  const result = await runCommandCheck(
+    { name: 'test', kind: 'command', run: 'true' },
+    {
+      cwd: dir,
+      previewDir: dir,
+      exec: async (_cmd, _cwd, { onSpawn }) => { onSpawn(999997); return { code: 0, output: '' } },
+    },
+  )
+  assert.equal(result.status, 'pass', 'the pre-existing claim must not fail the check')
+  assert.equal(await readFile(claim, 'utf8'), 'not ours\n', 'the pre-existing claim must be untouched')
+  // `previewClaimPath` names a SIBLING of `dir` (`${previewOwnerMarkerPath(dir)}.${pid}`), not
+  // a path inside it, so `rm(dir, { recursive: true })` below cannot reach it. Removed
+  // explicitly rather than left to leak into the shared temp root on every run.
+  await rm(claim, { force: true })
+  await rm(dir, { recursive: true, force: true })
 })
 
 test('agent and mcp checks come back pending', () => {
@@ -2230,8 +2324,12 @@ function previewCtx(overrides = {}) {
   }
 }
 
-const recordingExec = (calls, result = { code: 0, output: '' }) => async (cmd, cwd) => {
-  calls.push({ cmd, cwd })
+// `onSpawn` is captured alongside `cmd`/`cwd` so a call site can assert it is exactly `null`
+// outside a preview — `runCommandCheck` only builds a real claim writer when it is handed a
+// non-null `previewDir`, and a caller that wired the wrong value in either direction (a real
+// path where there should be none, or `null` where a preview really exists) shows up here.
+const recordingExec = (calls, result = { code: 0, output: '' }) => async (cmd, cwd, opts) => {
+  calls.push({ cmd, cwd, onSpawn: opts?.onSpawn ?? null })
   return result
 }
 
@@ -2247,6 +2345,33 @@ test('a command check runs inside the merge preview worktree when the phase merg
   assert.equal(calls.length, 1)
   assert.notEqual(calls[0].cwd, '/project/root', 'the command must not run against the project root')
   assert.match(calls[0].cwd, /tm-preview-/)
+})
+
+// `runCommandCheck` only holds a claim when it is HANDED a real `previewDir` — proven above by
+// unit tests that call it directly and supply `previewDir` by hand. Neither of those tests can
+// see whether `runChecks`/`runCheckList` actually WIRE the real preview path through to it: a
+// dropped fifth argument at the `runCheckList` call site, or a dropped `previewDir` from the
+// ctx spread inside `runCheckList`, both silently default back to `null` and leave the rest of
+// the suite green, because every other test either doubles `previewDir` itself or never
+// inspects `onSpawn`. This test goes through `runChecks` end to end, against the real preview
+// directory `withMergePreview` creates on disk, and fails loudly — via the exec double's own
+// throw — the moment that wiring is missing.
+test('a command check inside a real merge preview is actually handed a claim writer, not just told it could be', async () => {
+  let duringExists = null
+  let claimPath = null
+  const exec = async (_cmd, cwd, { onSpawn }) => {
+    if (typeof onSpawn !== 'function') throw new Error('a check inside a preview must be handed a claim writer')
+    onSpawn(999996)
+    claimPath = previewClaimPath(cwd, 999996)
+    duringExists = existsSync(claimPath)
+    return { code: 0, output: '' }
+  }
+  const ctx = previewCtx({ git: previewGit(), exec })
+  const results = await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], ctx)
+
+  assert.equal(results[1].status, 'pass', results[1].output)
+  assert.equal(duringExists, true, 'the claim must exist on disk in the real preview while the check runs')
+  assert.equal(existsSync(claimPath), false, 'the claim must be released once the check returns')
 })
 
 test('the computed merge check can never be marked optional by a manifest', async () => {
@@ -2358,6 +2483,9 @@ test('a solo run builds no merge preview and runs command checks against the pro
     assert.equal(results[0].status, 'pass')
   }
   assert.deepEqual(calls.map((c) => c.cwd), ['/project/root', '/project/root'])
+  // A solo run stands in the repository itself, not a preview: a claim written there is
+  // litter naming nothing the reaper reads, so `onSpawn` must never reach `exec` at all.
+  assert.deepEqual(calls.map((c) => c.onSpawn), [null, null])
 })
 
 test('a phase with no task branches passes the merge check and runs commands against the run tree', async () => {
@@ -2372,6 +2500,9 @@ test('a phase with no task branches passes the merge check and runs commands aga
   const results = await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], ctx)
   assert.deepEqual(results.map((r) => [r.name, r.status]), [['merge', 'pass'], ['test', 'pass']])
   assert.deepEqual(calls.map((c) => c.cwd), ['/project/root'])
+  // `path` is null here — nothing was merged — and null is not a preview: a claim written
+  // beside the run branch's own tree would name nothing the reaper reads either.
+  assert.deepEqual(calls.map((c) => c.onSpawn), [null])
 })
 
 test('a manifest entry claiming kind "merge" finds no runner and lands as pending, blocking the phase', async () => {
