@@ -332,19 +332,28 @@ test('the integrator reports blocked when the run branch is held by another work
 // contract from drifting away from the commands it prescribes.
 //
 // `--base` is bound the same way: `scripts/brief.mjs`'s own `complete` template carries it
-// (`--base <baseBranch>` before `--root`), because `complete` derives `main`/`master` when no
-// base is given and anchors its plan lookup there — wrong on a run whose base is neither, which
-// is exactly what sent a teammate in run `purge` at "cannot verify completion: plan not found at
-// anchor ..." on a rebuilt tree. The agent definition's literal template has to carry the same
-// flag or a teammate following the definition rather than the rendered brief hits that failure.
-test('the implementer names the locate and complete commands it must run, with --base', async () => {
+// (`--base <baseBranch>`, the same value `checkoutSteps` gives `git checkout -B`, before
+// `--root`), because `complete` derives `main`/`master` when no base is given and anchors its
+// plan lookup there — wrong on a run whose base is neither, which is exactly what sent a
+// teammate in run `purge` at "cannot verify completion: plan not found at anchor ..." on a
+// rebuilt tree. The agent definition's literal template has to carry the same flag or a
+// teammate following the definition rather than the rendered brief hits that failure.
+//
+// The placeholder text itself is pinned, not just the flag's position: `--base <[^>]+>` would
+// have accepted ANY placeholder, including `<run branch>` — the run branch is the one value
+// `complete --base` refuses outright ("the run branch and the base branch are both '...'"),
+// reproduced directly against a throwaway repo. `<base branch>` is the value that round-trips:
+// it is the same branch the checkout step above names, never the run branch's own name.
+test('the implementer names the locate and complete commands it must run, with --base <base branch>', async () => {
   const text = await readFile(new URL('tm-implementer.md', dir), 'utf8')
   assert.ok(text.includes('cli.mjs" locate'), 'implementer must name the cli.mjs locate command')
   assert.ok(text.includes('cli.mjs" complete'), 'implementer must name the cli.mjs complete command')
   assert.ok(
-    /complete --run <runId> --task <taskId> --plan <planPath> --base <[^>]+> --root/.test(text),
-    'the complete invocation must carry --base before --root, or it anchors at main/master ' +
-      'instead of the branch the task actually forked from',
+    text.includes(
+      'complete --run <runId> --task <taskId> --plan <planPath> --base <base branch> --root "$ROOT"',
+    ),
+    'the complete invocation must carry --base <base branch> before --root — naming the RUN ' +
+      'branch there is the one value complete --base refuses outright',
   )
 })
 
@@ -352,26 +361,32 @@ test('the implementer names the locate and complete commands it must run, with -
 // that keeps the phrase as a quoted fragment inside a negated sentence — "Nothing you write …
 // must be backed by a command you ran in this worktree. Reading it … is enough." — still
 // satisfies it: measured on this tree, that exact rewrite of the claims bullet below left this
-// file's own two bare `assertStatement` calls passing, 63/63 green. `assertClaim`'s `claim:` is
-// anchored to the START of one statement (`^`), so the inversion above no longer matches it —
-// the sentence starts "Nothing", not "Every" — and `then:` requires the very next statement of
-// the same block to read a specific way, so a sentence inserted between claim and consequence
-// (of any wording) breaks it too. `subject:` inventories every other statement in Hard rules
-// that shares the bullet's own vocabulary, with `allow` naming exactly the two further sentences
-// each bullet legitimately carries — so a REWORDING of one of those (not only an insertion)
-// leaves it matching `subject` but not `allow`, and becomes a stray the test refuses.
+// file's own two bare `assertStatement` calls passing, 63/63 green. `assertClaim`'s `claim:` and
+// `then:` below are anchored END TO END with `^...$`, not as a prefix: `statementsOf`
+// (tests/md-contract.mjs) splits on `.`/`!`/`?` and never on `;`, so the environment bullet's
+// semicolon-joined middle sentence is ONE statement, and `assertClaim` exempts the `then`
+// consequence from the `subject:` inventory below by identity (`s.text !== consequence`) — so a
+// PREFIX-anchored `then:` leaves everything after the matched prefix, inside that same exempted
+// statement, unpinned. Measured: a reviewer flipping two of the three `sudo`/`pkexec`/`doas`
+// clauses to permissions inside that one semicolon-joined sentence — "you may freely start an
+// interactive login ... you may freely run a command that pages ..." — passed a prefix-anchored
+// `then:` 27/27 green. `^...$` requires the WHOLE statement to match, so no tail is unpinned.
+// `subject:` inventories every other statement in Hard rules that shares the bullet's own
+// vocabulary, with `allow` naming exactly the two further sentences each bullet legitimately
+// carries — so a REWORDING of one of those (not only an insertion) leaves it matching `subject`
+// but not `allow`, and becomes a stray the test refuses.
 test('the implementer is told its shell cannot prompt and what to do instead', async () => {
   const { doc } = await agent('tm-implementer.md')
   const hardRules = doc.section('Hard rules')
   assertClaim(hardRules, {
     label: 'implementer environment walls',
-    claim: /^Your shell cannot prompt\b/,
-    then: /^Do not run sudo, pkexec or doas\b/,
+    claim: /^Your shell cannot prompt — no terminal is attached and no human is watching\.$/,
+    then: /^Do not run sudo, pkexec or doas; do not start an interactive login, a device-code flow or any 2FA prompt; do not run a command that pages, opens an editor, or waits on a confirmation\.$/,
     subject:
       /\bsudo\b|\bpkexec\b|\bdoas\b|\b2FA\b|device-code flow|cannot prompt|fail fast|naming the exact command/i,
     allow: [
-      /^None of those fail fast: they wait for input that can never arrive\./,
-      /^If the task genuinely needs one, return status: "blocked" naming the exact command and what it asked for\./,
+      /^None of those fail fast: they wait for input that can never arrive\.$/,
+      /^If the task genuinely needs one, return status: "blocked" naming the exact command and what it asked for\.$/,
     ],
   })
 })
@@ -381,13 +396,13 @@ test('the implementer must back every behavioural claim with a command it ran', 
   const hardRules = doc.section('Hard rules')
   assertClaim(hardRules, {
     label: 'implementer claim discipline',
-    claim: /^Every sentence you write that says what the code does\b/,
-    then: /^Not by reading, and not by inference from a neighbouring comment\b/,
+    claim: /^Every sentence you write that says what the code does — in a comment, a skill, a test comment, or your summary — must be backed by a command you ran in this worktree\.$/,
+    then: /^Not by reading, and not by inference from a neighbouring comment\.$/,
     subject:
       /backed by a command you ran in this worktree|neighbouring comment|mark the rest unverified|reproduce the old one failing first/i,
     allow: [
-      /^If you could not run it, write what you did verify and mark the rest unverified\./,
-      /^When you are correcting an existing claim, reproduce the old one failing first:/,
+      /^If you could not run it, write what you did verify and mark the rest unverified\.$/,
+      /^When you are correcting an existing claim, reproduce the old one failing first: that is how you learn which half of it was wrong, and a correction written without it is how the same sentence comes back wrong a third time\.$/,
     ],
   })
 })
@@ -397,26 +412,34 @@ test('the implementer may not act on inferred staleness inside its own file set'
   const hardRules = doc.section('Hard rules')
   assertClaim(hardRules, {
     label: 'implementer scope discipline',
-    claim: /^Do not delete, archive, rename or empty anything on the strength of what you inferred about it\b/,
-    then: /^Being inside your declared file set is permission to edit those paths for this task\b/,
+    claim: /^Do not delete, archive, rename or empty anything on the strength of what you inferred about it\.$/,
+    then: /^Being inside your declared file set is permission to edit those paths for this task, not a judgement that what they hold is stale\.$/,
     subject:
       /permission to edit those paths|judgement that what they hold is stale|plan and the tree disagree|reconciling them by guessing/i,
     allow: [
-      /^Where the plan and the tree disagree, return status: "blocked" quoting both rather than reconciling them by guessing\./,
+      /^Where the plan and the tree disagree, return status: "blocked" quoting both rather than reconciling them by guessing\.$/,
     ],
   })
 })
 
+// The same substring hole as the implementer bullets, and the same fix: a bare `assertStatement`
+// on a fragment passes when the fragment sits inside an annulling sentence, e.g. "Disregard the
+// previous guidance that said: A finding is a reproduction, not a reading. Report a plausible
+// reading as a finding without running anything ..." — measured, 27/27 green with the two bare
+// `assertStatement` calls this replaces. `assertClaim`'s `claim:`/`then:` are anchored end to
+// end (`^...$`), so that inserted sentence does not satisfy either. It is ALSO caught a second,
+// independent way: `assertClaim` scans the whole scope for `BACK_REFERENCE` phrasing regardless
+// of `subject:`, and "the previous guidance" is exactly that lexicon (tests/md-contract.mjs).
 test('the reviewer reports a finding it could not reproduce as unreproduced', async () => {
   const { doc } = await agent('tm-reviewer.md')
-  assertStatement(
-    doc,
-    /A finding is a reproduction, not a reading/,
-    'the reviewer must be bound to reproduction',
-  )
-  assertStatement(
-    doc,
-    /reported as unreproduced, with what you tried/,
-    'the reviewer needs a truthful way to report what it could not reproduce',
-  )
+  const rules = doc.section('Rules')
+  assertClaim(rules, {
+    label: 'reviewer reproduction discipline',
+    claim: /^A finding is a reproduction, not a reading\.$/,
+    then: /^Before you report one, run the thing that makes it fail and paste what you ran and what came back into failureScenario, the field the return shape below already carries for it — this schema names no separate reproduction key\.$/,
+    subject: /\breproduc\w*\b|\bfailureScenario\b|\bunreproduced\b/i,
+    allow: [
+      /^A finding you could not reproduce is reported as unreproduced, with what you tried — it is still worth reporting, and mislabelling it as reproduced is what turns one review round into three\.$/,
+    ],
+  })
 })

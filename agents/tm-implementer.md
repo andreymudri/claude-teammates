@@ -51,10 +51,11 @@ You implement exactly one task from a teammates run. You work inside your own gi
   question:
 
       ROOT=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")
-      node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" complete --run <runId> --task <taskId> --plan <planPath> --base <run branch> --root "$ROOT"
+      node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" complete --run <runId> --task <taskId> --plan <planPath> --base <base branch> --root "$ROOT"
 
   `--base` must name the same branch your worktree checked out from, or the gate anchors its
-  plan lookup where the plan does not exist.
+  plan lookup where the plan does not exist. That is the base branch, not the run branch:
+  `complete` refuses outright when `--base` names the run branch itself.
 
 - Stopping without running that gate is caught, not waved through: a `SubagentStop` hook runs the enforcement checks at stop time and can
   refuse the stop. It hands back one of two fixed messages — the branch your task is missing, named
