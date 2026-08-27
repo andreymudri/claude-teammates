@@ -80,6 +80,25 @@ test('timeoutMs at the ceiling itself is accepted, not just one below it', async
   assert.equal(seen.timeoutMs, 60 * 60_000)
 })
 
+// The domain has no floor, by design (docs/specs/2026-08-26-purge-and-teardown-design.md:76:
+// "a positive integer no greater than a hard 60-minute ceiling"), and nothing else in this file
+// proves that on the ACCEPT side: every timeoutMs that reaches `timeoutFault` elsewhere here is
+// either malformed (the table below) or >= 1000 (1000 above, 3600000 two tests up), so a
+// re-inserted `if (value < 1000) return ...` — the exact branch a previous round deleted — would
+// sit on both sides of every other value in this file and go unnoticed. Driven through
+// `runChecks`, not `runCommandCheck` directly, so a sub-1000 value is proved to reach `exec`
+// intact through the manifest path `timeoutFault` guards, not merely accepted by the function in
+// isolation.
+test('a sub-second timeoutMs is not a floor violation and reaches exec unchanged', async () => {
+  let seen = null
+  const results = await runChecks(
+    [{ name: 'quick', kind: 'command', run: 'true', timeoutMs: 300 }],
+    { cwd: process.cwd(), solo: true, exec: async (_cmd, _cwd, opts) => { seen = opts; return { code: 0, output: '' } } },
+  )
+  assert.equal(results[0].status, 'pass')
+  assert.equal(seen.timeoutMs, 300)
+})
+
 test('a malformed timeoutMs fails its entry and never falls back to the default', async () => {
   for (const bad of ['600000', 0, -1, 1.5, null, true, 60 * 60_000 + 1]) {
     const results = await runChecks(
@@ -3144,6 +3163,18 @@ test('a timed-out command check kills the whole process group, not just the shel
     // A failing run has left a live `sleep` behind; it is this test's to clean up.
     killPid(pid)
   }
+})
+
+test('the notice boundary at exactly 1000ms reports whole seconds, not milliseconds', { skip: POSIX_ONLY }, async () => {
+  // Mutation this pins: `timeoutMs >= 1000` -> `timeoutMs > 1000` in `resolveTimedOut`. Nothing
+  // else in this file touches the boundary itself — every sub-second notice test (300/400/600/
+  // 700/900ms above and below) sits strictly under it, every whole-second one (2500/3000ms
+  // below) sits strictly over it, and the `timeoutMs: 1000` at the top of this file never
+  // reaches a real timeout at all, only `timeoutFault`/`exec`. 1000 is the most natural round
+  // manifest value there is, so its own notice text has to be pinned directly.
+  const { code, output } = await defaultExec('sleep 5', process.cwd(), { timeoutMs: 1000 })
+  assert.notEqual(code, 0)
+  assert.match(output, /timed out after 1s; its process group was killed/)
 })
 
 test('a timed-out command check is a fail carrying its reason, never a pass', { skip: POSIX_ONLY, timeout: 20_000 }, async () => {
