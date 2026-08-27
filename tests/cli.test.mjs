@@ -8666,6 +8666,113 @@ test('livePreviewPaths reads the same sibling path the owner writes', async () =
   assert.deepEqual(asked, [previewOwnerMarkerPath(dir)])
 })
 
+// ---------------------------------------------------------------------------
+// The second kind of holder: a claim file sitting beside the owner marker, and the uid check
+// that keeps a claim from being plantable by another local user.
+// ---------------------------------------------------------------------------
+
+test('a preview whose owner is dead but whose claim is live is not reaped', async () => {
+  const dir = path.join(tmpdir(), 'tm-preview-live')
+  const live = await livePreviewPaths([dir], {
+    read: async (p) => (p.endsWith('.4242') ? '4242\n' : '999999\n'),
+    list: async () => [path.basename(previewOwnerMarkerPath(dir)), `${path.basename(previewOwnerMarkerPath(dir))}.4242`],
+    stat: async () => ({ uid: process.getuid() }),
+    probe: (pid) => { if (pid !== 4242) { const e = new Error('no such process'); e.code = 'ESRCH'; throw e } },
+  })
+  assert.equal(live.has(dir), true)
+})
+
+test('a preview whose owner and every claim are dead is reaped', async () => {
+  const dir = path.join(tmpdir(), 'tm-preview-dead')
+  const live = await livePreviewPaths([dir], {
+    read: async () => '999999\n',
+    list: async () => [path.basename(previewOwnerMarkerPath(dir)), `${path.basename(previewOwnerMarkerPath(dir))}.999998`],
+    stat: async () => ({ uid: process.getuid() }),
+    probe: () => { const e = new Error('no such process'); e.code = 'ESRCH'; throw e },
+  })
+  assert.equal(live.has(dir), false)
+})
+
+test('an unreadable claim file leaves the preview live', async () => {
+  const dir = path.join(tmpdir(), 'tm-preview-eacces')
+  const live = await livePreviewPaths([dir], {
+    read: async (p) => {
+      if (!p.endsWith('.4242')) { const e = new Error('no such file'); e.code = 'ENOENT'; throw e }
+      const e = new Error('permission denied'); e.code = 'EACCES'; throw e
+    },
+    list: async () => [`${path.basename(previewOwnerMarkerPath(dir))}.4242`],
+    stat: async () => ({ uid: process.getuid() }),
+    probe: () => { const e = new Error('no such process'); e.code = 'ESRCH'; throw e },
+  })
+  assert.equal(live.has(dir), true)
+})
+
+test('a listing that fails leaves the preview live', async () => {
+  const dir = path.join(tmpdir(), 'tm-preview-list-fails')
+  const live = await livePreviewPaths([dir], {
+    read: async () => { const e = new Error('no such file'); e.code = 'ENOENT'; throw e },
+    list: async () => { const e = new Error('permission denied'); e.code = 'EACCES'; throw e },
+    probe: () => { const e = new Error('no such process'); e.code = 'ESRCH'; throw e },
+  })
+  assert.equal(live.has(dir), true)
+})
+
+// A claim's ownership guarantee: only a claim owned by THIS process's uid may keep a preview
+// alive. Without the uid comparison, either test below fails — the foreign-uid claim would keep
+// a dead-owner preview alive forever (a local denial-of-service via a planted claim file), and
+// dropping the comparison entirely would be indistinguishable from always honouring the claim,
+// which the second test alone cannot catch.
+test('a claim owned by a different uid is ignored, even naming a live pid', async () => {
+  const dir = path.join(tmpdir(), 'tm-preview-foreign-uid')
+  const live = await livePreviewPaths([dir], {
+    read: async (p) => {
+      if (!p.endsWith(`.${process.pid}`)) { const e = new Error('no such file'); e.code = 'ENOENT'; throw e }
+      return `${process.pid}\n`
+    },
+    list: async () => [`${path.basename(previewOwnerMarkerPath(dir))}.${process.pid}`],
+    stat: async () => ({ uid: process.getuid() + 1 }),
+    // Would report the preview live if the foreign-uid claim were honoured either way.
+    probe: () => true,
+  })
+  assert.equal(live.has(dir), false)
+})
+
+test('a claim owned by the same uid still keeps a live pid live', async () => {
+  const dir = path.join(tmpdir(), 'tm-preview-same-uid')
+  const live = await livePreviewPaths([dir], {
+    read: async (p) => {
+      if (!p.endsWith(`.${process.pid}`)) { const e = new Error('no such file'); e.code = 'ENOENT'; throw e }
+      return `${process.pid}\n`
+    },
+    list: async () => [`${path.basename(previewOwnerMarkerPath(dir))}.${process.pid}`],
+    stat: async () => ({ uid: process.getuid() }),
+    probe: () => true,
+  })
+  assert.equal(live.has(dir), true)
+})
+
+test('a stat failure on a claim other than ENOENT leaves the preview live', async () => {
+  const dir = path.join(tmpdir(), 'tm-preview-stat-eacces')
+  const live = await livePreviewPaths([dir], {
+    read: async () => { const e = new Error('no such file'); e.code = 'ENOENT'; throw e },
+    list: async () => [`${path.basename(previewOwnerMarkerPath(dir))}.4242`],
+    stat: async () => { const e = new Error('permission denied'); e.code = 'EACCES'; throw e },
+    probe: () => { const e = new Error('no such process'); e.code = 'ESRCH'; throw e },
+  })
+  assert.equal(live.has(dir), true)
+})
+
+test('a claim released before it could be stat-ed does not keep the preview live', async () => {
+  const dir = path.join(tmpdir(), 'tm-preview-stat-enoent')
+  const live = await livePreviewPaths([dir], {
+    read: async () => { const e = new Error('no such file'); e.code = 'ENOENT'; throw e },
+    list: async () => [`${path.basename(previewOwnerMarkerPath(dir))}.4242`],
+    stat: async () => { const e = new Error('no such file'); e.code = 'ENOENT'; throw e },
+    probe: () => { const e = new Error('no such process'); e.code = 'ESRCH'; throw e },
+  })
+  assert.equal(live.has(dir), false)
+})
+
 test('prune-run leaves a preview whose marker names a running process', async () => {
   await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)

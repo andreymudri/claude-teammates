@@ -27,12 +27,15 @@ import { generateReviewDispatch } from './review-gen.mjs'
 import { resolveTaskBranch, taskBranchName } from './enforce.mjs'
 import { tmpdir } from 'node:os'
 import { realpathSync } from 'node:fs'
-import { stat } from 'node:fs/promises'
+// Imported twice under two names on purpose: `livePreviewPaths` below takes an injectable
+// parameter it also calls `stat`, and a default value `stat = (p) => stat(p)` would close over
+// the PARAMETER, not this import, and recurse forever. `fsStat` is the escape hatch.
+import { stat, stat as fsStat } from 'node:fs/promises'
 import { validateLinkPaths } from './preview-links.mjs'
 import { planDrift, renderDrift } from './plan-drift.mjs'
 import { summarizeRun, renderRunSummary, renderPlanNotes, suppliedForPhase, validateSuppliedPhases } from './finish.mjs'
 import { selectPrunableWorktrees, renderPrunePlan, leakedPreviews } from './prune.mjs'
-import { previewOwnerMarkerPath } from './merge-preview.mjs'
+import { previewOwnerMarkerPath, previewClaimPrefix } from './merge-preview.mjs'
 import { rebuildRunState } from './rebuild.mjs'
 import { generatePhaseWorkflow } from './workflow-gen.mjs'
 import { createGit, GitError, defaultGitExec } from './git.mjs'
@@ -1353,9 +1356,9 @@ async function unlinkPreviewLinks(dir, depth = 0) {
   return removed
 }
 
-// Which of these previews an owner is still HOLDING.
+// Which of these previews a HOLDER is still holding — either kind.
 //
-// scripts/merge-preview.mjs writes a marker BESIDE the preview directory before it calls
+// scripts/merge-preview.mjs writes an OWNER MARKER beside the preview directory before it calls
 // `git worktree add`, and releases it only after `removeWorktree` has deregistered the worktree.
 // Git registers a worktree at the START of the add and deregisters it at the end of the removal,
 // so the span over which the marker is held contains the span over which the preview is
@@ -1363,47 +1366,127 @@ async function unlinkPreviewLinks(dir, depth = 0) {
 // age. Those are sampled by the reaper and only narrow the window; this is held by the owner, so
 // there is no instant at which a living owner reads as absent.
 //
-// THREE FAIL-SAFE BRANCHES, all deliberate, all saying the same thing: an owner that cannot be
-// RULED OUT is an owner.
+// A second kind of holder, the CLAIM, exists because the marker does not survive its own
+// creator's death: a SIGKILLed gate runs no `finally`, so its marker survives naming a pid
+// nobody is at, while the suite it spawned is still writing to the tree. Every sibling file
+// matching `previewClaimPrefix(dir)` is read the same way the marker is.
 //
-//   1. A marker that cannot be READ for any reason other than ENOENT — EACCES, EBUSY, EIO. The
-//      file is there and could not be opened, so its pid is unknown.
-//   2. A marker that will not PARSE as a positive integer.
+// FAIL-SAFE BRANCHES, all deliberate, all saying the same thing: a holder that cannot be RULED
+// OUT is a holder.
+//
+//   1. A marker or claim that cannot be READ for any reason other than ENOENT — EACCES, EBUSY,
+//      EIO. The file is there and could not be opened, so its pid is unknown.
+//   2. A marker or claim that will not PARSE as a positive integer.
 //   3. A probe that fails with anything other than ESRCH — EPERM means the pid exists and
 //      belongs to another OS user, which is a gate this process may not signal, not one that
 //      is gone.
+//   4. A directory listing that fails for any reason: whether a claim exists at all becomes
+//      unknown, which is exactly as unresolved as a marker that cannot be read.
 //
 // An unreaped preview costs the operator a directory; a followed junction costs them their
 // repository's build inputs. Only ENOENT and ESRCH — the two answers that positively mean "no
 // owner" — let a preview through.
 //
-// `read` and `probe` are injectable because two of those three branches cannot be staged end to
-// end: EPERM needs a process owned by another user, and EACCES needs a file this user cannot
-// read. Exported for the same reason `isMissingPreviewRoot` is — each branch is on the
-// destructive path and has to be pinned on its own.
+// A CLAIM additionally requires the reading process's own uid to OWN the file, checked with the
+// injectable `stat` below — the marker keeps its original, unchecked handling, because it is
+// the gate that provisioned the preview that wrote it, under an identity this function has no
+// prior reason to distrust. A claim has no such provenance: it names a directory any local user
+// can see, so without an ownership check any local user could `touch` a claim file naming pid 1
+// beside a preview and make it unreapable forever. See the ownership check itself for what that
+// means on a platform without `process.getuid`.
+//
+// `read`, `list`, `stat` and `probe` are injectable because several of the branches above cannot
+// be staged end to end: EPERM needs a process owned by another user, EACCES needs a file this
+// user cannot read, and a foreign-uid claim needs a file this user does not own. Exported for
+// the same reason `isMissingPreviewRoot` is — each branch is on the destructive path and has to
+// be pinned on its own.
 export async function livePreviewPaths(previewPaths, {
   read = (p) => readFile(p, 'utf8'),
+  list = (dir) => readdir(dir),
+  // Ownership check on a CLAIM file, never on the owner marker: see the paragraph below the
+  // holder loop for why the marker keeps its pre-existing, unchecked handling.
+  stat = (p) => fsStat(p),
   // Signal 0 sends nothing: it only asks whether the pid can be signalled at all.
   probe = (pid) => process.kill(pid, 0),
 } = {}) {
   const live = new Set()
+  // One listing per parent directory, reused across every candidate under it. `null` is
+  // recorded for a listing that FAILED, which is not the same as an empty one.
+  const listings = new Map()
+  const listingFor = async (dir) => {
+    if (!listings.has(dir)) {
+      try { listings.set(dir, await list(dir)) } catch { listings.set(dir, null) }
+    }
+    return listings.get(dir)
+  }
+
   for (const dir of previewPaths) {
-    let raw
+    // Every holder's marker contents, and whether anything about them is UNKNOWN. The rule the
+    // whole reaper rests on is unchanged and now applies to both kinds: only ENOENT and ESRCH —
+    // the two answers that positively mean "no owner" — let a preview through.
+    const holders = []
+    let unknown = false
     try {
-      raw = await read(previewOwnerMarkerPath(dir))
+      holders.push(await read(previewOwnerMarkerPath(dir)))
     } catch (err) {
       // ENOENT is the only "no marker": a preview from before markers existed, or one whose
       // owner has already released it. Every other failure leaves the owner unknown.
-      if (err?.code !== 'ENOENT') live.add(dir)
-      continue
+      if (err?.code !== 'ENOENT') unknown = true
     }
-    const pid = Number.parseInt(String(raw).trim(), 10)
-    if (!Number.isInteger(pid) || pid <= 0) { live.add(dir); continue }
-    try {
-      probe(pid)
-      live.add(dir)
-    } catch (err) {
-      if (err?.code !== 'ESRCH') live.add(dir)
+    const parent = path.dirname(dir)
+    const names = await listingFor(parent)
+    if (names === null) {
+      // The directory could not be listed, so whether a claim exists is unknown, so the preview
+      // is live. An unreaped preview costs a directory; a followed junction costs the
+      // repository's build inputs.
+      unknown = true
+    } else {
+      const prefix = previewClaimPrefix(dir)
+      for (const name of names) {
+        if (!name.startsWith(prefix)) continue
+        const claimPath = path.join(parent, name)
+        // A claim is honoured only when it is owned by the SAME uid as the process reading it.
+        // Without this, any local user can `touch` a claim naming pid 1 beside a preview and
+        // make it unreapable forever. A foreign-uid claim is IGNORED outright — neither treated
+        // as an unknown holder nor as a live one — so an attacker-planted claim can never force
+        // `live` either way; it is simply not consulted.
+        //
+        // `process.getuid` is undefined on Windows, where this process has no way to learn a
+        // file's owning account through Node's fs API. On that platform the check below is
+        // skipped and every claim is treated as owned: the same-uid defense this comment
+        // describes is a Unix-only guarantee and gives no protection against a planted claim
+        // on Windows.
+        let info
+        try {
+          info = await stat(claimPath)
+        } catch (err) {
+          // A claim released between the listing and this stat is ENOENT and means exactly what
+          // it says: nothing to check, nothing to read. Anything else leaves that holder unknown
+          // — the same rule as an unreadable marker.
+          if (err?.code !== 'ENOENT') unknown = true
+          continue
+        }
+        if (typeof process.getuid === 'function' && info.uid !== process.getuid()) continue
+        try {
+          holders.push(await read(claimPath))
+        } catch (err) {
+          // A claim released between the stat and this read is ENOENT and means exactly what it
+          // says. Anything else leaves that holder unknown.
+          if (err?.code !== 'ENOENT') unknown = true
+        }
+      }
+    }
+    if (unknown) { live.add(dir); continue }
+    for (const raw of holders) {
+      const pid = Number.parseInt(String(raw).trim(), 10)
+      if (!Number.isInteger(pid) || pid <= 0) { live.add(dir); break }
+      try {
+        probe(pid)
+        live.add(dir)
+        break
+      } catch (err) {
+        if (err?.code !== 'ESRCH') { live.add(dir); break }
+      }
     }
   }
   return live
