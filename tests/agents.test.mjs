@@ -335,3 +335,55 @@ test('the implementer names the locate and complete commands it must run', async
   assert.ok(text.includes('cli.mjs" locate'), 'implementer must name the cli.mjs locate command')
   assert.ok(text.includes('cli.mjs" complete'), 'implementer must name the cli.mjs complete command')
 })
+
+test('the implementer is told its shell cannot prompt and what to do instead', async () => {
+  const { doc } = await agent('tm-implementer.md')
+  assertStatement(doc, /Your shell cannot prompt/, 'the implementer must be told the wall exists')
+  assertStatement(
+    doc,
+    /wait for input that can never arrive/,
+    'the reason must be stated, not just the rule',
+  )
+  assertStatement(
+    doc,
+    /naming the exact command and what it asked for/,
+    'the implementer must be given the move, not only the prohibition',
+  )
+})
+
+test('the implementer must back every behavioural claim with a command it ran', async () => {
+  const { doc } = await agent('tm-implementer.md')
+  assertStatement(
+    doc,
+    /must be backed by a command you ran in this worktree/,
+    'a claim must be bound to an execution',
+  )
+  assertStatement(
+    doc,
+    /reproduce the old one failing first/,
+    'the correction case must be named, since it is the one that goes wrong',
+  )
+})
+
+test('the implementer may not act on inferred staleness inside its own file set', async () => {
+  const { doc } = await agent('tm-implementer.md')
+  assertStatement(
+    doc,
+    /not a judgement that what they hold is stale/,
+    'the file set must not read as permission to archive',
+  )
+})
+
+test('the reviewer reports a finding it could not reproduce as unreproduced', async () => {
+  const { doc } = await agent('tm-reviewer.md')
+  assertStatement(
+    doc,
+    /A finding is a reproduction, not a reading/,
+    'the reviewer must be bound to reproduction',
+  )
+  assertStatement(
+    doc,
+    /reported as unreproduced, with what you tried/,
+    'the reviewer needs a truthful way to report what it could not reproduce',
+  )
+})
