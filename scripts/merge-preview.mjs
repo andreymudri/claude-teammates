@@ -121,8 +121,13 @@ export async function withMergePreview({
   // still reaches the `finally` that cleans the directory up.
   const marker = previewOwnerMarkerPath(dir)
   let teardownLinks = null
+  // Only set once writeOwnerMarker actually wrote the marker. EEXIST means it did not, and
+  // the finally below must not unlink an entry this process never created — see the guard
+  // there for why.
+  let markerHeld = false
   try {
     await writeOwnerMarker(marker, process.pid)
+    markerHeld = true
     await git.addWorktreeDetached(dir, base)
     const conflict = await git.mergeInto(dir, branches)
     if (conflict) {
@@ -185,7 +190,14 @@ export async function withMergePreview({
       // Its own `finally`, so release-last never becomes release-never: `teardownLinks()`
       // propagates its failures on purpose, and a marker stranded by one would claim an owner
       // forever for a preview nothing will clear.
-      await rm(marker, { force: true }).catch(() => {})
+      //
+      // Guarded on `markerHeld`, not unconditional: an EEXIST from `writeOwnerMarker` means
+      // this process never wrote the entry at `marker`, so releasing it anyway would unlink
+      // whatever is actually there — including a marker another local process is holding.
+      // scripts/cli.mjs:1488 states the same rule for the sibling claim path: EEXIST is
+      // tolerated and never unlinked, so a holder that writer did not create is never released
+      // by it.
+      if (markerHeld) await rm(marker, { force: true }).catch(() => {})
     }
   }
 }

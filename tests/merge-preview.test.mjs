@@ -619,7 +619,15 @@ test('withMergePreview writes the owner marker naming its own pid', async () => 
 // the helper in isolation. `makeTempDir` lets this test hand withMergePreview a directory that
 // already has a marker collision planted at it, deterministically, without monkey-patching
 // node:fs/promises or racing the real mkdtemp.
-test('a marker write that fails still removes the preview directory the seam handed it', async () => {
+//
+// The release in the `finally` is guarded on `markerHeld`, so an EEXIST from `writeOwnerMarker`
+// must leave the planted entry untouched rather than unlinking it — the same rule
+// scripts/cli.mjs:1488 states for the sibling claim path: "EEXIST is tolerated and never
+// unlinked, so a claim that writer did not create is never released by it." That is why this
+// plant needs no foreign uid, no user namespace and no sticky bit to be meaningful: the
+// invariant now belongs to the `markerHeld` guard rather than to the filesystem, so an ordinary
+// same-uid `writeFile` is enough to make it fail if the guard regresses.
+test('a marker write that fails still removes the preview directory the seam handed it, and never unlinks the marker it did not write', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'tm-preview-'))
   const marker = previewOwnerMarkerPath(dir)
   // Planted before withMergePreview ever runs, at the exact path it will try to write.
@@ -637,4 +645,11 @@ test('a marker write that fails still removes the preview directory the seam han
     existsSync(dir), false,
     'the preview directory the seam handed in must not be stranded when the marker write fails',
   )
+  assert.equal(
+    await readFile(marker, 'utf8'), 'planted-before-withMergePreview\n',
+    'a marker this process never wrote must survive the finally untouched',
+  )
+  // Left behind on purpose: unlike every other test here, this run never wrote the marker, so
+  // withMergePreview correctly leaves it for its actual owner rather than releasing it.
+  await rm(marker, { force: true })
 })
