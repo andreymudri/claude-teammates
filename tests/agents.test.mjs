@@ -330,48 +330,81 @@ test('the integrator reports blocked when the run branch is held by another work
 // `complete` at the gate — are named with the CLAUDE_PLUGIN_ROOT invocation the brief renders,
 // so the closing quote sits between `cli.mjs` and the subcommand. Binding the literal keeps the
 // contract from drifting away from the commands it prescribes.
-test('the implementer names the locate and complete commands it must run', async () => {
+//
+// `--base` is bound the same way: `scripts/brief.mjs`'s own `complete` template carries it
+// (`--base <baseBranch>` before `--root`), because `complete` derives `main`/`master` when no
+// base is given and anchors its plan lookup there — wrong on a run whose base is neither, which
+// is exactly what sent a teammate in run `purge` at "cannot verify completion: plan not found at
+// anchor ..." on a rebuilt tree. The agent definition's literal template has to carry the same
+// flag or a teammate following the definition rather than the rendered brief hits that failure.
+test('the implementer names the locate and complete commands it must run, with --base', async () => {
   const text = await readFile(new URL('tm-implementer.md', dir), 'utf8')
   assert.ok(text.includes('cli.mjs" locate'), 'implementer must name the cli.mjs locate command')
   assert.ok(text.includes('cli.mjs" complete'), 'implementer must name the cli.mjs complete command')
+  assert.ok(
+    /complete --run <runId> --task <taskId> --plan <planPath> --base <[^>]+> --root/.test(text),
+    'the complete invocation must carry --base before --root, or it anchors at main/master ' +
+      'instead of the branch the task actually forked from',
+  )
 })
 
+// Bare `assertStatement` matches a phrase ANYWHERE inside a statement, so an inverted rewrite
+// that keeps the phrase as a quoted fragment inside a negated sentence — "Nothing you write …
+// must be backed by a command you ran in this worktree. Reading it … is enough." — still
+// satisfies it: measured on this tree, that exact rewrite of the claims bullet below left this
+// file's own two bare `assertStatement` calls passing, 63/63 green. `assertClaim`'s `claim:` is
+// anchored to the START of one statement (`^`), so the inversion above no longer matches it —
+// the sentence starts "Nothing", not "Every" — and `then:` requires the very next statement of
+// the same block to read a specific way, so a sentence inserted between claim and consequence
+// (of any wording) breaks it too. `subject:` inventories every other statement in Hard rules
+// that shares the bullet's own vocabulary, with `allow` naming exactly the two further sentences
+// each bullet legitimately carries — so a REWORDING of one of those (not only an insertion)
+// leaves it matching `subject` but not `allow`, and becomes a stray the test refuses.
 test('the implementer is told its shell cannot prompt and what to do instead', async () => {
   const { doc } = await agent('tm-implementer.md')
-  assertStatement(doc, /Your shell cannot prompt/, 'the implementer must be told the wall exists')
-  assertStatement(
-    doc,
-    /wait for input that can never arrive/,
-    'the reason must be stated, not just the rule',
-  )
-  assertStatement(
-    doc,
-    /naming the exact command and what it asked for/,
-    'the implementer must be given the move, not only the prohibition',
-  )
+  const hardRules = doc.section('Hard rules')
+  assertClaim(hardRules, {
+    label: 'implementer environment walls',
+    claim: /^Your shell cannot prompt\b/,
+    then: /^Do not run sudo, pkexec or doas\b/,
+    subject:
+      /\bsudo\b|\bpkexec\b|\bdoas\b|\b2FA\b|device-code flow|cannot prompt|fail fast|naming the exact command/i,
+    allow: [
+      /^None of those fail fast: they wait for input that can never arrive\./,
+      /^If the task genuinely needs one, return status: "blocked" naming the exact command and what it asked for\./,
+    ],
+  })
 })
 
 test('the implementer must back every behavioural claim with a command it ran', async () => {
   const { doc } = await agent('tm-implementer.md')
-  assertStatement(
-    doc,
-    /must be backed by a command you ran in this worktree/,
-    'a claim must be bound to an execution',
-  )
-  assertStatement(
-    doc,
-    /reproduce the old one failing first/,
-    'the correction case must be named, since it is the one that goes wrong',
-  )
+  const hardRules = doc.section('Hard rules')
+  assertClaim(hardRules, {
+    label: 'implementer claim discipline',
+    claim: /^Every sentence you write that says what the code does\b/,
+    then: /^Not by reading, and not by inference from a neighbouring comment\b/,
+    subject:
+      /backed by a command you ran in this worktree|neighbouring comment|mark the rest unverified|reproduce the old one failing first/i,
+    allow: [
+      /^If you could not run it, write what you did verify and mark the rest unverified\./,
+      /^When you are correcting an existing claim, reproduce the old one failing first:/,
+    ],
+  })
 })
 
 test('the implementer may not act on inferred staleness inside its own file set', async () => {
   const { doc } = await agent('tm-implementer.md')
-  assertStatement(
-    doc,
-    /not a judgement that what they hold is stale/,
-    'the file set must not read as permission to archive',
-  )
+  const hardRules = doc.section('Hard rules')
+  assertClaim(hardRules, {
+    label: 'implementer scope discipline',
+    claim: /^Do not delete, archive, rename or empty anything on the strength of what you inferred about it\b/,
+    then: /^Being inside your declared file set is permission to edit those paths for this task\b/,
+    subject:
+      /permission to edit those paths|judgement that what they hold is stale|plan and the tree disagree|reconciling them by guessing/i,
+    allow: [
+      /^Where the plan and the tree disagree, return status: "blocked" quoting both rather than reconciling them by guessing\./,
+    ],
+  })
 })
 
 test('the reviewer reports a finding it could not reproduce as unreproduced', async () => {
