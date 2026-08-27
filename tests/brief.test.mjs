@@ -72,6 +72,39 @@ test('the complete command carries run, task and plan and sits after the constra
     'self-verification must precede the final commit instruction')
 })
 
+// `complete` derives a base itself when none is passed — `main` or `master` — and anchors the
+// plan lookup there. On a run whose base is neither (this repository's own run `purge`, based
+// on `run/purge`), that derived anchor holds no plan at all, and the failure names the plan
+// rather than the base. The fix is not "pass some base": it has to be the SAME value the
+// checkout step branched from, or the gate's anchor and the teammate's actual fork point can
+// still disagree — so this asserts they are the one value, not two literals that happen to match.
+test('the complete invocation carries the same base branch the checkout step used', () => {
+  for (const brief of [composeBrief(FULL), composeBrief({ ...FULL, caveman: 'full' })]) {
+    const checkoutLine = brief.split('\n').find((l) => l.includes('git checkout -B'))
+    assert.ok(checkoutLine, 'no checkout line found')
+    assert.ok(checkoutLine.endsWith(FULL.baseBranch),
+      `the checkout line does not end with the base branch: ${checkoutLine}`)
+    const completeLine = brief.split('\n').find((l) => l.includes('--plan ' + FULL.planPath))
+    assert.ok(completeLine, 'no complete invocation line found')
+    assert.ok(completeLine.includes('--base ' + FULL.baseBranch),
+      `the complete invocation does not carry --base ${FULL.baseBranch}: ${completeLine}`)
+    assert.ok(at(brief, '--plan ' + FULL.planPath) < at(brief, '--base ' + FULL.baseBranch),
+      '--base must follow --plan in the invocation')
+    assert.ok(at(brief, '--base ' + FULL.baseBranch) < at(brief, '--root "$ROOT"'),
+      '--base must precede --root in the invocation')
+  }
+})
+
+test('the complete invocation carries no --base when no base branch was supplied', () => {
+  for (const brief of [
+    composeBrief({ ...FULL, baseBranch: '' }),
+    composeBrief({ ...FULL, baseBranch: '', caveman: 'full' }),
+  ]) {
+    assert.ok(brief.includes('cli.mjs" complete'), 'the verify section should still render: run id and plan path are both present')
+    assert.ok(!brief.includes('--base'), 'a --base flag was emitted with no base branch supplied')
+  }
+})
+
 // Read out of `complete` in scripts/cli.mjs. The rejection is its OWN code now — the printed
 // first line no longer has to carry that distinction, because `COMPLETE_REJECTED` does — but the
 // guidance attached to each code is unchanged in kind, and it is what this test is about: a brief

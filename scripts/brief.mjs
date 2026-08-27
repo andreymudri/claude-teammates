@@ -136,12 +136,23 @@ const locateStep = (task, runId) => (runId ? [
 // conflated a rejection with a cannot-verify and only the text could separate them; 3 separates
 // them programmatically, which is what the hook needed and what makes this table simple enough
 // for a teammate to act on.
-const verifyStep = (task, runId, planPath) => (runId && planPath ? [
+// `--base` carries the SAME value `checkoutSteps` branched from, not a second guess at it.
+// `complete` derives a base itself when none is given — `main` or `master` — and anchors the
+// plan lookup there; on a run whose base is neither, that anchor holds no plan at all, and the
+// failure names the plan rather than the base, which is what sent three teammates in run
+// `purge` looking at the wrong thing. Passing the checkout's own base closes that: the anchor
+// the gate derives is the ref the teammate's branch actually forked from.
+//
+// Omitted when no base branch was supplied — the same case `checkoutSteps` already refuses to
+// name a starting commit for. Inventing one here would assert a base the checkout step itself
+// would not commit to.
+const verifyStep = (task, runId, planPath, baseBranch) => (runId && planPath ? [
   'BEFORE YOU RETURN "done". Run the task gate on your own work, in the FOREGROUND:',
   '',
   '    ROOT=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")',
   '    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" complete \\',
-  '      --run ' + runId + ' --task ' + task.id + ' --plan ' + planPath + ' --root "$ROOT"',
+  '      --run ' + runId + ' --task ' + task.id + ' --plan ' + planPath
+    + (baseBranch ? ' --base ' + baseBranch : '') + ' --root "$ROOT"',
   '',
   'If your shell refuses that invocation — some sandboxes reject a multi-line command or a',
   'string containing an absolute path they did not authorise — write the two lines to a file',
@@ -276,7 +287,7 @@ const full = ({ task, runId, planPath, baseBranch, constraints }) => [
   constraints.length ? 'GLOBAL CONSTRAINTS:' : '',
   ...constraints.map((c) => '- ' + c),
   '',
-  ...verifyStep(task, runId, planPath),
+  ...verifyStep(task, runId, planPath, baseBranch),
   'Commit your work on ' + task.branch + ' and return the structured result.',
 ].filter((line) => line !== '').join('\n')
 
@@ -312,7 +323,7 @@ const terse = ({ task, runId, planPath, baseBranch, constraints, caveman }) => [
   constraints.length ? 'GLOBAL CONSTRAINTS:' : '',
   ...constraints.map((c) => '- ' + c),
   '',
-  ...verifyStep(task, runId, planPath),
+  ...verifyStep(task, runId, planPath, baseBranch),
   'STYLE. Write summary and blockers caveman-terse: drop articles and filler, keep every',
   'technical term, file path and error string exact. If skill caveman:caveman is available,',
   'use it at level ' + caveman + '. If not available, apply the style directly — its absence',
