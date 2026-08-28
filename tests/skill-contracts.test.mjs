@@ -180,6 +180,21 @@ test('phase-gate documents the two claims results that are not findings', async 
   )
 })
 
+// The three sentences that tell an operator where the results actually are, each written once and
+// used twice below. `assertStatement` alone was not enough for them, and both escapes were
+// measured on this tree with the bare `/head -n -1/i` token in place, each leaving the suite fully
+// green: rewriting the clause to "a plain redirect of those bytes is enough, and do not bother
+// with `head -n -1`" — the exact thing the pin's own message says it forbids, still matching
+// because the token survives the inversion — and APPENDING "In practice capturing stdout with a
+// plain redirect and passing that capture works fine, so use whichever is convenient." Anchoring
+// end to end closes the first; only a subject inventory closes the second, so the last of the
+// three is stated as a claim with the other two as its reviewed neighbours. Fail-closed either
+// way — `gate --results` on a plain capture exits 2, never a false PASS — but a document that
+// contradicts itself about where its own output went is the defect, not the exit code.
+const PG_WRITES_FILE = /^It also writes that same document to \.teammates\/<runId>\/reviews\/results-<phase>\.json and prints that path last, so the gate --results <path> that follows names a file that exists — run without a redirect and without this, the review check stays pending forever while the gate reports FAIL with an empty failed list, naming nothing to fix\.$/i
+const PG_DEAD_REDIRECT = /^Pass the written path, not a capture of stdout: a > results\.json redirect no longer round-trips, because the trailing path line is inside the captured bytes and gate --results on that capture exits 2 on --results must be a readable JSON file shaped \{ "results": \[\.\.\.\] \}, while the file the same command wrote exits 0 with verdict PASS — both measured on this tree\.$/i
+const PG_WRITE_FAILURE = /^A third condition exits 4 and does print something usable: when the collection succeeded and only the write failed, the complete results go to stdout above cannot write the results file at …, so keep those bytes rather than re-running the reviews — but drop that last line before passing them on, because a plain redirect captures it and gate --results then exits 2 for exactly the reason above; head -n -1 is enough, and with it the gate exits 0 with verdict PASS, measured on this tree\.$/i
+
 // `collect-reviews` now writes its results file and refuses an omitted `--phase` on a multi-phase
 // plan. Both are BREAKING changes to what this section used to tell an operator to do — the
 // capture-and-pass workflow it described no longer reaches a verdict — so the skill has to say so
@@ -215,7 +230,10 @@ test('phase-gate documents the results file collect-reviews writes and the redir
       )
     }
   }
-  assert.equal(checked, 2, `precondition: phase-gate must invoke both commands, found ${checked}`)
+  // `>= 2`, not `=== 2`: the guard is that every invocation shown carries the flag unbracketed,
+  // and a THIRD correct invocation is not a defect. An equality here rejected it with
+  // `must invoke both commands, found 3` — a message naming a shortage as the cause of a surplus.
+  assert.ok(checked >= 2, `precondition: phase-gate must invoke both commands, found ${checked}`)
 
   assertStatement(
     section,
@@ -243,12 +261,12 @@ test('phase-gate documents the results file collect-reviews writes and the redir
 
   assertStatement(
     section,
-    /also writes that same document to \.teammates\/<runId>\/reviews\/results-<phase>\.json/i,
+    PG_WRITES_FILE,
     'phase-gate must name the file collect-reviews writes, or the gate --results below names a path nobody created',
   )
   assertStatement(
     section,
-    /a > results\.json redirect no longer round-trips/i,
+    PG_DEAD_REDIRECT,
     'phase-gate must retract the capture-and-pass workflow it used to invite: the captured bytes now '
       + 'carry the trailing path line, and gate --results on them exits 2',
   )
@@ -302,11 +320,17 @@ test('phase-gate documents the results file collect-reviews writes and the redir
   // last line is a PATH line. Measured on this tree — a plain redirect of the write-failure output
   // makes gate --results exit 2, and the same bytes with the last line dropped exit 0 with verdict
   // PASS.
-  assertStatement(
-    section,
-    /head -n -1/i,
-    'phase-gate must not hand the write-failure path the same plain redirect it retracts seven lines above',
-  )
+  assertClaim(section, {
+    label: 'write-failure remedy',
+    claim: PG_WRITE_FAILURE,
+    // Every other sentence in this section about redirecting or capturing stdout has to be one of
+    // the two below, so a fourth cannot appear unreviewed — which is how the "use whichever is
+    // convenient" escape got in. `round-trip` is in the lexicon because that is the word the
+    // retraction itself uses, and a rewrite of it would otherwise be reachable only through
+    // `redirect`.
+    subject: /redirect|captur(e|es|ing|ed)|head -n -1|round-trip/i,
+    allow: [PG_WRITES_FILE, PG_DEAD_REDIRECT],
+  })
 })
 
 // The statements above are claims about code, so they are pinned against the code rather than
@@ -1051,11 +1075,26 @@ test('parallel-execution makes prune-run the only supported cleanup', async () =
     // by identity, so the allow list can never see it), so an unanchored prefix match would
     // leave the sentence's TAIL — including the ancestor-proof bound — pinned nowhere. This
     // regex is the one and only place that bound is checked.
-    // Reviewed: the ancestor-proof bound. `git rev-parse --abbrev-ref HEAD` resolves the run
-    // branch BY NAME (scripts/git.mjs:147), and a teammate that plants a same-named tag plus a
-    // `refs/heads/heads/<name>` branch can make an unmerged branch read as contained — verified
-    // end to end (scripts/cli.mjs:3092-3117). Stated as the observable symptom, not the two
-    // known plant shapes, because an enumeration goes stale the moment a third exists.
+    // Reviewed: the ancestor-proof bound, AS IT NOW STANDS. The proof does not resolve the run
+    // branch by name: `derive` takes `runBranchRef` straight off `head.ref`
+    // (scripts/cli.mjs:2280-2290), which is `git symbolic-ref --quiet HEAD`
+    // (scripts/git.mjs:271), and the deletion resolves that same ref at the moment it decides
+    // (scripts/cli.mjs:3845-3847). Abbreviation is what the tag / `heads/<name>` /
+    // `refs/heads/refs/heads/<name>` plant redirected, and `symbolic-ref` abbreviates nothing;
+    // `classifyHeadRef` (scripts/git.mjs:126) additionally refuses a detached HEAD, a HEAD
+    // outside `refs/heads/`, and a stripped name that is itself a ref path. The mechanism the
+    // old plant needed is gone from this tree — `command grep -rn 'abbrev-ref' scripts/` finds
+    // only two comments describing what was replaced — and `tests/git.test.mjs:158-161` pins
+    // `currentBranchRef` to `symbolic-ref`.
+    //
+    // This comment previously asserted the OPPOSITE, and outlived the sentence it justifies by
+    // one commit: the prose was corrected in ed12b30 and these lines were left from a800266,
+    // still describing an operator pre-flight that § 5 no longer carries. Both of its citations
+    // had gone stale too — `scripts/git.mjs:147` is the name-slice inside `classifyHeadRef`, and
+    // `scripts/cli.mjs:3092-3117` is the body of the `brief` command. Left standing it would have
+    // argued a maintainer into RESTORING the deleted warning, which
+    // `finishing-a-development-branch/SKILL.md:99-104` already contradicts in the same words the
+    // regex below pins.
     then: /^It recomputes each phase's gate rather than reading status\.gates, removes only this run's worktrees whose phase passes, sweeps every leaked merge-preview worktree under the system temp directory regardless of which run left it — even one holding an operator's own uncommitted work — deletes each removed worktree's branch where git merge-base --is-ancestor proves it is already in the run branch — the run branch it proves against is the ref HEAD symbolically points at, so no tag or same-named branch can redirect that proof — and names every worktree it leaves alone with the reason\.$/i,
     // Widened to match the sibling lock at :813 in this file: the behaviour claims themselves
     // ("removes only...", "sweeps every...", "deletes each...") are the substance of this
