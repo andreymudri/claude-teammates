@@ -1794,13 +1794,24 @@ test('currentBranch answers null for a HEAD pointing outside refs/heads/', async
 // commands. git accepts U+2028, U+0085 and the C1 range in a refname (measured on 2.55.0), and
 // U+2028 is a hard line break (UAX#14 class BK) in the `pre` block a transcript is rendered in --
 // so an unwrapped ref forges a whole line under the CLI's own name with no escape sequence at all.
-// Every control character below is written as an ESCAPE on purpose, and the reason is narrower
-// than "U+2028 breaks JavaScript". Measured on node v26.7.0, one construct at a time: a literal
-// U+2028 in a STRING literal parses, in a TEMPLATE literal parses, and in a COMMENT parses --
-// ES2019 subsumed JSON and admitted U+2028/U+2029 into string and template literals, and
-// `engines.node` here is >=24.2.0, so that is true on every supported runtime. Only a REGEX
-// literal still rejects it, with `SyntaxError: Invalid regular expression: missing /`. This file
-// asserts through regex literals, so the escapes are required -- but for that reason alone.
+// Every control character below is written as an ESCAPE on purpose, and there are TWO reasons,
+// measured on node v26.7.0 one construct at a time.
+//
+//   - A REGEX literal REJECTS it: `SyntaxError: Invalid regular expression: missing /`. This file
+//     asserts through regex literals, so that alone would force the escapes.
+//   - A `//` COMMENT is TERMINATED by it, which is worse than rejection. U+2028 is a
+//     LineTerminator for comments, so everything after it on the source line is parsed as CODE.
+//     Whether the file still compiles then depends entirely on the tail: `// note<U+2028>note2`
+//     parses, `// note<U+2028>it's fine` throws `SyntaxError: Invalid or unexpected token`, and
+//     an earlier revision of THIS comment threw `SyntaxError: Unexpected identifier 'subsumed'`.
+//     And when the tail does parse, it RUNS —
+//     `vm.runInNewContext('// harmless note<U+2028>globalThis.hit = true')` sets `hit` (measured).
+//     Prose silently becomes code.
+//
+// STRING and TEMPLATE literals do admit it, since ES2019 subsumed JSON, and `engines.node` here
+// is >=24.2.0 — but that change deliberately left U+2028/U+2029 as LineTerminators for comments,
+// so it does not rescue the case above. A previous version of this note claimed comments parse
+// it; that was measured with a benign tail and is false in general.
 test('classifyHeadRef neutralises control characters in the ref it quotes', () => {
   const forged = 'refs/mine/x\u2028gate\u00a0phase\u00a0default\u00a0PASS\u2028z'
   const r = classifyHeadRef(forged)

@@ -12886,7 +12886,12 @@ test('locate names a repointed worktree HEAD rather than calling it detached', a
 // under refs/heads/, so `classifyHeadRef` returns ok and the not-a-branch refusal never fires.
 // `generateReviewDispatch` splices the name bare into the reviewer's prompt, so an unwrapped
 // value puts a line break and a forged instruction in front of an agent this gate trusts.
-// Measured before the wrap: four raw U+2028 on stdout and four in the prompt.
+// Measured before the wrap: FOUR raw U+2028 per reviewer prompt — the name is spliced twice and
+// carries two separators — and EIGHT on stdout, because one prompt is emitted per lens and
+// `writeReviewManifest` declares two (`stdoutRaw=8 reviewers=2 perPrompt=4,4`). The per-prompt
+// figure is the invariant one; the stdout total scales with the lens count, so a manifest change
+// would move it without anything here being wrong. The assertions below count NO raw separators
+// at all, which is why they hold either way.
 //
 // Every control character is an ESCAPE here: a literal U+2028 inside a REGEX literal is a line
 // terminator and breaks the parse (string and template literals have admitted it since ES2019,
