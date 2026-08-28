@@ -1997,14 +1997,38 @@ async function derive(root, runId, flags) {
       + ' ordinary ref anyone with a worktree can create and point at a commit of their choosing.',
     )
   }
+  // HEAD MUST POINT INSIDE refs/heads/, and this is not a formality. `git symbolic-ref HEAD
+  // <ref>` refuses only targets outside `refs/` entirely — `refs/tags/x` and `refs/mine/anything`
+  // are both accepted, exit 0 (measured). The strip below is anchored at `refs/heads/`, so on
+  // such a ref it is a NO-OP and `runBranch` becomes the whole string `refs/tags/x`; every
+  // consumer that prefixes `refs/heads/` — `deriveContext` above all — then resolves
+  // `refs/heads/refs/tags/x`, an ordinary ref an unprivileged teammate can create and point
+  // wherever it likes. Measured end to end: with HEAD pointed at a `refs/tags/x` that holds the
+  // REAL run tip, the working tree clean and nothing detached, the gate read the planter's commit
+  // as the run branch and `ownership` flipped from fail to PASS over a rogue commit.
+  if (!runBranchRef.startsWith('refs/heads/')) {
+    throw new Error(
+      `HEAD points at ${printable(runBranchRef)}, which is not a branch — a run branch must be a ref under refs/heads/.`
+      + ' git accepts any target inside refs/ for HEAD, so this state is reachable with one'
+      + ' `git symbolic-ref` and is not something a normal checkout produces. Nothing is verified'
+      + ' or removed against it: the name taken from such a ref is the whole ref string, and'
+      + ' prefixing refs/heads/ onto it lands on a ref anyone with a worktree can create.',
+    )
+  }
   const runBranch = runBranchRef.replace(/^refs\/heads\//, '')
-  // SO WHAT THIS CHECK IS FOR NOW is narrower than it once was, and worth keeping: `headSha` and
-  // `resolveRef` are two subprocesses, and an integrator merging concurrently moves the branch
-  // between them. That disagreement is an honest race, not an attack, and the message below says
-  // so first. The detached case no longer reaches here at all — it is refused above.
+  // A REAL ROUND TRIP, against the ref the rest of the run actually reads. The previous revision
+  // compared `resolveRef(runBranchRef)` with `headSha` — but `runBranchRef` IS HEAD's own target,
+  // so that comparison was trivially true and vetted nothing. What has to be bound is HEAD's sha
+  // to `refs/heads/${runBranch}`, because that is the string `deriveContext` builds and resolves.
+  // The prefix guard above makes the two the same ref in every honest run; this check is what
+  // makes that an assertion rather than an assumption, and it is the one that survives if some
+  // future caller reintroduces a name-derived path.
+  //
+  // It also still covers the honest race it was narrowed to: `headSha` and `resolveRef` are two
+  // subprocesses, and an integrator merging concurrently moves the branch between them.
   const headSha = await git.headSha()
-  const namedSha = await git.resolveRef(runBranchRef).catch(() => null)
-  const disagreement = runBranchDisagreement({ runBranchRef, headSha, namedSha })
+  const namedSha = await git.resolveRef(`refs/heads/${runBranch}`).catch(() => null)
+  const disagreement = runBranchDisagreement({ resolvedRef: `refs/heads/${runBranch}`, headSha, namedSha })
   if (disagreement) throw new Error(disagreement)
   const baseBranch = await resolveBaseBranch(git, flags.base)
   // Every other failure path here fails closed; a plain operator mistake — running the
@@ -2047,16 +2071,22 @@ async function derive(root, runId, flags) {
 // The run-branch round-trip decision, as a pure function of three values: null when the ref holds
 // the commit HEAD is on, and the operator-facing refusal otherwise.
 //
-// SEPARATED FROM `derive` SO BOTH ARMS CAN BE PINNED. The two shas can now only disagree if the
-// ref moves between `headSha` and `resolveRef` — two subprocesses with no seam a fixture can open,
+// `resolvedRef` is the ref the CALLER resolved — `refs/heads/<run branch>`, the same string
+// `deriveContext` builds — and not HEAD's own symbolic target. Those are the same ref in every
+// honest run, and a revision that compared HEAD's sha against HEAD's own target instead was
+// trivially true and vetted nothing; the parameter is named for what it must be so that mistake
+// cannot be re-made silently.
+//
+// SEPARATED FROM `derive` SO BOTH ARMS CAN BE PINNED. The two shas can only disagree if the ref
+// moves between `headSha` and `resolveRef` — two subprocesses with no seam a fixture can open,
 // since `derive` builds its own git. In-process that arm was therefore unreachable, and it was
 // left with no coverage at all: mutating the comparison to `namedSha === null` kept the whole
 // suite green while removing the only check standing between a moved run branch and a
 // `git branch -D`. Exported for the tests, not for callers — `derive` is the only caller.
-export function runBranchDisagreement({ runBranchRef, headSha, namedSha }) {
+export function runBranchDisagreement({ resolvedRef, headSha, namedSha }) {
   if (namedSha === headSha) return null
   return (
-    `HEAD is ${headSha}, but ${printable(runBranchRef)} — the ref HEAD points at —`
+    `HEAD is ${headSha}, but ${printable(resolvedRef)} — the ref this run resolves the run branch through —`
     + ` is ${namedSha === null ? 'not a ref at all' : namedSha}.`
     // ONE reachable cause now, and it is an honest one. `headSha` and `resolveRef` are two
     // subprocesses: a commit or merge landing on the run branch between them produces exactly

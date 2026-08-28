@@ -3448,6 +3448,57 @@ test('prune-run --yes is not fooled by a tag on the run branch planted while the
   })
 })
 
+// HEAD POINTED OUTSIDE refs/heads/, which git allows. `git symbolic-ref HEAD <ref>` refuses only
+// targets outside `refs/` entirely — `refs/tags/x` and `refs/mine/anything` are accepted, exit 0.
+// The strip that turns the ref into a name is anchored at `refs/heads/`, so on these it is a
+// no-op and the "branch name" becomes the whole ref string; `deriveContext` then resolves
+// `refs/heads/refs/tags/x`, which any teammate can create.
+//
+// This is staged with the run branch CARRYING A ROGUE COMMIT and the planted ref parked at the
+// tip as it stood before that commit, because the damage is an enforcement flip rather than a
+// crash: measured on the revision before this guard, ownership went from FAIL (naming the rogue
+// commit) to PASS, with HEAD at the real rogue tip, the tree clean and nothing detached.
+for (const target of ['refs/tags/x', 'refs/mine/run-branch']) {
+  test(`gate refuses when HEAD points at ${target} instead of a branch`, async () => {
+    await withRepo(async (ctx) => {
+      const { root, io, lines, git: g } = ctx
+      await writeEnforcementManifest(root)
+      g(['add', '.'])
+      g(['commit', '--quiet', '-m', 'manifest'])
+      g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+      await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+      g(['add', 'a.mjs'])
+      g(['commit', '--quiet', '-m', 'T1 work'])
+      g(['checkout', '--quiet', 'run-branch'])
+      g(['merge', '--no-ff', '--quiet', '-m', 'integrate T1', 'teammates/r1/T1'])
+      const clean = g(['rev-parse', 'HEAD']).trim()
+      // A rogue commit written straight onto the run branch — exactly what ownership exists to
+      // catch, and what the plant is designed to hide.
+      await writeFile(path.join(root, 'rogue.mjs'), 'export const rogue = 1\n', 'utf8')
+      g(['add', 'rogue.mjs'])
+      g(['commit', '--quiet', '-m', 'rogue direct commit'])
+      const rogue = g(['rev-parse', 'HEAD']).trim()
+      // THE PLANT. HEAD keeps the real sha, so nothing looks wrong from the working tree.
+      g(['update-ref', target, rogue])
+      g(['symbolic-ref', 'HEAD', target])
+      g(['update-ref', `refs/heads/${target}`, clean])
+      assert.equal(g(['symbolic-ref', '--quiet', 'HEAD']).trim(), target, 'the plant really did repoint HEAD')
+      assert.equal(g(['rev-parse', 'HEAD']).trim(), rogue, 'HEAD still sits at the real run tip')
+      assert.equal(g(['status', '--porcelain']).trim(), '', 'the working tree is clean, so nothing else flags this')
+      lines.length = 0
+      const code = await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+      // REFUSED, and refused by name. A non-zero exit alone is not enough here: before this guard
+      // the plant exited 0, and the way it could regress is by failing for some unrelated reason
+      // while the ref is still trusted.
+      assert.notEqual(code, 0)
+      assert.match(lines.join('\n'), new RegExp(`HEAD points at ${target.replace(/\//g, '\\/')}, which is not a branch`))
+      assert.match(lines.join('\n'), /a run branch must be a ref under refs\/heads\//)
+      // And the planted ref was never adopted as the run branch.
+      assert.doesNotMatch(lines.join('\n'), /"verdict":\s*"PASS"/)
+    })
+  })
+}
+
 // BOTH ARMS OF THE ROUND-TRIP CHECK, pinned directly. Before this the sha-disagreement arm had no
 // coverage at all: with the run branch resolved symbolically the two shas can only differ if the
 // ref moves between two subprocesses, which no in-process fixture can stage, so mutating the
@@ -3456,7 +3507,7 @@ test('prune-run --yes is not fooled by a tag on the run branch planted while the
 test('runBranchDisagreement passes only when the ref holds the commit HEAD is on', () => {
   const headSha = 'a'.repeat(40)
   assert.equal(
-    runBranchDisagreement({ runBranchRef: 'refs/heads/run-branch', headSha, namedSha: headSha }),
+    runBranchDisagreement({ resolvedRef: 'refs/heads/run-branch', headSha, namedSha: headSha }),
     null,
   )
 })
@@ -3467,9 +3518,9 @@ test('runBranchDisagreement passes only when the ref holds the commit HEAD is on
 test('runBranchDisagreement reports the ref and both shas when the ref moved', () => {
   const headSha = 'a'.repeat(40)
   const namedSha = 'b'.repeat(40)
-  const message = runBranchDisagreement({ runBranchRef: 'refs/heads/run-branch', headSha, namedSha })
+  const message = runBranchDisagreement({ resolvedRef: 'refs/heads/run-branch', headSha, namedSha })
   assert.match(message, new RegExp(`HEAD is ${headSha}`))
-  assert.match(message, new RegExp(`refs/heads/run-branch — the ref HEAD points at — is ${namedSha}`))
+  assert.match(message, new RegExp(`refs/heads/run-branch — the ref this run resolves the run branch through — is ${namedSha}`))
   // It must NOT claim the ref is absent: that is the other arm, and it has a different remedy.
   assert.doesNotMatch(message, /not a ref at all/)
 })
@@ -3478,7 +3529,7 @@ test('runBranchDisagreement reports the ref and both shas when the ref moved', (
 // without a repository.
 test('runBranchDisagreement says the ref is absent rather than printing null as a sha', () => {
   const headSha = 'a'.repeat(40)
-  const message = runBranchDisagreement({ runBranchRef: 'refs/heads/run-branch', headSha, namedSha: null })
+  const message = runBranchDisagreement({ resolvedRef: 'refs/heads/run-branch', headSha, namedSha: null })
   assert.match(message, /is not a ref at all/)
   assert.doesNotMatch(message, /is null/)
 })
