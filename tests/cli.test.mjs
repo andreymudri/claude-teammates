@@ -5,7 +5,7 @@ import { constants as fsConstants } from 'node:fs'
 import net from 'node:net'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import {
   runCli,
   mergeSuppliedResults,
@@ -9524,9 +9524,15 @@ test('a claim under a preview whose directory is gone is still ignored, even nam
 // reproduced out of band against three revisions of this file and the result is recorded in the
 // comment above `openHolderEntry`; it is not measured by anything below.
 //
-// The fifo test also stands as the no-hang assertion, and it is the only kind available: a test
-// that returns at all is a test whose `open(2)` did not park. Before O_NONBLOCK there was no
-// assertion to write, only a suite that stopped.
+// TERMINATION is asserted for the fifo shapes, and it cannot be asserted in this process. A test
+// that returns is evidence its `open(2)` did not park, but it is evidence only when it returns:
+// drop `O_NONBLOCK` and the call never comes back, and since this suite runs with no per-test
+// timeout `npm test` then hangs forever instead of failing. A per-test `{ timeout }` does not
+// rescue it either — that reports `test timed out` while the parked threadpool request keeps the
+// process alive, which was measured in this worktree. So the fifo cases run in a CHILD process
+// under a bounded wait, and the parent asserts on how that child ended. A regression becomes a
+// non-zero exit or a kill, both of which are verdicts, instead of a gate that consumes its whole
+// budget and reports nothing.
 // ---------------------------------------------------------------------------
 
 // `mkfifo` is a POSIX utility with no Node binding and no Windows equivalent. Skipping there
@@ -9534,15 +9540,48 @@ test('a claim under a preview whose directory is gone is still ignored, even nam
 // is a junction, which the directory case below covers.
 const NO_FIFO_ON_WIN32 = { skip: process.platform === 'win32' }
 
-test('a fifo planted at the marker path is refused without blocking', NO_FIFO_ON_WIN32, async () => {
+// Ask a CHILD process whether a preview is live, under a hard wall-clock bound, and report how it
+// ended rather than what it printed. Three outcomes, and each is a different failure:
+//
+//   exit 0        the preview was NOT live, and the child got there and exited     -> pass
+//   exit 3        the child answered, and answered LIVE                            -> wrong verdict
+//   killed        the child never answered inside the bound                        -> it parked
+//
+// The child is written to the same scratch directory as the fixture rather than shipped as a
+// file: it exists only for the duration of one test, and a `.mjs` under the temp root is ESM
+// whatever this repository's package.json says. It imports `livePreviewPaths` by URL from this
+// test file's own location, so it is unambiguously the same source the in-process tests exercise.
+const LIVE_PROBE_BUDGET_MS = 20000
+
+async function previewLiveInChildProcess(scratch, preview) {
+  const child = path.join(scratch, 'probe.mjs')
+  const cliUrl = new URL('../scripts/cli.mjs', import.meta.url).href
+  await writeFile(child, [
+    `const { livePreviewPaths } = await import(${JSON.stringify(cliUrl)})`,
+    `const live = await livePreviewPaths([${JSON.stringify(preview)}])`,
+    `process.exit(live.has(${JSON.stringify(preview)}) ? 3 : 0)`,
+    '',
+  ].join('\n'), 'utf8')
+  // spawnSync, not execFileSync: this must not throw on a non-zero exit, because distinguishing a
+  // wrong verdict from a hang is the entire point. SIGKILL, not the default SIGTERM, because a
+  // process parked inside a blocking open(2) is exactly the case where politeness is not wanted.
+  return spawnSync(process.execPath, [child], {
+    timeout: LIVE_PROBE_BUDGET_MS,
+    killSignal: 'SIGKILL',
+    encoding: 'utf8',
+  })
+}
+
+test('a fifo planted at the marker path is refused, and the reader terminates', NO_FIFO_ON_WIN32, async () => {
   const scratch = await mkdtemp(path.join(tmpdir(), 'tm-preview-fifo-'))
   const preview = path.join(scratch, 'preview')
   await mkdir(preview)
   try {
-    // No writer will ever open the other end. Under a blocking open this call never returns.
+    // No writer will ever open the other end. Under a blocking open this never returns.
     execFileSync('mkfifo', [previewOwnerMarkerPath(preview)])
-    const live = await livePreviewPaths([preview])
-    assert.equal(live.has(preview), false, 'a fifo marker is IGNORED, not read and not unknown')
+    const r = await previewLiveInChildProcess(scratch, preview)
+    assert.equal(r.signal, null, `the reader had to be killed after ${LIVE_PROBE_BUDGET_MS}ms: it parked in open(2)`)
+    assert.equal(r.status, 0, 'a fifo marker is IGNORED, not read and not unknown')
   } finally {
     await rm(scratch, { recursive: true, force: true })
   }
@@ -9586,15 +9625,16 @@ test('a symlink planted at the marker path is ignored, not treated as unknown', 
 // The same three shapes at a CLAIM path, because the claim read got the identical treatment and a
 // fix applied to one and not the other would go unnoticed: every claim test above uses doubles,
 // which never reach the fused open at all.
-test('a fifo planted at a claim path is refused without blocking', NO_FIFO_ON_WIN32, async () => {
+test('a fifo planted at a claim path is refused, and the reader terminates', NO_FIFO_ON_WIN32, async () => {
   const scratch = await mkdtemp(path.join(tmpdir(), 'tm-preview-claimfifo-'))
   const preview = path.join(scratch, 'preview')
   await mkdir(preview)
   try {
     await writeFile(previewOwnerMarkerPath(preview), `${deadPid()}\n`, 'utf8')
     execFileSync('mkfifo', [previewClaimPath(preview, 4242)])
-    const live = await livePreviewPaths([preview])
-    assert.equal(live.has(preview), false, 'a fifo claim is IGNORED, not read and not unknown')
+    const r = await previewLiveInChildProcess(scratch, preview)
+    assert.equal(r.signal, null, `the reader had to be killed after ${LIVE_PROBE_BUDGET_MS}ms: it parked in open(2)`)
+    assert.equal(r.status, 0, 'a fifo claim is IGNORED, not read and not unknown')
   } finally {
     await rm(scratch, { recursive: true, force: true })
   }
@@ -9708,6 +9748,46 @@ test('an unreadable marker this process owns still leaves the preview live', NO_
     await chmod(marker, 0o644).catch(() => {})
     await rm(scratch, { recursive: true, force: true })
   }
+})
+
+// THE FOURTH ROW OF THE FALLBACK TABLE: an entry that is GONE by the time the fallback looks.
+//
+// The other three rows are pinned by the real-filesystem tests above — a rejected predicate, an
+// accepted one that could not be read, and a fallback `lstat` that fails some other way. This one
+// says an entry which vanished between the failed open and the fallback `lstat` is `missing`, not
+// `unknown`, and nothing held it: mutating that arm to `'unknown'` flips `livePreviewPaths` from
+// reaping the preview to keeping it live, with the whole suite still green.
+//
+// DOUBLES, deliberately, and the alternative is worth naming: staging this for real means winning
+// a race against the filesystem — the entry has to survive the open and be unlinked before the
+// lstat a few microseconds later — which is not a test, it is a coin flip that usually lands on
+// the branch above. Injecting `read` selects the by-path stand-in, so `stat` is asked twice for
+// the same path and can answer differently the second time, which is exactly the sequence the
+// fused path produces when `openFile` throws and the fallback runs. The ARM is the same code
+// either way; only what makes it fire is synthetic.
+test('an entry that disappears between the failed open and the fallback lstat is missing, not unknown', async () => {
+  const dir = path.join(tmpdir(), 'tm-preview-vanished')
+  const marker = previewOwnerMarkerPath(dir)
+  let markerStats = 0
+  const live = await livePreviewPaths([dir], {
+    // Injected only to select the by-path stand-in; it must never be reached, because the entry
+    // is never successfully opened.
+    read: async () => { assert.fail('an entry that could not be opened must not be read') },
+    list: async () => [],
+    stat: async (p) => {
+      if (p === dir) return { uid: OWNER_UID, isFile: () => false }
+      if (p !== marker) { const e = new Error('no such file'); e.code = 'ENOENT'; throw e }
+      markerStats += 1
+      // First look: the entry is there but cannot be opened, so the fallback runs.
+      if (markerStats === 1) { const e = new Error('permission denied'); e.code = 'EACCES'; throw e }
+      // Second look: it has been released in between. That is "not there", not "unresolved".
+      const e = new Error('no such file'); e.code = 'ENOENT'; throw e
+    },
+    // Would report the preview live if anything here were read and honoured.
+    probe: () => true,
+  })
+  assert.equal(markerStats, 2, 'the fallback has to look again; one look means it never ran')
+  assert.equal(live.has(dir), false, 'a vanished entry is no holder at all, so nothing keeps this preview')
 })
 
 // The flag word is computed in one place so that a platform missing either constant can be
