@@ -901,11 +901,13 @@ test('collect-reviews refuses to write its results file outside the run director
 //     `Array.isArray(plan?.tasks) ? … : []` -> `plan.tasks ?? []` alone
 //       -> 'a plan whose tasks are not tasks is refused, never thrown'
 //     `t?.phase` -> `t.phase` alone
-//       -> 'a plan whose tasks are not tasks is refused, never thrown', and ONLY since that fixture
-//          began running every body at `--phase 1` as well as with the flag omitted. Before that it
-//          killed nothing: `Number('default')` is NaN, so the omitted-flag route returns the task
-//          list unfiltered and never looks at an element. An unpinned production edit, found by a
-//          reviewer running the halves this record described in one breath.
+//       -> 'a plan whose tasks are not tasks is refused, never thrown'
+//          'review-dispatch is refused by the same plan, not thrown'
+//          Both, and ONLY since those fixtures began running every body at `--phase 1` as well as
+//          with the flag omitted. Before that it killed NOTHING: `Number('default')` is NaN, so the
+//          omitted-flag route returns the task list unfiltered and never looks at an element. An
+//          unpinned production edit, found by a reviewer running the halves this record had
+//          described in one breath.
 //   `readEntryText(file, …)` -> `readFile(file, 'utf8')` inside `readRunPlan`, or
 //   `nonBlockingReadFlags` drops `| c.O_NONBLOCK` — the two ways to reopen the plan.json FIFO door
 //     -> 'a fifo planted at plan.json is refused, and collect-reviews terminates'
