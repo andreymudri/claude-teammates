@@ -1669,3 +1669,74 @@ test('commitFileSets defaults to 500 commits when no limit is given', async () =
   await createGit({ exec }).commitFileSets()
   assert.ok(calls[0].includes('--max-count=500'), `expected --max-count=500 in ${JSON.stringify(calls[0])}`)
 })
+
+// THE LAYER ALL THE SIGNAL GUARDS STAND ON, asserted on a REAL git call rather than through a
+// double. Every other signal test hands the guard `signal: 'SIGKILL'` itself, so all of them stay
+// green if `defaultGitExec` quietly stops surfacing the field — measured: reverting the close
+// handler to `resolve({ code: code ?? 1, stdout, stderr })` left the entire suite passing while
+// making all five guards dead code in production. This is the one test that notices.
+test('defaultGitExec surfaces a signal field on an ordinary successful call', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-'))
+  try {
+    await defaultGitExec(['init', '--initial-branch=main'], root)
+    await defaultGitExec(['config', 'user.email', 'test@example.com'], root)
+    await defaultGitExec(['config', 'user.name', 'test'], root)
+    await writeFile(path.join(root, 'f.txt'), 'x\n', 'utf8')
+    await defaultGitExec(['add', '.'], root)
+    await defaultGitExec(['commit', '-m', 'one'], root)
+    const result = await defaultGitExec(['rev-parse', 'HEAD'], root)
+    assert.equal(result.code, 0)
+    // Present, and null rather than absent: the guards test `if (signal)`, so an `undefined`
+    // would behave the same here and differ nowhere except in what a reader can rely on.
+    assert.ok('signal' in result, 'defaultGitExec must surface `signal`; every signal guard reads it')
+    assert.equal(result.signal, null)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+// A killed `ls-files --error-unmatch` must not read as "untracked": `preview-check` treats false
+// as permission to link the path into a preview worktree.
+test('tracks throws rather than answering false when the process was killed', async () => {
+  const exec = async () => ({ code: 1, signal: 'SIGKILL', stdout: '', stderr: '' })
+  await assert.rejects(() => createGit({ exec }).tracks('some/path'), GitError)
+})
+
+// A killed `merge-base --is-ancestor` must not read as "not an ancestor": that is the permissive
+// answer in the side-door check and in prune-run's containment proof alike.
+test('isAncestor throws rather than answering false when the process was killed', async () => {
+  const exec = async () => ({ code: 1, signal: 'SIGKILL', stdout: '', stderr: '' })
+  await assert.rejects(() => createGit({ exec }).isAncestor('aaa', 'bbb'), GitError)
+})
+
+// `branchExists` interpolated its argument with no type guard, so a null asked git about
+// `refs/heads/null` — false in an ordinary repository, and TRUE in one carrying a branch of that
+// name. Both measured against real git before the guard was added.
+test('branchExists refuses a non-string instead of asking git about refs/heads/null', async () => {
+  const git = createGit({ exec: async () => ({ code: 0, signal: null, stdout: 'sha\n', stderr: '' }) })
+  await assert.rejects(() => git.branchExists(null), GitError)
+  await assert.rejects(() => git.branchExists(undefined), GitError)
+  await assert.rejects(() => git.branchExists(''), GitError)
+})
+
+// The consequence that made the missing guard worth a test rather than a comment: a repository
+// really can carry a branch named `null`, and there the un-guarded form answered TRUE.
+test('a repository can hold a branch named null, which is why branchExists must not interpolate', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-'))
+  const sh = (args) => defaultGitExec(args, root)
+  try {
+    await sh(['init', '--initial-branch=main'])
+    await sh(['config', 'user.email', 'test@example.com'])
+    await sh(['config', 'user.name', 'test'])
+    await writeFile(path.join(root, 'f.txt'), 'x\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'one'])
+    assert.equal((await sh(['branch', 'null'])).code, 0, 'git really does accept a branch named null')
+    const git = createGit({ cwd: root })
+    assert.equal(await git.branchExists('null'), true, 'the string is a real branch here')
+    // The null itself is refused rather than colliding with it.
+    await assert.rejects(() => git.branchExists(null), GitError)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

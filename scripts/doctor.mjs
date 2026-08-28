@@ -66,10 +66,14 @@ export async function collectDoctorReport({ git, runId, runBranch, baseBranch, t
   let baseSha = null
   if (baseBranch && await git.branchExists(baseBranch)) baseSha = await git.resolveRef(`refs/heads/${baseBranch}`)
   // `runBranch` is null when the main worktree is detached and no `--run-branch` was given, and
-  // `branchExists` rejects a non-string outright — so the null is tested here rather than allowed
-  // to throw and take the whole report down. Every question below degrades to "cannot tell" on a
-  // null run sha, which is the honest answer in that state and the one the problem raised above
-  // explains.
+  // the null is tested HERE rather than left to `branchExists`. An earlier version of this
+  // comment claimed `branchExists` rejected a non-string outright; it did not — it interpolated
+  // the value, so `branchExists(null)` asked about `refs/heads/null` and answered false in an
+  // ordinary repository and TRUE in one carrying a branch named `null` (both measured). It now
+  // carries the same type guard the other readers have, which makes this test belt-and-braces
+  // rather than load-bearing — but the report still wants the null handled rather than thrown,
+  // because every question below degrades to "cannot tell" on a null run sha, which is the honest
+  // answer in that state and the one the problem raised above explains.
   const runSha = passedRunSha ?? (runBranch !== null && await git.branchExists(runBranch)
     ? await git.resolveRef(`refs/heads/${runBranch}`)
     : null)

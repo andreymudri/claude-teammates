@@ -73,13 +73,17 @@ export function defaultGitExec(args, cwd) {
     // wrappers) must not see a plain Error here — spawn failure (git missing from PATH,
     // cwd absent) has to read as a gate FAIL with a message, not an uncaught crash.
     child.on('error', (err) => reject(new GitError(err.message)))
-    // SIGNAL SURFACED SEPARATELY, because `code ?? 1` is lossy in a way two readers below
+    // SIGNAL SURFACED SEPARATELY, because `code ?? 1` is lossy in a way FIVE readers below
     // cannot recover from. A killed child reports `code: null, signal: 'SIGKILL'` (measured),
     // so collapsing it to 1 produces `{code: 1, stdout: '', stderr: ''}` — byte for byte the
-    // shape git uses for two ORDINARY answers: `symbolic-ref --quiet` on a detached HEAD, and
-    // `rev-parse --verify --quiet` on a name that is not a branch. Both readers then treat a
-    // process that never ran to completion as a definite negative answer. `signal` is the only
-    // field that still tells them apart once `code` has been defaulted.
+    // shape git uses for ORDINARY answers from `symbolic-ref --quiet` (detached HEAD),
+    // `rev-parse --verify --quiet` (not a branch), `ls-files --error-unmatch` (untracked) and
+    // `merge-base --is-ancestor` (not an ancestor). In every one of them exit 1 is the
+    // PERMISSIVE answer, so a process that never ran to completion would read as a definite
+    // negative and open the thing the check exists to close. `signal` is the only field that
+    // still tells them apart once `code` has been defaulted, which is why the field is asserted
+    // on a REAL call in tests/git.test.mjs rather than only through a fake exec: a double that
+    // supplies `signal` itself cannot notice this layer no longer producing it.
     child.on('close', (code, signal) => resolve({ code: code ?? 1, signal: signal ?? null, stdout, stderr }))
   })
 }
@@ -272,8 +276,15 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
         throw new GitError(`tracks requires a non-empty pathspec, got ${JSON.stringify(pathspec)}`)
       }
       const args = ['ls-files', '--error-unmatch', '-z', '--', pathspec]
-      const { code, stderr } = await runRaw(args)
+      const { code, stderr, signal } = await runRaw(args)
       if (code === 0) return true
+      // A killed probe is not "untracked". `preview-check` reads a false here as permission to
+      // link a path into a preview worktree, and prints `preview.link is usable` and exits 0 —
+      // so a signal death would clear a path that IS tracked, which is the one answer this
+      // question exists to prevent.
+      if (signal) {
+        throw new GitError(`git ${args.join(' ')} was killed by ${signal} — whether the path is tracked is unknown`)
+      }
       if (code === 1) return false
       throw new GitError(`git ${args.join(' ')} failed: ${stderr.trim() || `exit ${code}`}`)
     },
@@ -377,6 +388,15 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
       return seconds * 1000
     },
     async branchExists(name) {
+      // The same type guard `resolveRef` and `mergeBase` carry, and it was missing here while
+      // every other reader had it. Without it the name is INTERPOLATED: `branchExists(null)`
+      // asks git about `refs/heads/null`, which answers false in most repositories and TRUE in
+      // one that happens to have a branch named `null` (both measured). A caller that reached
+      // this with a null had already lost track of which branch it meant, and the honest answer
+      // is a failure rather than a verdict about whatever ref that spelling collided with.
+      if (!isNonEmptyString(name)) {
+        throw new GitError(`branchExists requires a non-empty branch name, got ${JSON.stringify(name)}`)
+      }
       const args = ['rev-parse', '--verify', '--quiet', `refs/heads/${name}`]
       const { code, stderr, signal } = await runRaw(args)
       if (code === 0) return true
@@ -405,8 +425,15 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
         throw new GitError(`isAncestor requires non-empty refs, got ancestor=${JSON.stringify(ancestor)} descendant=${JSON.stringify(descendant)}`)
       }
       const args = ['merge-base', '--is-ancestor', '--end-of-options', ancestor, descendant]
-      const { code, stderr } = await runRaw(args)
+      const { code, stderr, signal } = await runRaw(args)
       if (code === 0) return true
+      // A killed probe is not "no". This is the predicate behind the side-door check in
+      // gate-runner.mjs and behind `prune-run`'s containment proof, and in both a false is the
+      // permissive answer: a signal death would make ownership report no violation for a branch
+      // that really was landed into the base.
+      if (signal) {
+        throw new GitError(`git ${args.join(' ')} was killed by ${signal} — the ancestry question was not answered`)
+      }
       // Exit 1 is git's answer for "not an ancestor". Anything else (128 for a bad ref,
       // for instance) is a failure and must not read as a clean "no".
       if (code === 1) return false

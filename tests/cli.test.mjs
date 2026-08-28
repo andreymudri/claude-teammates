@@ -12518,3 +12518,126 @@ test('finish marks plan notes as stale when only the destination has changed', a
     assert.match(out, /no longer match/i)
   })
 })
+
+// THE REVIEW DISPATCH'S OWN DETACHMENT REFUSAL, which nothing else in this suite reaches:
+// `runCli(['review-dispatch'…])` on a detached HEAD had no coverage at all, and mutating the
+// guard to `if (false)` left every one of these files green. What flows through with the guard
+// gone is `runBranch: null`, and the dispatch it produces instructs each reviewer to run
+// `git worktree add --detach <dir> null` and `git merge-base null <branch>` — and `refs/heads/null`
+// is as creatable as `refs/heads/HEAD` was, so this is the same class of hole one layer out.
+test('review-dispatch refuses on a detached HEAD instead of dispatching against a null branch', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeReviewManifest(root)
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['checkout', '--quiet', '--detach', 'HEAD'])
+    lines.length = 0
+    const code = await runCli(['review-dispatch', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 4)
+    assert.match(lines.join('\n'), /HEAD is detached, so there is no run branch to review against/)
+    // And no dispatch was emitted: a reviewer must not be handed a spec naming a null branch.
+    assert.doesNotMatch(lines.join('\n'), /"reviewers"/)
+  })
+})
+
+// `planAtAnchor`'s refusal, reached through `brief` — it reads the plan every teammate is briefed
+// from, and it does not go through `derive`, so it cannot inherit that command's refusal. Mutating
+// this guard to `if (false)` also left the suite green; with it gone, a detached HEAD resolved
+// `refs/heads/HEAD` and would have briefed the fleet from whatever plan a planted ref named.
+test('brief refuses to read the plan at the anchor when HEAD is detached', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    // withRepo already committed plan.md, so the anchor read has something to find; the only
+    // thing this fixture changes is where HEAD points.
+    g(['checkout', '--quiet', '--detach', 'HEAD'])
+    lines.length = 0
+    const code = await runCli(['brief', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--root', root], io)
+    assert.notEqual(code, 0)
+    assert.match(lines.join('\n'), /HEAD is detached, so there is no run branch to read the plan from/)
+  })
+})
+
+// `locate` on a detached worktree. The RECORD stores null — the store bounds this field's type and
+// length only, and null is the honest answer for "which branch is this worktree on" — but the
+// printed line must not render that null as a name. Replacing the label with `printable(branch)`
+// leaves every other test in this file green and prints `recorded T1 at /path on null`, which
+// names a ref an operator could go and create.
+test('locate on a detached worktree names the state rather than printing a null branch', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const { findTaskByWorktree } = await stateModule()
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const wt = path.join(root, 'wt-T1')
+    g(['worktree', 'add', '--quiet', '--detach', wt, 'HEAD'])
+    lines.length = 0
+    const code = await runCli(['locate', '--run', 'r1', '--task', 'T1', '--root', wt], io)
+    assert.equal(code, 0, lines.join('\n'))
+    assert.match(lines.join('\n'), /recorded T1 at .* on \(detached HEAD\)/)
+    assert.doesNotMatch(lines.join('\n'), /on null/)
+    // The stored value stays null rather than being turned into the display string: a reader
+    // asking which branch this worktree is on must get "none", not a name it could resolve.
+    const found = await findTaskByWorktree(root, wt)
+    assert.equal(found.branch, null)
+  })
+})
+
+// A mid-run mover for the TASK-branch side. The two fixtures above both move the RUN branch, and
+// the residual list's "SNAPSHOT ENDPOINTS" bullet rests on the other half of that contrast — that
+// `runFilesetCheck` re-resolves `refs/heads/<task branch>` LIVE at check time, so a task branch
+// that moved since `derive` is judged at its NEW sha and its phase FAILS. Nothing pinned that.
+//
+// The command check is ordered FIRST here, unlike `stageMidRunCheck`, and that ordering is the
+// whole fixture: `prune-run` runs a phase's checks in the order the manifest lists them, so a
+// mover placed after `fileset` would move the branch only after the question had been asked.
+async function stageTaskBranchMover({ root }, run) {
+  await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+    phases: {
+      default: {
+        checks: [
+          { name: 'midrun', kind: 'command', run },
+          { name: 'fileset', kind: 'fileset' },
+        ],
+      },
+    },
+  }), 'utf8')
+}
+
+test('a task branch moved mid-run is judged at its new sha, so its phase fails and its worktree survives', async () => {
+  await withRepo(async (ctx) => {
+    const { root, io, lines, git: g } = ctx
+    await stagePrunableRun(ctx)
+    // The task branch's own fork point: moving it here leaves it contributing nothing past that
+    // point, which is exactly what `runFilesetCheck` rejects.
+    const forkPoint = g(['rev-parse', 'run-branch~1']).trim()
+    const before = g(['rev-parse', 'refs/heads/teammates/r1/T1']).trim()
+    assert.notEqual(before, forkPoint, 'the branch really does start somewhere else')
+    await stageTaskBranchMover(ctx, `git update-ref refs/heads/teammates/r1/T1 ${forkPoint}`)
+    lines.length = 0
+    const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
+    assert.equal(code, 0)
+    assert.equal(g(['rev-parse', 'refs/heads/teammates/r1/T1']).trim(), forkPoint, 'the check really did move the task branch')
+    // The phase FAILED because the fileset check read the MOVED sha, so nothing was pruned. Had
+    // the check been computed against the derive-time sha, the phase would have passed and this
+    // worktree would be gone.
+    assert.equal(hasWorktree(root, 'a1'), true)
+    assert.equal(hasBranch(root, 'teammates/r1/T1'), true)
+    assert.doesNotMatch(lines.join('\n'), /deleted teammates\/r1\/T1/)
+  })
+})
+
+// The control, without which the assertions above would hold on any run that pruned nothing for
+// any reason at all — a fixture that fails to build its own preconditions looks identical.
+test('the same run with the task branch left alone does prune its worktree', async () => {
+  await withRepo(async (ctx) => {
+    const { root, io, lines, git: g } = ctx
+    await stagePrunableRun(ctx)
+    await stageTaskBranchMover(ctx, 'node -e ""')
+    lines.length = 0
+    const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
+    assert.equal(code, 0)
+    assert.equal(hasWorktree(root, 'a1'), false, 'the phase passes and the worktree is pruned when nothing moved')
+  })
+})

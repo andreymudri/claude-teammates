@@ -2559,9 +2559,16 @@ export async function runCli(argv, io = { out: console.log }) {
     // either. It was simply never said out loud, which is what made the consequence invisible.
     let runBranch = null
     let baseHere = null
+    // WHY there is no run branch, not just that there is none. The note below used to infer the
+    // cause from `baseHere` alone, which reads the base branch's EXISTENCE as evidence that it is
+    // checked out — `resolveBaseBranch` answers from `branchExists` and never looks at HEAD. On a
+    // detached HEAD that printed `because main is checked out and that is the base branch` while
+    // main was not checked out at all (measured), sending an operator to fix the wrong thing.
+    let headDetached = false
     try {
       const git = createGit({ cwd: root })
       const head = await git.currentBranch()
+      headDetached = head === null
       baseHere = await resolveBaseBranch(git, flags.base)
       runBranch = head === baseHere ? null : head
     } catch {
@@ -2585,7 +2592,9 @@ export async function runCli(argv, io = { out: console.log }) {
     if (recorded.runBranch === null) {
       io.out(
         `note: run ${printable(runId)} recorded no run branch`
-        + (baseHere ? `, because ${printable(baseHere)} is checked out and that is the base branch` : '')
+        + (headDetached
+          ? ', because HEAD is detached and a detached HEAD is on no branch'
+          : (baseHere ? `, because ${printable(baseHere)} is checked out and that is the base branch` : ''))
         + '. Check out this run\'s branch before gating — `gate` refuses to run from the base branch,'
         + ' and until some command derives a context from the run branch, stop-time enforcement'
         + ' cannot confirm the checkout and will allow every stop rather than risk blocking on the wrong ref.',
@@ -3459,22 +3468,34 @@ export async function runCli(argv, io = { out: console.log }) {
       // tell "closed" from "never considered" — and follows it with the ones that merely bound
       // it. Nothing below the first bullet is closed by anything in this file.
       //
-      //   - THE NAME. Closed, and recorded here because this list is read as complete. It took
-      //     two attempts, and the first one is why this bullet is worded around REFS rather than
-      //     around resolution: resolving HEAD symbolically closed the tag /
-      //     `heads/<name>` / `refs/heads/refs/heads/<name>` plant, but left `currentBranch`
-      //     returning the string `HEAD` for a detached HEAD — and `refs/heads/HEAD` is a ref
-      //     `git update-ref` creates without complaint, so the same hijack came straight back
-      //     under a name that merely looked reserved. Executed against that revision, `prune-run
-      //     --yes` deleted an unmerged task branch and exited 0.
+      //   - WHICH REF IS THE RUN BRANCH. Closed at `derive`, by REFUSAL rather than by resolution,
+      //     and recorded here because this list is read as complete. It took three attempts and
+      //     each earlier one was reported as closed, so the wording below is deliberately about
+      //     what is refused rather than about what is resolved.
       //
-      //     What closes it is that no NAME stands for the run branch on this path at all.
-      //     `ctx.runBranchRef` is `symbolic-ref`'s own output, captured by `derive` and resolved
-      //     directly at the deletion below; `derive` refuses outright when HEAD is detached, so
-      //     there is no state in which a name has to be invented for it. tests/cli.test.mjs
-      //     stages both plants — the three-ref one and `refs/heads/HEAD` with the main worktree
-      //     detached — and asserts the first proceeds against the real run branch and the second
-      //     is refused.
+      //     Attempt one resolved HEAD symbolically, which killed the tag / `heads/<name>` /
+      //     `refs/heads/refs/heads/<name>` plant but left `currentBranch` returning the string
+      //     `HEAD` on a detached HEAD — and `refs/heads/HEAD` is a ref `git update-ref` creates
+      //     without complaint. Attempt two returned null there instead, but still trusted
+      //     `symbolic-ref`'s target to be a branch: `git symbolic-ref HEAD refs/tags/x` is
+      //     accepted (git refuses only targets outside `refs/`), the `refs/heads/` strip is a
+      //     no-op on such a ref, and `refs/heads/refs/tags/x` is creatable — so `deriveContext`
+      //     read the planter's commit as the run branch. Measured on that revision, with HEAD at
+      //     the real run tip and the tree clean, `ownership` went from FAIL naming a rogue commit
+      //     to PASS.
+      //
+      //     What closes it is `derive` refusing two states outright — HEAD detached, and HEAD
+      //     pointing anywhere but under `refs/heads/` — and then binding `headSha` to
+      //     `refs/heads/${runBranch}`, the ref `deriveContext` itself resolves. Attempt two's
+      //     round trip compared HEAD's sha against HEAD's OWN target, which is trivially equal
+      //     and vetted nothing; that is the mistake this bullet exists to stop being re-made.
+      //
+      //     WHAT IS NOT THIS CODE'S DOING: under the `refs/tags/x` plant the `git branch -D`
+      //     below fails on its own, with `fatal: HEAD not found below refs/heads!`, exit 128
+      //     (measured). That is git declining to run `branch -D` at all in that state, not a
+      //     guarantee anything here provides — `git worktree list` works fine in the same
+      //     repository, which is why the force-removal a few lines up WAS reached. Do not read
+      //     the surviving branch as evidence that this path was safe.
       //   - Proof-to-delete. The sha is proved and then deleted BY NAME, so a write to
       //     refs/heads/<branch> in between is deleted unproved. Closing it needs a
       //     compare-and-swap (`git update-ref -d <ref> <proved sha>`), which needs a helper
