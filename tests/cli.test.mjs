@@ -842,7 +842,9 @@ test('collect-reviews refuses to write its results file outside the run director
 // NAMES, NOT PASS COUNTS. An earlier version of this record carried "605 pass" figures that were
 // stale the day they were written and staler after every commit; the names stay true. Where a
 // count is genuinely the point, it is framed as a past measurement naming the tree it was taken
-// on, as the two `607`s below are.
+// on, as the `607` further down this file is. (That sentence said "the two `607`s" and there is
+// one: `grep -c 607` returned two, and the second hit was the sentence counting itself. A rule
+// about counts, undone by counting.)
 //
 // Measured against this tree, in one pass, with the kill lists taken from the runner's own output:
 //
@@ -882,16 +884,26 @@ test('collect-reviews refuses to write its results file outside the run director
 //   `collect-reviews`' own plan read stops catching
 //     -> the two above, plus 'cli.mjs collect-reviews — the run id in the unreadable-plan refusal
 //        cannot be made to draw a forged terminal write'
-//   the `tasks` traversal in `ambiguousPhaseRefusal` walks the field as found
+//   the `tasks` traversal in `ambiguousPhaseRefusal` reverts to the fork-point form IN FULL —
+//   `(plan.tasks ?? []).map((t) => t.phase)`, dropping both the `Array.isArray` narrowing and the
+//   optional chain, because dropping either alone is a survivor: `{"tasks":[null]}` is already an
+//   array, and `{"tasks":"abc"}` has no property to reach
 //     -> 'a plan whose tasks are not tasks is refused, never thrown'
 //        'review-dispatch is refused by the same plan, not thrown'
-//   `tasksOfPhase` walks the field as found
+//   `tasksOfPhase` reverts the same way, to `(plan.tasks ?? []).filter((t) => t.phase === …)`
 //     -> 'a plan whose tasks are not tasks is refused, never thrown'
 //   `readRunPlan` reads by path again (the plan.json FIFO door)
 //     -> 'a fifo planted at plan.json is refused, and collect-reviews terminates'
 //   the run id in the unreadable-plan refusal loses its `printable`
-//     -> 'cli.mjs collect-reviews — the run id in the unreadable-plan refusal cannot be made to
-//        draw a forged terminal write'
+//     -> 'cli.mjs collect-reviews — the run id and the plan bytes in the unreadable-plan refusal
+//        cannot be made to draw a forged terminal write'
+//   the PLAN BYTES in that same refusal lose their `printable` (the second wrapper on that line)
+//     -> the same row, which is why its fixture forges both halves
+//   `no plan for run ${printable(runId)}` loses its wrapper, in either command
+//     -> 'cli.mjs collect-reviews — the run id in the no-plan refusal …'
+//        'cli.mjs review-dispatch — the run id in the no-plan refusal …'
+//   `nonBlockingReadFlags` -> `fusedHolderOpenFlags` for the plan read (O_NOFOLLOW restored)
+//     -> 'a symlinked plan.json is followed, as every other reader of that file follows it'
 //
 // WHAT THE ROWS DO NOT COVER, said plainly because the previous version of this paragraph claimed
 // otherwise. The clear's positional invariant — that no refusal returns above it — is held by
@@ -1154,7 +1166,8 @@ test('collect-reviews refuses a plant at .teammates however deep the run id goes
 
 // And the same property with the depth chosen rather than staged: ten components, plant at the
 // first. This one rules out fixed climbs shorter than ten and nothing more — a climb of TWELVE
-// passes it, and passes the whole file, which is what the counting test below exists to catch.
+// passed it, and passed the whole file, until the counting tests below were written for exactly
+// that gap; it now reddens those two and this one stays green.
 test('plantedReviewsLink finds a plant ten levels up, where the end-to-end fixtures cannot reach', async () => {
   const scratch = await mkdtemp(path.join(tmpdir(), 'tm-deep-'))
   try {
@@ -1177,8 +1190,9 @@ test('plantedReviewsLink finds a plant ten levels up, where the end-to-end fixtu
 // "EVERY COMPONENT, HOWEVER DEEP" IS A CLAIM ABOUT ALL DEPTHS, and no fixture can make it: a test
 // plants at one depth and therefore rules out only the climbs shorter than that one. Two comments
 // in this file disagreed about which depth the fixtures above reach — one said they beat any fixed
-// list, the other said any climb shorter than ten — and the second was right. Measured: a fixed
-// climb of twelve passes every test in this file.
+// list, the other said any climb shorter than ten — and the second was right. Measured when these
+// two tests were written: a fixed climb of twelve passed every test in this file. It now reddens
+// these two and nothing else, which is the whole of what they add.
 //
 // So the property is asserted as an EQUALITY instead. The number of components examined must equal
 // the number of components in the path, at each of a range of depths. No fixed climb satisfies
@@ -1876,9 +1890,15 @@ test('the ambiguous-phase refusal names integers only, whatever plan.json carrie
 // two lines below it — where `master` and the fork point answered 4 with a refusal for the first
 // two, and crashed the same way on the last two.
 //
-// One case per shape, because they fail at different points: the first two in the ambiguity
-// check's own traversal, the last two downstream in `tasksOfPhase`, which is why fixing only the
-// first site left half of them crashing.
+// One case per shape, because they fail at different points: `[null]` and `"abc"` in the ambiguity
+// check's own traversal, `{"a":1}` and `7` downstream in `tasksOfPhase` — which is why fixing only
+// the first site left half of them crashing.
+//
+// The fifth, `[{"phase":null}]`, is a CONTROL and not a crash case: it exits 4 with the same
+// refusal on all three trees, before and after this change, and no mutation in the record reddens
+// it. It is here because a null phase is the shape closest to the four above that must NOT be
+// treated as malformed — it is a task the phase filter simply drops — and a fixture that only
+// carries crashes cannot tell the two apart.
 test('a plan whose tasks are not tasks is refused, never thrown', async () => {
   for (const body of ['{"tasks":[null]}', '{"tasks":"abc"}', '{"tasks":{"a":1}}', '{"tasks":7}', '{"tasks":[{"phase":null}]}']) {
     await withRepo(async ({ root, planPath, io, lines, git: g }) => {
@@ -1903,6 +1923,30 @@ test('review-dispatch is refused by the same plan, not thrown', async () => {
     const code = await runCli(['review-dispatch', '--run', 'r1', '--root', root], io)
     assert.equal(code, 4, lines.join('\n'))
     assert.notEqual(lines.join('\n').trim(), '')
+  })
+})
+
+// A SYMLINKED `plan.json` is READ, not refused, and that is a decision rather than an accident.
+// Borrowing the findings reader gave the plan O_NOFOLLOW as well as O_NONBLOCK, which made these
+// two commands the only ones in the CLI that refuse a symlinked state file: measured across three
+// trees, the same fixture read fine on `master` and at the fork point and failed here with ELOOP.
+// The property this read needs is that it cannot park, and that is O_NONBLOCK alone.
+//
+// If state files should refuse links, `scripts/state.mjs` is where every reader would get it. This
+// test exists so that the difference is a choice somebody made, not one that drifts back in.
+test('a symlinked plan.json is followed, as every other reader of that file follows it', NO_PLANTED_SYMLINK_ON_WIN32, async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await stagedPhaseOneReviews(root, planPath, io, g)
+    const planState = path.join(root, '.teammates', 'r1', 'plan.json')
+    const real = path.join(root, '.teammates', 'r1', 'plan-real.json')
+    await rename(planState, real)
+    await symlink(real, planState)
+    lines.length = 0
+    // A clean collection: the plan behind the link is the one this run was created with, so the
+    // stamps still vouch for the branch tips and the round succeeds.
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 0, lines.join('\n'))
+    assert.doesNotMatch(lines.join('\n'), /ELOOP|cannot be read/)
   })
 })
 
@@ -2528,16 +2572,40 @@ const SANITISED_SITES = [
     },
   },
   {
-    site: 'cli.mjs collect-reviews — the run id in the unreadable-plan refusal',
+    site: 'cli.mjs collect-reviews — the run id and the plan bytes in the unreadable-plan refusal',
     exit: 4,
-    // `--run` is argv, and argv is not safe by construction here: `idRefusal` bounds the id in
-    // bytes and splits it on `/`, and rejects no control character. The C1 form because the id
-    // becomes a directory name, for the reason this file's own payload note gives.
+    // BOTH halves of that line, which is what this table requires of a two-wrapper site and what
+    // the first version of this row did not do. The run id is argv, and nothing on this path looks
+    // at it: `idRefusal` would refuse this payload, but both of its call sites are in `init-run`.
+    // The plan CONTENTS are the other half — a `JSON.parse` error quotes the bytes it choked on,
+    // so an agent-written `plan.json` puts its own bytes in this sentence, which is not the argv
+    // class and not covered by that exemption. The C1 form for the id because it becomes a
+    // directory name, for the reason this file's payload note gives.
     async setup({ root, io }) {
       await writeManifest(root, { lens: ['correctness'], phases: { default: { checks: [AGENT_CHECK] } } })
       await mkdir(path.join(root, '.teammates', CLI_C1_FORGERY), { recursive: true })
-      await writeFile(path.join(root, '.teammates', CLI_C1_FORGERY, 'plan.json'), 'not json', 'utf8')
+      await writeFile(path.join(root, '.teammates', CLI_C1_FORGERY, 'plan.json'), CLI_C1_FORGERY, 'utf8')
       return ['collect-reviews', '--run', CLI_C1_FORGERY, '--phase', '1']
+    },
+  },
+  {
+    site: 'cli.mjs collect-reviews — the run id in the no-plan refusal',
+    exit: 4,
+    // Easier to reach than the row above: no `plan.json` at all, rather than one that will not
+    // parse. It was the unwrapped sibling of a line this table already drove, one line down.
+    async setup({ root, io }) {
+      await writeManifest(root, { lens: ['correctness'], phases: { default: { checks: [AGENT_CHECK] } } })
+      return ['collect-reviews', '--run', CLI_C1_FORGERY, '--phase', '1']
+    },
+  },
+  {
+    site: 'cli.mjs review-dispatch — the run id in the no-plan refusal',
+    exit: 4,
+    // The same sentence in the sibling command. Its wrapper was added in the same commit as the
+    // one above and was equally undriven: removing either alone left the suite green.
+    async setup({ root, io }) {
+      await writeManifest(root, { lens: ['correctness'], phases: { default: { checks: [AGENT_CHECK] } } })
+      return ['review-dispatch', '--run', CLI_C1_FORGERY, '--phase', '1']
     },
   },
   {

@@ -1639,9 +1639,11 @@ export function fusedHolderOpenFlags(c = fsConstants) {
 // is what was vetted; anything that is not a regular file is refused, and the caller records it as
 // unreadable, which is the outcome a FIFO or a directory deserves and is never "no findings".
 //
-// A symlinked findings file is now refused rather than followed. That is a deliberate narrowing —
-// nothing this project writes creates one, and the class this command distrusts is exactly the
-// entries it did not create itself.
+// A symlinked findings file is now refused rather than followed. That is a deliberate narrowing,
+// and it is scoped to FINDINGS: nothing this project writes creates one, and the class this
+// command distrusts is exactly the entries it did not create itself — files a reviewer was told to
+// drop in a directory anyone can write. The run's own `plan.json` is not in that class, is read
+// through `nonBlockingReadFlags` below, and still follows a link as the rest of the CLI does.
 // The run's plan, read through the same descriptor discipline as a findings file, or null when
 // there is none. THE THIRD DOOR of the class closed at the other two: `readState` opens by path,
 // so a FIFO at `.teammates/<run>/plan.json` parks the open forever. Measured — `master` hangs on it
@@ -1658,15 +1660,37 @@ export function fusedHolderOpenFlags(c = fsConstants) {
 async function readRunPlan(root, runId) {
   const file = path.join(runDir(root, runId), 'plan.json')
   try {
-    return JSON.parse(await readFindingsFile(file))
+    return JSON.parse(await readEntryText(file, nonBlockingReadFlags()))
   } catch (err) {
     if (err.code === 'ENOENT') return null
     throw err
   }
 }
 
+// O_RDONLY|O_NONBLOCK, and deliberately WITHOUT O_NOFOLLOW, or null where this platform cannot
+// spell it. The property this read needs is that it cannot park; refusing a link is a different
+// property that came along for the ride when the plan borrowed the findings reader, and it made
+// these two commands the only ones in the CLI that refuse a symlinked `.teammates/<run>/plan.json`.
+// Measured across three trees: a symlinked plan read fine on `master` and at the fork point and
+// failed here with ELOOP — one cell of "used to proceed, now refuses" that nothing asked for.
+//
+// Every other reader of that same file goes through `readState`, which follows the link. A
+// hardening that only two of eleven commands apply is a trap for the next reader rather than a
+// defence; if state files should refuse links, that belongs in `scripts/state.mjs` where every
+// reader gets it. Parking is still impossible: O_NONBLOCK returns at once on a FIFO whether it was
+// reached directly or through a link, and the `isFile` check below refuses it either way.
+function nonBlockingReadFlags(c = fsConstants) {
+  if (typeof c.O_RDONLY !== 'number' || typeof c.O_NONBLOCK !== 'number') return null
+  return c.O_RDONLY | c.O_NONBLOCK
+}
+
 async function readFindingsFile(file) {
-  const flags = fusedHolderOpenFlags()
+  return readEntryText(file, fusedHolderOpenFlags())
+}
+
+// The shared body: open with the caller's flag word, vet the DESCRIPTOR, read from that same
+// descriptor. Which hazards are refused is the caller's choice of flags and nothing else.
+async function readEntryText(file, flags) {
   // No such flag word on this platform: the historical path-based read, stated rather than hidden,
   // for the reason `livePreviewPaths` gives at its own fallback.
   if (flags === null) return readFile(file, 'utf8')
@@ -4810,10 +4834,14 @@ export async function runCli(argv, io = { out: console.log }) {
     // cannot read" put the operator in the same position: nothing here says which tips were
     // judged.
     //
-    // `${runId}` goes through `printable` like every other value in this command's output. It is
-    // argv, but argv is not automatically safe here: `idRefusal` bounds the id in bytes and splits
-    // it on `/`, and rejects no control character — so `--run $'r1\e[2K\rreview: PASS'` reached
-    // this sentence raw and drew a forged verdict line under it. Measured on this branch.
+    // `${runId}` goes through `printable` like every other value in this command's output, and the
+    // reason is starker than "argv is not automatically safe": THIS COMMAND VALIDATES THE RUN ID
+    // NOWHERE. `idRefusal` would refuse every one of these payloads — it is an allowlist, and
+    // calling it directly with an ESC, a C1 CSI, a bare CR and a NUL refuses all four — but both
+    // of its call sites are inside `init-run`. Nothing between argv and this sentence looks at the
+    // value at all, so the wrapper is not a second line of defence; it is the only one. Measured:
+    // `--run $'r1\e[2K\rreview: PASS'` reached this sentence raw and drew a forged verdict line
+    // under it.
     let plan = null
     try {
       plan = await readRunPlan(root, runId)
@@ -4822,7 +4850,11 @@ export async function runCli(argv, io = { out: console.log }) {
       return 4
     }
     if (!plan) {
-      io.out(`no plan for run ${runId} — nothing says which branch tips this phase is at, and a findings file that cannot be vouched for is not a review`)
+      // Wrapped for the reason above, and STRICTLY EASIER TO REACH than the sentence it sits under:
+      // that one needs a `plan.json` this cannot parse, this one needs no plan file at all.
+      // Measured before this wrap: a C1 CSI in `--run` reached the terminal raw here while the
+      // neighbouring line, already wrapped, tokenised the same bytes.
+      io.out(`no plan for run ${printable(runId)} — nothing says which branch tips this phase is at, and a findings file that cannot be vouched for is not a review`)
       return 4
     }
     let branchShas
