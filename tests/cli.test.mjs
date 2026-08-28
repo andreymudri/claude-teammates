@@ -12774,3 +12774,42 @@ test('derive throws the classifier reason when HEAD names no branch', async () =
     )
   }
 })
+
+// The NOT-A-BRANCH kind at the two sites that previously only tested for null. Detachment alone is
+// not enough coverage: for three rounds every site was guarded against the state a reviewer had
+// just reproduced and left trusting HEAD's target otherwise, so both kinds are pinned at all four
+// sites now. This one is staged with a plain `.git/HEAD` FILE WRITE rather than `git symbolic-ref`
+// — the route no pseudo-ref guard sees, and the one the reviewer used.
+test('brief refuses to read the plan at the anchor when HEAD points outside refs/heads/', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    g(['update-ref', 'refs/mine/rb', 'HEAD'])
+    await writeFile(path.join(root, '.git', 'HEAD'), 'ref: refs/mine/rb\n', 'utf8')
+    assert.equal(g(['symbolic-ref', '--quiet', 'HEAD']).trim(), 'refs/mine/rb', 'the file write really did repoint HEAD')
+    lines.length = 0
+    const code = await runCli(['brief', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--root', root], io)
+    // The merge base exits 2 in this state; this must not exit 0 emitting a dispatch whose
+    // constraints came from an anchor of the planter's choosing.
+    assert.notEqual(code, 0)
+    assert.match(lines.join('\n'), /HEAD points at refs\/mine\/rb, which is not a branch/)
+  })
+})
+
+test('review-dispatch refuses when HEAD points outside refs/heads/', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeReviewManifest(root)
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['update-ref', 'refs/tags/x', 'HEAD'])
+    g(['symbolic-ref', 'HEAD', 'refs/tags/x'])
+    lines.length = 0
+    const code = await runCli(['review-dispatch', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 4)
+    assert.match(lines.join('\n'), /HEAD points at refs\/tags\/x, which is not a branch/)
+    assert.doesNotMatch(lines.join('\n'), /"reviewers"/)
+  })
+})
