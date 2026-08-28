@@ -1299,7 +1299,11 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 // `collect-reviews`' unsafe-phase refusal wraps such a value with nothing in the class beside it:
 // `--phase` is argv, so no agent-written file reaches that sentence and no row could forge it.
 // Named here because the grep below finds the line, and a reader counting its results would
-// otherwise have to re-derive why it is not one of the sites this table vouches for.
+// otherwise have to re-derive why it is not one of the sites this table vouches for. Its two
+// results-file failure reports — the previous file that cannot be cleared, and the write that
+// cannot be made — are the same case one step removed: each wraps a Node fs error quoting a path
+// this CLI built out of argv, which is exactly what `configFailureMessage`'s syscall branch does
+// in group 0, and each is wrapped defensively so there is nothing for a row to forge.
 //
 // Where the census lines outside `cli.mjs` are driven. `reviews.mjs` holds six: the two
 // `reviewFileName` refusals (a lens, and a phase, with a path separator), the three `reviewStale`
