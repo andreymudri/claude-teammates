@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir, rename, lstat, readdir, unlink, open as openFile } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, rename, lstat, readdir, truncate, unlink, open as openFile } from 'node:fs/promises'
 import { constants as fsConstants } from 'node:fs'
 import { livenessRows, renderLiveness, hasStall, hasUnknown, DEFAULT_STALE_MINUTES } from './liveness.mjs'
 import path from 'node:path'
@@ -1967,6 +1967,41 @@ function tasksOfPhase(plan, phaseName) {
   return Number.isInteger(phaseNumber)
     ? (plan.tasks ?? []).filter((t) => t.phase === phaseNumber)
     : (plan.tasks ?? [])
+}
+
+// The component of the run's reviews path that is a symlink, or null when every one of them that
+// exists is a real entry. `lstat` reports only the FINAL component of a path, so asking it about
+// the reviews directory alone answers nothing about the directories above it: with
+// `.teammates/<run>` planted as a link to a directory the caller chose, `lstat(dir)` is a plain
+// directory, `mkdir` recursive builds `reviews/` inside the link's target, and every path built
+// from `dir` resolves through it — measured on this branch, the command exited 0 printing an
+// in-repo path while the bytes landed at `<root>/outside-the-run/reviews/results-1.json`.
+//
+// Three components, listed from the top down so the refusal names the outermost planted one:
+// `<root>/.teammates`, the run directory under it, and `reviews` under that. `path.dirname` of the
+// run directory rather than the literal `.teammates`, so this follows `runDir` if that layout ever
+// moves. A component that does not exist yet is nothing to plant through — whatever creates it
+// creates a real directory, since its parent has just been vetted.
+//
+// Nothing above `root` is checked. That is the same assumption every other path in this CLI makes:
+// the operator names the root, and a link on the way to it is theirs.
+//
+// A CHECK, NOT A LOCK. It is not atomic, and no Node API makes it so: there is no way to write
+// relative to an opened directory descriptor here, so a link planted between the last check and
+// the `rename` is still a window. What it closes is every stationary plant, and it is re-run
+// immediately before the write so that window is a few syscalls rather than a whole collection.
+async function plantedReviewsLink(root, runId, dir) {
+  const runPath = runDir(root, runId)
+  for (const component of [path.dirname(runPath), runPath, dir]) {
+    let info = null
+    try {
+      info = await lstat(component)
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err
+    }
+    if (info?.isSymbolicLink()) return component
+  }
+  return null
 }
 
 // Whether an omitted `--phase` is ambiguous for this run, and the refusal to print when it is.
@@ -4346,8 +4381,13 @@ export async function runCli(argv, io = { out: console.log }) {
     // reopen the hole. Clearing it up front also covers the exits no `return` can — a crash, a
     // kill, a timeout mid-collection — none of which can leave a superseded document behind.
     //
-    // `unlink` removes the LINK, never what it points at, so clearing a symlink an earlier round
-    // (or another teammate) left at this path destroys nothing on the other end of it.
+    // `unlink` removes the LINK, never what it points at, so a symlink an earlier round (or
+    // another teammate) left AT THE RESULTS PATH is cleared without touching the file on the other
+    // end of it. That is true of a link at that path and false of a link at the DIRECTORY above
+    // it, which is why the directory is vetted first: through a planted `reviews` link this
+    // removal deleted the victim directory's own `results-1.json` — measured on this branch,
+    // before the vet was moved ahead of it. The destructive half must not be the unguarded one:
+    // a refused write costs a round, a deletion costs the file.
     //
     // The name is `results-<phase>.json`, beside the findings files this round reads, and the
     // phase goes through `isUnsafePathComponent` — the predicate `reviewFileName` applies to each
@@ -4375,6 +4415,21 @@ export async function runCli(argv, io = { out: console.log }) {
       return 4
     }
     const resultsPath = path.join(dir, `results-${resultsName}.json`)
+
+    // The directory is resolved BEFORE the removal, not beside the write, because the removal is
+    // the half that cannot be undone.
+    let planted = null
+    try {
+      planted = await plantedReviewsLink(root, runId, dir)
+    } catch (err) {
+      io.out(`cannot vet the run's reviews directory at ${printable(dir)}: ${printable(err.message)}`)
+      return 4
+    }
+    if (planted) {
+      io.out(`${printable(planted)} is a symlink, and every component of ${printable(dir)} must be a real directory — refusing before anything is removed or written`)
+      return 4
+    }
+
     try {
       await unlink(resultsPath)
     } catch (err) {
@@ -4382,8 +4437,33 @@ export async function runCli(argv, io = { out: console.log }) {
       // document this command cannot account for, and leaving it in place would let it be read as
       // this round's answer.
       if (err.code !== 'ENOENT') {
-        io.out(`cannot clear the previous results file at ${resultsPath}: ${printable(err.message)} — a document from an earlier round must not survive this one`)
-        return 4
+        // EMPTIED WHERE IT CANNOT BE REMOVED, which is a real case and not a defensive one: in a
+        // `0555` reviews directory `unlink` fails EACCES while `truncate` succeeds, because
+        // removing an entry needs write permission on the DIRECTORY and emptying a file needs it
+        // on the FILE. Measured on this branch: without this fallback that round exited 4 with the
+        // superseded document still on disk saying `"status": "pass"`, and `gate --results` on
+        // it exited 0 with verdict PASS over a tree no reviewer had judged — the exact failure the
+        // up-front clear exists to prevent. A zero-byte file is fail-closed: the gate refuses it
+        // with `--results must be a readable JSON file`, measured in the same run.
+        //
+        // `lstat` first, and only a REGULAR FILE is emptied: `truncate` follows a symlink, so
+        // without this a plant at the results path would have its target emptied instead — the
+        // deletion-shaped version of the write hazard two blocks down.
+        let emptied = false
+        try {
+          if ((await lstat(resultsPath)).isFile()) {
+            await truncate(resultsPath, 0)
+            emptied = true
+          }
+        } catch { emptied = false }
+        if (!emptied) {
+          // Reports the OUTCOME rather than the norm. "must not survive this one" says what ought
+          // to happen and leaves the operator to infer the state; what they need to know is that
+          // the document is still there, at the path in this sentence, and that anything reading
+          // it will read a verdict this round did not reach.
+          io.out(`cannot clear or empty the previous results file at ${printable(resultsPath)}: ${printable(err.message)} — it is still on disk, still carrying an earlier round's verdict, and gate --results on it will read that verdict as this round's; remove it by hand before re-running`)
+          return 4
+        }
       }
     }
 
@@ -4534,8 +4614,14 @@ export async function runCli(argv, io = { out: console.log }) {
     //
     // `'wx'` on the temp for the same reason `writeOwnerMarker` uses it (see
     // scripts/merge-preview.mjs) — an entry already at the scratch name is refused, not followed.
-    // `'wx'` is wrong for the DESTINATION: `collect-reviews` legitimately re-runs, and an
-    // exclusive create there would refuse every round after the first.
+    // `'wx'` is wrong for the DESTINATION, and NOT for the reason that reads most naturally.
+    // "an exclusive create would refuse every round after the first" is false for this code: the
+    // unconditional clear above guarantees the destination is absent by the time the write runs,
+    // and a fixture collecting twice against the same run returned 0 both times with `'wx'`
+    // substituted at the destination — measured on this branch. What it would really break is the
+    // window this whole block exists for: a plant landing between the clear and the write turns
+    // `'wx'` into EEXIST, which fails a round whose collection had already succeeded. `rename`
+    // replaces that plant instead, which is the outcome the operator needs.
     //
     // Stated as UNCOVERED rather than as safe: no test here pins that `'wx'`, and removing it
     // alone leaves the suite green — measured. The scratch name carries this pid and a
@@ -4545,15 +4631,18 @@ export async function runCli(argv, io = { out: console.log }) {
     // nothing; do not read a green suite as evidence for it.
     let tmp = null
     try {
-      await mkdir(dir, { recursive: true })
-      // The fourth shape of the same hazard, and neither `rename` nor `'wx'` reaches it: with
-      // `reviews/` ITSELF a symlink, `mkdir` recursive is a no-op on it and every path built from
-      // `dir` resolves through it, so the document lands in whatever directory it points at while
-      // the printed path still says in-repo — measured on this branch. `lstat` reports the link
-      // rather than its target, which is what makes the difference visible here.
-      if ((await lstat(dir)).isSymbolicLink()) {
-        throw new Error(`${dir} is a symlink, and the run's reviews directory must be a real directory`)
+      // The shape neither `rename` nor `'wx'` reaches: a symlink anywhere on the way to the
+      // directory, where `mkdir` recursive is a no-op on the link and every path built from `dir`
+      // resolves through it, so the document lands wherever it points while the printed path still
+      // says in-repo. Re-checked here rather than trusted from the vet before the clear: that one
+      // ran before the whole collection, and this one runs immediately before the write, which is
+      // as close as this can be brought without an API for writing relative to an open directory.
+      // Checked BEFORE `mkdir`, so a planted chain has nothing created inside it.
+      const replanted = await plantedReviewsLink(root, runId, dir)
+      if (replanted) {
+        throw new Error(`${printable(replanted)} is a symlink, and every component of ${printable(dir)} must be a real directory`)
       }
+      await mkdir(dir, { recursive: true })
       tmp = `${resultsPath}.${process.pid}.${Math.floor(performance.now() * 1000)}.tmp`
       await writeFile(tmp, `${document}\n`, { encoding: 'utf8', flag: 'wx' })
       await rename(tmp, resultsPath)
@@ -4564,10 +4653,10 @@ export async function runCli(argv, io = { out: console.log }) {
       // looking for a path that does not exist. Wrapped for the reason `configFailureMessage`'s
       // syscall branch is: a Node fs error quotes the path this CLI built, and nothing that
       // reaches a terminal should carry bytes unfiltered.
-      io.out(`cannot write the results file at ${resultsPath}: ${printable(err.message)} — the results above are complete; redirect them to a file and pass that to gate --results`)
+      io.out(`cannot write the results file at ${printable(resultsPath)}: ${printable(err.message)} — the results above are complete; redirect them to a file and pass that to gate --results`)
       return 4
     }
-    io.out(`results written to ${resultsPath} — pass that path to gate --results`)
+    io.out(`results written to ${printable(resultsPath)} — pass that path to gate --results`)
     return 0
   }
 

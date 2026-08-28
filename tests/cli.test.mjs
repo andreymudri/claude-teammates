@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { chmod, lstat, mkdir, mkdtemp, readdir, rename, rm, stat, symlink, utimes, writeFile, readFile } from 'node:fs/promises'
-import { constants as fsConstants, readFileSync, symlinkSync } from 'node:fs'
+import { constants as fsConstants, readFileSync, renameSync, symlinkSync } from 'node:fs'
 import net from 'node:net'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -813,11 +813,18 @@ test('collect-reviews refuses to write its results file outside the run director
       // guard is left.
       phases: { [phase]: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: [] }] } },
     }), 'utf8')
+    // A REAL FILE at the path the traversal reaches, not an absence. Asserting ENOENT there pins
+    // the write half only: the clear runs first and builds its path from the same value, so with
+    // the vet moved below the unlink the whole suite stayed green — the unlink ENOENT'd on a path
+    // that did not exist and the later vet still returned 4 with this same sentence. With the file
+    // present, that ordering is what the assertion is about: the mutant deletes it.
+    const victim = path.join(root, '.teammates', 'pwned.json')
+    await writeFile(victim, 'not this command\'s file\n', 'utf8')
     lines.length = 0
     const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', phase, '--root', root], io)
     assert.equal(code, 4, lines.join('\n'))
     assert.match(lines.join('\n'), /no path separators/)
-    await assert.rejects(stat(path.join(root, '.teammates', 'pwned.json')), { code: 'ENOENT' })
+    assert.equal(await readFile(victim, 'utf8'), 'not this command\'s file\n')
   })
 })
 
@@ -908,22 +915,87 @@ test('collect-reviews does not follow a symlink planted between the clear and th
   })
 })
 
-// The fourth shape, which neither `rename` nor `'wx'` reaches: with the DIRECTORY a symlink, every
-// path built from it resolves through the link and `mkdir` recursive is a no-op on it, so the
-// document lands elsewhere while the printed path still says in-repo.
+// The shape neither `rename` nor `'wx'` reaches: a link on the way to the directory, where every
+// path built from it resolves through the link and `mkdir` recursive is a no-op on it.
 //
-// This is also where the write-failure contract is pinned: the results reach stdout in full
-// BEFORE the write is attempted, so a filesystem that refuses the file cannot discard a collection
-// that already succeeded. Write-first, that case exited 1 with a Node stack and an empty stdout.
-test('collect-reviews refuses a reviews directory that is a symlink, and still prints the results', NO_PLANTED_SYMLINK_ON_WIN32, async () => {
+// WHAT THIS TEST HOLDS IS THE ORDERING, not just the refusal. The command clears the previous
+// results file before it reads anything, so the vet has to come before the CLEAR and not merely
+// before the write: through a planted `reviews` link, the clear deleted the victim directory's own
+// `results-1.json` — measured, and that is what the surviving bait below pins. The destructive
+// half is the one that cannot be undone, so it is the one that must be guarded first.
+test('collect-reviews refuses a symlinked reviews directory before it removes anything', NO_PLANTED_SYMLINK_ON_WIN32, async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await stagedPhaseOneReviews(root, planPath, io, g)
+    const reviews = path.join(root, '.teammates', 'r1', 'reviews')
+    const victim = path.join(root, 'victim')
+    await rename(reviews, victim)
+    await symlink(victim, reviews)
+    // A file at exactly the name this command would clear, and one it has no business touching.
+    const bait = path.join(victim, 'results-1.json')
+    await writeFile(bait, '{"results":[{"name":"review","status":"pass"}]}\n', 'utf8')
+    await writeFile(path.join(victim, 'other.txt'), 'keep me\n', 'utf8')
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 4, lines.join('\n'))
+    assert.match(lines.join('\n'), /is a symlink, and every component of/)
+    // The whole point: the clear never ran through the link.
+    assert.match(await readFile(bait, 'utf8'), /"status": ?"pass"/)
+    assert.deepEqual((await readdir(victim)).sort(), ['1-correctness.json', '1-security.json', 'other.txt', 'results-1.json'])
+    // Refused before the findings were read, so no collection is reported beside it.
+    assert.doesNotMatch(lines.join('\n'), /"source"/)
+  })
+})
+
+// `lstat` answers about the FINAL component only, so a guard that asks it about the reviews
+// directory says nothing about the directories above. With the run directory itself planted, that
+// guard passed and the command exited 0 printing an in-repo path while the bytes landed under the
+// planted target — measured on this branch. The refusal must name the outermost planted component,
+// which is the one the operator has to go and look at.
+test('collect-reviews refuses a symlink one level above its reviews directory', NO_PLANTED_SYMLINK_ON_WIN32, async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await stagedPhaseOneReviews(root, planPath, io, g)
+    const runPath = path.join(root, '.teammates', 'r1')
+    const outside = path.join(root, 'outside-the-run')
+    await rename(runPath, outside)
+    await symlink(outside, runPath)
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 4, lines.join('\n'))
+    // The run directory, not the reviews directory below it: naming the wrong one sends the
+    // operator to a directory that is exactly what it appears to be.
+    assert.match(lines.join('\n'), new RegExp(`${runPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} is a symlink`))
+    await assert.rejects(stat(path.join(outside, 'reviews', 'results-1.json')), { code: 'ENOENT' })
+  })
+})
+
+// The write-failure contract, and the only fixture that still reaches it now that a planted
+// directory is refused up front: a link that arrives AFTER the vet, planted from `io.out` at the
+// moment the results are printed — the same seam, and the same threat, as the results-path plant
+// above. Two things are pinned at once. The directory is re-checked immediately before the write,
+// so the up-front vet is not left as the only one across a whole collection; and the results reach
+// stdout in full BEFORE the write is attempted, so a filesystem that refuses the file cannot
+// discard a collection that already succeeded — write-first, that case exited 1 with a Node stack
+// and an empty stdout.
+test('collect-reviews reports a reviews directory replanted after the vet, results already printed', NO_PLANTED_SYMLINK_ON_WIN32, async () => {
   await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await stagedPhaseOneReviews(root, planPath, io, g)
     const reviews = path.join(root, '.teammates', 'r1', 'reviews')
     const elsewhere = path.join(root, 'elsewhere')
-    await rename(reviews, elsewhere)
-    await symlink(elsewhere, reviews)
+    let planted = false
+    const racing = {
+      out: (t) => {
+        lines.push(t)
+        if (!planted && t.startsWith('{')) {
+          renameSync(reviews, elsewhere)
+          symlinkSync(elsewhere, reviews)
+          planted = true
+        }
+      },
+      err: () => {},
+    }
     lines.length = 0
-    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], racing)
+    assert.equal(planted, true, 'the fixture never planted: it pins nothing unless it did')
     assert.equal(code, 4, lines.join('\n'))
     const out = lines.join('\n').split('\n')
     assert.equal(out[0], '{', 'the collection must be printed before the write is tried')
@@ -972,18 +1044,98 @@ test('a failing round leaves no results file from the round before it', async ()
 })
 
 // The removal is what makes a present file mean "this round succeeded", so a removal that cannot
-// happen has to stop the round rather than be skipped. ENOENT is the ordinary case and must not
-// be confused with it; a directory at the path is a non-ENOENT failure with no permissions in it.
-test('collect-reviews refuses when the previous results file cannot be cleared', async () => {
+// happen has to stop the round rather than be skipped. ENOENT is the ordinary case and must not be
+// confused with it; a directory at the path is a non-ENOENT failure with no permissions in it, and
+// one the truncate fallback must not swallow either — a directory is not a regular file.
+test('collect-reviews refuses when the previous results file can be neither removed nor emptied', async () => {
   await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     const resultsPath = await stagedPhaseOneReviews(root, planPath, io, g)
     await mkdir(resultsPath)
     lines.length = 0
     const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
     assert.equal(code, 4, lines.join('\n'))
-    assert.match(lines.join('\n'), /cannot clear the previous results file/)
+    const out = lines.join('\n')
+    assert.match(out, /cannot clear or empty the previous results file/)
+    // The sentence has to report the STATE, not a norm: an operator who is told only that a
+    // document "must not survive" is not told that this one did.
+    assert.match(out, /still on disk/)
+    assert.match(out, /gate --results on it will read that verdict as this round's/)
     // Refused before the findings were read, so no collection is reported beside it.
-    assert.doesNotMatch(lines.join('\n'), /"status"/)
+    assert.doesNotMatch(out, /"status"/)
+  })
+})
+
+// A results file that cannot be REMOVED can still be EMPTIED, and the difference decides a gate
+// verdict. Removing an entry needs write permission on the directory; emptying a file needs it on
+// the file. Measured on this branch without the fallback: round two exited 4 on stale findings
+// while the superseded document stayed on disk saying `"status": "pass"`, and `gate --results` on
+// it returned verdict PASS over a tree no reviewer had judged.
+//
+// Skipped where the fixture cannot be built rather than where the mechanism is absent: win32 does
+// not enforce these mode bits, and root ignores them — in both cases `unlink` would succeed and
+// the fallback under test would never run, so the test would pass while pinning nothing.
+const NO_MODE_BITS_AS_ROOT_OR_WIN32 = {
+  skip: process.platform === 'win32' || (typeof process.getuid === 'function' && process.getuid() === 0),
+}
+
+test('a previous results file that cannot be removed is emptied instead of left saying pass', NO_MODE_BITS_AS_ROOT_OR_WIN32, async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const resultsPath = await stagedPhaseOneReviews(root, planPath, io, g)
+    const reviews = path.dirname(resultsPath)
+    lines.length = 0
+    assert.equal(await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io), 0, lines.join('\n'))
+    assert.equal(JSON.parse(await readFile(resultsPath, 'utf8')).results[0].status, 'pass')
+
+    g(['checkout', '--quiet', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 2\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'fix round'])
+    g(['checkout', '--quiet', 'run-branch'])
+
+    await chmod(reviews, 0o555)
+    try {
+      lines.length = 0
+      const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
+      assert.equal(code, 4, lines.join('\n'))
+      assert.match(lines.join('\n'), /stale findings/)
+      // Still present — the directory forbids removing it — but no longer a verdict.
+      assert.equal((await stat(resultsPath)).size, 0)
+      lines.length = 0
+      const gateCode = await runCli(
+        ['gate', '--run', 'r1', '--plan', planPath, '--phase', '1', '--results', resultsPath, '--root', root, '--no-fleet'],
+        io,
+      )
+      assert.equal(gateCode, 2, lines.join('\n'))
+      assert.doesNotMatch(lines.join('\n'), /"verdict": "PASS"/)
+    } finally {
+      await chmod(reviews, 0o755).catch(() => {})
+    }
+  })
+})
+
+// The fallback empties a regular file and nothing else: `truncate` follows a symlink, so a plant
+// at the results path in an undeletable directory would otherwise have its TARGET emptied — the
+// deletion-shaped version of the write hazard the rename closes.
+test('the empty-instead-of-remove fallback does not truncate through a planted symlink', {
+  skip: NO_MODE_BITS_AS_ROOT_OR_WIN32.skip || process.platform === 'win32',
+}, async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const resultsPath = await stagedPhaseOneReviews(root, planPath, io, g)
+    const reviews = path.dirname(resultsPath)
+    const bait = path.join(root, 'teammates.gate.json')
+    const before = await readFile(bait, 'utf8')
+    await symlink(bait, resultsPath)
+    await chmod(reviews, 0o555)
+    try {
+      lines.length = 0
+      const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
+      assert.equal(code, 4, lines.join('\n'))
+      assert.match(lines.join('\n'), /cannot clear or empty the previous results file/)
+      assert.equal(await readFile(bait, 'utf8'), before, 'the link target must not be emptied')
+      assert.ok((await lstat(resultsPath)).isSymbolicLink())
+    } finally {
+      await chmod(reviews, 0o755).catch(() => {})
+    }
   })
 })
 
