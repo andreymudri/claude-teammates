@@ -4393,8 +4393,11 @@ export async function runCli(argv, io = { out: console.log }) {
     // phase goes through `isUnsafePathComponent` — the predicate `reviewFileName` applies to each
     // of its own components — so a phase name that is not a safe filename is refused rather than
     // escaping the directory. Vetted HERE rather than beside the write, because this removal
-    // builds a path from the same value: unvetted, it would be a delete-anything primitive as
-    // readily as the write was a write-anything one. Refused with the 4 the `reviewFileName`
+    // builds a path from the same value: unvetted, it is a delete-anything primitive as readily as
+    // the write was a write-anything one. Measured, with this block moved below the unlink and a
+    // real file planted at `.teammates/pwned.json`: the command still exited 4 with this same
+    // sentence, and the file was gone. The refusal is not what the ordering buys — the ordering is
+    // what stops the deletion happening on the way to it. Refused with the 4 the `reviewFileName`
     // failure below returns, rather than a second code for the same flag on the same command.
     //
     // NOT redundant with that failure, which is the reading the lens loop invites: it fires once
