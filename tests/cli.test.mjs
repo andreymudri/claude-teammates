@@ -8764,7 +8764,7 @@ test('collect-reviews accepts findings stamped with the tips as they stand now',
     lines.length = 0
     const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
     assert.equal(code, 0)
-    assert.equal(JSON.parse(lines.join('\n')).results[0].status, 'pass')
+    assert.equal(collectedResults(lines).results[0].status, 'pass')
   })
 })
 
