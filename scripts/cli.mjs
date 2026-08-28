@@ -1405,8 +1405,33 @@ async function unlinkPreviewLinks(dir, depth = 0) {
 // to prove it is a genuine holder before its content is trusted at all, and a forged one must
 // never be able to force `live` in EITHER direction merely by existing.
 //
-//   - It must be a REGULAR FILE. A directory, a symlink, a fifo, a device — none of those is
-//     ever opened; `read` is only called on something `lstat` first confirmed is a plain file.
+// THAT LAST SENTENCE IS A CLAIM ABOUT A MECHANISM, so here is the mechanism, because a version of
+// this function held the sentence while an errno could get round it. Every candidate is vetted
+// EXACTLY ONCE, on one of two paths, and neither can be skipped by planting a particular shape:
+// `openHolderEntry` opens the entry and vets the DESCRIPTOR, and if the open fails for any reason
+// but ENOENT the caller vets the PATH with the same predicate and reads nothing. An entry nobody
+// can open — a socket, a mode-000 file — is therefore still judged, and judged by what it IS
+// rather than by which errno it produced. The one thing an unopenable entry can still buy its
+// planter is `unknown`, and only when it PASSES vetting, which means being a regular file owned
+// by the preview directory's own owner: the shape a legitimate holder has.
+//
+//   - It must be a REGULAR FILE. A directory, a symlink, a fifo, a socket, a device — none of
+//     those is ever READ. WHICH syscall rejects it varies by shape, and that matters to anyone
+//     tempted to simplify this, so it is measured rather than assumed. Opening each shape with
+//     this function's own flag word:
+//
+//       regular    open OK      isFile=true                 -> vetted, read
+//       directory  open OK      isDirectory=true            -> rejected by the fstat
+//       fifo       open OK      isFIFO=true                 -> rejected by the fstat
+//       symlink    open FAILS   ELOOP                       -> rejected by the fallback lstat
+//       mode 000   open FAILS   EACCES                      -> judged by the fallback lstat
+//       socket     open FAILS   ENXIO                       -> rejected by the fallback lstat
+//
+//     Two consequences worth spelling out. A directory and a fifo reach `fstat` alive, which is
+//     why the open must carry O_NONBLOCK: without it the fifo's open never returns and
+//     `prune-run` stops dead with no output. And the three that fail to open are judged anyway,
+//     by the fallback — which is the only reason "none of those is ever read" is a statement
+//     about every shape rather than only about the openable ones.
 //   - It must be owned by the SAME uid as the PREVIEW DIRECTORY, never by whoever is running
 //     this reaper. `sudo prune-run` is the one caller whose removal can actually succeed, and
 //     under it the reaper runs as uid 0 while the gate that legitimately holds the preview does
@@ -1415,10 +1440,17 @@ async function unlinkPreviewLinks(dir, depth = 0) {
 //     0 is an ordinary value here, not a sentinel for "unset": a preview a root-run gate created
 //     is legitimately claimed by uid 0 too, and the strict `!==` below honours that.
 //
-// Both checks read with the injectable `stat` below, which defaults to `lstat` — never a
-// symlink-following `stat` — because the ENTRY itself, not whatever it might point at, is what
-// a planted file can control, and `lstat` needs no read permission on the entry, only on the
-// directory that contains it, which is exactly the access an attacker planting a claim has.
+// Neither check ever uses a symlink-following `stat`: the ENTRY itself, not whatever it might
+// point at, is what a planted file can control. On the default path that is `fstat` on an
+// O_NOFOLLOW descriptor; where the open failed, and wherever a test injects `read`, it is the
+// injectable `stat` below, which defaults to `lstat`.
+//
+// The two are not interchangeable in one respect, and getting that backwards is how a hole got
+// in here. `lstat` needs no read permission on the entry, only search permission on the directory
+// containing it — so it answers about entries an `open` cannot touch at all. That was written as
+// a note about symlink safety while it was really the load-bearing reason the fallback above can
+// exist: an unreadable entry can still be judged, so an attacker cannot escape vetting by making
+// the thing unopenable.
 //
 // TWO LIMITS to the guarantee above, stated rather than left implicit:
 //   - Windows-void, and only the UID half of it. Node's fs reports uid 0 for every path on that
@@ -1555,11 +1587,32 @@ async function unlinkPreviewLinks(dir, depth = 0) {
 //     object now held open — and the read below comes from that same descriptor. A swap after
 //     this point renames the entry; it cannot reach through a descriptor that is already open.
 //
-// O_NOFOLLOW's refusal is ELOOP on Linux and EMLINK on macOS and the BSDs; the caller maps both
-// to IGNORED, because "this is a symlink" is the same answer `!isFile()` gave before and must not
-// become `unknown` — see the caller for why that direction matters.
+// This function REFUSES rather than classifies. Every failure it can produce — O_NOFOLLOW's
+// refusal of a symlink (ELOOP on Linux, EMLINK on macOS and the BSDs), EACCES, ENXIO, a
+// descriptor limit — is handed to the caller as a throw, and the caller vets the path instead of
+// reading the errno. That division is deliberate: an errno says why THIS process could not open
+// the entry, never what the entry IS, and only the second question decides between ignoring a
+// candidate and calling it unknown.
+// The flag word for that open, or `null` when this platform's `fs.constants` does not carry both
+// flags — which is the whole point of computing it in one place rather than inlining the OR.
+//
+// `fs.constants` is platform-conditional, which is checkable here and is checked: `O_SYMLINK` is
+// `undefined` on Linux, so the object plainly does not carry every name on every platform. A
+// missing name is `undefined`, and `undefined | undefined` is `0` — so an inlined OR of two
+// absent flags does not fail, it silently opens with O_RDONLY alone: symlinks followed again,
+// no non-blocking guarantee, and vetting that has gone blind without saying so.
+//
+// UNVERIFIED, and stated as such: that the two names are specifically the ones missing on win32.
+// No leg of this suite runs on that platform, so nothing here proves it. The guard does not
+// depend on the claim being true — it triggers on the constants actually present at runtime,
+// wherever that happens to be — and its consequence is stated at the call site.
+export function fusedHolderOpenFlags(c = fsConstants) {
+  if (typeof c.O_NOFOLLOW !== 'number' || typeof c.O_NONBLOCK !== 'number') return null
+  return c.O_RDONLY | c.O_NONBLOCK | c.O_NOFOLLOW
+}
+
 async function openHolderEntry(p) {
-  const handle = await openFile(p, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK | fsConstants.O_NOFOLLOW)
+  const handle = await openFile(p, fusedHolderOpenFlags())
   try {
     return {
       info: await handle.stat(),
@@ -1590,14 +1643,63 @@ export async function livePreviewPaths(previewPaths, {
   // Signal 0 sends nothing: it only asks whether the pid can be signalled at all.
   probe = (pid) => process.kill(pid, 0),
 } = {}) {
-  const openHolder = read === null
-    ? openHolderEntry
-    : async (p) => ({ info: await stat(p), read: () => read(p), close: () => {} })
+  // Three implementations, and which one is in play is the one thing a reader has to know.
+  //
+  //   - The fused open, which is production on any platform whose `fs.constants` carries both
+  //     flags.
+  //   - By path — `lstat`, then `readFile` — on a platform whose constants do not, because the
+  //     alternative is refusing to open anything there and never reaping a preview at all. That
+  //     loses the atomicity, which that platform cannot offer in the first place, and keeps the
+  //     behaviour the fork point had. Unreachable on this suite's platforms.
+  //   - The stand-in a test selects by injecting `read`, which is by path for the same reason a
+  //     double cannot hand out a file descriptor. It reproduces the bookkeeping below faithfully
+  //     and the atomicity not at all, so anything about OPEN FAILURE has to be pinned against the
+  //     fused default with nothing injected.
+  const byPathHolder = async (p) => ({ info: await stat(p), read: () => readFile(p, 'utf8'), close: () => {} })
+  const openHolder = read !== null
+    ? async (p) => ({ info: await stat(p), read: () => read(p), close: () => {} })
+    : (fusedHolderOpenFlags() === null ? byPathHolder : openHolderEntry)
 
   // ONE candidate entry — a marker or a claim — resolved to exactly one of four answers. Naming
   // them is the point: IGNORED and UNKNOWN are the two the rest of this function must never
   // conflate, because a candidate that fails vetting contributes nothing at all while one that
   // cannot be read contributes `unknown`, and `unknown` means live.
+  // AN ENTRY THAT COULD NOT BE OPENED IS STILL VETTED, on the path, with the SAME predicate.
+  //
+  // Fusing the vetting into the open put the vetting behind something an attacker controls: an
+  // entry this process cannot open is an entry it never vetted, and calling that `unknown` makes
+  // it live. Measured against the fork point, two entries any local user can plant in a 1777 temp
+  // root went from ignored to live that way — a unix socket at a claim name, which open(2) refuses
+  // with ENXIO, and a claim-named regular file chmod 000, which it refuses with EACCES. Either one
+  // makes a preview unreapable forever, which is precisely the denial-of-cleanup the vetting
+  // exists to prevent, reached through the adjacent door.
+  //
+  // Mapping those errnos to `ignored` instead would be worse than the hole. This process's OWN
+  // marker, mode 000, is also EACCES — a legitimate holder's record that cannot be read — and
+  // ignoring it would reap a preview whose owner is alive. The errno cannot decide this; only the
+  // predicate can. So: fall back to `lstat`, which succeeds on entries that cannot be opened, and
+  // ask the same question.
+  //
+  //   predicate REJECTS                  -> ignored   (wrong type or wrong owner, as before)
+  //   predicate ACCEPTS, open failed      -> unknown   (a real holder we cannot read; stay live)
+  //   the lstat is ENOENT                 -> missing
+  //   the lstat fails any other way       -> unknown
+  //
+  // The fallback READS NOTHING, so it reopens no race: a successful open is still vetted on the
+  // descriptor, and this path only decides between ignoring an entry and admitting it is
+  // unreadable. There is no ELOOP or EMLINK arm any more, and none is wanted — a symlink lands
+  // here, its `lstat` says it is not a regular file, and it is ignored by the same rule as
+  // everything else rather than by a second one that could drift from it.
+  const vetWithoutOpening = async (p, accept) => {
+    let info
+    try {
+      info = await stat(p)
+    } catch (err) {
+      return err?.code === 'ENOENT' ? 'missing' : 'unknown'
+    }
+    return accept(info) ? 'unknown' : 'ignored'
+  }
+
   const holderAt = async (p, accept) => {
     let handle
     try {
@@ -1605,12 +1707,7 @@ export async function livePreviewPaths(previewPaths, {
     } catch (err) {
       // ENOENT is the one answer that positively means "not there".
       if (err?.code === 'ENOENT') return 'missing'
-      // O_NOFOLLOW's refusal of a symlink: ELOOP on Linux, EMLINK on macOS and the BSDs. That is
-      // the entry failing to be a regular file, so it is IGNORED. Calling it `unknown` would let
-      // any local user make a preview permanently unreapable by planting one symlink — the
-      // denial-of-cleanup this vetting exists to prevent, arrived at from the other side.
-      if (err?.code === 'ELOOP' || err?.code === 'EMLINK') return 'ignored'
-      return 'unknown'
+      return vetWithoutOpening(p, accept)
     }
     try {
       if (!accept(handle.info)) return 'ignored'
@@ -1770,8 +1867,11 @@ export async function livePreviewPaths(previewPaths, {
       const claimNames = names.filter((name) => name.startsWith(prefix))
       if (claimNames.length > 0) {
         // A claim SHARES THE MARKER'S SHAPE EXACTLY — a sibling entry under a prefix any local
-        // user can guess, vetted and then read — so it gets the same fused open, and the same
-        // ELOOP/EMLINK-is-ignored mapping, for the same reasons.
+        // user can guess, vetted and then read — so it goes through the same `holderAt`, with the
+        // same fused open and the same vet-the-path-when-the-open-failed fallback, for the same
+        // reasons. The claim side is where that fallback was measured: a socket and a mode-000
+        // file, both planted at claim names, were the two entries that went from ignored to live
+        // without it.
         //
         // `ownerUid` was resolved once at the top of this iteration, so the value that vetted the
         // marker vets every claim here and the two cannot disagree about who owns this preview.

@@ -1,6 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readdir, rename, rm, stat, symlink, utimes, writeFile, readFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, mkdtemp, readdir, rename, rm, stat, symlink, utimes, writeFile, readFile } from 'node:fs/promises'
+import { constants as fsConstants } from 'node:fs'
+import net from 'node:net'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -11,6 +13,7 @@ import {
   promptSafeDirectories,
   isMissingPreviewRoot,
   livePreviewPaths,
+  fusedHolderOpenFlags,
   newestMtime,
   MAX_WALK_ENTRIES,
   REQUIRED,
@@ -9611,6 +9614,126 @@ test('a real regular-file marker naming a live pid is still read through the fus
   } finally {
     await rm(scratch, { recursive: true, force: true })
   }
+})
+
+// ---------------------------------------------------------------------------
+// AN ENTRY THAT CANNOT BE OPENED IS STILL VETTED.
+//
+// None of these may inject `read`: doing so selects the by-path stand-in, which lstats and never
+// opens, so it is STRUCTURALLY BLIND to every divergence below — it cannot tell an open failure
+// from anything else because it never opens. Everything here runs against the fused default.
+//
+// `stat` IS injected in two of them, and only to answer for the preview DIRECTORY. A claim owned
+// by somebody other than the preview's owner cannot be staged from one account, and the run this
+// suite belongs to forbids reaching for a second one. Giving the directory a synthetic uid asks
+// the same question — the comparison under test is directory-owner-versus-entry, never
+// reader-versus-entry — while leaving the candidate entries entirely real, which is the half that
+// has to be real for these to mean anything.
+// ---------------------------------------------------------------------------
+
+// The preview directory, per its double, is owned by nobody this process is. Every real entry
+// planted below is therefore a foreign-owned candidate.
+const foreignOwnerOf = (dir) => async (p) => (
+  p === dir ? { uid: FOREIGN_UID, isFile: () => false } : lstat(p)
+)
+
+// A UNIX SOCKET at a claim name: open(2) refuses it with ENXIO, and `lstat` says it is a socket.
+// Judged by what it IS, it is not a regular file, so it is IGNORED. Judged by its errno it would
+// be `unknown`, and `unknown` means live — which is a preview no one can ever reap, produced by
+// planting one socket. Node unlinks a unix socket path on `close`, so the server stays listening
+// across the call: closing it during setup would leave ENOENT and this test would pass while
+// measuring nothing.
+test('a unix socket planted at a claim name is ignored, not treated as unknown', NO_FIFO_ON_WIN32, async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'tm-preview-socket-'))
+  const preview = path.join(scratch, 'preview')
+  await mkdir(preview)
+  const server = net.createServer()
+  try {
+    await writeFile(previewOwnerMarkerPath(preview), `${deadPid()}\n`, 'utf8')
+    await new Promise((resolve, reject) => {
+      server.listen(previewClaimPath(preview, 4242), resolve)
+      server.on('error', reject)
+    })
+    const live = await livePreviewPaths([preview])
+    assert.equal(live.has(preview), false)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
+// THE DECISIVE PAIR. Same planted claim, same live pid, one chmod apart: mode 0644 is refused by
+// the uid comparison on the descriptor, and mode 0000 cannot be opened at all and must be refused
+// by the same comparison on the path. Without the fallback the second one is `unknown` and the
+// preview is live forever — any local user can read a `tm-preview-XXXXXX` name out of a
+// world-readable temp root, plant a claim name, chmod it away, and the preview is never reaped.
+// Running both in one test is what makes it a control: if vetting were dropped altogether both
+// would be live, and if it were reached only on the openable path only the second would be.
+test('a foreign-owned claim is ignored whether or not it can be opened', NO_FIFO_ON_WIN32, async () => {
+  for (const mode of [0o644, 0o000]) {
+    const scratch = await mkdtemp(path.join(tmpdir(), 'tm-preview-foreign-mode-'))
+    const preview = path.join(scratch, 'preview')
+    await mkdir(preview)
+    try {
+      await writeFile(previewOwnerMarkerPath(preview), `${deadPid()}\n`, 'utf8')
+      const claim = previewClaimPath(preview, process.pid)
+      // Names a pid that really is running, so nothing but the vetting can reject it.
+      await writeFile(claim, `${process.pid}\n`, 'utf8')
+      await chmod(claim, mode)
+      const live = await livePreviewPaths([preview], { stat: foreignOwnerOf(preview) })
+      assert.equal(live.has(preview), false, `mode ${mode.toString(8)} must not force live`)
+    } finally {
+      await rm(scratch, { recursive: true, force: true })
+    }
+  }
+})
+
+// THE OTHER DIRECTION, and the reason the errno cannot be allowed to decide. This marker is a
+// regular file owned by the preview directory's own owner — a legitimate holder's record —
+// naming a pid that is alive, and it simply cannot be read. That is `unknown`, and `unknown` is
+// live. A fix that mapped EACCES to `ignored` would pass every test above and reap a preview with
+// its owner still working in it, which is the destructive direction this whole function exists to
+// refuse.
+test('an unreadable marker this process owns still leaves the preview live', NO_FIFO_ON_WIN32, async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'tm-preview-own-000-'))
+  const preview = path.join(scratch, 'preview')
+  await mkdir(preview)
+  const marker = previewOwnerMarkerPath(preview)
+  try {
+    await writeFile(marker, `${process.pid}\n`, 'utf8')
+    await chmod(marker, 0o000)
+    const live = await livePreviewPaths([preview])
+    assert.equal(live.has(preview), true, 'a holder that cannot be ruled out is a holder')
+  } finally {
+    await chmod(marker, 0o644).catch(() => {})
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
+// The flag word is computed in one place so that a platform missing either constant can be
+// DETECTED rather than silently ORed into 0. That collapse is the whole hazard: `undefined |
+// undefined` is 0, so an inlined OR of two absent flags opens with O_RDONLY alone — following
+// symlinks, with no non-blocking guarantee — and the vetting goes blind without failing.
+//
+// Pinned against synthetic constants objects, because this platform's real one carries both flags
+// and cannot exercise the guard. That `fs.constants` is platform-conditional at all is checkable
+// here and is checked below. Which names are missing on win32 specifically is NOT verified by
+// anything in this suite, which runs on no such platform; the guard does not rest on that, since
+// it tests the constants actually present at runtime.
+test('the fused open refuses to build a flag word from constants it does not have', () => {
+  const full = { O_RDONLY: 0, O_NONBLOCK: 2048, O_NOFOLLOW: 131072 }
+  assert.equal(fusedHolderOpenFlags(full), 0 | 2048 | 131072)
+  // Either one missing is a refusal, not a narrower flag word.
+  assert.equal(fusedHolderOpenFlags({ O_RDONLY: 0, O_NONBLOCK: 2048 }), null)
+  assert.equal(fusedHolderOpenFlags({ O_RDONLY: 0, O_NOFOLLOW: 131072 }), null)
+  assert.equal(fusedHolderOpenFlags({ O_RDONLY: 0 }), null)
+  // The collapse this guard exists to prevent, stated as the arithmetic it is.
+  assert.equal(undefined | undefined, 0)
+  // `fs.constants` really does vary by platform, so a guard on presence is not theoretical:
+  // O_SYMLINK is a macOS flag and is absent here.
+  assert.equal(typeof fsConstants.O_SYMLINK, process.platform === 'darwin' ? 'number' : 'undefined')
+  // And this platform does carry both, so the fused open is what the tests above exercised.
+  assert.equal(typeof fusedHolderOpenFlags(), 'number')
 })
 
 // The trailing dot in `previewClaimPrefix` is load-bearing (see scripts/merge-preview.mjs for
