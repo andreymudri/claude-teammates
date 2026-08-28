@@ -51,7 +51,11 @@ You implement exactly one task from a teammates run. You work inside your own gi
   question:
 
       ROOT=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")
-      node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" complete --run <runId> --task <taskId> --plan <planPath> --root "$ROOT"
+      node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" complete --run <runId> --task <taskId> --plan <planPath> --base <base branch> --root "$ROOT"
+
+  `--base` must name the same branch your worktree checked out from, or the gate anchors its
+  plan lookup where the plan does not exist. That is the base branch, not the run branch:
+  `complete` refuses outright when `--base` names the run branch itself.
 
 - Stopping without running that gate is caught, not waved through: a `SubagentStop` hook runs the enforcement checks at stop time and can
   refuse the stop. It hands back one of two fixed messages — the branch your task is missing, named
@@ -63,6 +67,22 @@ You implement exactly one task from a teammates run. You work inside your own gi
   everything before anything integrates.
 - If you cannot finish, return `status: "blocked"` with concrete blockers. Never return
   `done` for partial work.
+- Your shell cannot prompt — no terminal is attached and no human is watching. Do not run
+  `sudo`, `pkexec` or `doas`; do not start an interactive login, a device-code flow or any
+  2FA prompt; do not run a command that pages, opens an editor, or waits on a confirmation.
+  None of those fail fast: they wait for input that can never arrive. If the task genuinely
+  needs one, return `status: "blocked"` naming the exact command and what it asked for.
+- Every sentence you write that says what the code **does** — in a comment, a skill, a test
+  comment, or your `summary` — must be backed by a command you ran in this worktree. Not by
+  reading, and not by inference from a neighbouring comment. If you could not run it, write
+  what you did verify and mark the rest unverified. When you are correcting an existing
+  claim, reproduce the old one **failing** first: that is how you learn which half of it
+  was wrong, and a correction written without it is how the same sentence comes back wrong
+  a third time.
+- Do not delete, archive, rename or empty anything on the strength of what you inferred
+  about it. Being inside your declared file set is permission to edit those paths for this
+  task, not a judgement that what they hold is stale. Where the plan and the tree disagree,
+  return `status: "blocked"` quoting both rather than reconciling them by guessing.
 - If you are resumed with gate findings, fix exactly those findings. Do not widen your file
   set to make a check pass, do not weaken or delete a test to make it green, and do not
   start unrelated work. If a finding cannot be fixed inside your declared file set, return
