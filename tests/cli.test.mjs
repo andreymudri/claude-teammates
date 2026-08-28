@@ -1300,11 +1300,20 @@ test('the empty-instead-of-remove fallback does not destroy an inode with anothe
 
 // The platform guard on that open, pinned as a pure function because no fixture can remove a
 // constant from `fs.constants`. `undefined` in a bitwise OR is 0, so an inlined flag word would
-// silently degrade to a plain `O_WRONLY` — opening through the very link it looks like it refuses.
-test('emptyResultsOpenFlags refuses to build a flag word without O_NOFOLLOW', () => {
+// silently degrade to a plain `O_WRONLY` — opening through the very link it looks like it refuses,
+// and parking on the FIFO it looks like it rejects.
+//
+// BOTH names are required, one per hazard, and the O_NONBLOCK half is here because it shipped
+// missing: this function cited `fusedHolderOpenFlags` as its precedent while dropping the flag
+// that precedent's own header calls the difference between a hung command and a rejected entry.
+// The row for a word carrying only O_NOFOLLOW is that regression, spelled out.
+test('emptyResultsOpenFlags refuses a flag word missing either guard', () => {
   assert.equal(emptyResultsOpenFlags({ O_WRONLY: 1 }), null)
-  assert.equal(emptyResultsOpenFlags({ O_WRONLY: 1, O_NOFOLLOW: 'no' }), null)
-  assert.equal(emptyResultsOpenFlags({ O_WRONLY: 1, O_NOFOLLOW: 0x20000 }), 1 | 0x20000)
+  assert.equal(emptyResultsOpenFlags({ O_WRONLY: 1, O_NOFOLLOW: 'no', O_NONBLOCK: 0x800 }), null)
+  // The shipped regression: O_NOFOLLOW alone is not a usable word.
+  assert.equal(emptyResultsOpenFlags({ O_WRONLY: 1, O_NOFOLLOW: 0x20000 }), null)
+  assert.equal(emptyResultsOpenFlags({ O_WRONLY: 1, O_NONBLOCK: 0x800 }), null)
+  assert.equal(emptyResultsOpenFlags({ O_WRONLY: 1, O_NONBLOCK: 0x800, O_NOFOLLOW: 0x20000 }), 1 | 0x800 | 0x20000)
 })
 
 // An agent check with an empty lens list reads no findings file at all, and `collectReviewResults`
@@ -1360,10 +1369,17 @@ test('review-dispatch refuses an omitted --phase when the plan has more than one
   })
 })
 
-// A valueless `--phase` names no phase, so it is the omission in another spelling. `--phase` is
-// not in this command's REQUIRED list, so nothing upstream rejects the bare flag: without the
-// `=== true` arm it parses as `true`, reads as "a phase was given", and widens exactly as an
-// omitted flag would.
+// A valueless `--phase` names no phase the operator chose, and `--phase` is not in this command's
+// REQUIRED list, so nothing upstream rejects the bare flag: without the `=== true` arm it parses
+// as `true` and reads as "a phase was given".
+//
+// It does NOT then widen — that is what this comment claimed, and it is backwards. `Number(true)`
+// is 1, so `tasksOfPhase` NARROWS to plan phase 1 and the stamp carries the phase name `"true"`.
+// Measured with the refusal forced off, on the two-phase fixture: valueless selected `[T1]` with
+// stamp phase `"true"`, omitted selected `[T1, T2]` with phase `"default"`, and `--phase 1`
+// selected `[T1]`. So a bare flag silently reviews phase 1 under a phase name no manifest key
+// matches, whatever the operator meant — a different wrong answer from the omitted flag's, and
+// refused for the same reason: nobody chose it.
 test('collect-reviews refuses a valueless --phase the same way it refuses an omitted one', async () => {
   await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await withStampedPhase(root, planPath, io, g)

@@ -1625,15 +1625,61 @@ export function fusedHolderOpenFlags(c = fsConstants) {
   return c.O_RDONLY | c.O_NONBLOCK | c.O_NOFOLLOW
 }
 
+// A findings file read through a DESCRIPTOR that cannot park, or by path where this platform
+// cannot express that. `readFile` on a path opens blocking, and a FIFO planted at
+// `<phase>-<lens>.json` parks that open forever: measured on this branch, `collect-reviews` never
+// returned — killed at 20s, empty stdout, no exit code. This is the easier of the two FIFO doors,
+// with no permission precondition at all, because the reviews directory is where reviewers are
+// told to write and this loop opens whatever it finds under the manifest's lens names. It is the
+// one defect here that predates this task: the same `readFile` sits at the fork point, so it is
+// fixed rather than introduced.
+//
+// `fusedHolderOpenFlags` is exactly the right word — O_RDONLY|O_NONBLOCK|O_NOFOLLOW — and this is
+// the third caller of the rule it encodes. `stat` on the descriptor, not the path, so what is read
+// is what was vetted; anything that is not a regular file is refused, and the caller records it as
+// unreadable, which is the outcome a FIFO or a directory deserves and is never "no findings".
+//
+// A symlinked findings file is now refused rather than followed. That is a deliberate narrowing —
+// nothing this project writes creates one, and the class this command distrusts is exactly the
+// entries it did not create itself.
+async function readFindingsFile(file) {
+  const flags = fusedHolderOpenFlags()
+  // No such flag word on this platform: the historical path-based read, stated rather than hidden,
+  // for the reason `livePreviewPaths` gives at its own fallback.
+  if (flags === null) return readFile(file, 'utf8')
+  const handle = await openFile(file, flags)
+  try {
+    const info = await handle.stat()
+    if (!info.isFile()) {
+      throw Object.assign(new Error(`${file} is not a regular file`), { code: 'ENOTREGULAR' })
+    }
+    return await handle.readFile('utf8')
+  } finally {
+    await handle.close().catch(() => {})
+  }
+}
+
 // The flag word for emptying a results file in place, or `null` when this platform's
-// `fs.constants` does not carry O_NOFOLLOW — the same shape, and the same reason, as
+// `fs.constants` does not carry BOTH names — the same shape, and the same two reasons, as
 // `fusedHolderOpenFlags` above: a missing name is `undefined`, `O_WRONLY | undefined` is
 // `O_WRONLY`, and an inlined OR would quietly open through a symlink while looking like it
 // refused one. The caller treats `null` as "cannot empty safely" and refuses, rather than
 // emptying blind.
+//
+// O_NONBLOCK IS NOT OPTIONAL HERE, and leaving it out is how this function first shipped — citing
+// the precedent above while dropping the flag that precedent exists for, whose own header calls it
+// "the difference between a hung `prune-run` and a rejected entry". Measured on this branch: with
+// a FIFO at the results path and the `0555` directory this fallback is reached through,
+// `collect-reviews` never returned — killed at 20s with an empty stdout and no exit code, where
+// the same fixture with a regular file answers 4 in milliseconds. Isolated to the one flag:
+// `O_WRONLY|O_NOFOLLOW` on a FIFO stayed blocked past 5s, and adding O_NONBLOCK returns ENXIO at
+// once, which the caller already reports as a reason it could not empty the file.
+//
+// A FIFO is the only shape that parks the call: a directory and a socket refuse promptly, and
+// O_NOFOLLOW refuses a symlink to a device node before it can open one.
 export function emptyResultsOpenFlags(c = fsConstants) {
-  if (typeof c.O_NOFOLLOW !== 'number') return null
-  return c.O_WRONLY | c.O_NOFOLLOW
+  if (typeof c.O_NOFOLLOW !== 'number' || typeof c.O_NONBLOCK !== 'number') return null
+  return c.O_WRONLY | c.O_NONBLOCK | c.O_NOFOLLOW
 }
 
 async function openHolderEntry(p) {
@@ -2021,12 +2067,24 @@ function tasksOfPhase(plan, phaseName) {
 // A CHECK, NOT A LOCK, and narrower than it looks. It is not atomic, and no Node API makes it so:
 // there is no way to write relative to an opened directory descriptor here, so a link planted
 // between the last check and the `rename` is still a window, and so is one planted between this
-// check and the descriptor the clear opens. It sees LINKS only: `lstat` reports a bind mount as an
-// ordinary directory, so a mount planted over any component passes this walk and lands the write
-// wherever the mount points. Untested — staging one needs `mount`, which needs a privilege this
-// worktree does not have — and stated rather than implied away. What it closes is every stationary
-// symlink, and it is re-run immediately before the write so that window is a few syscalls rather
-// than a whole collection.
+// check and the descriptor the clear opens.
+//
+// It sees LINKS only, and a BIND MOUNT is not a link. Staged in this worktree under `unshare -Urm`
+// and confirmed: `mount --bind` over the reviews directory left `lstat` reporting
+// `isSymbolicLink=false isDirectory=true`, this function answered null, and the write landed in
+// the victim tree. `realpath` does not help either — a bind mount resolves to the path it is
+// mounted at, not to its source — so closing this would mean reading `/proc/self/mountinfo`, which
+// exists on one platform of the three this suite targets. Left open, pinned by the test that
+// stages it, and stated as the boundary of what this walk promises.
+//
+// An earlier version of this paragraph said staging one "needs a privilege this worktree does not
+// have". That was asserted, not attempted: `unshare -Urm` returns 0 here. The rule that produced
+// the error is worth more than the correction — an environment wall is a measurement like any
+// other, and claiming one without running the command is the same defect as any other unbacked
+// claim.
+//
+// What it closes is every stationary symlink, and it is re-run immediately before the write so
+// that window is a few syscalls rather than a whole collection.
 export async function plantedReviewsLink(root, dir) {
   const rel = path.relative(root, dir)
   if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
@@ -4376,46 +4434,9 @@ export async function runCli(argv, io = { out: console.log }) {
   }
 
   if (command === 'collect-reviews') {
-    // Refused before the manifest, for the reason given at the same call in `review-dispatch`:
-    // collecting under the widened default records a pass over branches this phase never reviewed.
-    const ambiguous = await ambiguousPhaseRefusal(root, runId, flags, command)
-    if (ambiguous) { io.out(ambiguous); return 2 }
-
-    const config = await resolveGateConfig(root, io)
-    if (config === GATE_CONFIG_REJECTED) return 2
-    // 4, matching `complete`: this cannot verify what it was asked about. Inferring a manifest
-    // here would invent the lens list, which is the one thing this command must not guess —
-    // the lens list is what decides whether a review is complete.
-    if (!config) { io.out('no gate manifest — cannot tell which lenses were dispatched'); return 4 }
-
+    // `--phase` names the manifest key and comes off argv alone, so it is resolved here rather
+    // than after the manifest: everything below needs it, starting with the clear.
     const phaseName = flags.phase ?? 'default'
-    const checks = checksForPhase(config, phaseName)
-    const agentChecks = checks.filter((c) => kindOf(c) === 'agent')
-    if (agentChecks.length !== 1) {
-      io.out(`this phase declares ${agentChecks.length} agent checks; collect-reviews handles exactly one`)
-      return 4
-    }
-    const check = agentChecks[0]
-
-    // AN AGENT CHECK WITH NO LENS COLLECTS NOTHING, and a pass over nothing is the outcome this
-    // whole command exists to refuse. `checksForPhase` substitutes the manifest's lens list only
-    // for a check that OMITS one; an explicit `"lens": []` is kept, the read loop below runs zero
-    // times, and `collectReviewResults` reports a clean pass because no lens is missing. Measured
-    // on this branch before this refusal: exit 0, `0 finding(s), none blocking, recovered from the
-    // reviewers' findings files`, with no findings file opened at all — and the results file was
-    // written and advertised, so `gate --results` on it returned verdict PASS over a tree no
-    // reviewer had judged.
-    //
-    // The pass COMPUTATION predates this task — the fork point prints the same document on stdout
-    // — but persisting it is what makes it reusable, and it contradicts this command's own
-    // contract that a results file exists only where a round succeeded. Refused at the COLLECTION
-    // rather than at the write, because the document is wrong wherever it goes: a reader of that
-    // stdout is as misled as a reader of the file. 4, matching every other "this cannot be
-    // verified" answer here.
-    if (Array.isArray(check.lens) && check.lens.length === 0) {
-      io.out(`the agent check ${printable(check.name ?? 'review')} declares an empty lens list, so no review was dispatched for this phase and there is nothing to collect — a pass over zero lenses is not a review`)
-      return 4
-    }
 
     const dir = path.join(runDir(root, runId), 'reviews')
 
@@ -4438,10 +4459,20 @@ export async function runCli(argv, io = { out: console.log }) {
     // anything else that reads it, whereas removing it makes its EXISTENCE the claim — a results
     // file is present only when the round that wrote it succeeded.
     //
-    // Removed HERE, before the findings are read, rather than on each failing exit: this command
-    // has nine paths that return 4 after this point, and a tenth added later would silently
-    // reopen the hole. Clearing it up front also covers the exits no `return` can — a crash, a
-    // kill, a timeout mid-collection — none of which can leave a superseded document behind.
+    // Removed HERE — before the manifest is resolved, before the phase is matched to a check,
+    // before the findings are read — rather than on each failing exit. "Before the findings are
+    // read" was too weak, and the gap it left was measured: a round that refused at the empty-lens
+    // check, or at the agent-check count, returned 4 with the previous round's `"status": "pass"`
+    // still on disk, and `gate --results` on that file exited 0 with verdict PASS over a tree that
+    // round had refused to judge. Five refusals sat above it.
+    //
+    // The property is positional, so it is stated positionally, and it is checkable by reading
+    // rather than by counting: NO `return` in this command sits above this block, and the only
+    // three inside it are the guards below that decide whether the removal may happen at all —
+    // they cannot be moved after the thing they guard. Every other exit, all fifteen of them, is
+    // downstream. A count of the paths downstream was true and useless, which is what the earlier
+    // version of this sentence was: what mattered was the paths UPSTREAM. Clearing here also
+    // covers the exits no `return` can: a crash, a kill, a timeout mid-collection.
     //
     // `unlink` removes the LINK, never what it points at, so a symlink an earlier round (or
     // another teammate) left AT THE RESULTS PATH is cleared without touching the file on the other
@@ -4523,13 +4554,21 @@ export async function runCli(argv, io = { out: console.log }) {
         // project at zero bytes, with nothing in the output naming it. `st_nlink` was never
         // consulted.
         //
-        // So: open with O_WRONLY|O_NOFOLLOW, `fstat` the DESCRIPTOR, require a regular file with
-        // exactly one link, and `ftruncate` that same descriptor. This is the pattern
-        // `openHolderEntry` above already uses, against the same class of plant; there was no
-        // reason this site did not reach for it first. It closes four things the path-based
-        // version could not: a symlink (refused by the open), a hard link (nlink), a directory
-        // (EISDIR from the open), and the race between the check and the destruction, which were
-        // two syscalls on a path and are now one object held open.
+        // So: open with the O_WRONLY|O_NONBLOCK|O_NOFOLLOW word above, `fstat` the DESCRIPTOR,
+        // require a regular file with exactly one link, and `ftruncate` that same descriptor. This
+        // is the pattern `openHolderEntry` uses, against the same class of plant; there was no
+        // reason this site did not reach for it first.
+        //
+        // WHAT IT ACTUALLY BUYS, measured by substituting the old `lstat`-then-`truncate` body
+        // back in: exactly one hazard changes hands — the HARD LINK, which `isFile()` cannot see.
+        // The symlink and the directory were already refused by the old body (`lstat` reports the
+        // link, so `isFile()` is false and `truncate` was never called; a directory failed the
+        // same test), and with the old body the symlink test still passes and the directory case
+        // still refuses with the same exit and sentence. The earlier version of this comment
+        // claimed four, counting two the check it replaced already covered. Two further properties
+        // come with the descriptor and are NOT pinned by any test here: the check and the
+        // destruction are now one object rather than two syscalls on a path, so nothing can be
+        // swapped in between, and O_NONBLOCK is what stops a FIFO parking the call.
         let emptied = false
         let emptyErr = null
         const flags = emptyResultsOpenFlags()
@@ -4574,6 +4613,47 @@ export async function runCli(argv, io = { out: console.log }) {
       }
     }
 
+    // Refused before the manifest, for the reason given at the same call in `review-dispatch`:
+    // collecting under the widened default records a pass over branches this phase never reviewed.
+    const ambiguous = await ambiguousPhaseRefusal(root, runId, flags, command)
+    if (ambiguous) { io.out(ambiguous); return 2 }
+
+    const config = await resolveGateConfig(root, io)
+    if (config === GATE_CONFIG_REJECTED) return 2
+    // 4, matching `complete`: this cannot verify what it was asked about. Inferring a manifest
+    // here would invent the lens list, which is the one thing this command must not guess —
+    // the lens list is what decides whether a review is complete.
+    if (!config) { io.out('no gate manifest — cannot tell which lenses were dispatched'); return 4 }
+
+    const checks = checksForPhase(config, phaseName)
+    const agentChecks = checks.filter((c) => kindOf(c) === 'agent')
+    if (agentChecks.length !== 1) {
+      io.out(`this phase declares ${agentChecks.length} agent checks; collect-reviews handles exactly one`)
+      return 4
+    }
+    const check = agentChecks[0]
+
+    // AN AGENT CHECK WITH NO LENS COLLECTS NOTHING, and a pass over nothing is the outcome this
+    // whole command exists to refuse. `checksForPhase` substitutes the manifest's lens list only
+    // for a check that OMITS one; an explicit `"lens": []` is kept, the read loop below runs zero
+    // times, and `collectReviewResults` reports a clean pass because no lens is missing. Measured
+    // on this branch before this refusal: exit 0, `0 finding(s), none blocking, recovered from the
+    // reviewers' findings files`, with no findings file opened at all — and the results file was
+    // written and advertised, so `gate --results` on it returned verdict PASS over a tree no
+    // reviewer had judged.
+    //
+    // The pass COMPUTATION predates this task — the fork point prints the same document on stdout
+    // — but persisting it is what makes it reusable, and it contradicts this command's own
+    // contract that a results file exists only where a round succeeded. Refused at the COLLECTION
+    // rather than at the write, because the document is wrong wherever it goes: a reader of that
+    // stdout is as misled as a reader of the file. 4, matching every other "this cannot be
+    // verified" answer here.
+    if (Array.isArray(check.lens) && check.lens.length === 0) {
+      io.out(`the agent check ${printable(check.name ?? 'review')} declares an empty lens list, so no review was dispatched for this phase and there is nothing to collect — a pass over zero lenses is not a review`)
+      return 4
+    }
+
+
     const files = []
     const unreadable = []
     for (const lens of check.lens) {
@@ -4585,7 +4665,7 @@ export async function runCli(argv, io = { out: console.log }) {
         return 4
       }
       try {
-        const parsed = JSON.parse(await readFile(path.join(dir, name), 'utf8'))
+        const parsed = JSON.parse(await readFindingsFile(path.join(dir, name)))
         // A reviewer returns an array of findings; the file it writes may carry that array
         // directly or wrap it. Both are accepted, and anything else is unreadable rather than
         // an empty review — the distinction this whole command exists to preserve.
