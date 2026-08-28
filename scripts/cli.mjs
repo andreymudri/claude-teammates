@@ -1631,8 +1631,8 @@ export function fusedHolderOpenFlags(c = fsConstants) {
 // returned — killed at 20s, empty stdout, no exit code. This is the easier of the two FIFO doors,
 // with no permission precondition at all, because the reviews directory is where reviewers are
 // told to write and this loop opens whatever it finds under the manifest's lens names. It is the
-// one defect here that predates this task: the same `readFile` sits at the fork point, so it is
-// fixed rather than introduced.
+// one defect here that is not new: `git show master:scripts/cli.mjs` carries the same path-based
+// `readFile` at this site, so this is a fix rather than a regression introduced beside it.
 //
 // `fusedHolderOpenFlags` is exactly the right word — O_RDONLY|O_NONBLOCK|O_NOFOLLOW — and this is
 // the third caller of the rule it encodes. `stat` on the descriptor, not the path, so what is read
@@ -4685,9 +4685,10 @@ export async function runCli(argv, io = { out: console.log }) {
     // written and advertised, so `gate --results` on it returned verdict PASS over a tree no
     // reviewer had judged.
     //
-    // The pass COMPUTATION predates this task — the fork point prints the same document on stdout
-    // — but persisting it is what makes it reusable, and it contradicts this command's own
-    // contract that a results file exists only where a round succeeded. Refused at the COLLECTION
+    // The pass COMPUTATION is not new — `git show master:scripts/cli.mjs` prints the same document
+    // on stdout for the same manifest — but persisting it is what makes it reusable, and it
+    // contradicts this command's own contract that a results file exists only where a round
+    // succeeded. Refused at the COLLECTION
     // rather than at the write, because the document is wrong wherever it goes: a reader of that
     // stdout is as misled as a reader of the file. 4, matching every other "this cannot be
     // verified" answer here.
@@ -4742,9 +4743,9 @@ export async function runCli(argv, io = { out: console.log }) {
     // round moves a branch, and findings about the old tree are not findings about this one —
     // during run `codemap` that was worked around three times by deleting the files by hand
     // between rounds.
-    // The same `readState` rethrow one command down, and PRE-EXISTING: the fork point crashes
-    // identically on a `plan.json` that is not JSON — measured, exit 1 with an empty stdout on
-    // both, where this branch's only contribution is that the clear has already run by then.
+    // The same `readState` rethrow one command down, and PRE-EXISTING: `master` crashes identically
+    // on a `plan.json` that is not JSON — measured, exit 1 with an empty stdout on both, where this
+    // branch's only contribution is that the clear has already run by then.
     // Folded into the refusal below rather than left to throw, because "no plan" and "a plan this
     // cannot read" put the operator in the same position: nothing here says which tips were
     // judged.
