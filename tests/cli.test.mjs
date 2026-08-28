@@ -3447,13 +3447,20 @@ test('prune-run --yes is not fooled by a tag on the run branch planted while the
   })
 })
 
-// The other arm of the same guard, and it is live rather than defensive. `--abbrev-ref HEAD`
-// answers the literal string `HEAD` on a detached HEAD, `refs/heads/HEAD` is not a ref, and
-// `resolveRef` rejects it — so `namedSha` is null and the comparison fails on the null side. The
-// three-ref test below never reaches this: its plant makes `refs/heads/refs/heads/run-branch` a
-// real ref, so `namedSha` is a sha there and the null branch of the ternary is never taken.
-// Without this fixture, both the `not a ref at all` wording and failing closed on an
-// unresolvable name could be deleted with the whole suite green.
+// The other arm of the same guard, and it is live rather than defensive. `currentBranch` answers
+// the literal string `HEAD` on a detached HEAD — `git symbolic-ref --quiet HEAD` exits 1 silently
+// and the null is mapped to that string, its preserved contract — `refs/heads/HEAD` is not a ref,
+// and `resolveRef` rejects it, so `namedSha` is null and the comparison fails on the null side.
+// The three-ref test below never reaches this: its plant makes `refs/heads/refs/heads/run-branch`
+// a real ref, and in any case the name no longer resolves through it at all.
+//
+// WHAT THIS FIXTURE ACTUALLY PINS IS THE MESSAGE REGEX, and only that. Measured by mutating the
+// `.catch(() => null)` in `derive` to `.catch(() => headSha)`, which removes the null arm
+// entirely: all three behavioural assertions below still passed — the branch survived, the
+// worktree survived, and the exit code was still 4 — and the run still printed `cannot decide
+// what is prunable`, because `resolveRef`'s own rejection then propagates from further
+// downstream. Only the regex told the two apart. So relaxing it to `/cannot decide what is
+// prunable/` would leave a fixture that passes with the null arm deleted; do not weaken it.
 test('prune-run refuses to act on a detached HEAD rather than deriving from an unresolvable name', async () => {
   await withRepo(async (ctx) => {
     const { root, io, lines, git: g } = ctx
@@ -3469,14 +3476,14 @@ test('prune-run refuses to act on a detached HEAD rather than deriving from an u
   })
 })
 
-// The run branch's own NAME is abbreviation-derived — `git rev-parse --abbrev-ref HEAD` shortens
-// only as far as stays unambiguous — so three ordinary refs, all creatable by an unprivileged
-// teammate in its own worktree, make it answer `refs/heads/run-branch`; the CLI then prefixes
-// `refs/heads/` again and reads the sha out of a ref the planter owns. The enabling defect
-// predates this task, and a stray tag on its own already fails closed. What is new is that this
-// command now runs `git branch -D` on the strength of that sha, so the name is cross-checked
-// against HEAD before anything is derived from it.
-test('prune-run refuses to act when the branch name git abbreviates HEAD to does not resolve back to HEAD', async () => {
+// The regression test for the closure. The three refs below are the whole plant that used to
+// redirect the run branch: they are ordinary, an unprivileged teammate can create all three in its
+// own worktree, and they still defeat `git rev-parse --abbrev-ref HEAD` — which is why the
+// assertion that the plant is REAL comes first. What changed is the resolution the CLI uses:
+// `currentBranch` reads `git symbolic-ref --quiet HEAD`, which abbreviates nothing, so the name
+// comes off the ref HEAD literally points at and the planted ref is never consulted. The run
+// therefore proceeds against the real run branch instead of failing closed against a planted one.
+test('the three-ref plant no longer redirects the run branch: prune-run resolves the real one', async () => {
   await withRepo(async (ctx) => {
     const { root, io, lines, git: g } = ctx
     await stagePrunableRun(ctx, { merged: false })
@@ -3488,20 +3495,24 @@ test('prune-run refuses to act when the branch name git abbreviates HEAD to does
     // 3. the ref that name lands on once `refs/heads/` is prefixed, holding a commit of the
     //    planter's choosing — here T1's own unmerged tip, which would make T1 look contained.
     g(['update-ref', 'refs/heads/refs/heads/run-branch', tip])
-    assert.equal(g(['rev-parse', '--abbrev-ref', 'HEAD']).trim(), 'refs/heads/run-branch', 'the plant really did redirect the name')
+    // The plant is real and still defeats the OLD resolution. Without this the test could pass
+    // against a repository where the three ref writes silently did nothing.
+    assert.equal(g(['rev-parse', '--abbrev-ref', 'HEAD']).trim(), 'refs/heads/run-branch', 'the plant really did redirect the abbreviated name')
     lines.length = 0
     const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
+    assert.equal(code, 0)
+    // Proceeds against the REAL run branch. Had the planted ref been read, T1's tip would have
+    // been contained in it trivially and the branch would have been deleted; against the real run
+    // branch, `merged: false` leaves T1 uncontained and it survives.
     assert.equal(hasBranch(root, 'teammates/r1/T1'), true)
-    assert.equal(hasWorktree(root, 'a1'), true)
-    // Fails closed WITH A STATED REASON, and that is what this pins. Measured with the
-    // cross-check disabled, this fixture does not lose the branch: the phase gate rejects it
-    // downstream, because a fileset check computed against a run branch nothing was merged into
-    // finds nothing landed, so no phase passes and nothing is prunable. The run then exits 0
-    // saying "nothing to prune" — a silent pass on a repository whose run branch is a ref the
-    // planter chose. This guard is the layer that says so instead, ahead of a downstream refusal
-    // that only holds while the planted sha happens to be one the gate dislikes.
-    assert.equal(code, 4)
-    assert.match(lines.join('\n'), /cannot decide what is prunable: HEAD is [0-9a-f]{40}, but refs\/heads\/refs\/heads\/run-branch/)
+    assert.match(lines.join('\n'), /left teammates\/r1\/T1 in place/)
+    assert.doesNotMatch(lines.join('\n'), /deleted teammates\/r1\/T1/)
+    // The worktree really was pruned, so the deletion arm really was reached — without this the
+    // assertions above would also hold on a run that pruned nothing at all.
+    assert.equal(hasWorktree(root, 'a1'), false)
+    // The planted ref still holds exactly what it was given, so the run demonstrably neither read
+    // it nor wrote through it.
+    assert.equal(g(['rev-parse', 'refs/heads/refs/heads/run-branch']).trim(), tip, 'the planted ref was left untouched')
   })
 })
 
