@@ -538,6 +538,17 @@ async function withStampedPhase(root, planPath, io, g) {
   return (lens) => ({ phase: '1', lens, branches: [`teammates/r1/T1@${sha}`] })
 }
 
+// `collect-reviews` stdout is the results JSON and then the line naming the file it wrote, so a
+// test after the object has to stop at the closing brace rather than parse the whole capture.
+// The brace is found as the LAST line that is exactly `}`: `JSON.stringify(…, null, 2)` indents
+// every nested close, so only the document's own final line can be a bare one.
+function collectedResults(lines) {
+  const out = lines.join('\n').split('\n')
+  const close = out.lastIndexOf('}')
+  assert.ok(close >= 0, `no results object on stdout: ${lines.join('\n')}`)
+  return JSON.parse(out.slice(0, close + 1).join('\n'))
+}
+
 test('collect-reviews turns the reviewers’ findings files into a gate results file', async () => {
   await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     const stampFor = await withStampedPhase(root, planPath, io, g)
@@ -554,7 +565,7 @@ test('collect-reviews turns the reviewers’ findings files into a gate results 
     lines.length = 0
     const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
     assert.equal(code, 0)
-    const parsed = JSON.parse(lines.join('\n'))
+    const parsed = collectedResults(lines)
     assert.equal(parsed.results[0].status, 'fail')
     assert.equal(parsed.results[0].source, 'file')
     assert.equal(parsed.results[0].findings[0].lens, 'security')
@@ -705,7 +716,7 @@ test('collect-reviews carries unprobed claims through to the emitted check outpu
     lines.length = 0
     const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
     assert.equal(code, 0)
-    const parsed = JSON.parse(lines.join('\n'))
+    const parsed = collectedResults(lines)
     assert.equal(parsed.results[0].status, 'pass')
     assert.match(parsed.results[0].output, /2/)
     assert.match(parsed.results[0].output, /not reached/i)
@@ -725,6 +736,134 @@ test('collect-reviews reports a findings file that is not readable JSON instead 
     const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
     assert.equal(code, 4)
     assert.match(lines.join('\n'), /1-correctness\.json/)
+  })
+})
+
+// --- the results file, and the phase that has to be named -------------------------------------
+
+const REVIEW_MANIFEST = {
+  lens: ['correctness', 'security'],
+  phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', blockOn: ['high'] }] } },
+}
+
+// The whole point of writing the file: `gate --results` takes a PATH, and this command's only
+// output used to be stdout — so the operator had to know to redirect it, and the review check sat
+// pending when they did not.
+test('collect-reviews writes its results file as well as printing them', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const stampFor = await withStampedPhase(root, planPath, io, g)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(REVIEW_MANIFEST), 'utf8')
+    await writeReviewFile(root, 'r1', '1-correctness.json', { stamp: stampFor('correctness'), findings: [] })
+    await writeReviewFile(root, 'r1', '1-security.json', { stamp: stampFor('security'), findings: [] })
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 0, lines.join('\n'))
+
+    const written = path.join(root, '.teammates', 'r1', 'reviews', 'results-1.json')
+    const onDisk = JSON.parse(await readFile(written, 'utf8'))
+    // Asserted before the comparison below, because `deepEqual` between two objects that both
+    // lack `results` would hold and pin nothing — the shape is what the next command reads.
+    assert.ok(Array.isArray(onDisk.results), `no results array in ${written}: ${JSON.stringify(onDisk)}`)
+    assert.equal(onDisk.results.length, 1)
+    assert.equal(onDisk.results[0].source, 'file')
+    assert.deepEqual(onDisk, collectedResults(lines))
+    // The path is printed so the operator can pass it on without constructing it.
+    assert.ok(lines.join('\n').includes(written), lines.join('\n'))
+  })
+})
+
+// stdout stays JSON-first, and the path line is the only thing after it. The `> results.json`
+// redirect an operator may already have is NOT preserved by that — the redirect captures the path
+// line too, and `gate --results` JSON.parses the whole file — which is why the file this command
+// now writes itself is the path to pass on. Measured on this branch: with the capture redirected,
+// `gate --results` exits 2 on `--results must be a readable JSON file`.
+test('collect-reviews prints the JSON first, and the path it wrote after the closing brace', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const stampFor = await withStampedPhase(root, planPath, io, g)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(REVIEW_MANIFEST), 'utf8')
+    await writeReviewFile(root, 'r1', '1-correctness.json', { stamp: stampFor('correctness'), findings: [] })
+    await writeReviewFile(root, 'r1', '1-security.json', { stamp: stampFor('security'), findings: [] })
+    lines.length = 0
+    assert.equal(await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io), 0)
+
+    const out = lines.join('\n').split('\n')
+    assert.equal(out[0], '{')
+    const close = out.lastIndexOf('}')
+    assert.ok(close > 0, lines.join('\n'))
+    assert.match(out[close + 1], /results-1\.json/)
+    assert.equal(out.length, close + 2, `nothing may follow the path line: ${lines.join('\n')}`)
+  })
+})
+
+// `tasksOfPhase` reads a non-integer phase name as EVERY task branch of the run, so the `default`
+// this flag used to fall back to silently widens a multi-phase run's review to branches that were
+// integrated rounds ago. 2 rather than 4: this is a rejected invocation, not a failure to verify.
+test('collect-reviews refuses an omitted --phase when the plan has more than one phase', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await withStampedPhase(root, planPath, io, g)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(REVIEW_MANIFEST), 'utf8')
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--root', root], io)
+    assert.equal(code, 2, lines.join('\n'))
+    const out = lines.join('\n')
+    assert.match(out, /--phase/)
+    // The numbers to choose between, so the refusal is actionable without reading the plan.
+    assert.match(out, /1, 2/)
+  })
+})
+
+test('review-dispatch refuses an omitted --phase when the plan has more than one phase', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await withStampedPhase(root, planPath, io, g)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(REVIEW_MANIFEST), 'utf8')
+    lines.length = 0
+    const code = await runCli(['review-dispatch', '--run', 'r1', '--root', root], io)
+    assert.equal(code, 2, lines.join('\n'))
+    const out = lines.join('\n')
+    assert.match(out, /--phase/)
+    assert.match(out, /1, 2/)
+    // The spec must not have been emitted beside the refusal.
+    assert.doesNotMatch(out, /"reviewers"/)
+  })
+})
+
+// A plan with one phase has nothing for the flag to disambiguate, and the pair above would be
+// satisfied just as well by refusing always — this is what makes them assertions about ambiguity.
+const SINGLE_PHASE_PLAN = `### Task 1: A
+
+**Files:**
+- Create: \`a.mjs\`
+`
+
+test('an omitted --phase is still accepted on a single-phase plan', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await writeFile(planPath, SINGLE_PHASE_PLAN, 'utf8')
+    g(['add', 'plan.md'])
+    g(['commit', '--quiet', '-m', 'single-phase plan'])
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const plan = JSON.parse(await readFile(path.join(root, '.teammates', 'r1', 'plan.json'), 'utf8'))
+    assert.deepEqual([...new Set(plan.tasks.map((t) => t.phase))], [1], 'the fixture must have one phase')
+
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    const sha = g(['rev-parse', 'refs/heads/teammates/r1/T1']).trim()
+    // The manifest key `--phase` falls back to, which is what the findings files are named for.
+    const stampFor = (lens) => ({ phase: 'default', lens, branches: [`teammates/r1/T1@${sha}`] })
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(REVIEW_MANIFEST), 'utf8')
+    await writeReviewFile(root, 'r1', 'default-correctness.json', { stamp: stampFor('correctness'), findings: [] })
+    await writeReviewFile(root, 'r1', 'default-security.json', { stamp: stampFor('security'), findings: [] })
+
+    lines.length = 0
+    assert.equal(await runCli(['review-dispatch', '--run', 'r1', '--root', root], io), 0, lines.join('\n'))
+    lines.length = 0
+    assert.equal(await runCli(['collect-reviews', '--run', 'r1', '--root', root], io), 0, lines.join('\n'))
+    const written = path.join(root, '.teammates', 'r1', 'reviews', 'results-default.json')
+    const onDisk = JSON.parse(await readFile(written, 'utf8'))
+    assert.ok(Array.isArray(onDisk.results), `no results array in ${written}: ${JSON.stringify(onDisk)}`)
+    assert.equal(onDisk.results.length, 1)
   })
 })
 
