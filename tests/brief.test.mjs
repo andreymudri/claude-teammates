@@ -809,17 +809,51 @@ test('the brief quotes the run-branch/base-branch collision marker scripts/cli.m
   // own `brief` command reads `flags.base === true ? '' : (flags.base ?? '')` with no
   // resolveBaseBranch fallback (cli.mjs:2411), so `cli.mjs brief` with no --base renders a
   // complete line that omits the flag entirely, while the collision this row describes is still
-  // reachable through complete's own derived default. Reproduced by mutation: wording the row as
-  // "the --base value in this invocation named your own run branch" passed every assertion above
-  // (the marker, "dispatch error" and "nothing in your worktree produced it" are all still
-  // there) while being false in exactly that no-flag rendering — this is the assertion that
-  // catches it. Checked on both a with-base and a no-base brief because the row's own text is
-  // unconditional prose and must read the same in either.
+  // reachable through complete's own derived default.
+  //
+  // A round-3 fix here ruled out one presupposing phrasing by excluding the literal substring
+  // 'the --base value in this'. That pins a WORDING, not the row: rewording lines 208-212 to a
+  // DIFFERENT presupposing form — "the --base flag shown in the command above names your own
+  // run branch" — still passed, because it contains neither the excluded substring nor any word
+  // the earlier assertions require absent, while being just as false in the no-flag rendering.
+  // Verbatim-pinning the row closes the class instead of one phrasing, the same instrument this
+  // file already uses for SCOPE_ENVIRONMENT_CLAIM_LINES and for the identical reason.
+  //
+  // Lines 208-212 are fully static — no interpolation of task.id, runId, planPath or baseBranch,
+  // unlike the fallback clause pinned by line-anchor last round, which sits among lines that DO
+  // interpolate those and so could not be pinned whole. Checked here, not assumed: read straight
+  // off scripts/brief.mjs, there is no `+` concatenation or `${...}` anywhere in these five
+  // lines. That is what makes a full verbatim pin possible rather than another anchor.
+  //
+  // The literal below is retyped by hand, not derived by calling anything in scripts/brief.mjs.
+  // Deriving "expected" from the code under test is the tautology round 2 caught on this exact
+  // task, and a verbatim pin is precisely where the temptation returns.
+  const COLLISION_ROW_LINES = [
+    '             "the run branch and the base branch are both" — the base this run resolved to',
+    '                (an explicit --base above, or complete\'s own derived default when none is',
+    '                shown) is the same as your own run branch. That is a dispatch error: the',
+    '                collision existed before this brief was ever composed. Report it and',
+    '                proceed; nothing in your worktree produced it.',
+  ]
+  const expectedCollisionRow = COLLISION_ROW_LINES.join('\n')
+  const rowStartMarker = 'Nothing on your branch can change it, so do not try to make it pass.\n'
+  const rowEndMarker = '\n             "no gate manifest"'
+
+  // Checked on both a with-base and a no-base brief, because the row's own text is unconditional
+  // prose that must read the same in either — the round-3 defect was reachable only in the
+  // no-base rendering, where the with-base check alone would have stayed green.
   for (const brief of [composeBrief(FULL), composeBrief({ ...FULL, baseBranch: '' })]) {
     const noBaseRows = exitRows(brief)
-    assert.ok(
-      !noBaseRows.get(cannotVerify).includes('the --base value in this'),
-      'the collision row still presupposes an explicit --base flag is present in this invocation',
+    const row = noBaseRows.get(cannotVerify)
+    const startAt = row.indexOf(rowStartMarker)
+    assert.notEqual(startAt, -1, 'the "could not run:" bullet that precedes the collision row was not found')
+    const start = startAt + rowStartMarker.length
+    const end = row.indexOf(rowEndMarker)
+    assert.notEqual(end, -1, 'the "no gate manifest" bullet that follows the collision row was not found')
+    assert.equal(
+      row.slice(start, end),
+      expectedCollisionRow,
+      'the collision row no longer matches the expected text verbatim — a wording change, however phrased, must fail here',
     )
   }
 })
