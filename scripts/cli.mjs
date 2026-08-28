@@ -920,9 +920,20 @@ async function planAtAnchor(root, planPath, flags, io) {
   const git = createGit({ cwd: root })
   let anchorSha
   try {
-    const runBranch = await git.currentBranch()
+    // THE SHARED CLASSIFIER, for the same reason `derive` uses it: this reads the plan every
+    // teammate is briefed from, and it does not go through `derive`, so it inherits none of that
+    // command's refusals. It guarded only the detached case for one round, and that was a genuine
+    // regression against the tree before this task — with `ref: refs/mine/rb` written straight
+    // into `.git/HEAD` (a plain file write, which no pseudo-ref guard sees), `brief` and
+    // `workflow` exited 0 and emitted dispatches whose `## Global Constraints` came from an anchor
+    // of the planter's choosing, with a real constraint silently absent. Measured: the merge base
+    // exits 2 in the identical state, so this had to refuse it too.
+    const head = await git.headBranch()
+    if (!head.ok) {
+      throw new GitError(`${head.reason} — there is no run branch to read the plan from; check out the run branch and re-run`)
+    }
     const baseBranch = await resolveBaseBranch(git, flags.base)
-    const runSha = await git.resolveRef(`refs/heads/${runBranch}`)
+    const runSha = await git.resolveRef(head.ref)
     const baseSha = await git.resolveRef(`refs/heads/${baseBranch}`)
     anchorSha = await git.mergeBase(baseSha, runSha)
     // `git show <sha>:<path>` takes a repo-relative path and rejects an absolute one, but
@@ -1966,63 +1977,53 @@ async function resolveBranchShas(git, tasks, runId) {
   return branchShas
 }
 
-async function derive(root, runId, flags) {
-  const git = createGit({ cwd: root })
-  const runBranch = await git.currentBranch()
-  // THE NAME HAS TO ROUND-TRIP. `currentBranch` is `git rev-parse --abbrev-ref HEAD`, which
-  // shortens only as far as stays UNAMBIGUOUS — the same rule that makes `%(refname:short)`
-  // unusable. Plant a tag named like the run branch and it answers `heads/<name>`; add a branch
-  // literally named `heads/<name>` and it answers `refs/heads/<name>`. Every caller here then
-  // prefixes `refs/heads/`, so that last one resolves `refs/heads/refs/heads/<name>` — a ref an
-  // unprivileged teammate can create in its own worktree and thereby choose the sha this whole
-  // run treats as the run branch. All three refs are ordinary; none needs a foothold.
-  //
-  // In normal operation HEAD IS `refs/heads/<current branch>`, so this compares equal and never
-  // fires. Under a plant left at a DIFFERENT sha it does fire, and everything downstream fails
-  // closed — which matters most for `prune-run --yes`, where the run branch is the entire proof
-  // behind a `git branch -D`.
-  //
-  // WHAT IT IS, STATED AT ITS REAL WIDTH: a DERIVE-TIME ROUND-TRIP CHECK, and nothing more. It
-  // is NOT "the sha half, closed". It asks one question at one instant — does the ref that
-  // abbreviated name lands on hold HEAD's sha right now — and every consumer afterwards re-reads
-  // that ref by the same name. Park the planted `refs/heads/refs/heads/<name>` AT HEAD's sha and
-  // this compares equal and never fires; move it afterwards, from a command check minutes later,
-  // and every later resolution follows the attacker. Reproduced end to end against this tree:
-  // `prune-run --yes` printed `deleted teammates/r1/T1 (9df69ac…), which refs/heads/run-branch
-  // (9df69ac…) contains`, exited 0, and the deleted tip was reachable from the REAL run branch
-  // by nothing.
-  //
-  // And parking at HEAD costs the attacker NOTHING, so do not read this as a maintenance burden
-  // on them: the plant does not have to be a sha at all. `git symbolic-ref refs/heads/refs/heads/
-  // <name> refs/heads/<name>` makes it TRACK the run branch, and `git rev-parse --verify
-  // --end-of-options`, which is what `resolveRef` runs, FOLLOWS a symref — so the comparison
-  // below returns equal forever, through any number of integration merges. Verified in a
-  // throwaway repository: the planted ref answered HEAD's sha before and after two commits moved
-  // HEAD. Detaching it later is `git symbolic-ref -d … && git update-ref … <victim tip>`, which
-  // is the same one line in a check that the bypass needed before this guard existed. So what
-  // this rules out is the naive create-at-the-victim-tip form and nothing more.
-  //
-  // The only thing that does is resolving HEAD SYMBOLICALLY, `git symbolic-ref --quiet HEAD`, so
-  // the name never passes through git's abbreviation rules at all. That is a helper in
-  // scripts/git.mjs, a different file, and it is a recorded carry-over. See the residual list at
-  // the branch deletion in `prune-run` for the same statement where the damage happens.
-  const headSha = await git.headSha()
-  const namedSha = await git.resolveRef(`refs/heads/${runBranch}`).catch(() => null)
-  if (namedSha !== headSha) {
+// `deps.git` is a TEST SEAM and nothing else — every production caller passes three arguments and
+// gets a git built here. It exists because the round-trip refusal below could not otherwise be
+// pinned at its CALL SITE: with the run branch resolved from HEAD's own ref, the two shas can
+// disagree only if the branch moves between two subprocesses, which no in-process fixture can
+// stage, so `if (disagreement) throw` could be deleted with the whole suite green. The helper's
+// arms were pinned as a pure function; the wiring was not. Injecting git is the smallest seam that
+// covers both, and it is exported for the same reason.
+export async function derive(root, runId, flags, deps = {}) {
+  const git = deps.git ?? createGit({ cwd: root })
+  // THE REF, NOT THE NAME, is what everything destructive downstream is given. `currentBranchRef`
+  // is `git symbolic-ref --quiet HEAD` (scripts/git.mjs), so this is the ref HEAD literally points
+  // at, never a name abbreviated toward it: no tag, no `heads/<name>` branch and no
+  // `refs/heads/refs/heads/<name>` changes what it resolves. `runBranch` below is derived FROM it
+  // for display and for the ordinary name comparisons, and `ctx.runBranchRef` is what
+  // `prune-run` resolves at the `git branch -D`.
+  // THE SHARED CLASSIFIER, not a conditional of this function's own. `headBranch` is the single
+  // place that decides what HEAD has to be (scripts/git.mjs); every other run-branch consumer asks
+  // the same question through the same call, which is what keeps them from drifting apart the way
+  // they did for three rounds. What is local to `derive` is only the CONSEQUENCE: a throw, because
+  // everything downstream of here verifies or removes something.
+  const head = await git.headBranch()
+  if (!head.ok) {
     throw new Error(
-      `HEAD is ${headSha}, but refs/heads/${printable(runBranch)} — the branch name git abbreviates HEAD to —`
-      + ` is ${namedSha === null ? 'not a ref at all' : namedSha}.`
-      // Two reachable causes, and the remedy differs, so neither is asserted as the diagnosis.
-      // `headSha` and `resolveRef` are two subprocesses: an ordinary concurrent commit or merge
-      // on the run branch between them produces exactly this disagreement and is not an attack.
-      // A detached HEAD reaches it too, by way of `--abbrev-ref` answering `HEAD`.
-      + ' The reported name therefore does not identify the branch HEAD is on. Either something'
-      + ' moved the branch while this was reading it — an integrator merging concurrently, or a'
-      + ' HEAD that is detached or mid-rebase — in which case settle the repository and re-run;'
-      + ' or a tag, or a branch named `heads/…`, is shadowing the run branch, in which case remove'
-      + ' that ref. Nothing is verified or removed against a run branch that cannot be named.',
+      `${head.reason}${head.kind === 'detached' ? ` (HEAD is ${await git.headSha()})` : ''}.`
+      + ' Check out the run branch and re-run. Nothing is verified or removed against a HEAD that'
+      + ' does not name a branch: the name such a state yields is either invented or the whole ref'
+      + ' string, and prefixing refs/heads/ onto either lands on a ref anyone with a worktree can'
+      + ' create and point at a commit of their choosing.',
     )
   }
+  const runBranchRef = head.ref
+  const runBranch = head.name
+  // The two-subprocess race, and ONLY that. `headSha` and `resolveRef` are separate git
+  // invocations, so a commit or merge landing on the run branch between them shows up here as a
+  // disagreement; that is an honest race and the message says so.
+  //
+  // It is NOT what closes the repointed-HEAD hazard, and an earlier revision of this comment
+  // claimed it was. `refs/heads/${runBranch}` is rebuilt from a name that was itself taken off
+  // `head.ref`, so it reconstructs that ref character for character — the comparison cannot
+  // disagree about WHICH ref is the run branch, only about what that one ref held a moment
+  // earlier. The guard above is the whole of that closure. Reverting this to resolve `head.ref`
+  // directly changes nothing measurable, which is exactly why it must not be described as
+  // defence.
+  const headSha = await git.headSha()
+  const namedSha = await git.resolveRef(`refs/heads/${runBranch}`).catch(() => null)
+  const disagreement = runBranchDisagreement({ resolvedRef: `refs/heads/${runBranch}`, headSha, namedSha })
+  if (disagreement) throw new Error(disagreement)
   const baseBranch = await resolveBaseBranch(git, flags.base)
   // Every other failure path here fails closed; a plain operator mistake — running the
   // gate while checked out on the base branch itself — must not be the one that fails
@@ -2037,7 +2038,10 @@ async function derive(root, runId, flags) {
     )
   }
   try {
-    return await deriveContext({ git, runId, runBranch, baseBranch, planPath: flags.plan })
+    // `runBranchRef` rides along so the destructive path never has to rebuild `refs/heads/` from
+    // a name. `deriveContext` is given the name, as it always was — by this point the name came
+    // off `symbolic-ref` and the round trip above has been checked, so the two agree.
+    return { ...await deriveContext({ git, runId, runBranch, baseBranch, planPath: flags.plan }), runBranchRef }
   } catch (err) {
     // deriveContext reads the plan via `git show <anchorSha>:<planPath>`, which fails with
     // raw git stderr ("fatal: bad revision ..."). That is often an adopting project's
@@ -2047,7 +2051,7 @@ async function derive(root, runId, flags) {
       let anchorSha = 'unknown'
       try {
         const baseSha = await git.resolveRef(`refs/heads/${baseBranch}`)
-        const runSha = await git.resolveRef(`refs/heads/${runBranch}`)
+        const runSha = await git.resolveRef(runBranchRef)
         anchorSha = await git.mergeBase(baseSha, runSha)
       } catch { /* best-effort context for the message only */ }
       throw new Error(
@@ -2056,6 +2060,39 @@ async function derive(root, runId, flags) {
     }
     throw err
   }
+}
+
+// The run-branch round-trip decision, as a pure function of three values: null when the ref holds
+// the commit HEAD is on, and the operator-facing refusal otherwise.
+//
+// `resolvedRef` is the ref the CALLER resolved — `refs/heads/<run branch>`, the same string
+// `deriveContext` builds — and not HEAD's own symbolic target. Those are the same ref in every
+// honest run, and a revision that compared HEAD's sha against HEAD's own target instead was
+// trivially true and vetted nothing; the parameter is named for what it must be so that mistake
+// cannot be re-made silently.
+//
+// SEPARATED FROM `derive` SO BOTH ARMS CAN BE PINNED. The two shas can only disagree if the ref
+// moves between `headSha` and `resolveRef` — two subprocesses with no seam a fixture can open,
+// since `derive` builds its own git. In-process that arm was therefore unreachable, and it was
+// left with no coverage at all: mutating the comparison to `namedSha === null` kept the whole
+// suite green while removing the only check standing between a moved run branch and a
+// `git branch -D`. Exported for the tests, not for callers — `derive` is the only caller.
+export function runBranchDisagreement({ resolvedRef, headSha, namedSha }) {
+  if (namedSha === headSha) return null
+  return (
+    `HEAD is ${headSha}, but ${printable(resolvedRef)} — the ref this run resolves the run branch through —`
+    + ` is ${namedSha === null ? 'not a ref at all' : namedSha}.`
+    // ONE reachable cause now, and it is an honest one. `headSha` and `resolveRef` are two
+    // subprocesses: a commit or merge landing on the run branch between them produces exactly
+    // this disagreement. The detached case is refused earlier with its own message, and the
+    // shadowing case is gone — the ref comes from `symbolic-ref` rather than from abbreviation,
+    // so no tag and no `heads/…` branch can produce it, and telling an operator to hunt for one
+    // would send them after a ref that is not there.
+    + ' Either something moved the branch while this was reading it — an integrator merging'
+    + ' concurrently — in which case settle the repository and re-run; or the ref was deleted'
+    + ' underneath this command. Nothing is verified or removed against a run branch whose ref'
+    + ' does not hold the commit HEAD is on.'
+  )
 }
 
 // Everything this CLI can say about a failed config operation, or null for an error that is
@@ -2516,11 +2553,23 @@ export async function runCli(argv, io = { out: console.log }) {
     // either. It was simply never said out loud, which is what made the consequence invisible.
     let runBranch = null
     let baseHere = null
+    // WHY there is no run branch, not just that there is none. The note below used to infer the
+    // cause from `baseHere` alone, which reads the base branch's EXISTENCE as evidence that it is
+    // checked out — `resolveBaseBranch` answers from `branchExists` and never looks at HEAD. On a
+    // detached HEAD that printed `because main is checked out and that is the base branch` while
+    // main was not checked out at all (measured), sending an operator to fix the wrong thing.
+    // The KIND, from the shared classifier, not a null test. There are two ways to be on no
+    // branch and they need different sentences: a null test collapses them, so a HEAD repointed
+    // to `refs/mine/rb` was reported as detached while `git status` in the same repository said
+    // `## refs/mine/rb` (measured). That is the same failure this comment already describes —
+    // naming a cause the operator cannot act on — one spelling further along.
+    let headKind = null
     try {
       const git = createGit({ cwd: root })
-      const head = await git.currentBranch()
+      const head = await git.headBranch()
+      headKind = head.kind
       baseHere = await resolveBaseBranch(git, flags.base)
-      runBranch = head === baseHere ? null : head
+      runBranch = head.name === baseHere ? null : head.name
     } catch {
       runBranch = null
     }
@@ -2542,7 +2591,13 @@ export async function runCli(argv, io = { out: console.log }) {
     if (recorded.runBranch === null) {
       io.out(
         `note: run ${printable(runId)} recorded no run branch`
-        + (baseHere ? `, because ${printable(baseHere)} is checked out and that is the base branch` : '')
+        + (headKind === 'detached'
+          ? ', because HEAD is detached and a detached HEAD is on no branch'
+          : headKind === 'not-a-branch'
+            ? ', because HEAD points at a ref that is not a branch, and only a branch can be a run branch'
+            : headKind === 'ref-path-name'
+              ? ', because the checked-out branch has a name that is itself a ref path, which git resolves inconsistently depending on the command'
+              : (baseHere ? `, because ${printable(baseHere)} is checked out and that is the base branch` : ''))
         + '. Check out this run\'s branch before gating — `gate` refuses to run from the base branch,'
         + ' and until some command derives a context from the run branch, stop-time enforcement'
         + ' cannot confirm the checkout and will allow every stop rather than risk blocking on the wrong ref.',
@@ -2702,9 +2757,29 @@ export async function runCli(argv, io = { out: console.log }) {
       // task branch legitimately records that. The store constrains only the type and length —
       // what a branch name MEANS is the hook's to decide, and "not the expected branch" is the
       // case it exists to catch.
-      const branch = typeof flags.branch === 'string' ? flags.branch : await git.currentBranch()
+      // What is STORED is null on every rejection: the store accepts it (`writeLocation` bounds
+      // the field's type and length only) and a reader asking which branch this worktree is on
+      // then gets "none" rather than a name. The value it used to record in that state was the
+      // string `HEAD`, which names a ref anyone can create — so the record asserted a branch that
+      // a third party, not the teammate, controlled.
+      // The KIND again, for the label only — what is STORED is unchanged, and is null for both
+      // rejected states. Labelling by a null test called a worktree whose HEAD pointed at
+      // `refs/mine/wb` "detached" while `git status` there said `## refs/mine/wb`.
+      const head = typeof flags.branch === 'string' ? null : await git.headBranch()
+      const branch = typeof flags.branch === 'string' ? flags.branch : head.name
       await writeLocation(mainRoot, runId, flags.task, { worktree, branch })
-      io.out(`recorded ${printable(flags.task)} at ${printable(worktree)} on ${printable(branch)}`)
+      // One arm per kind, and the third is not the second: a ref-path name IS a branch, one
+      // `git branch --list` marks with `*`, so the not-a-branch wording contradicts git in the
+      // same worktree. This is the third consumer of `kind`; `doctor` and `init-run` are the
+      // others, and all three have to be visited whenever a state is added.
+      const label = branch !== null
+        ? printable(branch)
+        : head.kind === 'detached'
+          ? '(detached HEAD)'
+          : head.kind === 'ref-path-name'
+            ? `(branch ${printable(head.ref)}, whose name is itself a ref path)`
+            : `(no branch: HEAD points at ${printable(head.ref)})`
+      io.out(`recorded ${printable(flags.task)} at ${printable(worktree)} on ${label}`)
       return 0
     } catch (err) {
       // Never swallowed. A `locate` that exits 0 having written nothing leaves the teammate
@@ -2879,6 +2954,14 @@ export async function runCli(argv, io = { out: console.log }) {
     // main worktree was moved off the run branch: in that state `currentBranch` reports the
     // wrong branch, and every task diff computed from it would be nonsense. Default to the
     // current branch, which is right whenever nothing moved it.
+    //
+    // NULL IS PASSED THROUGH DELIBERATELY, not defaulted to a name. `currentBranch` answers null
+    // on a detached HEAD, and that is one of the states this report exists to describe — refusing
+    // here, the way `derive` does, would silence the diagnosis at the moment it is most wanted.
+    // `collectDoctorReport` raises it as a problem instead. It must not be turned back into a
+    // string here: the string that state used to produce was `HEAD`, and `refs/heads/HEAD` is a
+    // creatable ref, so a detached repository compared equal to a run branch named `HEAD` and the
+    // report said `no problems found`.
     const runBranch = typeof flags['run-branch'] === 'string' && flags['run-branch'] !== ''
       ? flags['run-branch']
       : await git.currentBranch()
@@ -3398,36 +3481,57 @@ export async function runCli(argv, io = { out: console.log }) {
       // against. A snapshot is exactly as good as the assumption that nothing moved, and the
       // thing being decided is irreversible.
       //
-      // WHAT REMAINS OPEN. This list is meant to be read as complete, so it carries the item that
-      // defeats the paragraph above as well as the ones that merely bound it. None of it is
-      // closed by anything in this file.
+      // WHAT REMAINS OPEN. This list is meant to be read as complete, so it leads with the item
+      // that used to defeat the paragraph above — now closed, and kept precisely so a reader can
+      // tell "closed" from "never considered" — and follows it with the ones that merely bound
+      // it. Nothing below the first bullet is closed by anything in this file.
       //
-      //   - THE NAME IS ATTACKER-CHOOSABLE, AND FRESHNESS DOES NOT HELP AGAINST IT. This is the
-      //     one that matters, and it is not a printing defect. `ctx.runBranch` comes from
-      //     `git rev-parse --abbrev-ref HEAD`, which shortens only as far as stays unambiguous:
-      //     a planted tag makes it answer `heads/<name>`, and a planted `heads/<name>` branch on
-      //     top of that makes it answer `refs/heads/<name>`, at which point the `refs/heads/`
-      //     prefix this file adds lands on `refs/heads/refs/heads/<name>` — an ordinary ref an
-      //     unprivileged teammate can create in its own worktree. `derive`'s cross-check is a
-      //     DERIVE-TIME ROUND TRIP, not a closed sha half: it only asks whether that ref equals
-      //     HEAD at the moment `derive` runs. Park the planted ref AT HEAD's sha and it compares
-      //     equal and never fires; then move it later and this loop re-reads it.
+      //   - WHICH REF IS THE RUN BRANCH. Closed at `derive`, by REFUSAL rather than by resolution,
+      //     and recorded here because this list is read as complete. It took three attempts and
+      //     each earlier one was reported as closed, so the wording below is deliberately about
+      //     what is refused rather than about what is resolved.
       //
-      //     Reproduced end to end on this tree, with the plant at HEAD's sha and one
-      //     `git update-ref refs/heads/refs/heads/run-branch <T1 tip>` inside a command check:
-      //     `deleted teammates/r1/T1 (9df69ac…), which refs/heads/run-branch (9df69ac…)
-      //     contains`, exit 0 — and `merge-base --is-ancestor <tip> refs/heads/run-branch`
-      //     against the REAL run branch afterwards answers no. The commit is in no ref: the
-      //     worktree that held one reflog was force-removed a moment earlier and `-D` took the
-      //     branch reflog.
+      //     Attempt one resolved HEAD symbolically, which killed the tag / `heads/<name>` /
+      //     `refs/heads/refs/heads/<name>` plant but left `currentBranch` returning the string
+      //     `HEAD` on a detached HEAD — and `refs/heads/HEAD` is a ref `git update-ref` creates
+      //     without complaint. Attempt two returned null there instead, but still trusted
+      //     `symbolic-ref`'s target to be a branch: `git symbolic-ref HEAD refs/tags/x` is
+      //     accepted (git refuses only targets outside `refs/`), the `refs/heads/` strip is a
+      //     no-op on such a ref, and `refs/heads/refs/tags/x` is creatable — so `deriveContext`
+      //     read the planter's commit as the run branch. Measured on that revision, with HEAD at
+      //     the real run tip and the tree clean, `ownership` went from FAIL naming a rogue commit
+      //     to PASS.
       //
-      //     So per-iteration freshness re-reads a value the ATTACKER controls rather than the
-      //     vetted one, and the bullet below does not absorb this: the move lands minutes
-      //     earlier, inside a check, not inside a two-command window. Closing it needs the run
-      //     branch resolved SYMBOLICALLY — a `currentBranchRef()` over `git symbolic-ref --quiet
-      //     HEAD` — which lives in scripts/git.mjs and is a recorded carry-over, not something
-      //     this file can do. Until then the guarantee here is bounded by "no ref named
-      //     `heads/<run branch>` or tagged like the run branch exists", which nothing enforces.
+      //     Attempt three refused both of those, and was still permissive, because the round trip
+      //     it added proves less than it appears to: `refs/heads/${runBranch}` reconstructs HEAD's
+      //     own ref BYTE FOR BYTE, so it can only catch the branch moving between two
+      //     subprocesses — never a disagreement about WHICH ref is meant. The divergence was at a
+      //     CONSUMER: `derive` hands `deriveContext` the NAME, gate-runner.mjs:1703 passes that
+      //     name on as the merge-preview base, and `qualifyBranch` returns any `refs/`-prefixed
+      //     string unchanged. So HEAD at `refs/heads/refs/heads/run-branch` stripped to
+      //     `refs/heads/run-branch`, which re-qualified to the REAL branch while `ctx.runBranchRef`
+      //     stayed the planted one. Measured: `gate --phase 1` exited 0, verdict PASS, merge=pass,
+      //     on a tree where merging the task branch into `ctx.runBranchRef` conflicts.
+      //
+      //     What closes it is `derive` refusing three states outright — HEAD detached, HEAD
+      //     pointing anywhere but under `refs/heads/`, and a stripped name that is ITSELF a ref
+      //     path — all three in `classifyHeadRef`, so a consumer cannot be handed a name two
+      //     qualification rules disagree about. The round trip is kept for the honest
+      //     two-subprocess race and is described as that and nothing more.
+      //
+      //     STILL OPEN, and named because this list claims to be complete: gate-runner.mjs:1703
+      //     takes the NAME rather than `ctx.runBranchRef`. Nothing reaches it with a hostile value
+      //     now — every path goes through the classifier first — but the structural fix is to pass
+      //     the REF there, and that file is outside this task's declared set. Until then the
+      //     guarantee rests on the refusal above rather than on the consumer being unable to
+      //     misread what it is given.
+      //
+      //     WHAT IS NOT THIS CODE'S DOING: under the `refs/tags/x` plant the `git branch -D`
+      //     below fails on its own, with `fatal: HEAD not found below refs/heads!`, exit 128
+      //     (measured). That is git declining to run `branch -D` at all in that state, not a
+      //     guarantee anything here provides — `git worktree list` works fine in the same
+      //     repository, which is why the force-removal a few lines up WAS reached. Do not read
+      //     the surviving branch as evidence that this path was safe.
       //   - Proof-to-delete. The sha is proved and then deleted BY NAME, so a write to
       //     refs/heads/<branch> in between is deleted unproved. Closing it needs a
       //     compare-and-swap (`git update-ref -d <ref> <proved sha>`), which needs a helper
@@ -3435,20 +3539,30 @@ export async function runCli(argv, io = { out: console.log }) {
       //     comment is the record.
       //   - The run branch can still move between this resolve and the `-D` on the same
       //     iteration, and between one iteration and the next. Per-iteration shrinks that window
-      //     to two git commands; it does not remove it. It bounds only the honest-race case —
-      //     see the first bullet for the case it does not bound.
+      //     to two git commands; it does not remove it. What is left is the honest race alone:
+      //     the redirected-name case the first bullet used to pair this with is closed, so a move
+      //     inside this window is now something that moved the real run branch.
       //   - The WORKTREE REMOVAL a few lines up is authorised by a verdict computed over
-      //     SNAPSHOT RANGES. Not by a stale verdict: `passedPhases` is built by actually running
-      //     this command's checks above, and the worktree list is re-read after them — a check
-      //     that exits non-zero makes the phase FAIL and its worktree is not removed at all. What
-      //     is snapshotted is what those checks measure. `runFilesetCheck` and
-      //     `runOwnershipCheck` read `ctx.anchorSha` and `ctx.runSha`, and the task branch shas
-      //     were resolved at derive time, so a task branch that moved since then is judged on the
-      //     range it used to span — and `git worktree remove --force` discards whatever is
-      //     uncommitted in that worktree regardless. Irreversible, and not re-proved the way the
-      //     deletion below now is.
+      //     SNAPSHOT ENDPOINTS. Not by a stale verdict: `passedPhases` is built by actually
+      //     running this command's checks above, and the worktree list is re-read after them — a
+      //     check that exits non-zero makes the phase FAIL and its worktree is not removed at
+      //     all. What is snapshotted is the RANGE those checks measure, and it is the run-branch
+      //     side, not the task-branch side. `runFilesetCheck` and `runOwnershipCheck` re-resolve
+      //     `refs/heads/<task branch>` at check time, so a task branch that moved since `derive`
+      //     is judged at its NEW sha — measured, by moving one mid-run: the fileset check read
+      //     the moved sha, flipped from pass to `contributes no file changes past its fork
+      //     point`, and the phase failed, so that worktree is not removed at all. `ctx.anchorSha`
+      //     and `ctx.runSha` are the derive-time values, so a commit added to the RUN BRANCH
+      //     mid-run is never examined by ownership — measured on the same repository: the branch
+      //     advanced, `ctx.runSha` did not, and ownership passed without ever naming the new
+      //     commit — and `mergedParentFiles` walks that same stale range. The existing fixture at
+      //     tests/cli.test.mjs already demonstrates the consequence, by moving the run branch
+      //     backward past the integration merge and watching the phase still pass and the
+      //     worktree still go. `git worktree remove --force` discards whatever is uncommitted in
+      //     that worktree regardless. Irreversible, and not re-proved the way the deletion below
+      //     now is.
       try {
-        const runSha = await git.resolveRef(`refs/heads/${ctx.runBranch}`)
+        const runSha = await git.resolveRef(ctx.runBranchRef)
         const branchSha = await git.resolveRef(`refs/heads/${w.branch}`)
         if (await git.isAncestor(branchSha, runSha)) {
           await git.deleteBranch(w.branch)
@@ -4060,6 +4174,27 @@ export async function runCli(argv, io = { out: console.log }) {
     // that normalisation is a second net rather than the one that catches it.
     const linkPaths = previewLinks(config)
 
+    // THE SHARED CLASSIFIER again, before a dispatch is built. This command does not go through
+    // `derive` either, and the value below is what every reviewer is told to diff the phase
+    // against — so a HEAD that names no branch would have a whole review round computed against a
+    // tree of the planter's choosing and reported as fact. The consequence here is an exit code
+    // rather than a throw, because `review-dispatch` reports its refusals that way.
+    const head = await git.headBranch()
+    if (!head.ok) {
+      io.out(`${head.reason} — there is no run branch to review against; check out the run branch and re-run`)
+      return 4
+    }
+    // THE REF, not the name, because this value is handed to an AGENT as a git argument rather
+    // than to `qualifyBranch`. Git's DWIM order resolves `refs/tags/<name>` BEFORE
+    // `refs/heads/<name>`, so a bare name is redirected by one `git tag run-branch <task tip>` —
+    // creatable by any teammate from its own worktree, with no HEAD write and no privilege.
+    // Measured: the prompt's own `git merge-base run-branch <branch>` then answered the T1 TIP,
+    // the diff against it was EMPTY, and every reviewer honestly returned zero findings while
+    // `export const backdoor = 1` sat in the phase. The agent review BLOCKS, so that is a pass
+    // issued over an unreviewed diff. The mechanical checks never saw it precisely because they
+    // go through `qualifyBranch`, which is what made this invisible to everything else.
+    const reviewRunBranch = head.ref
+
     let spec
     try {
       spec = generateReviewDispatch({
@@ -4072,8 +4207,32 @@ export async function runCli(argv, io = { out: console.log }) {
         tier: config.agents?.reviewer?.tier ?? 'capable',
         effort: config.agents?.reviewer?.effort ?? '',
         tierModels,
-        runBranch: await git.currentBranch(),
-        branches,
+        // WRAPPED HERE, AND THIS IS A COMPROMISE — say so rather than reading it as the clean fix.
+        // `generateReviewDispatch` splices this value bare into the reviewer's PROMPT, and a
+        // branch name is chosen by whoever created the branch. A name legitimately under
+        // refs/heads/ — so `classifyHeadRef` returns ok and the refusal above never fires — can
+        // carry control characters that render as line breaks, and the payload after one reads as
+        // its own instruction to an agent this gate trusts. Measured splices per lens:
+        // `correctness:2 security:2 tests:2 claims:4` — claims is not uniform with the others,
+        // because review-gen.mjs:76 is a claims-only method step that splices the name again.
+        // How many characters that yields is the attacker's to choose, so no total is recorded
+        // here; the fixture is the same information under test.
+        //
+        // Bounded, and not a regression: the line this replaced passed the identical string, and
+        // `[` and `:` are refname-illegal, so a bracketed verdict cannot be spelled and the JSON
+        // still parses.
+        //
+        // THE STRUCTURAL FIX IS AT THE SPLICE SITES in review-gen.mjs, which is outside this
+        // task's declared file set. So this is a caller-side wrap: exactly the per-site shape that
+        // let the HEAD rule drift across four sites for three review rounds. It closes THIS
+        // caller and no other — `review-gen.mjs` still splices `runBranch` bare from every other
+        // one, and that is recorded as a separate followups item rather than fixed here.
+        runBranch: printable(reviewRunBranch),
+        // Fully qualified for the same reason, and this is the same channel: these names are
+        // spliced into the reviewer's `git worktree add` / `git merge-base` / `git diff` lines,
+        // so a tag named like a task branch redirects them exactly as one named like the run
+        // branch did. `resolveBranchShas` already proved each exists under refs/heads/.
+        branches: branches.map((b) => (b.startsWith('refs/') ? b : `refs/heads/${b}`)),
         findingsDir: `.teammates/${runId}/reviews`,
         scratchRoot: tmpdir(),
         testCommand,

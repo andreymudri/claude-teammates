@@ -31,9 +31,28 @@ function insideRepo(worktreePath, repoRoot) {
 export async function collectDoctorReport({ git, runId, runBranch, baseBranch, tasks = [], repoRoot = null, anchorSha = null, runSha: passedRunSha = null, mergedFiles: passedMergedFiles = null }) {
   const problems = []
 
-  const mainBranch = await git.currentBranch()
-  if (mainBranch !== runBranch) {
-    problems.push(`main worktree is on ${mainBranch}, not the run branch ${runBranch} — a teammate or reviewer that ran git checkout here moved it, and the gate reads the current branch to decide what it is protecting`)
+  // THE SHARED CLASSIFIER, the same one `derive` refuses on. This comparison is the alarm that
+  // reports the states those plants depend on, and it has silenced itself twice by comparing two
+  // values that were equally wrong: while `currentBranch` minted the sentinel `HEAD`, both sides
+  // read `HEAD` and compared EQUAL; and while a repointed HEAD yielded the whole ref string, both
+  // sides read `refs/tags/x` and compared equal again, so `doctor` printed `no problems found` for
+  // a state the very same commit's `derive` calls hostile. Returning null fixes neither on its
+  // own — null === null is just as quiet. The STATE has to be named, which is what `ok` is for.
+  const head = await git.headBranch()
+  const mainBranch = head.name
+  if (!head.ok) {
+    const at = await git.headSha().catch(() => 'an unknown commit')
+    const where = runBranch === null ? '(none recorded)' : runBranch
+    // One sentence per KIND. The third state is a real branch — git lists it, `git status -sb`
+    // prints it as current — so describing it the way the second one is described would have this
+    // report contradict git in the same repository.
+    problems.push(head.kind === 'detached'
+      ? `main worktree is detached at ${at}, not on the run branch ${where} — a detached HEAD belongs to no branch, so nothing here can be verified against the run branch, and a commit reachable only from HEAD disappears the moment anything else is checked out`
+      : head.kind === 'ref-path-name'
+        ? `main worktree is on ${head.ref}, a real branch whose NAME is itself a ref path, not on the run branch ${where} — git resolves such a name inconsistently depending on which command re-qualifies it, so the gate refuses to run here; rename the branch`
+        : `main worktree has HEAD pointing at ${head.ref}, which is not a branch, not at the run branch ${where} — git accepts any target inside refs/ for HEAD, and the gate refuses to run at all in this state, so nothing here has been verified against a run branch`)
+  } else if (mainBranch !== runBranch) {
+    problems.push(`main worktree is on ${mainBranch}, not the run branch ${runBranch === null ? '(none recorded)' : runBranch} — a teammate or reviewer that ran git checkout here moved it, and the gate reads the current branch to decide what it is protecting`)
   }
 
   const dirty = await git.dirtyPaths()
@@ -55,7 +74,18 @@ export async function collectDoctorReport({ git, runId, runBranch, baseBranch, t
   // report about everything else rather than a single failure standing in for all of it.
   let baseSha = null
   if (baseBranch && await git.branchExists(baseBranch)) baseSha = await git.resolveRef(`refs/heads/${baseBranch}`)
-  const runSha = passedRunSha ?? (await git.branchExists(runBranch) ? await git.resolveRef(`refs/heads/${runBranch}`) : null)
+  // `runBranch` is null when the main worktree is detached and no `--run-branch` was given, and
+  // the null is tested HERE rather than left to `branchExists`. An earlier version of this
+  // comment claimed `branchExists` rejected a non-string outright; it did not — it interpolated
+  // the value, so `branchExists(null)` asked about `refs/heads/null` and answered false in an
+  // ordinary repository and TRUE in one carrying a branch named `null` (both measured). It now
+  // carries the same type guard the other readers have, which makes this test belt-and-braces
+  // rather than load-bearing — but the report still wants the null handled rather than thrown,
+  // because every question below degrades to "cannot tell" on a null run sha, which is the honest
+  // answer in that state and the one the problem raised above explains.
+  const runSha = passedRunSha ?? (runBranch !== null && await git.branchExists(runBranch)
+    ? await git.resolveRef(`refs/heads/${runBranch}`)
+    : null)
 
   // The files each merge on the run branch's own first-parent chain actually carried, indexed
   // by that merge's secondary parent — one walk for the whole report, not one per task, because
@@ -209,9 +239,19 @@ export async function collectDoctorReport({ git, runId, runBranch, baseBranch, t
 // Wrapping happens only here. `collectDoctorReport` returns the values as git reported them, so a
 // caller reading the report as data is unaffected, and no problem, task or exit code changes —
 // only how a value renders. This covers the sites in this function and says nothing about others.
+// A branch name for display, or an explicit marker for the states that have no branch name the
+// tool will accept. `printable(null)` renders the word `null`, which reads as a branch called
+// "null" in a header whose other fields are branch names — and the header line
+// `main worktree on HEAD · clean` is exactly how the detached case used to present itself as
+// healthy. `(no branch)` rather than `(detached HEAD)` because detachment is not the only state
+// that reaches it; the problem list names which one it is, and this line only has to avoid
+// asserting a branch. The marker cannot be confused for a ref: it contains characters git refuses
+// in a ref name.
+const branchLabel = (name) => (name === null || name === undefined ? '(no branch)' : printable(name))
+
 export function renderDoctor(report) {
-  const lines = [`run ${printable(report.runId)} · run branch ${printable(report.runBranch)} · base ${printable(report.baseBranch)}`]
-  lines.push(`main worktree on ${printable(report.mainBranch)}${report.dirty.length ? ` · ${report.dirty.length} dirty path(s)` : ' · clean'}`)
+  const lines = [`run ${printable(report.runId)} · run branch ${report.runBranch === null || report.runBranch === undefined ? '(none recorded)' : printable(report.runBranch)} · base ${printable(report.baseBranch)}`]
+  lines.push(`main worktree on ${branchLabel(report.mainBranch)}${report.dirty.length ? ` · ${report.dirty.length} dirty path(s)` : ' · clean'}`)
 
   if (report.worktrees.length) {
     lines.push('worktrees')
