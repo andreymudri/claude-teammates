@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir, rename, lstat, readdir, truncate, unlink, open as openFile } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, rename, lstat, readdir, unlink, open as openFile } from 'node:fs/promises'
 import { constants as fsConstants } from 'node:fs'
 import { livenessRows, renderLiveness, hasStall, hasUnknown, DEFAULT_STALE_MINUTES } from './liveness.mjs'
 import path from 'node:path'
@@ -1625,6 +1625,17 @@ export function fusedHolderOpenFlags(c = fsConstants) {
   return c.O_RDONLY | c.O_NONBLOCK | c.O_NOFOLLOW
 }
 
+// The flag word for emptying a results file in place, or `null` when this platform's
+// `fs.constants` does not carry O_NOFOLLOW — the same shape, and the same reason, as
+// `fusedHolderOpenFlags` above: a missing name is `undefined`, `O_WRONLY | undefined` is
+// `O_WRONLY`, and an inlined OR would quietly open through a symlink while looking like it
+// refused one. The caller treats `null` as "cannot empty safely" and refuses, rather than
+// emptying blind.
+export function emptyResultsOpenFlags(c = fsConstants) {
+  if (typeof c.O_NOFOLLOW !== 'number') return null
+  return c.O_WRONLY | c.O_NOFOLLOW
+}
+
 async function openHolderEntry(p) {
   const handle = await openFile(p, fusedHolderOpenFlags())
   try {
@@ -1977,22 +1988,47 @@ function tasksOfPhase(plan, phaseName) {
 // from `dir` resolves through it — measured on this branch, the command exited 0 printing an
 // in-repo path while the bytes landed at `<root>/outside-the-run/reviews/results-1.json`.
 //
-// Three components, listed from the top down so the refusal names the outermost planted one:
-// `<root>/.teammates`, the run directory under it, and `reviews` under that. `path.dirname` of the
-// run directory rather than the literal `.teammates`, so this follows `runDir` if that layout ever
-// moves. A component that does not exist yet is nothing to plant through — whatever creates it
-// creates a real directory, since its parent has just been vetted.
+// EVERY component from `root` down, accumulated over `path.relative`, and NOT a fixed list. A
+// fixed list of three — `<root>/.teammates`, the run directory, `reviews` — is right only for a
+// single-segment run id, because `path.dirname` climbs exactly one level. Run ids nest by design
+// (`scripts/state.mjs` names `--run 2026/substop`, and `idRefusal` caps bytes rather than depth),
+// and at depth two `<root>/.teammates` itself went unchecked. Measured on this branch, through a
+// real `init-run`: with `--run a/b` and `.teammates` symlinked out, the command exited 0 printing
+// `.teammates/a/b/reviews/results-default.json` while the bytes landed under the planted target;
+// with `--run 2026/substop` the same plant put the clear inside a victim tree; and at `--run
+// a/b/c` a plant at `.teammates/a` did the same. The control that settles it: the identical plant
+// with a FLAT run id was refused by the fixed list. The rule was right and its reach was wrong.
 //
-// Nothing above `root` is checked. That is the same assumption every other path in this CLI makes:
-// the operator names the root, and a link on the way to it is theirs.
+// Top down, so the refusal names the OUTERMOST planted component — the one an operator has to go
+// and look at. A component that does not exist yet is nothing to plant through: whatever creates
+// it creates a real directory, since its parent has just been vetted.
 //
-// A CHECK, NOT A LOCK. It is not atomic, and no Node API makes it so: there is no way to write
-// relative to an opened directory descriptor here, so a link planted between the last check and
-// the `rename` is still a window. What it closes is every stationary plant, and it is re-run
-// immediately before the write so that window is a few syscalls rather than a whole collection.
-async function plantedReviewsLink(root, runId, dir) {
-  const runPath = runDir(root, runId)
-  for (const component of [path.dirname(runPath), runPath, dir]) {
+// A `dir` that is not under `root` is refused rather than walked. `assertContained` makes that
+// unreachable through the CLI today, which is exactly why it would sit unpinned: without it, the
+// accumulation would climb ABOVE the root this function promises never to look above, one `lstat`
+// per `..`. Exported for that reason — it is the only way to reach that arm, and the depth cases
+// above are cheaper to state here than to stage end to end.
+//
+// Nothing AT OR ABOVE `root` is checked, `root` included. That is the same assumption every other
+// path in this CLI makes: the operator names the root, and a link on the way to it is theirs.
+//
+// A CHECK, NOT A LOCK, and narrower than it looks. It is not atomic, and no Node API makes it so:
+// there is no way to write relative to an opened directory descriptor here, so a link planted
+// between the last check and the `rename` is still a window, and so is one planted between this
+// check and the descriptor the clear opens. It sees LINKS only: `lstat` reports a bind mount as an
+// ordinary directory, so a mount planted over any component passes this walk and lands the write
+// wherever the mount points. Untested — staging one needs `mount`, which needs a privilege this
+// worktree does not have — and stated rather than implied away. What it closes is every stationary
+// symlink, and it is re-run immediately before the write so that window is a few syscalls rather
+// than a whole collection.
+export async function plantedReviewsLink(root, dir) {
+  const rel = path.relative(root, dir)
+  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new Error(`${printable(dir)} is not inside ${printable(root)}, so its components cannot be vetted`)
+  }
+  let component = root
+  for (const segment of rel.split(path.sep)) {
+    component = path.join(component, segment)
     let info = null
     try {
       info = await lstat(component)
@@ -4355,6 +4391,26 @@ export async function runCli(argv, io = { out: console.log }) {
     }
     const check = agentChecks[0]
 
+    // AN AGENT CHECK WITH NO LENS COLLECTS NOTHING, and a pass over nothing is the outcome this
+    // whole command exists to refuse. `checksForPhase` substitutes the manifest's lens list only
+    // for a check that OMITS one; an explicit `"lens": []` is kept, the read loop below runs zero
+    // times, and `collectReviewResults` reports a clean pass because no lens is missing. Measured
+    // on this branch before this refusal: exit 0, `0 finding(s), none blocking, recovered from the
+    // reviewers' findings files`, with no findings file opened at all — and the results file was
+    // written and advertised, so `gate --results` on it returned verdict PASS over a tree no
+    // reviewer had judged.
+    //
+    // The pass COMPUTATION predates this task — the fork point prints the same document on stdout
+    // — but persisting it is what makes it reusable, and it contradicts this command's own
+    // contract that a results file exists only where a round succeeded. Refused at the COLLECTION
+    // rather than at the write, because the document is wrong wherever it goes: a reader of that
+    // stdout is as misled as a reader of the file. 4, matching every other "this cannot be
+    // verified" answer here.
+    if (Array.isArray(check.lens) && check.lens.length === 0) {
+      io.out(`the agent check ${printable(check.name ?? 'review')} declares an empty lens list, so no review was dispatched for this phase and there is nothing to collect — a pass over zero lenses is not a review`)
+      return 4
+    }
+
     const dir = path.join(runDir(root, runId), 'reviews')
 
     // THE PREVIOUS ROUND'S RESULTS FILE IS REMOVED BEFORE THIS ROUND READS ANYTHING, and that is
@@ -4400,21 +4456,22 @@ export async function runCli(argv, io = { out: console.log }) {
     // what stops the deletion happening on the way to it. Refused with the 4 the `reviewFileName`
     // failure below returns, rather than a second code for the same flag on the same command.
     //
-    // NOT redundant with that failure, which is the reading the lens loop invites: it fires once
-    // PER LENS, and a check may declare its own empty `lens` array. `checksForPhase` keeps an
-    // empty array as it is (only a MISSING one falls back to the manifest's list) and
-    // `ENFORCEMENT_VALIDATORS.lens` validates the top-level key, never a check's own — so with
-    // `"lens": []` on the agent check that loop runs zero times and nothing has looked at the
-    // phase. Measured on this branch, with this guard forced to false and the manifest declaring a
-    // phase key of `a/../../../pwned`: the results file was written to `.teammates/pwned.json`,
-    // two directories above the run's own reviews directory, and the command printed that path
-    // and exited 0.
+    // NOT redundant with the per-lens `reviewFileName` failure, which is the reading the lens loop
+    // invites. That loop runs AFTER this, and after the removal below: by the time it could refuse
+    // the phase, this code has already built a path from it and deleted whatever was there. The
+    // two refusals also read differently on purpose — this one names the results file — because
+    // they otherwise printed the same sentence, and a fixture could not tell which had fired.
+    // Measured on this branch, with this guard forced to false and the manifest declaring a phase
+    // key of `a/../../../pwned`: the results file was written to `.teammates/pwned.json`, two
+    // directories above the run's own reviews directory, and the command printed that path and
+    // exited 0; with the guard merely MOVED below the removal, a real file planted at that same
+    // path was deleted while the command still exited 4 with this very sentence.
     //
     // Coerced with `String` first for the same reason `reviewFileName` does it: the value that
     // gets checked has to be the value that gets joined, or the two can differ.
     const resultsName = String(phaseName)
     if (isUnsafePathComponent(resultsName)) {
-      io.out(`a phase must be a non-empty name with no path separators, got ${JSON.stringify(printable(resultsName))}`)
+      io.out(`the results file cannot be named: a phase must be a non-empty name with no path separators, got ${JSON.stringify(printable(resultsName))}`)
       return 4
     }
     const resultsPath = path.join(dir, `results-${resultsName}.json`)
@@ -4423,7 +4480,7 @@ export async function runCli(argv, io = { out: console.log }) {
     // the half that cannot be undone.
     let planted = null
     try {
-      planted = await plantedReviewsLink(root, runId, dir)
+      planted = await plantedReviewsLink(root, dir)
     } catch (err) {
       io.out(`cannot vet the run's reviews directory at ${printable(dir)}: ${printable(err.message)}`)
       return 4
@@ -4449,22 +4506,63 @@ export async function runCli(argv, io = { out: console.log }) {
         // up-front clear exists to prevent. A zero-byte file is fail-closed: the gate refuses it
         // with `--results must be a readable JSON file`, measured in the same run.
         //
-        // `lstat` first, and only a REGULAR FILE is emptied: `truncate` follows a symlink, so
-        // without this a plant at the results path would have its target emptied instead — the
-        // deletion-shaped version of the write hazard two blocks down.
+        // THROUGH A DESCRIPTOR, never by path, and the property required is not the one that
+        // reads most naturally. "only a regular file is emptied" describes the CHECK; what the
+        // fallback actually needs is that the bytes it destroys BELONG TO THIS COMMAND, and
+        // `isFile()` does not say that. A hard link is a regular file: `unlink` on one is
+        // harmless because it removes a NAME, which is why such a plant is inert on the normal
+        // path, but `truncate` destroys the shared inode. Measured on this branch with the
+        // path-based check: `link('<outside>/secret.txt', '<reviews>/results-1.json')` in a `0555`
+        // directory — the very condition this fallback exists for — left that file outside the
+        // project at zero bytes, with nothing in the output naming it. `st_nlink` was never
+        // consulted.
+        //
+        // So: open with O_WRONLY|O_NOFOLLOW, `fstat` the DESCRIPTOR, require a regular file with
+        // exactly one link, and `ftruncate` that same descriptor. This is the pattern
+        // `openHolderEntry` above already uses, against the same class of plant; there was no
+        // reason this site did not reach for it first. It closes four things the path-based
+        // version could not: a symlink (refused by the open), a hard link (nlink), a directory
+        // (EISDIR from the open), and the race between the check and the destruction, which were
+        // two syscalls on a path and are now one object held open.
         let emptied = false
-        try {
-          if ((await lstat(resultsPath)).isFile()) {
-            await truncate(resultsPath, 0)
-            emptied = true
+        let emptyErr = null
+        const flags = emptyResultsOpenFlags()
+        if (flags === null) {
+          emptyErr = new Error('this platform has no O_NOFOLLOW, so the entry cannot be opened without risking following a link')
+        } else {
+          let handle = null
+          try {
+            handle = await openFile(resultsPath, flags)
+            const info = await handle.stat()
+            if (info.isFile() && info.nlink === 1) {
+              await handle.truncate(0)
+              emptied = true
+            } else {
+              emptyErr = new Error(`the entry there is not a single-linked regular file (nlink ${info.nlink}), so emptying it could destroy bytes this command does not own`)
+            }
+          } catch (err) {
+            emptyErr = err
+          } finally {
+            if (handle) await handle.close().catch(() => {})
           }
-        } catch { emptied = false }
+        }
         if (!emptied) {
-          // Reports the OUTCOME rather than the norm. "must not survive this one" says what ought
-          // to happen and leaves the operator to infer the state; what they need to know is that
-          // the document is still there, at the path in this sentence, and that anything reading
-          // it will read a verdict this round did not reach.
-          io.out(`cannot clear or empty the previous results file at ${printable(resultsPath)}: ${printable(err.message)} — it is still on disk, still carrying an earlier round's verdict, and gate --results on it will read that verdict as this round's; remove it by hand before re-running`)
+          // ONLY WHAT WAS OBSERVED, which is narrower than "report the outcome" and is the rule
+          // this sentence has now broken twice. The first version asserted a norm ("must not
+          // survive this one"). The second asserted a state nobody had looked at — that the
+          // document is still on disk carrying a verdict `gate --results` would read as this
+          // round's — and that is false on three reachable paths, all measured on this branch: a
+          // DIRECTORY at the path (the state one of this command's own tests builds) makes the
+          // gate exit 2, not read a verdict, and `rm` without `-r` refuses the advice; the
+          // reviews entry replaced by a regular file fails ENOTDIR, so the file named as "still
+          // on disk" does not exist; and a `0666` reviews directory fails EACCES on both the
+          // unlink and the open, so nothing observed the entry at all.
+          //
+          // What IS observed is two attempts and two failures, so that is what is printed —
+          // together with the one consequence this code does control, which is that the round is
+          // refused before anything is read. Naming both errors is the whole of the diagnosis: an
+          // EACCES pair says the directory, an EISDIR says the entry.
+          io.out(`could not clear the previous results file at ${printable(resultsPath)}: unlink failed (${printable(err.message)}), and emptying it in place failed too (${printable(emptyErr?.message ?? 'no reason recorded')}) — this round is refused before reading any findings, so nothing here is its answer; inspect that path before re-running`)
           return 4
         }
       }
@@ -4641,7 +4739,7 @@ export async function runCli(argv, io = { out: console.log }) {
       // ran before the whole collection, and this one runs immediately before the write, which is
       // as close as this can be brought without an API for writing relative to an open directory.
       // Checked BEFORE `mkdir`, so a planted chain has nothing created inside it.
-      const replanted = await plantedReviewsLink(root, runId, dir)
+      const replanted = await plantedReviewsLink(root, dir)
       if (replanted) {
         throw new Error(`${printable(replanted)} is a symlink, and every component of ${printable(dir)} must be a real directory`)
       }

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmod, lstat, mkdir, mkdtemp, readdir, rename, rm, stat, symlink, utimes, writeFile, readFile } from 'node:fs/promises'
+import { chmod, link, lstat, mkdir, mkdtemp, readdir, rename, rm, stat, symlink, utimes, writeFile, readFile } from 'node:fs/promises'
 import { constants as fsConstants, readFileSync, renameSync, symlinkSync } from 'node:fs'
 import net from 'node:net'
 import { tmpdir } from 'node:os'
@@ -26,6 +26,8 @@ import {
   planSectionsRefusal,
   runBranchDisagreement,
   derive,
+  plantedReviewsLink,
+  emptyResultsOpenFlags,
 } from '../scripts/cli.mjs'
 import { previewOwnerMarkerPath, previewClaimPath } from '../scripts/merge-preview.mjs'
 import { renderRunSummary } from '../scripts/finish.mjs'
@@ -807,11 +809,7 @@ test('collect-reviews refuses to write its results file outside the run director
     const phase = 'a/../../../pwned'
     await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
       lens: ['correctness'],
-      // The empty per-check list is the whole point of the fixture. The per-lens `reviewFileName`
-      // refusal prints the SAME sentence, so with the manifest's own list in force this fixture
-      // could not tell which of the two refused; with no lens that loop never runs and only the
-      // guard is left.
-      phases: { [phase]: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: [] }] } },
+      phases: { [phase]: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
     }), 'utf8')
     // A REAL FILE at the path the traversal reaches, not an absence. Asserting ENOENT there pins
     // the write half only: the clear runs first and builds its path from the same value, so with
@@ -823,7 +821,10 @@ test('collect-reviews refuses to write its results file outside the run director
     lines.length = 0
     const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', phase, '--root', root], io)
     assert.equal(code, 4, lines.join('\n'))
-    assert.match(lines.join('\n'), /no path separators/)
+    // The guard's own sentence, not the per-lens `reviewFileName` one. They used to be identical,
+    // which left this fixture unable to say which had refused; only this one names the results
+    // file, and only this one runs before the removal below.
+    assert.match(lines.join('\n'), /the results file cannot be named/)
     assert.equal(await readFile(victim, 'utf8'), 'not this command\'s file\n')
   })
 })
@@ -968,6 +969,120 @@ test('collect-reviews refuses a symlink one level above its reviews directory', 
   })
 })
 
+// --- the same walk, at the depths a run id actually reaches ------------------------------------
+//
+// Run ids nest by design — `scripts/state.mjs` names `--run 2026/substop`, and `idRefusal` caps
+// bytes rather than depth — and a walk of a FIXED list of three components is right only for a
+// single-segment one. `path.dirname` climbs exactly one level, so at depth two `<root>/.teammates`
+// itself was never checked and both hazards this phase closed reopened. These two tests are the
+// pair that distinguishes an accumulating walk from a `dirname` climb: the depth-2 case plants at
+// `.teammates`, which one extra `dirname` would also catch, and ONLY the depth-3 case, planting at
+// `.teammates/<first>`, tells the loop from a `dirname` applied twice.
+//
+// Staged through the real `init-run` rather than by hand, because the nesting under test is the
+// nesting that command creates.
+async function withNestedRun(root, planPath, io, g, runId) {
+  await writeFile(planPath, SINGLE_PHASE_PLAN, 'utf8')
+  g(['add', 'plan.md'])
+  g(['commit', '--quiet', '-m', 'single-phase plan'])
+  await runCli(['init-run', planPath, '--run', runId, '--root', root], io)
+  await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+    lens: ['correctness'],
+    phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+  }), 'utf8')
+  g(['checkout', '--quiet', '-b', `teammates/${runId}/T1`])
+  await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
+  g(['add', 'a.mjs'])
+  g(['commit', '--quiet', '-m', 'T1 work'])
+  g(['checkout', '--quiet', 'run-branch'])
+  const sha = g(['rev-parse', `refs/heads/teammates/${runId}/T1`]).trim()
+  const reviews = path.join(root, '.teammates', ...runId.split('/'), 'reviews')
+  await mkdir(reviews, { recursive: true })
+  await writeFile(path.join(reviews, 'default-correctness.json'), JSON.stringify({
+    stamp: { phase: 'default', lens: 'correctness', branches: [`teammates/${runId}/T1@${sha}`] },
+    findings: [],
+  }), 'utf8')
+  return reviews
+}
+
+test('collect-reviews refuses a plant at .teammates when the run id nests', NO_PLANTED_SYMLINK_ON_WIN32, async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await withNestedRun(root, planPath, io, g, 'a/b')
+    const teammates = path.join(root, '.teammates')
+    const outside = path.join(root, 'outside-the-run')
+    await rename(teammates, outside)
+    await symlink(outside, teammates)
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'a/b', '--root', root], io)
+    assert.equal(code, 4, lines.join('\n'))
+    assert.match(lines.join('\n'), /is a symlink, and every component of/)
+    // The escape this closes: with the fixed list, the command exited 0 and the bytes landed here
+    // while the printed path claimed the run directory.
+    await assert.rejects(stat(path.join(outside, 'a', 'b', 'reviews', 'results-default.json')), { code: 'ENOENT' })
+  })
+})
+
+// The depth that separates an accumulating walk from one more `dirname`: the plant is two levels
+// below `<root>/.teammates` and three above `reviews`.
+test('collect-reviews refuses a plant midway through a three-deep run id', NO_PLANTED_SYMLINK_ON_WIN32, async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await withNestedRun(root, planPath, io, g, 'a/b/c')
+    const first = path.join(root, '.teammates', 'a')
+    const outside = path.join(root, 'outside-the-run')
+    await rename(first, outside)
+    await symlink(outside, first)
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'a/b/c', '--root', root], io)
+    assert.equal(code, 4, lines.join('\n'))
+    // Named by the OUTERMOST planted component, which is the one to go and look at.
+    assert.match(lines.join('\n'), new RegExp(`${first.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} is a symlink`))
+    await assert.rejects(stat(path.join(outside, 'b', 'c', 'reviews', 'results-default.json')), { code: 'ENOENT' })
+  })
+})
+
+// The destructive half of the same gap, at depth: through a plant at `.teammates` the up-front
+// clear deleted a file inside the victim tree. The round is made to fail so the clear is the only
+// thing that could have touched it.
+test('a plant at .teammates does not let the clear reach into the victim tree', NO_PLANTED_SYMLINK_ON_WIN32, async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await withNestedRun(root, planPath, io, g, '2026/substop')
+    const teammates = path.join(root, '.teammates')
+    const victim = path.join(root, 'victim')
+    await rename(teammates, victim)
+    await symlink(victim, teammates)
+    const bait = path.join(victim, '2026', 'substop', 'reviews', 'results-default.json')
+    await writeFile(bait, '{"results":[{"name":"review","status":"pass"}]}\n', 'utf8')
+    lines.length = 0
+    assert.equal(await runCli(['collect-reviews', '--run', '2026/substop', '--root', root], io), 4, lines.join('\n'))
+    assert.match(await readFile(bait, 'utf8'), /"status": ?"pass"/)
+  })
+})
+
+// The arm no fixture can reach through the CLI, which is why the helper is exported: `assertContained`
+// refuses a `dir` outside the root long before this, so without a direct test this refusal would sit
+// unpinned — and unpinned, the accumulation walks `..` upwards, `lstat`ing components ABOVE the root
+// this function documents itself as never looking above.
+test('plantedReviewsLink refuses a directory that is not inside the root', async () => {
+  await assert.rejects(
+    plantedReviewsLink('/a/root', '/a/root/../elsewhere/reviews'),
+    /is not inside/,
+  )
+  await assert.rejects(plantedReviewsLink('/a/root', '/a/root'), /is not inside/)
+})
+
+test('plantedReviewsLink answers null when every component is a real directory', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'tm-walk-'))
+  try {
+    const deep = path.join(scratch, '.teammates', 'a', 'b', 'reviews')
+    await mkdir(deep, { recursive: true })
+    assert.equal(await plantedReviewsLink(scratch, deep), null)
+    // A component that does not exist yet is nothing to plant through.
+    assert.equal(await plantedReviewsLink(scratch, path.join(scratch, '.teammates', 'a', 'b', 'c', 'reviews')), null)
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
 // The write-failure contract, and the only fixture that still reaches it now that a planted
 // directory is refused up front: a link that arrives AFTER the vet, planted from `io.out` at the
 // moment the results are printed — the same seam, and the same threat, as the results-path plant
@@ -1055,11 +1170,17 @@ test('collect-reviews refuses when the previous results file can be neither remo
     const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
     assert.equal(code, 4, lines.join('\n'))
     const out = lines.join('\n')
-    assert.match(out, /cannot clear or empty the previous results file/)
-    // The sentence has to report the STATE, not a norm: an operator who is told only that a
-    // document "must not survive" is not told that this one did.
-    assert.match(out, /still on disk/)
-    assert.match(out, /gate --results on it will read that verdict as this round's/)
+    assert.match(out, /could not clear the previous results file/)
+    // Both attempts and both failures, because the pair is the diagnosis: EISDIR on each says the
+    // entry is a directory, where an EACCES pair would say the directory above it.
+    assert.match(out, /unlink failed \(EISDIR/)
+    assert.match(out, /emptying it in place failed too \(EISDIR/)
+    // And NOTHING it did not observe. This exact fixture makes each of these false: `gate
+    // --results` on a directory exits 2 rather than reading a verdict, and `rm` without `-r`
+    // refuses, so advice to remove it by hand is wrong here.
+    assert.doesNotMatch(out, /still on disk/)
+    assert.doesNotMatch(out, /will read that verdict/)
+    assert.doesNotMatch(out, /remove it by hand/)
     // Refused before the findings were read, so no collection is reported beside it.
     assert.doesNotMatch(out, /"status"/)
   })
@@ -1130,12 +1251,80 @@ test('the empty-instead-of-remove fallback does not truncate through a planted s
       lines.length = 0
       const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
       assert.equal(code, 4, lines.join('\n'))
-      assert.match(lines.join('\n'), /cannot clear or empty the previous results file/)
+      const out = lines.join('\n')
+      assert.match(out, /could not clear the previous results file/)
+      // O_NOFOLLOW refuses the link at the open, so the descriptor never names the target. ELOOP
+      // on Linux; the assertion is on the refusal rather than the errno spelling, which the BSDs
+      // give as EMLINK.
+      assert.match(out, /emptying it in place failed too/)
       assert.equal(await readFile(bait, 'utf8'), before, 'the link target must not be emptied')
       assert.ok((await lstat(resultsPath)).isSymbolicLink())
     } finally {
       await chmod(reviews, 0o755).catch(() => {})
     }
+  })
+})
+
+// A HARD LINK is a regular file, so the check that asked `isFile()` about a path said yes to one.
+// `unlink` on a hard link is harmless — it removes a name — which is why such a plant is inert on
+// the normal path and only the fallback is exposed: `truncate` destroys the shared inode. Measured
+// with the path-based check, in the `0555` directory the fallback exists for: the file outside the
+// project was left at zero bytes and nothing in the output named it.
+//
+// What the fallback needs is not "a regular file" but "bytes this command owns", and `st_nlink` is
+// what says so.
+test('the empty-instead-of-remove fallback does not destroy an inode with another name', {
+  skip: NO_MODE_BITS_AS_ROOT_OR_WIN32.skip,
+}, async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const resultsPath = await stagedPhaseOneReviews(root, planPath, io, g)
+    const reviews = path.dirname(resultsPath)
+    const outside = await mkdtemp(path.join(tmpdir(), 'tm-hardlink-'))
+    const secret = path.join(outside, 'secret.txt')
+    try {
+      await writeFile(secret, 'BYTES THAT MUST SURVIVE\n', 'utf8')
+      await link(secret, resultsPath)
+      await chmod(reviews, 0o555)
+      lines.length = 0
+      const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
+      assert.equal(code, 4, lines.join('\n'))
+      assert.equal(await readFile(secret, 'utf8'), 'BYTES THAT MUST SURVIVE\n')
+      // And it says WHY, naming the property that decided it rather than a bare refusal.
+      assert.match(lines.join('\n'), /nlink 2/)
+    } finally {
+      await chmod(reviews, 0o755).catch(() => {})
+      await rm(outside, { recursive: true, force: true })
+    }
+  })
+})
+
+// The platform guard on that open, pinned as a pure function because no fixture can remove a
+// constant from `fs.constants`. `undefined` in a bitwise OR is 0, so an inlined flag word would
+// silently degrade to a plain `O_WRONLY` — opening through the very link it looks like it refuses.
+test('emptyResultsOpenFlags refuses to build a flag word without O_NOFOLLOW', () => {
+  assert.equal(emptyResultsOpenFlags({ O_WRONLY: 1 }), null)
+  assert.equal(emptyResultsOpenFlags({ O_WRONLY: 1, O_NOFOLLOW: 'no' }), null)
+  assert.equal(emptyResultsOpenFlags({ O_WRONLY: 1, O_NOFOLLOW: 0x20000 }), 1 | 0x20000)
+})
+
+// An agent check with an empty lens list reads no findings file at all, and `collectReviewResults`
+// calls that a clean pass because no lens is missing. Before this refusal the command exited 0,
+// wrote the results file and advertised it, and `gate --results` on that file returned verdict PASS
+// over a tree no reviewer had judged — the last door to the outcome this command exists to close.
+test('collect-reviews refuses an agent check that declares no lens', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const resultsPath = await stagedPhaseOneReviews(root, planPath, io, g)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      lens: ['correctness'],
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: [] }] } },
+    }), 'utf8')
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 4, lines.join('\n'))
+    assert.match(lines.join('\n'), /empty lens list/)
+    // Refused at the collection, so neither the document nor the file exists to be believed.
+    assert.doesNotMatch(lines.join('\n'), /none blocking/)
+    await assert.rejects(stat(resultsPath), { code: 'ENOENT' })
   })
 })
 
