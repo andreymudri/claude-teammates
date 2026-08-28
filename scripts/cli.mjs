@@ -1625,27 +1625,10 @@ export function fusedHolderOpenFlags(c = fsConstants) {
   return c.O_RDONLY | c.O_NONBLOCK | c.O_NOFOLLOW
 }
 
-// A findings file read through a DESCRIPTOR that cannot park, or by path where this platform
-// cannot express that. `readFile` on a path opens blocking, and a FIFO planted at
-// `<phase>-<lens>.json` parks that open forever: measured on this branch, `collect-reviews` never
-// returned — killed at 20s, empty stdout, no exit code. This is the easier of the two FIFO doors,
-// with no permission precondition at all, because the reviews directory is where reviewers are
-// told to write and this loop opens whatever it finds under the manifest's lens names. It is the
-// one defect here that is not new: `git show master:scripts/cli.mjs` carries the same path-based
-// `readFile` at this site, so this is a fix rather than a regression introduced beside it.
-//
-// `fusedHolderOpenFlags` is exactly the right word — O_RDONLY|O_NONBLOCK|O_NOFOLLOW — and this is
-// the third caller of the rule it encodes. `stat` on the descriptor, not the path, so what is read
-// is what was vetted; anything that is not a regular file is refused, and the caller records it as
-// unreadable, which is the outcome a FIFO or a directory deserves and is never "no findings".
-//
-// A symlinked findings file is now refused rather than followed. That is a deliberate narrowing,
-// and it is scoped to FINDINGS: nothing this project writes creates one, and the class this
-// command distrusts is exactly the entries it did not create itself — files a reviewer was told to
-// drop in a directory anyone can write. The run's own `plan.json` is not in that class, is read
-// through `nonBlockingReadFlags` below, and still follows a link as the rest of the CLI does.
 // The run's plan, read through the same descriptor discipline as a findings file, or null when
-// there is none. THE THIRD DOOR of the class closed at the other two: `readState` opens by path,
+// there is none.
+//
+// THE THIRD DOOR of the class closed at the other two: `readState` opens by path,
 // so a FIFO at `.teammates/<run>/plan.json` parks the open forever. Measured — `master` hangs on it
 // too (SIGKILL at 15s, empty stdout), so the door is inherited rather than opened here; what IS
 // new is the reach. The ambiguity check above reads the plan BEFORE the manifest is resolved, so a
@@ -1684,6 +1667,32 @@ function nonBlockingReadFlags(c = fsConstants) {
   return c.O_RDONLY | c.O_NONBLOCK
 }
 
+// A findings file read through a DESCRIPTOR that cannot park, or by path where this platform
+// cannot express that. `readFile` on a path opens blocking, and a FIFO planted at
+// `<phase>-<lens>.json` parks that open forever: measured on this branch, `collect-reviews` never
+// returned — killed at 20s, empty stdout, no exit code. This is the easier of the two FIFO doors,
+// with no permission precondition at all, because the reviews directory is where reviewers are
+// told to write and this loop opens whatever it finds under the manifest's lens names. It is the
+// one defect here that is not new: `git show master:scripts/cli.mjs` carries the same path-based
+// `readFile` at this site, so this is a fix rather than a regression introduced beside it.
+//
+// `fusedHolderOpenFlags` is exactly the right word — O_RDONLY|O_NONBLOCK|O_NOFOLLOW — and this is
+// the third caller of the rule it encodes. `stat` on the descriptor, not the path, so what is read
+// is what was vetted; anything that is not a regular file is refused, and the caller records it as
+// unreadable, which is the outcome a FIFO or a directory deserves and is never "no findings".
+//
+// A symlinked findings file is now refused rather than followed. That is a deliberate narrowing,
+// and it is scoped to FINDINGS: nothing this project writes creates one, and the class this
+// command distrusts is exactly the entries it did not create itself — files a reviewer was told to
+// drop in a directory anyone can write. The run's own `plan.json` is not in that class, is read
+// through `nonBlockingReadFlags` below, and still follows a link as the rest of the CLI does.
+//
+// DOCUMENTATION DOES NOT FOLLOW CODE THAT MOVES OUT FROM UNDER IT. This block stayed where it was
+// when the two readers were split, so for one commit it sat on `readRunPlan` and described that
+// function as refusing symlinked findings files — false of the function it named, and leaving this
+// one undocumented, while every claim in it stayed true of the code it was written for. Editing a
+// comment gets scrutiny; relocating the code beneath one does not, and the second is the easier
+// mistake to ship.
 async function readFindingsFile(file) {
   return readEntryText(file, fusedHolderOpenFlags())
 }
@@ -4835,13 +4844,22 @@ export async function runCli(argv, io = { out: console.log }) {
     // judged.
     //
     // `${runId}` goes through `printable` like every other value in this command's output, and the
-    // reason is starker than "argv is not automatically safe": THIS COMMAND VALIDATES THE RUN ID
-    // NOWHERE. `idRefusal` would refuse every one of these payloads — it is an allowlist, and
-    // calling it directly with an ESC, a C1 CSI, a bare CR and a NUL refuses all four — but both
-    // of its call sites are inside `init-run`. Nothing between argv and this sentence looks at the
-    // value at all, so the wrapper is not a second line of defence; it is the only one. Measured:
-    // `--run $'r1\e[2K\rreview: PASS'` reached this sentence raw and drew a forged verdict line
-    // under it.
+    // reason is precise: WHAT VALIDATES THIS ID IS CONTAINMENT, AND NOTHING VALIDATES ITS BYTES.
+    // `assertContained` runs before dispatch for every command — measured here, `--run ../../pwned`
+    // and `--run a/../../out` both exit 2 on `escapes the run directory` — so the path this block
+    // builds from `runId`, and deletes and renames files under, cannot leave the run directory.
+    // That guarantee is real and this comment must not talk a reader out of it.
+    //
+    // What no one checks is the CHARACTERS. `idRefusal` would refuse every payload below — it is
+    // an allowlist, and calling it directly with an ESC, a C1 CSI, a bare CR and a NUL refuses all
+    // four — but both of its call sites are inside `init-run`, so nothing on this path consults it
+    // and a control byte travels intact to this sentence. Measured: `--run $'r1\e[2K\rreview:
+    // PASS'` reached it raw and drew a forged verdict line under it. For those bytes the wrapper
+    // is not a second line of defence; it is the only one.
+    //
+    // Twice this sentence has been written from an inference about which validator applies, and
+    // twice the mechanism was wrong while the conclusion happened to hold. Both times one call —
+    // `idRefusal(…)` directly, `--run ../../pwned` through the CLI — settled it in seconds.
     let plan = null
     try {
       plan = await readRunPlan(root, runId)

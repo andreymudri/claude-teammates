@@ -863,6 +863,9 @@ test('collect-reviews refuses to write its results file outside the run director
 //        and NOT the two nested fixtures, which both plant four components from the end and
 //        therefore share a threshold rather than bracketing one
 //   the accumulating walk -> a fixed climb of TWELVE
+//   (a "fixed climb of N" here means N applications of `path.dirname` from `dir`, which may
+//    overshoot the root, with the resulting chain examined root-down — a `slice(-N)` construction
+//    counts differently and is a different mutant)
 //     -> 'plantedReviewsLink examines exactly as many components as the path has'
 //        'plantedReviewsLink stops at the outermost link and names it'
 //        This is why those two exist: twelve passes every FIXTURE in this file, including the
@@ -882,16 +885,27 @@ test('collect-reviews refuses to write its results file outside the run director
 //     -> 'a fifo planted at plan.json is refused, and collect-reviews terminates'
 //        'an unparseable plan.json is refused rather than thrown, on both reads'
 //   `collect-reviews`' own plan read stops catching
-//     -> the two above, plus 'cli.mjs collect-reviews — the run id in the unreadable-plan refusal
-//        cannot be made to draw a forged terminal write'
-//   the `tasks` traversal in `ambiguousPhaseRefusal` reverts to the fork-point form IN FULL —
-//   `(plan.tasks ?? []).map((t) => t.phase)`, dropping both the `Array.isArray` narrowing and the
-//   optional chain, because dropping either alone is a survivor: `{"tasks":[null]}` is already an
-//   array, and `{"tasks":"abc"}` has no property to reach
-//     -> 'a plan whose tasks are not tasks is refused, never thrown'
-//        'review-dispatch is refused by the same plan, not thrown'
-//   `tasksOfPhase` reverts the same way, to `(plan.tasks ?? []).filter((t) => t.phase === …)`
-//     -> 'a plan whose tasks are not tasks is refused, never thrown'
+//     -> the two above, plus 'cli.mjs collect-reviews — the run id AND THE PLAN BYTES in the
+//        unreadable-plan refusal cannot be made to draw a forged terminal write' — that row was
+//        renamed when its fixture grew the second forgery, and this line kept the old name while
+//        two others were updated. A name is only self-checking if something re-runs it.
+//   the `tasks` traversal in `ambiguousPhaseRefusal`, HALF AT A TIME, because the halves differ:
+//     `t?.phase` -> `t.phase` alone
+//       -> 'a plan whose tasks are not tasks is refused, never thrown'
+//          'review-dispatch is refused by the same plan, not thrown'
+//     `Array.isArray(plan.tasks) ? … : []` -> `plan.tasks ?? []` alone
+//       -> 'a plan whose tasks are not tasks is refused, never thrown'
+//     Measured separately after a claim here that "dropping either alone is a survivor" — which is
+//     false at this site, and was reasoned from the other one without re-running it.
+//   `tasksOfPhase`, also half at a time, where the halves really do differ in that way:
+//     `Array.isArray(plan?.tasks) ? … : []` -> `plan.tasks ?? []` alone
+//       -> 'a plan whose tasks are not tasks is refused, never thrown'
+//     `t?.phase` -> `t.phase` alone
+//       -> 'a plan whose tasks are not tasks is refused, never thrown', and ONLY since that fixture
+//          began running every body at `--phase 1` as well as with the flag omitted. Before that it
+//          killed nothing: `Number('default')` is NaN, so the omitted-flag route returns the task
+//          list unfiltered and never looks at an element. An unpinned production edit, found by a
+//          reviewer running the halves this record described in one breath.
 //   `readEntryText(file, …)` -> `readFile(file, 'utf8')` inside `readRunPlan`, or
 //   `nonBlockingReadFlags` drops `| c.O_NONBLOCK` — the two ways to reopen the plan.json FIFO door
 //     -> 'a fifo planted at plan.json is refused, and collect-reviews terminates'
@@ -1902,31 +1916,46 @@ test('the ambiguous-phase refusal names integers only, whatever plan.json carrie
 // it. It is here because a null phase is the shape closest to the four above that must NOT be
 // treated as malformed — it is a task the phase filter simply drops — and a fixture that only
 // carries crashes cannot tell the two apart.
+//
+// AND EVERY BODY IS RUN AT TWO PHASES, which is not thoroughness for its own sake. `tasksOfPhase`
+// has two arms, and only the INTEGER one filters: with `--phase` omitted the name is `default`,
+// `Number('default')` is NaN, and the whole task list comes back untouched without any element
+// being looked at. So the omitted-flag column alone left `t?.phase` there unpinned — reverting it
+// to `t.phase` passed the entire file — while `--phase 1` over `{"tasks":[null]}` sends the
+// mutant to exit 1 with an empty stdout on BOTH commands, and the shipped code to exit 4 with a
+// refusal. A guard on one arm of a branch needs a case on that arm.
+const MALFORMED_PLANS = ['{"tasks":[null]}', '{"tasks":"abc"}', '{"tasks":{"a":1}}', '{"tasks":7}', '{"tasks":[{"phase":null}]}']
+
 test('a plan whose tasks are not tasks is refused, never thrown', async () => {
-  for (const body of ['{"tasks":[null]}', '{"tasks":"abc"}', '{"tasks":{"a":1}}', '{"tasks":7}', '{"tasks":[{"phase":null}]}']) {
-    await withRepo(async ({ root, planPath, io, lines, git: g }) => {
-      await stagedPhaseOneReviews(root, planPath, io, g)
-      await writeFile(path.join(root, '.teammates', 'r1', 'plan.json'), body, 'utf8')
-      lines.length = 0
-      // `--phase` omitted, so the ambiguity check walks `tasks` before anything else does.
-      const code = await runCli(['collect-reviews', '--run', 'r1', '--root', root], io)
-      assert.equal(code, 4, `${body}: ${lines.join('\n')}`)
-      assert.notEqual(lines.join('\n').trim(), '', `${body}: a refusal must say something`)
-      // The one code these commands never return, and the one shape a refusal never takes.
-      assert.notEqual(code, 1)
-    })
+  for (const body of MALFORMED_PLANS) {
+    for (const argv of [[], ['--phase', '1']]) {
+      await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+        await stagedPhaseOneReviews(root, planPath, io, g)
+        await writeFile(path.join(root, '.teammates', 'r1', 'plan.json'), body, 'utf8')
+        lines.length = 0
+        const code = await runCli(['collect-reviews', '--run', 'r1', ...argv, '--root', root], io)
+        const where = `${body} with ${argv.length ? argv.join(' ') : 'no --phase'}`
+        assert.equal(code, 4, `${where}: ${lines.join('\n')}`)
+        assert.notEqual(lines.join('\n').trim(), '', `${where}: a refusal must say something`)
+        // The one code these commands never return, and the one shape a refusal never takes.
+        assert.notEqual(code, 1)
+      })
+    }
   }
 })
 
 test('review-dispatch is refused by the same plan, not thrown', async () => {
-  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
-    await stagedPhaseOneReviews(root, planPath, io, g)
-    await writeFile(path.join(root, '.teammates', 'r1', 'plan.json'), '{"tasks":[null]}', 'utf8')
-    lines.length = 0
-    const code = await runCli(['review-dispatch', '--run', 'r1', '--root', root], io)
-    assert.equal(code, 4, lines.join('\n'))
-    assert.notEqual(lines.join('\n').trim(), '')
-  })
+  // Both arms here too: this command reaches `tasksOfPhase` by the same two routes.
+  for (const argv of [[], ['--phase', '1']]) {
+    await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+      await stagedPhaseOneReviews(root, planPath, io, g)
+      await writeFile(path.join(root, '.teammates', 'r1', 'plan.json'), '{"tasks":[null]}', 'utf8')
+      lines.length = 0
+      const code = await runCli(['review-dispatch', '--run', 'r1', ...argv, '--root', root], io)
+      assert.equal(code, 4, lines.join('\n'))
+      assert.notEqual(lines.join('\n').trim(), '')
+    })
+  }
 })
 
 // A SYMLINKED `plan.json` is READ, not refused, and that is a decision rather than an accident.
@@ -2578,12 +2607,13 @@ const SANITISED_SITES = [
     site: 'cli.mjs collect-reviews — the run id and the plan bytes in the unreadable-plan refusal',
     exit: 4,
     // BOTH halves of that line, which is what this table requires of a two-wrapper site and what
-    // the first version of this row did not do. The run id is argv, and nothing on this path looks
-    // at it: `idRefusal` would refuse this payload, but both of its call sites are in `init-run`.
-    // The plan CONTENTS are the other half — a `JSON.parse` error quotes the bytes it choked on,
-    // so an agent-written `plan.json` puts its own bytes in this sentence, which is not the argv
-    // class and not covered by that exemption. The C1 form for the id because it becomes a
-    // directory name, for the reason this file's payload note gives.
+    // the first version of this row did not do. The run id is argv, and what runs over it before
+    // this sentence is `assertContained` — containment, not characters: it refuses `../../pwned`
+    // and says nothing about a C1 CSI, and `idRefusal`, which would refuse one, is reached only by
+    // `init-run`. The plan CONTENTS are the other half — a `JSON.parse` error quotes the bytes it
+    // choked on, so an agent-written `plan.json` puts its own bytes in this sentence, which is not
+    // the argv class and not covered by that exemption. The C1 form for the id because it becomes
+    // a directory name, for the reason this file's payload note gives.
     async setup({ root, io }) {
       await writeManifest(root, { lens: ['correctness'], phases: { default: { checks: [AGENT_CHECK] } } })
       await mkdir(path.join(root, '.teammates', CLI_C1_FORGERY), { recursive: true })
