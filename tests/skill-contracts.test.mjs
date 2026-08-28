@@ -1329,6 +1329,56 @@ test('every sentence about the SubagentStop mechanism, in any document, is one a
   )
 })
 
+// A section lock binds one section, so the cheapest escape was never to reword a locked sentence
+// but to add a contradicting one under the next heading. Measured on this tree: a
+// `Clear leftovers by hand when you are in a hurry:` bullet plus an `rm -rf
+// .claude/worktrees/agent-* && git branch -D $(git branch --list 'teammates/*')` block, placed in
+// Worktree mechanics, left the whole suite green — the document then carried an unsupported hand
+// sweep two sections below the claim that prune-run is the only supported way to clean up, and no
+// test named it. The corpus inventory removes the LOCATION dimension: every sentence about
+// sweeping by hand, in either document, has to be in this list.
+//
+// The `cleanup.code.length === 1` assertion in the cleanup test is one heading wide, so it never
+// looks at Worktree mechanics at all, and `claimSites` is built from statements and headings — a
+// code block is neither. Two different bounds, and the plant walked between them. What this lock
+// reaches is the PROSE: the bullet is a list item and therefore a statement. Measured on this
+// tree, the block alone with the bullet removed is caught too, but for a reason worth naming
+// rather than counting as strength — placed between two bullets, its indented lines are read as a
+// continuation of the PRECEDING list item, so they land inside that item's statement rather than
+// in a block of their own.
+//
+// WHAT IS STILL OPEN, measured rather than reasoned: a genuine standalone block, under its own
+// `## Leftovers` heading, introduced by `Sometimes a run ends untidily. Then:` — prose that names
+// nothing in the lexicon — left the whole suite green, with the sweep sitting in the document. So
+// this buys nothing about MEANING, exactly as the lexicon above buys nothing. What is spent is the
+// location; the vocabulary is not.
+const HAND_SWEEP_LEXICON = /rm -rf|rm -fr|by hand|hand-run|hand sweep/i
+
+const HAND_SWEEP_CORPUS = [
+  "finishing-a-development-branch :: Do not sweep by hand: a hand-run git worktree remove --force or git branch -D supplies neither the recomputed phase gate nor the ancestry proof above — it only does what the flag itself says, on whatever you point it at.",
+  "parallel-execution :: On a detached HEAD init-run records the literal string HEAD, which is not a run branch and which no command overwrites, so it disarms the second layer until the field is removed by hand.",
+  "parallel-execution :: On either direct-Agent path — the fallback above and the fewer-than-three-task case — build each teammate's brief with the CLI rather than composing it by hand:",
+  "parallel-execution :: Do not remove a worktree or delete a teammate branch by hand: git worktree remove refuses one holding uncommitted work only until --force is added, and nothing then stops --force from reaching a worktree whose phase has not passed yet; git branch -D does not measure \"merged\" at all — the one thing it refuses is a branch a registered worktree still has checked out, which is why the worktree has to go first, and otherwise it force-deletes regardless of ancestry — and -d, the flag that does measure, measures against the branch's own upstream or HEAD, never against the run branch.",
+  "parallel-execution :: The one exception is a task going to a fresh implementer before its phase has passed: this command cannot reach that worktree yet, so it still has to be removed by hand with --force — authorised there because abandoning that teammate's unfinished worktree for a fresh dispatch is the deliberate point, and a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over — and that authorisation covers the teammate's unfinished work only: --force still follows a junction out of the worktree the same way, and nothing unlinks it first there either, so check the worktree for one first (dir /AL in the worktree, or Get-Item <path> | Select-Object LinkType) and remove the link itself with rmdir <link> — never a recursive delete, which follows it — before forcing — see the matching exception in \"Worktree mechanics\" below.",
+  "parallel-execution :: Prune with the command rather than by hand:",
+  "parallel-execution :: Once the phase has a recorded PASS, run prune-run to remove the worktree, not git worktree remove by hand — the command above already covers this case.",
+  "parallel-execution :: The one exception is a task going to a fresh implementer instead of a resume, because resuming stalled: prune that task's worktree first, since prune-run only removes a worktree whose phase already recomputes to PASS and a mid-phase stall has none yet to rest that removal on — do it by hand with git worktree remove --force <path>, then git worktree prune; --force is required and authorised here, because a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over, and discarding that work is the deliberate point of abandoning it for a fresh implementer — that authorisation covers the teammate's unfinished work only, not a junction: --force still follows one out of the worktree and deletes its target, and nothing unlinks it first the way it does for a leaked preview, so check the worktree for one first (dir /AL in the worktree, or Get-Item <path> | Select-Object LinkType) and remove the link itself with rmdir <link> — never a recursive delete, which follows it — before forcing — because a returned teammate's worktree keeps its branch checked out and the new dispatch would otherwise fail with \"already used by worktree\"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover.",
+]
+
+test('every sentence about sweeping worktrees by hand, in either cleanup skill, is one a human locked', async () => {
+  const docs = []
+  for (const name of ['parallel-execution', 'finishing-a-development-branch']) {
+    docs.push({ label: name, doc: (await skill(name)).doc })
+  }
+  assertCorpusInventory(
+    docs,
+    HAND_SWEEP_LEXICON,
+    HAND_SWEEP_CORPUS,
+    'the two documents that tell an operator not to sweep by hand each carry authorised exceptions, '
+      + 'and no section lock spans them',
+  )
+})
+
 // A corpus inventory is a list, so a statement counted once per enclosing heading would appear in
 // it two or three times and the lock would encode nesting depth as if it were content. Adding an
 // unrelated `###` anywhere would then fail a lock about SubagentStop. Measured before the fix:
