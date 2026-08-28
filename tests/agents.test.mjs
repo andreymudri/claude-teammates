@@ -20,7 +20,18 @@ import {
 // changes that count and fails, whatever words it uses. `subject:` stays alongside it for a
 // different threat: a sentence inserted ELSEWHERE in the section, in a different block, which a
 // per-block count cannot see (that block's count is unaffected). The two are complementary, not
-// redundant: count guards the bound block, subject guards the rest of the section.
+// redundant: count guards the bound block, subject guards the rest of the section — but only on
+// a call site that actually carries a `subject:`. The `--base` gloss below shipped without one
+// for a round, because the obvious lexicon ("run branch"/"base branch") collides with unrelated
+// bullets elsewhere in Hard rules — and the fifth-register sentence above, placed one bullet
+// away instead of inside the gloss's own paragraph, shipped green with the count alone seeing
+// nothing wrong. All five call sites below now carry a `subject:`, the gloss on a pattern
+// checked not to collide before it was relied on — `--base` alone was not enough, because the
+// demonstrated attack sentence names no flag, only prose ("no separate base", "run branch") that
+// round 3 had already ruled out as a section-wide lock; the phrase actually used to close it is
+// narrower than that ban. Read this as true of the five call sites as they stand, not as a
+// property `assertBlockStatementCount` itself guarantees — a future call site that omits
+// `subject:` gets only the block it names guarded.
 //
 // This is deliberately tight, not defensive-loose: the block count must be exactly right for
 // today's tree, not "at least N". A bullet whose prose legitimately grows over time would need
@@ -391,19 +402,34 @@ test('the implementer names the locate and complete commands it must run, with -
 // branch ... That is the run branch, not the base branch you checked out from" left every test in
 // this file at 27/27, because nothing bound those two sentences at all. `then:` requires them
 // adjacent, and both patterns are anchored end to end, so a swap of "base branch" and "run branch"
-// inside either sentence — not only a deletion — fails to match and goes red. No `subject:` here:
-// "run branch" and "base branch" are used throughout Hard rules for the unrelated fork-point-diff
-// bullet (`git merge-base <run branch> ...`) and the branch-convention bullets, so a section-wide
-// vocabulary lock on those two phrases would flag statements this claim has nothing to do with.
+// inside either sentence — not only a deletion — fails to match and goes red.
 //
-// A THIRD register defeated even the widened lexicons elsewhere in this file: appending "Where
+// A THIRD register defeated even the round-3 lexicons elsewhere in this file: appending "Where
 // your run has no separate base, pass the run branch instead." after the bound consequence here
 // shipped an implementer definition instructing a teammate to pass the ONE value `complete
-// --base` refuses outright — measured, 28/28 green, because this test has no `subject:` to widen
-// (by design, for the reason above) and a lexicon is an arms race lost by construction: the
-// attacker picks the register after the words are picked. `assertBlockStatementCount` pins how
-// many statements the bound paragraph contains instead of which words appear in them, so ANY
-// appended sentence changes the count and fails, whatever register it uses.
+// --base` refuses outright — measured, 28/28 green. `assertBlockStatementCount` closed that: it
+// pins how many statements the bound paragraph holds, so ANY appended sentence changes the count
+// and fails, whatever register it uses.
+//
+// The count guards its own paragraph, not the rest of the section — round 4 shipped this test
+// with no `subject:` at all, and the fifth-register sentence above still ships green when placed
+// ONE BULLET AWAY, where the count cannot see it. Round 3 skipped `subject:` here because "run
+// branch" and "base branch" are used throughout Hard rules in unrelated bullets — the fork-point
+// `git merge-base <run branch> ...` line, the branch-convention bullets — and a lock on those two
+// phrases would flag statements this claim has nothing to do with. That reasoning holds for those
+// phrases; it does not rule out a narrower one. `--base` itself — the flag, not the branch nouns
+// around it — appears in exactly two statements in Hard rules today, and they are precisely this
+// claim and its consequence: printed and counted directly against the tree before relying on it,
+// the way the round-3 lexicon widenings were.
+//
+// `/--base/i` ALONE is not enough, though: run against the actual demonstrated attack — "Where
+// your run has no separate base, pass the run branch instead." placed in the neighbouring bullet
+// — it stayed green, because that sentence names no `--base` flag at all; it says "base" and "run
+// branch" in prose, the very phrases round 3 ruled out as a section-wide lock. Reproduced directly
+// before writing this: `/--base/i.test(...)` on that sentence returns false. `pass the run branch
+// instead` closes the demonstrated case without reopening the collision — checked against every
+// statement in Hard rules alongside `--base`, the combined pattern still matches exactly the three
+// statements it should: the claim, its consequence, and (when present) that one attack sentence.
 test("the implementer's --base gloss names the base branch, not the run branch", async () => {
   const { doc } = await agent('tm-implementer.md')
   const hardRules = doc.section('Hard rules')
@@ -411,6 +437,7 @@ test("the implementer's --base gloss names the base branch, not the run branch",
     label: 'implementer --base gloss',
     claim: /^--base must name the same branch your worktree checked out from, or the gate anchors its plan lookup where the plan does not exist\.$/,
     then: /^That is the base branch, not the run branch: complete refuses outright when --base names the run branch itself\.$/,
+    subject: /--base|pass the run branch instead/i,
   })
   assertBlockStatementCount(
     hit,
