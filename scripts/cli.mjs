@@ -4321,6 +4321,72 @@ export async function runCli(argv, io = { out: console.log }) {
     const check = agentChecks[0]
 
     const dir = path.join(runDir(root, runId), 'reviews')
+
+    // THE PREVIOUS ROUND'S RESULTS FILE IS REMOVED BEFORE THIS ROUND READS ANYTHING, and that is
+    // what keeps a deterministic, phase-scoped filename safe to advertise.
+    //
+    // The file is written only on success, so before it existed this command was fail-closed:
+    // there was no artefact unless the operator made one, and a `>` redirect truncates on the
+    // failing run. Writing it turned that fail-open. Measured on this branch before this removal:
+    // a clean round wrote `results-default.json` saying `"status": "pass"` and printed that path;
+    // a fix-round commit then made the round-2 collection refuse with exit 4 (`stale findings for
+    // lens correctness`), the round-1 file survived untouched still saying `"pass"`, and `gate
+    // --results` on exactly the path round 1 advertised exited 0 with verdict PASS — a pass over
+    // a tree no reviewer judged.
+    //
+    // REMOVAL rather than a stamp inside the document. A stamp is only worth what its reader
+    // checks, and `gate --results` does not check one: it `JSON.parse`s the file and trusts
+    // `results`, which is how the stale document above passed. Teaching the gate to verify a
+    // stamp would put that check on every run's gate path and still leave the document trusted by
+    // anything else that reads it, whereas removing it makes its EXISTENCE the claim — a results
+    // file is present only when the round that wrote it succeeded.
+    //
+    // Removed HERE, before the findings are read, rather than on each failing exit: this command
+    // has nine paths that return 4 after this point, and a tenth added later would silently
+    // reopen the hole. Clearing it up front also covers the exits no `return` can — a crash, a
+    // kill, a timeout mid-collection — none of which can leave a superseded document behind.
+    //
+    // `unlink` removes the LINK, never what it points at, so clearing a symlink an earlier round
+    // (or another teammate) left at this path destroys nothing on the other end of it.
+    //
+    // The name is `results-<phase>.json`, beside the findings files this round reads, and the
+    // phase goes through `isUnsafePathComponent` — the predicate `reviewFileName` applies to each
+    // of its own components — so a phase name that is not a safe filename is refused rather than
+    // escaping the directory. Vetted HERE rather than beside the write, because this removal
+    // builds a path from the same value: unvetted, it would be a delete-anything primitive as
+    // readily as the write was a write-anything one. Refused with the 4 the `reviewFileName`
+    // failure below returns, rather than a second code for the same flag on the same command.
+    //
+    // NOT redundant with that failure, which is the reading the lens loop invites: it fires once
+    // PER LENS, and a check may declare its own empty `lens` array. `checksForPhase` keeps an
+    // empty array as it is (only a MISSING one falls back to the manifest's list) and
+    // `ENFORCEMENT_VALIDATORS.lens` validates the top-level key, never a check's own — so with
+    // `"lens": []` on the agent check that loop runs zero times and nothing has looked at the
+    // phase. Measured on this branch, with this guard forced to false and the manifest declaring a
+    // phase key of `a/../../../pwned`: the results file was written to `.teammates/pwned.json`,
+    // two directories above the run's own reviews directory, and the command printed that path
+    // and exited 0.
+    //
+    // Coerced with `String` first for the same reason `reviewFileName` does it: the value that
+    // gets checked has to be the value that gets joined, or the two can differ.
+    const resultsName = String(phaseName)
+    if (isUnsafePathComponent(resultsName)) {
+      io.out(`a phase must be a non-empty name with no path separators, got ${JSON.stringify(printable(resultsName))}`)
+      return 4
+    }
+    const resultsPath = path.join(dir, `results-${resultsName}.json`)
+    try {
+      await unlink(resultsPath)
+    } catch (err) {
+      // ENOENT is the ordinary case — no earlier round, or one that failed. Anything else is a
+      // document this command cannot account for, and leaving it in place would let it be read as
+      // this round's answer.
+      if (err.code !== 'ENOENT') {
+        io.out(`cannot clear the previous results file at ${resultsPath}: ${printable(err.message)} — a document from an earlier round must not survive this one`)
+        return 4
+      }
+    }
+
     const files = []
     const unreadable = []
     for (const lens of check.lens) {
@@ -4440,39 +4506,60 @@ export async function runCli(argv, io = { out: console.log }) {
     // with an empty `failed: []`, naming nothing to fix. Writing the file makes the next command's
     // argument something that exists rather than something the operator had to know to create.
     //
-    // The filename is `results-<phase>.json`, beside the findings files it was collected from, and
-    // the phase goes through `isUnsafePathComponent` — the predicate `reviewFileName` applies to
-    // each of its own components — so a phase name that is not a safe filename is refused rather
-    // than escaping the directory. Refused with the 4 the `reviewFileName` failure above returns,
-    // rather than a second code for the same flag on the same command.
+    // The JSON goes out FIRST, before anything is written, and the path after it. Two reasons,
+    // and the ordering serves both. Nothing is prepended to what a caller already parses; and a
+    // collection that succeeded is never lost to a filesystem that refused it — with the results
+    // file made unwritable (an earlier round under another uid, or a read-only `.teammates`) the
+    // write-first version exited 1 with a raw Node stack and ZERO bytes on stdout, discarding a
+    // review it had already computed, and 1 is not a code this command otherwise returns.
     //
-    // NOT redundant with that failure, which is the reading the loop above invites: it fires once
-    // PER LENS, and a check may declare its own empty `lens` array. `checksForPhase` keeps an
-    // empty array as it is (only a MISSING one falls back to the manifest's list) and
-    // `ENFORCEMENT_VALIDATORS.lens` validates the top-level key, never a check's own — so with
-    // `"lens": []` on the agent check the loop runs zero times and nothing has looked at the phase
-    // when the write is reached. Measured on this branch, with this guard forced to false and the
-    // manifest declaring a phase key of `a/../../../pwned`: the results file was written to
-    // `.teammates/pwned.json`, two directories above the run's own reviews directory, and the
-    // command printed that path and exited 0.
+    // A `> results.json` redirect is NOT preserved by that ordering — it captures the path line
+    // too, and `gate --results` JSON.parses the whole file, so the redirect yields `--results must
+    // be a readable JSON file` (measured on this branch). The file written below is the path to
+    // pass instead, which is what makes the redirect unnecessary.
+    const document = JSON.stringify({ results: collected.results }, null, 2)
+    io.out(document)
+
+    // TEMP-THEN-RENAME, matching `writeState` in `scripts/state.mjs`, because a plain `writeFile`
+    // FOLLOWS A SYMLINK sitting at the target. `'w'` is `O_CREAT|O_WRONLY|O_TRUNC`, and the guard
+    // above vets the phase STRING while nothing vets the ENTRY already at the safe path — which
+    // any teammate can plant, since `.teammates/<run>/reviews/` is where reviewers are told to
+    // write and the filename is derivable from the phase in their own dispatch prompt. Measured on
+    // this branch before this change, each with the printed path still naming the innocuous
+    // in-repo location and the command exiting 0: a symlink to `teammates.gate.json` had the
+    // TRACKED MANIFEST overwritten with this document (`git status` reported it modified); a
+    // symlink to a file outside the project root had that file overwritten; and a DANGLING symlink
+    // to `hooks-new-file.mjs` CREATED that file. `rename` replaces a link rather than following
+    // it, so all three now end with the plant gone and the document at the real path.
     //
-    // Coerced with `String` first for the same reason `reviewFileName` does it: the value that
-    // gets checked has to be the value that gets joined, or the two can differ.
-    const resultsName = String(phaseName)
-    if (isUnsafePathComponent(resultsName)) {
-      io.out(`a phase must be a non-empty name with no path separators, got ${JSON.stringify(printable(resultsName))}`)
+    // `'wx'` on the temp for the same reason `writeOwnerMarker` uses it (see
+    // scripts/merge-preview.mjs) — an entry already at the scratch name is refused, not followed.
+    // `'wx'` is wrong for the DESTINATION: `collect-reviews` legitimately re-runs, and an
+    // exclusive create there would refuse every round after the first.
+    let tmp = null
+    try {
+      await mkdir(dir, { recursive: true })
+      // The fourth shape of the same hazard, and neither `rename` nor `'wx'` reaches it: with
+      // `reviews/` ITSELF a symlink, `mkdir` recursive is a no-op on it and every path built from
+      // `dir` resolves through it, so the document lands in whatever directory it points at while
+      // the printed path still says in-repo — measured on this branch. `lstat` reports the link
+      // rather than its target, which is what makes the difference visible here.
+      if ((await lstat(dir)).isSymbolicLink()) {
+        throw new Error(`${dir} is a symlink, and the run's reviews directory must be a real directory`)
+      }
+      tmp = `${resultsPath}.${process.pid}.${Math.floor(performance.now() * 1000)}.tmp`
+      await writeFile(tmp, `${document}\n`, { encoding: 'utf8', flag: 'wx' })
+      await rename(tmp, resultsPath)
+    } catch (err) {
+      if (tmp) await unlink(tmp).catch(() => {})
+      // Reported, not thrown: the results are already on stdout above. 4 rather than 0 because
+      // this command's answer is now a FILE and there is not one — a caller told 0 would go
+      // looking for a path that does not exist. Wrapped for the reason `configFailureMessage`'s
+      // syscall branch is: a Node fs error quotes the path this CLI built, and nothing that
+      // reaches a terminal should carry bytes unfiltered.
+      io.out(`cannot write the results file at ${resultsPath}: ${printable(err.message)} — the results above are complete; redirect them to a file and pass that to gate --results`)
       return 4
     }
-    const resultsPath = path.join(dir, `results-${resultsName}.json`)
-    const document = JSON.stringify({ results: collected.results }, null, 2)
-    await mkdir(dir, { recursive: true })
-    await writeFile(resultsPath, `${document}\n`, 'utf8')
-    // The JSON goes out first and the path after it, so nothing is prepended to what a caller
-    // already parses. A `> results.json` redirect is NOT preserved by that ordering — it captures
-    // this line too, and `gate --results` JSON.parses the whole file, so the redirect now yields
-    // `--results must be a readable JSON file` (measured on this branch). The file written above
-    // is the path to pass instead, which is what makes the redirect unnecessary.
-    io.out(document)
     io.out(`results written to ${resultsPath} — pass that path to gate --results`)
     return 0
   }

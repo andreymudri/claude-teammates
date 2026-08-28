@@ -807,8 +807,10 @@ test('collect-reviews refuses to write its results file outside the run director
     const phase = 'a/../../../pwned'
     await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
       lens: ['correctness'],
-      // The empty per-check list is the whole point of the fixture: with the manifest's own list
-      // in force the loop refuses this phase first and the guard under test is never reached.
+      // The empty per-check list is the whole point of the fixture. The per-lens `reviewFileName`
+      // refusal prints the SAME sentence, so with the manifest's own list in force this fixture
+      // could not tell which of the two refused; with no lens that loop never runs and only the
+      // guard is left.
       phases: { [phase]: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: [] }] } },
     }), 'utf8')
     lines.length = 0
@@ -816,6 +818,135 @@ test('collect-reviews refuses to write its results file outside the run director
     assert.equal(code, 4, lines.join('\n'))
     assert.match(lines.join('\n'), /no path separators/)
     await assert.rejects(stat(path.join(root, '.teammates', 'pwned.json')), { code: 'ENOENT' })
+  })
+})
+
+// --- the entry already sitting at the results path --------------------------------------------
+//
+// The phase guard above vets the path this command BUILDS. These vet what it finds there, which
+// is a different question and not one any string check can answer: `.teammates/<run>/reviews/` is
+// where reviewers are told to write, and the filename follows from the phase in their own dispatch
+// prompt, so the entry at the target is attacker-choosable. Skipped on win32 for the reason the
+// preview suite gives lower down: an unprivileged Windows process cannot create a file symlink,
+// so the fixture, not the mechanism, is what is unavailable there.
+const NO_PLANTED_SYMLINK_ON_WIN32 = { skip: process.platform === 'win32' }
+
+async function stagedPhaseOneReviews(root, planPath, io, g) {
+  const stampFor = await withStampedPhase(root, planPath, io, g)
+  await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(REVIEW_MANIFEST), 'utf8')
+  await writeReviewFile(root, 'r1', '1-correctness.json', { stamp: stampFor('correctness'), findings: [] })
+  await writeReviewFile(root, 'r1', '1-security.json', { stamp: stampFor('security'), findings: [] })
+  return path.join(root, '.teammates', 'r1', 'reviews', 'results-1.json')
+}
+
+// A plain `writeFile` is `O_CREAT|O_WRONLY|O_TRUNC` and follows the link: before the temp-then-
+// rename, this fixture overwrote the tracked gate manifest and still exited 0 printing the
+// in-repo path.
+test('collect-reviews replaces a symlink at its results path rather than writing through it', NO_PLANTED_SYMLINK_ON_WIN32, async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const resultsPath = await stagedPhaseOneReviews(root, planPath, io, g)
+    const bait = path.join(root, 'teammates.gate.json')
+    const before = await readFile(bait, 'utf8')
+    await symlink(bait, resultsPath)
+    lines.length = 0
+    assert.equal(await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io), 0, lines.join('\n'))
+    assert.equal(await readFile(bait, 'utf8'), before, 'the link target must be untouched')
+    // The document went to the path that was printed, and the plant is gone rather than followed.
+    assert.equal((await lstat(resultsPath)).isSymbolicLink(), false)
+    assert.ok(Array.isArray(JSON.parse(await readFile(resultsPath, 'utf8')).results))
+  })
+})
+
+// The same write CREATED the target when the link dangled, which is the shape that plants a new
+// file in a repository rather than editing one.
+test('collect-reviews does not create the target of a dangling symlink at its results path', NO_PLANTED_SYMLINK_ON_WIN32, async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const resultsPath = await stagedPhaseOneReviews(root, planPath, io, g)
+    const target = path.join(root, 'hooks-new-file.mjs')
+    await symlink(target, resultsPath)
+    lines.length = 0
+    assert.equal(await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io), 0, lines.join('\n'))
+    await assert.rejects(stat(target), { code: 'ENOENT' })
+    assert.equal((await lstat(resultsPath)).isSymbolicLink(), false)
+  })
+})
+
+// The fourth shape, which neither `rename` nor `'wx'` reaches: with the DIRECTORY a symlink, every
+// path built from it resolves through the link and `mkdir` recursive is a no-op on it, so the
+// document lands elsewhere while the printed path still says in-repo.
+//
+// This is also where the write-failure contract is pinned: the results reach stdout in full
+// BEFORE the write is attempted, so a filesystem that refuses the file cannot discard a collection
+// that already succeeded. Write-first, that case exited 1 with a Node stack and an empty stdout.
+test('collect-reviews refuses a reviews directory that is a symlink, and still prints the results', NO_PLANTED_SYMLINK_ON_WIN32, async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await stagedPhaseOneReviews(root, planPath, io, g)
+    const reviews = path.join(root, '.teammates', 'r1', 'reviews')
+    const elsewhere = path.join(root, 'elsewhere')
+    await rename(reviews, elsewhere)
+    await symlink(elsewhere, reviews)
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 4, lines.join('\n'))
+    const out = lines.join('\n').split('\n')
+    assert.equal(out[0], '{', 'the collection must be printed before the write is tried')
+    assert.equal(collectedResults(lines).results.length, 1)
+    assert.match(out[out.length - 1], /cannot write the results file/)
+    await assert.rejects(stat(path.join(elsewhere, 'results-1.json')), { code: 'ENOENT' })
+  })
+})
+
+// --- a results file may not outlive the round that wrote it -----------------------------------
+//
+// The name is deterministic and phase-scoped, so a second round reuses exactly the path the first
+// advertised. Before the removal this sequence ended with `gate --results` at verdict PASS over a
+// tree no reviewer had judged.
+test('a failing round leaves no results file from the round before it', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const resultsPath = await stagedPhaseOneReviews(root, planPath, io, g)
+    lines.length = 0
+    assert.equal(await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io), 0, lines.join('\n'))
+    assert.equal(JSON.parse(await readFile(resultsPath, 'utf8')).results[0].status, 'pass')
+
+    // A fix round lands a commit: the findings files now describe a tree that is gone, which is
+    // exactly what the stamp exists to catch.
+    g(['checkout', '--quiet', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 2\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'fix round'])
+    g(['checkout', '--quiet', 'run-branch'])
+
+    lines.length = 0
+    assert.equal(await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io), 4)
+    assert.match(lines.join('\n'), /stale findings/)
+    await assert.rejects(stat(resultsPath), { code: 'ENOENT' })
+
+    // The end of the sequence, and the only assertion that speaks for the operator: the gate must
+    // not pass on the path round one taught them.
+    lines.length = 0
+    const gateCode = await runCli(
+      ['gate', '--run', 'r1', '--plan', planPath, '--phase', '1', '--results', resultsPath, '--root', root, '--no-fleet'],
+      io,
+    )
+    assert.equal(gateCode, 2, lines.join('\n'))
+    assert.match(lines.join('\n'), /--results must be a readable JSON file/)
+    assert.doesNotMatch(lines.join('\n'), /"verdict": "PASS"/)
+  })
+})
+
+// The removal is what makes a present file mean "this round succeeded", so a removal that cannot
+// happen has to stop the round rather than be skipped. ENOENT is the ordinary case and must not
+// be confused with it; a directory at the path is a non-ENOENT failure with no permissions in it.
+test('collect-reviews refuses when the previous results file cannot be cleared', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const resultsPath = await stagedPhaseOneReviews(root, planPath, io, g)
+    await mkdir(resultsPath)
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 4, lines.join('\n'))
+    assert.match(lines.join('\n'), /cannot clear the previous results file/)
+    // Refused before the findings were read, so no collection is reported beside it.
+    assert.doesNotMatch(lines.join('\n'), /"status"/)
   })
 })
 
