@@ -180,6 +180,89 @@ test('phase-gate documents the two claims results that are not findings', async 
   )
 })
 
+// `collect-reviews` now writes its results file and refuses an omitted `--phase` on a multi-phase
+// plan. Both are BREAKING changes to what this section used to tell an operator to do — the
+// capture-and-pass workflow it described no longer reaches a verdict — so the skill has to say so
+// or it teaches a sequence the CLI answers with an exit code.
+test('phase-gate documents the results file collect-reviews writes and the redirect that no longer round-trips', async () => {
+  const { doc, body } = await skill('phase-gate')
+  const section = doc.section('Finish the pending checks')
+
+  // A bracketed flag reads as optional, and for these two commands the omission is refused rather
+  // than defaulted. Measured on a scratch run whose plan carries two integer phases:
+  // `review-dispatch --run r1 --root <root>` exits 2 naming both, where `--phase 1` exits 0.
+  let checked = 0
+  for (const line of body.split(/\r?\n/)) {
+    if (!/cli\.mjs["']?\s+(review-dispatch|collect-reviews)\b/.test(line)) continue
+    checked++
+    assert.ok(
+      !line.includes('[--phase'),
+      `phase-gate shows --phase as optional on a command whose omission the CLI refuses: ${line.trim()}`,
+    )
+    assert.ok(
+      line.includes('--phase <name>'),
+      `phase-gate must show --phase <name> on this invocation: ${line.trim()}`,
+    )
+  }
+  assert.equal(checked, 2, `precondition: phase-gate must invoke both commands, found ${checked}`)
+
+  assertStatement(
+    section,
+    /--phase is not optional on a plan with more than one phase/i,
+    'phase-gate must say the flag is required rather than leaving the reader to infer it from the invocation',
+  )
+  assertStatement(
+    section,
+    /it names the manifest key default, which scopes the review to every task branch in the run/i,
+    'phase-gate must say what the omitted flag actually widens to, not merely that it is refused',
+  )
+  assertStatement(
+    section,
+    /the CLI refuses that with exit 2 rather than reviewing it/i,
+    'phase-gate must name the exit code, since an orchestrator branches on it',
+  )
+  // A guard's bound belongs beside the guard. Without this the section teaches a refusal that
+  // reads as total, and a plan mixing an integer phase with a string one silently reviews every
+  // branch in the run under one `default` stamp.
+  assertStatement(
+    section,
+    /the guard counts INTEGER phases only/i,
+    'phase-gate must state the bound of the ambiguity refusal beside the refusal itself',
+  )
+
+  assertStatement(
+    section,
+    /also writes that same document to \.teammates\/<runId>\/reviews\/results-<phase>\.json/i,
+    'phase-gate must name the file collect-reviews writes, or the gate --results below names a path nobody created',
+  )
+  assertStatement(
+    section,
+    /a > results\.json redirect no longer round-trips/i,
+    'phase-gate must retract the capture-and-pass workflow it used to invite: the captured bytes now '
+      + 'carry the trailing path line, and gate --results on them exits 2',
+  )
+  assertStatement(
+    section,
+    /the file's existence is itself the claim/i,
+    'phase-gate must state the fail-closed property — a results file exists only where the round that '
+      + 'wrote it succeeded — since that is what stops a stale pass being read back',
+  )
+  // PINNED AGAINST RETRACTION, not merely required. This sentence scopes itself to two named
+  // conditions with `while … or when …`; the write-failure path is a third, and it was twice
+  // reported as making this sentence false. It does not. The correction is the sentence below it,
+  // and an edit that rewrites this one instead is the defect this anchor catches.
+  assertStatement(
+    section,
+    /^It exits 4 and prints nothing usable while any lens has no file, or when a file exists and does not parse — respawn those lenses instead\.$/i,
+    'the two conditions this sentence names are still true, so it must be added to rather than rewritten',
+  )
+  assertStatement(
+    section,
+    /a third condition exits 4 and does print something usable/i,
+    'phase-gate must name the write-failure path, where the complete results are on stdout and re-running the reviews would waste them',
+  )
+})
+
 // The statements above are claims about code, so they are pinned against the code rather than
 // only against themselves. If `collectReviewResults` ever stops refusing an `unableToVerify`
 // lens, this fails and the skill sentences saying it does have to be rewritten — which is the
