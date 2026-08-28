@@ -97,11 +97,12 @@ remove what it lists:
 
 It removes a task's worktree only where that task's phase gate recomputes to PASS, and
 it deletes the worktree's branch only where `git merge-base --is-ancestor` proves the
-run branch already contains it. That proof is only as good as the run branch's name
-being unambiguous, so before `--yes` confirm `git rev-parse --abbrev-ref HEAD` prints
-the run branch's plain name — anything longer means the run branch does not resolve the
-way the proof assumes, whatever produced that, and the deletion would be proved against
-the wrong ref. That proof is not something a bare `git branch -D` makes on its own: `-D`
+run branch already contains it. That proof is against the ref `derive` takes directly
+off `git symbolic-ref --quiet HEAD`, not off an abbreviated name, and `derive` refuses
+to produce a run branch at all when HEAD is detached, when HEAD points outside
+`refs/heads/`, or when the name that ref strips to is itself a ref path — so nothing a
+teammate can plant under `refs/heads/` changes which ref this proof or the deletion it
+authorises runs against. That proof is not something a bare `git branch -D` makes on its own: `-D`
 deletes whatever branch it is given without asking whether the run branch contains it —
 it refuses only a branch a registered worktree still holds checked out, which is why
 `prune-run` removes the worktree first — and the plain `-d` measures "merged" against

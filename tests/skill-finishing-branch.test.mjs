@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
-import { assertClaim, parseDoc, splitFrontmatter } from './md-contract.mjs'
+import { assertClaim, parseDoc, splitFrontmatter, statementsOf } from './md-contract.mjs'
 
 const body = async () => readFile(new URL('../skills/finishing-a-development-branch/SKILL.md', import.meta.url), 'utf8')
 
@@ -17,6 +17,30 @@ const doc = async () => {
 }
 const cleanup = async () => (await doc()).section(/^Worktree and branch cleanup$/)
 const taxonomy = async () => (await doc()).section(/^Branch taxonomy$/)
+
+// Mirrors tests/agents.test.mjs's helper of the same name: `subject:` is a vocabulary lock, and a
+// sentence appended in a register the lexicon does not name still ships green; the statement
+// COUNT of the bound block cannot be dodged by wording at all, because any appended sentence
+// changes it regardless of what it says. Measured against this tree before relying on it: printed
+// via `statementsOf` on each paragraph in the cleanup section (see the two applications below).
+//
+// Applied only where the bound block is a small, closed enumeration, not to the two cleanup-flag
+// paragraphs those `then:` chains above sit inside. Both of those hold five statements spanning
+// several sub-topics (the junction hazard, the dry-run gloss, the ancestry proof, the `-D`
+// contrast, the never-touches-main-worktree carve-out), and the run-branch-name sentence inside
+// the second one has already been rewritten three times across this and the prior task working
+// the same hazard — recorded in `scripts/cli.mjs`'s own `WHAT REMAINS OPEN` list. A hard count on
+// either paragraph would fail on the next legitimate revision of that still-active analysis
+// exactly as readily as on a regression, so `subject:` alone stays the guard there.
+function assertBlockStatementCount(hit, expected, message) {
+  const count = statementsOf(hit.block.text).length
+  assert.equal(
+    count,
+    expected,
+    `${message}\n  expected exactly ${expected} statement(s) in the bound block, found ${count}: ` +
+      JSON.stringify(statementsOf(hit.block.text)),
+  )
+}
 
 test('requires a recorded gate PASS before presenting work as finished', async () => {
   const b = await body()
@@ -77,25 +101,29 @@ test('the Windows-junction limit leads into the dry-run sentence, which no longe
   })
 })
 
-test('routes worktree removal through the recomputed phase gate and branch deletion through the ancestry proof, immediately bounded by the run-branch-name caveat stated as a symptom, not an enumeration', async () => {
+test('routes worktree removal through the recomputed phase gate and branch deletion through the ancestry proof, immediately bounded by the refusal derive makes before a run branch is ever resolved', async () => {
   const scope = await cleanup()
   assertClaim(scope, {
     claim: /^It removes a task's worktree only where that task's phase gate recomputes to PASS, and it deletes the worktree's branch only where git merge-base --is-ancestor proves the run branch already contains it\.$/,
-    // The consequence deliberately does NOT enumerate causes (a planted tag, a planted
-    // `heads/<name>` branch): a live plant exists — `refs/run/<...>` plus
-    // `refs/remotes/heads/<...>` plus `refs/heads/refs/heads/<...>` — that is neither a tag nor a
-    // branch named `heads/<name>`, and an enumeration naming only those two reads as cleared by an
-    // operator who checked for them and found neither. The symptom (a non-plain `abbrev-ref`
-    // answer) covers every cause, known or not.
-    then: /^That proof is only as good as the run branch's name being unambiguous, so before --yes confirm git rev-parse --abbrev-ref HEAD prints the run branch's plain name — anything longer means the run branch does not resolve the way the proof assumes, whatever produced that, and the deletion would be proved against the wrong ref\.$/,
-    subject: /merge-base --is-ancestor|rev-parse --abbrev-ref HEAD/i,
+    // The resolution above is what this sentence now rests on: scripts/git.mjs's
+    // `classifyHeadRef` refuses three HEAD states outright — detached, pointing outside
+    // `refs/heads/`, and a stripped name that is itself a ref path — before `derive` ever hands
+    // anything downstream a name to resolve, so the ancestry proof always runs against the ref
+    // `derive` took HEAD's name from, never a reconstructed one. Verified in this worktree: a
+    // throwaway repository detached at HEAD reports `classifyHeadRef` as
+    // `{ok:false,kind:'detached',...}` and `currentBranch()` as `null`; symref'ing HEAD at
+    // `refs/heads/refs/heads/run-branch` (the plant this section used to describe) reports
+    // `{ok:false,kind:'ref-path-name',...}`. `tests/git.test.mjs:1747-1914` hold the same three
+    // refusals as fixtures, and `tests/cli.test.mjs:3550-3650` drive them through `prune-run`.
+    then: /^That proof is against the ref derive takes directly off git symbolic-ref --quiet HEAD, not off an abbreviated name, and derive refuses to produce a run branch at all when HEAD is detached, when HEAD points outside refs\/heads\/, or when the name that ref strips to is itself a ref path — so nothing a teammate can plant under refs\/heads\/ changes which ref this proof or the deletion it authorises runs against\.$/,
+    subject: /merge-base --is-ancestor|symbolic-ref --quiet HEAD/i,
   })
 })
 
 test('the run-branch-name caveat leads into what a bare git branch -D actually does — refusing a checked-out branch, never proving ancestry', async () => {
   const scope = await cleanup()
   assertClaim(scope, {
-    claim: /^That proof is only as good as the run branch's name being unambiguous, so before --yes confirm git rev-parse --abbrev-ref HEAD prints the run branch's plain name — anything longer means the run branch does not resolve the way the proof assumes, whatever produced that, and the deletion would be proved against the wrong ref\.$/,
+    claim: /^That proof is against the ref derive takes directly off git symbolic-ref --quiet HEAD, not off an abbreviated name, and derive refuses to produce a run branch at all when HEAD is detached, when HEAD points outside refs\/heads\/, or when the name that ref strips to is itself a ref path — so nothing a teammate can plant under refs\/heads\/ changes which ref this proof or the deletion it authorises runs against\.$/,
     then: /^That proof is not something a bare git branch -D makes on its own: -D deletes whatever branch it is given without asking whether the run branch contains it — it refuses only a branch a registered worktree still holds checked out, which is why prune-run removes the worktree first — and the plain -d measures "merged" against the branch's upstream or your current HEAD, never against the run branch\.$/,
     subject: /git branch -D|-d measures/i,
     allow: [/^Do not sweep by hand: a hand-run git worktree remove --force or git branch -D supplies neither the recomputed phase gate nor the ancestry proof above/],
@@ -113,31 +141,43 @@ test('never touches the main worktree or another run\'s task worktree, but does 
 
 test('names the phase gate and ancestry proof, not junction-following, as the reason to avoid a hand-run remove, and covers an rm -rf escape hatch too', async () => {
   const scope = await cleanup()
-  assertClaim(scope, {
+  const hit = assertClaim(scope, {
     claim: /^Do not sweep by hand: a hand-run git worktree remove --force or git branch -D supplies neither the recomputed phase gate nor the ancestry proof above — it only does what the flag itself says, on whatever you point it at\.$/,
     // `rm -rf`/`rm -fr` added: an escape-hatch paragraph recommending it instead of the two named
     // commands is exactly the kind of insertion `by hand` alone would miss, since it names
     // neither `git worktree remove` nor `git branch -D`.
     subject: /sweep by hand|by hand|rm -rf|rm -fr/i,
   })
+  // This paragraph is the claim and nothing else — `statementsOf` on its own block returns one
+  // entry today. `subject:` above already catches a second sentence naming the lexicon it locks;
+  // this catches a second sentence appended in ANY register, including one that names neither
+  // "hand" nor `rm -rf`/`rm -fr` at all.
+  assertBlockStatementCount(hit, 1, 'the hand-sweep paragraph must hold exactly its one warning, nothing appended after it')
 })
 
 test('says .teammates is kept deliberately, and the very next statement distinguishes what resume and rebuild-state each do with it rather than listing or delisting either', async () => {
   const scope = await cleanup()
-  assertClaim(scope, {
+  const hit = assertClaim(scope, {
     claim: /^What this does not clean up: \.teammates\/<run-id>\/ stays on disk on purpose\.$/,
     // `resume` reads it to continue a run. `rebuild-state` reads it TWICE, for two different
     // reasons: `readState` refuses when the run's status file exists — that refusal is what the
     // directory-already-gone case exists to bypass — and then, inside `writePlan`, it reads
     // `.teammates/<runId>/plan.json` again and carries forward whatever `runBranch` was already
     // recorded there. Verified in this worktree: mutating `writePlan`'s `carried` to always be
-    // `null` turns `tests/cli.test.mjs:11669` ("rebuild-state keeps the recorded run branch
+    // `null` turns `tests/cli.test.mjs:11819` ("rebuild-state keeps the recorded run branch
     // rather than adopting the checkout") red, along with four other tests pinning the same
     // carry-forward. Deleting the directory before a `rebuild-state` run from a different
     // checkout has nothing to carry forward, so that run's own checkout is what gets recorded —
     // permanently, since fill-if-absent then protects it from every later writer.
     then: /^Delete it yourself when you no longer want the record: resume reads it to continue a run, while rebuild-state reads it twice: once to refuse when it exists, since it exists for the case where the directory is already gone, and once to keep the run branch it recorded — delete the directory and a later rebuild-state run from any other checkout records that checkout as the run branch, permanently, and complete --enforcement-only can no longer verify completion for the rest of the run\.$/,
   })
+  // Three closed facts about one narrow topic — what is not cleaned up, how `resume` and
+  // `rebuild-state` each read it, and that it is gitignored — not prose meant to accumulate a
+  // fourth. `then:` above already pins the second against insertion before or after it; this
+  // pins the whole paragraph, so a fourth statement appended after "It is gitignored." (which
+  // `then:`'s adjacency check cannot see, since it only binds the claim's immediate next
+  // statement) fails too.
+  assertBlockStatementCount(hit, 3, 'the .teammates paragraph must hold exactly its three statements, nothing appended after "It is gitignored."')
 })
 
 test('is original and carries no upstream attribution', async () => {
