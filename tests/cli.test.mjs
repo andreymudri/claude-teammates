@@ -12914,3 +12914,49 @@ test('review-dispatch does not splice a control character from the branch name i
     assert.doesNotMatch(JSON.stringify(spec), /\u2028/)
   })
 })
+
+// THE FIFTH ATTACK SHAPE, and the only one that reached a PASS verdict. HEAD is symref'd at
+// `refs/heads/refs/heads/run-branch` -- the third ref of this project's own documented plant plus
+// one main-worktree HEAD write. The stripped name is `refs/heads/run-branch`, which itself starts
+// with `refs/`, so `qualifyBranch` passes it through unchanged and gate-runner.mjs:1703 bases the
+// merge preview on the REAL branch while `ctx.runBranchRef` is the planted one.
+//
+// Staged so the two genuinely disagree: the planted branch edits the same line the task branch
+// edits, so merging into `ctx.runBranchRef` CONFLICTS while the preview against the real branch
+// does not. Measured before the refusal: exit 0, verdict PASS, merge=pass. The tree before this
+// task exits 1 and fails `derive`, so this was a regression from fail-closed to permissive.
+test('gate refuses a HEAD whose branch name is itself a ref path', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'fileset', kind: 'fileset' }] } },
+    }), 'utf8')
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 0\n', 'utf8')
+    g(['add', '.'])
+    g(['commit', '--quiet', '-m', 'manifest and a.mjs'])
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 1 // T1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    g(['checkout', '--quiet', 'run-branch'])
+    // The planted branch, editing the same line differently.
+    // Based on run-branch, not main, so the planted worktree still carries the manifest; what
+    // makes it a plant is the ref name, not the history.
+    g(['branch', 'refs/heads/run-branch', 'run-branch'])
+    g(['checkout', '--quiet', '--detach', 'refs/heads/refs/heads/run-branch'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const a = 999 // planted\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'planted commit'])
+    g(['update-ref', 'refs/heads/refs/heads/run-branch', g(['rev-parse', 'HEAD']).trim()])
+    await writeFile(path.join(root, '.git', 'HEAD'), 'ref: refs/heads/refs/heads/run-branch\n', 'utf8')
+    assert.equal(g(['symbolic-ref', '--quiet', 'HEAD']).trim(), 'refs/heads/refs/heads/run-branch', 'the plant really did repoint HEAD')
+    lines.length = 0
+    const code = await runCli(['gate', '--run', 'r1', '--phase', '1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    // Refused BY NAME. A non-zero exit alone would not discriminate: before the refusal this
+    // exited 0, and a regression could fail here for some unrelated reason instead.
+    assert.notEqual(code, 0)
+    assert.match(out, /is itself a ref path/)
+    assert.doesNotMatch(out, /"verdict":\s*"PASS"/)
+  })
+})

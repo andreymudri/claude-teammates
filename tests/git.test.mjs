@@ -1874,3 +1874,23 @@ test('currentBranchRef removes a CRLF terminator and leaves an ordinary name alo
   const plain = async () => ({ code: 0, signal: null, stdout: 'refs/heads/run-branch\n', stderr: '' })
   assert.equal(await createGit({ exec: plain }).currentBranchRef(), 'refs/heads/run-branch')
 })
+
+// The name a consumer would re-qualify differently. `qualifyBranch` returns any `refs/`-prefixed
+// string unchanged, so a name that is itself a ref path resolves to a DIFFERENT ref than the one
+// HEAD points at -- while `refs/heads/${name}` still reconstructs HEAD's ref byte for byte, which
+// is why the round trip cannot see it. Refused here, at the single point, rather than at each
+// consumer.
+test('classifyHeadRef refuses a branch whose name is itself a ref path', () => {
+  const r = classifyHeadRef('refs/heads/refs/heads/run-branch')
+  assert.equal(r.ok, false)
+  assert.equal(r.kind, 'not-a-branch')
+  assert.equal(r.name, null, 'no name may escape, or a consumer will re-qualify it')
+  assert.match(r.reason, /is itself a ref path/)
+  // The ref is still reported, because an operator has to know which ref to go and fix.
+  assert.equal(r.ref, 'refs/heads/refs/heads/run-branch')
+  // Any refs/ prefix, not just the doubled-heads spelling.
+  assert.equal(classifyHeadRef('refs/heads/refs/tags/v1').ok, false)
+  // And an ordinary name containing slashes is still perfectly fine.
+  assert.equal(classifyHeadRef('refs/heads/teammates/r1/T1').name, 'teammates/r1/T1')
+  assert.equal(classifyHeadRef('refs/heads/feature/refs-cleanup').name, 'feature/refs-cleanup')
+})

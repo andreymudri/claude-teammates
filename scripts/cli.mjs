@@ -3492,11 +3492,29 @@ export async function runCli(argv, io = { out: console.log }) {
       //     the real run tip and the tree clean, `ownership` went from FAIL naming a rogue commit
       //     to PASS.
       //
-      //     What closes it is `derive` refusing two states outright — HEAD detached, and HEAD
-      //     pointing anywhere but under `refs/heads/` — and then binding `headSha` to
-      //     `refs/heads/${runBranch}`, the ref `deriveContext` itself resolves. Attempt two's
-      //     round trip compared HEAD's sha against HEAD's OWN target, which is trivially equal
-      //     and vetted nothing; that is the mistake this bullet exists to stop being re-made.
+      //     Attempt three refused both of those, and was still permissive, because the round trip
+      //     it added proves less than it appears to: `refs/heads/${runBranch}` reconstructs HEAD's
+      //     own ref BYTE FOR BYTE, so it can only catch the branch moving between two
+      //     subprocesses — never a disagreement about WHICH ref is meant. The divergence was at a
+      //     CONSUMER: `derive` hands `deriveContext` the NAME, gate-runner.mjs:1703 passes that
+      //     name on as the merge-preview base, and `qualifyBranch` returns any `refs/`-prefixed
+      //     string unchanged. So HEAD at `refs/heads/refs/heads/run-branch` stripped to
+      //     `refs/heads/run-branch`, which re-qualified to the REAL branch while `ctx.runBranchRef`
+      //     stayed the planted one. Measured: `gate --phase 1` exited 0, verdict PASS, merge=pass,
+      //     on a tree where merging the task branch into `ctx.runBranchRef` conflicts.
+      //
+      //     What closes it is `derive` refusing three states outright — HEAD detached, HEAD
+      //     pointing anywhere but under `refs/heads/`, and a stripped name that is ITSELF a ref
+      //     path — all three in `classifyHeadRef`, so a consumer cannot be handed a name two
+      //     qualification rules disagree about. The round trip is kept for the honest
+      //     two-subprocess race and is described as that and nothing more.
+      //
+      //     STILL OPEN, and named because this list claims to be complete: gate-runner.mjs:1703
+      //     takes the NAME rather than `ctx.runBranchRef`. Nothing reaches it with a hostile value
+      //     now — every path goes through the classifier first — but the structural fix is to pass
+      //     the REF there, and that file is outside this task's declared set. Until then the
+      //     guarantee rests on the refusal above rather than on the consumer being unable to
+      //     misread what it is given.
       //
       //     WHAT IS NOT THIS CODE'S DOING: under the `refs/tags/x` plant the `git branch -D`
       //     below fails on its own, with `fatal: HEAD not found below refs/heads!`, exit 128

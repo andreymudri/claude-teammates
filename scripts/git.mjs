@@ -135,7 +135,34 @@ export function classifyHeadRef(ref) {
       reason: `HEAD points at ${typeof ref === 'string' ? printable(ref) : JSON.stringify(ref)}, which is not a branch — a run branch must be a ref under refs/heads/`,
     }
   }
-  return { ok: true, kind: 'branch', ref, name: ref.slice('refs/heads/'.length), reason: null }
+  const name = ref.slice('refs/heads/'.length)
+  // THE NAME MUST NOT ITSELF LOOK LIKE A REF, and this is the one rejection that is about a
+  // CONSUMER rather than about HEAD. `derive` hands `deriveContext` the NAME, and a consumer is
+  // free to re-qualify it differently from the way this module does: `qualifyBranch` returns any
+  // `refs/`-prefixed string UNCHANGED, and gate-runner.mjs:1703 passes the name straight through
+  // as the merge-preview base. So HEAD symref'd at `refs/heads/refs/heads/run-branch` — the third
+  // ref of this project's own documented plant, plus one main-worktree HEAD write — strips to
+  // `refs/heads/run-branch`, which resolves to the REAL branch, while `ctx.runBranchRef` is the
+  // planted one. Measured: `gate --phase 1` exited 0 with verdict PASS and merge=pass, on a tree
+  // where merging the task branch into `ctx.runBranchRef` actually CONFLICTS; the tree before
+  // this task exits 1 and fails `derive`, so it was a regression to permissive.
+  //
+  // Worth being precise about why the round-trip proof did not cover it, because the lesson
+  // generalises: `refs/heads/${name}` really does reconstruct `ref` byte for byte, so that
+  // reasoning held for the path it described. The divergence is downstream, at a consumer that
+  // takes the name and qualifies it by a different rule. Rejecting here closes it at the single
+  // point instead of at one more consumer — and a branch literally named `refs/heads/x` is
+  // creatable but pathological, so refusing it costs nothing real.
+  if (name.startsWith('refs/')) {
+    return {
+      ok: false,
+      kind: 'not-a-branch',
+      ref,
+      name: null,
+      reason: `HEAD points at ${printable(ref)}, whose branch name would be ${printable(name)} — a name that is itself a ref path, which consumers re-qualify inconsistently, so it is refused rather than resolved`,
+    }
+  }
+  return { ok: true, kind: 'branch', ref, name, reason: null }
 }
 
 export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
