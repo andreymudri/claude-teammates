@@ -11,6 +11,21 @@ const body = async () => readFile(new URL('../skills/finishing-a-development-bra
 // original and the old assertions never noticed. `assertClaim` binds a claim to one statement,
 // optionally to its very next statement (`then`), which an inserted or reworded sentence cannot
 // satisfy by accident. See tests/md-contract.mjs for what this can and cannot detect.
+//
+// One asymmetry in that model has already cost this file a hole, so it is written down here
+// rather than left to be rediscovered: `allow:` is permissive-only. It subtracts a statement
+// from the `subject:` inventory and never asserts that the statement is present. Rewrite a
+// pinned sentence and leave its entry behind, and the entry matches nothing, fails nothing,
+// and silently re-admits the very sentence it was written to review — `claim:` and `then:`
+// both go red when their sentence changes, and an `allow` entry never does. So whenever a
+// sentence in this section is rewritten, its `allow` entry must be re-checked alongside them.
+// Measured in this task, on this file: appending a previously deleted sentence about `--yes`
+// back into the prose while its now-stale entry was still listed left this file at 14 pass /
+// 0 fail and the full suite green; removing the stale entry turned that same sentence into a
+// failure of the --yes inventory test below, reported as an unreviewed statement about the
+// pinned subject, while the clean tree stayed at 14 pass / 0 fail. Every remaining entry was
+// then matched against the parsed statements of the section it is scoped to: each matches
+// exactly one, so none of them is dead today.
 const doc = async () => {
   const { body: text } = splitFrontmatter(await body(), 'finishing-a-development-branch')
   return parseDoc(text, 'finishing-a-development-branch/SKILL.md')
@@ -82,7 +97,6 @@ test('states the --yes flag is destructive before showing the command, with the 
     allow: [
       /^Do not sweep by hand: a hand-run git worktree remove --force or git branch -D supplies neither the recomputed phase gate nor the ancestry proof above/,
       /^Without --yes the command removes nothing, and it prints the worktrees and branches it would act on if nothing changes before the --yes run/,
-      /^That proof is only as good as the run branch's name being unambiguous, so before --yes confirm/,
       /^Run it first without --yes to read the plan, then add --yes to remove what it lists:/,
     ],
   })
@@ -114,7 +128,14 @@ test('routes worktree removal through the recomputed phase gate and branch delet
     // `{ok:false,kind:'detached',...}` and `currentBranch()` as `null`; symref'ing HEAD at
     // `refs/heads/refs/heads/run-branch` (the plant this section used to describe) reports
     // `{ok:false,kind:'ref-path-name',...}`. `tests/git.test.mjs:1747-1914` hold the same three
-    // refusals as fixtures, and `tests/cli.test.mjs:3550-3650` drive them through `prune-run`.
+    // refusals as fixtures, and three tests in `tests/cli.test.mjs` drive them through the
+    // `prune-run` command: "prune-run refuses to act on a detached HEAD rather than deriving
+    // from an unresolvable name", "the three-ref plant no longer redirects the run branch:
+    // prune-run resolves the real one", and "the refs/heads/HEAD plant does not make a
+    // detached HEAD look like a run branch". Named by command and sentence rather than by
+    // line, because that file's own header rules it out: a sibling task editing the same file
+    // shifts every number under a line citation, so such a citation is only ever invalidated
+    // by a merge — which is precisely when nobody re-reads it.
     then: /^That proof is against the ref derive takes directly off git symbolic-ref --quiet HEAD, not off an abbreviated name, and derive refuses to produce a run branch at all when HEAD is detached, when HEAD points outside refs\/heads\/, or when the name that ref strips to is itself a ref path — so nothing a teammate can plant under refs\/heads\/ changes which ref this proof or the deletion it authorises runs against\.$/,
     subject: /merge-base --is-ancestor|symbolic-ref --quiet HEAD/i,
   })
@@ -164,9 +185,14 @@ test('says .teammates is kept deliberately, and the very next statement distingu
     // directory-already-gone case exists to bypass — and then, inside `writePlan`, it reads
     // `.teammates/<runId>/plan.json` again and carries forward whatever `runBranch` was already
     // recorded there. Verified in this worktree: mutating `writePlan`'s `carried` to always be
-    // `null` turns `tests/cli.test.mjs:11819` ("rebuild-state keeps the recorded run branch
-    // rather than adopting the checkout") red, along with four other tests pinning the same
-    // carry-forward. Deleting the directory before a `rebuild-state` run from a different
+    // `null` turns `tests/cli.test.mjs`'s "rebuild-state keeps the recorded run branch rather
+    // than adopting the checkout" red — named, not numbered, for the reason given above —
+    // along with exactly four other tests pinning the same carry-forward: "a base-valued
+    // record is left alone rather than replaced by the current checkout", "a correct run
+    // branch survives a gate whose --base names it", "a lifecycle command never overwrites a
+    // run branch that is already recorded", and "re-running init-run from another branch
+    // keeps the recorded run branch". Re-measured in this task: that mutation fails those
+    // five and nothing else in the file. Deleting the directory before a `rebuild-state` run from a different
     // checkout has nothing to carry forward, so that run's own checkout is what gets recorded —
     // permanently, since fill-if-absent then protects it from every later writer.
     then: /^Delete it yourself when you no longer want the record: resume reads it to continue a run, while rebuild-state reads it twice: once to refuse when it exists, since it exists for the case where the directory is already gone, and once to keep the run branch it recorded — delete the directory and a later rebuild-state run from any other checkout records that checkout as the run branch, permanently, and complete --enforcement-only can no longer verify completion for the rest of the run\.$/,
