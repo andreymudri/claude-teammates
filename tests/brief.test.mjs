@@ -785,8 +785,9 @@ test('the brief quotes the could-not-run marker that scripts/cli.mjs actually pr
 // for is read out of scripts/cli.mjs's own template literal, not restated by hand, so the two
 // cannot silently drift apart. This is the message a --base collision with the run branch
 // produces (see the comment above verifyStep in scripts/brief.mjs) — reproduced in
-// docs/plans/2026-08-09-gaps-followups.md:162's topology, where task branches fork straight off
-// the run branch and this brief's own --base then equals it.
+// docs/plans/2026-08-09-gaps-followups.md's Task 2 ("diff each task branch from its own fork
+// point, not from the run anchor") topology, where task branches fork straight off the run
+// branch and this brief's own --base then equals it.
 test('the brief quotes the run-branch/base-branch collision marker scripts/cli.mjs actually prints, and calls it a dispatch error', async () => {
   const cli = await readFile(new URL('../scripts/cli.mjs', import.meta.url), 'utf8')
   const emitted = /`(the run branch and the base branch are both )'\$\{runBranch\}'/.exec(cli)
@@ -807,9 +808,10 @@ test('the brief quotes the run-branch/base-branch collision marker scripts/cli.m
 
   // The row must hold whether or not THIS invocation carries --base at all: scripts/cli.mjs's
   // own `brief` command reads `flags.base === true ? '' : (flags.base ?? '')` with no
-  // resolveBaseBranch fallback (cli.mjs:2411), so `cli.mjs brief` with no --base renders a
-  // complete line that omits the flag entirely, while the collision this row describes is still
-  // reachable through complete's own derived default.
+  // resolveBaseBranch fallback beside it — grep-able by that literal expression rather than by a
+  // line number, since scripts/cli.mjs is under active edit elsewhere in this run — so
+  // `cli.mjs brief` with no --base renders a complete line that omits the flag entirely, while
+  // the collision this row describes is still reachable through complete's own derived default.
   //
   // A round-3 fix here ruled out one presupposing phrasing by excluding the literal substring
   // 'the --base value in this'. That pins a WORDING, not the row: rewording lines 208-212 to a

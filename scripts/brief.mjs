@@ -150,8 +150,9 @@ const locateStep = (task, runId) => (runId ? [
 // own base closes that: the anchor `complete` derives is now the ref the teammate's branch
 // actually forked from, and the base a failure names is the real one.
 //
-// NOT closed by this in every topology: docs/plans/2026-08-09-gaps-followups.md:162 stages a
-// run where task branches fork straight off the RUN branch itself (`git checkout -B
+// NOT closed by this in every topology: docs/plans/2026-08-09-gaps-followups.md's Task 2
+// ("diff each task branch from its own fork point, not from the run anchor") reproduction
+// stages a run where task branches fork straight off the RUN branch itself (`git checkout -B
 // teammates/r/T5 run/r`, no separate base ahead of it). There `baseBranch` and the run branch
 // are the same name, so this line's `--base` sets the gate's base equal to its own run branch,
 // and `complete` refuses with "the run branch and the base branch are both '<name>'" — one
@@ -201,10 +202,12 @@ const verifyStep = (task, runId, planPath, baseBranch) => (runId && planPath ? [
   // Thrown when the base this invocation resolves to collides with the run branch — see the
   // comment above verifyStep. Worded to hold whether that base arrived as an explicit --base
   // above or was left to complete's own derived default: `cli.mjs brief` renders no --base at
-  // all when none was passed to it (scripts/cli.mjs:2411's `flags.base ?? ''`), so a row that
-  // presupposed the flag would be false exactly there. Named here so a teammate reads it as a
-  // dispatch error, not something wrong in its own worktree that checking out a different
-  // branch would fix.
+  // all when none was passed to it — grep scripts/cli.mjs's `brief` command for the literal
+  // `flags.base === true ? '' : (flags.base ?? '')`, no resolveBaseBranch fallback beside it —
+  // so a row that presupposed the flag would be false exactly there. No line number: that file
+  // is under active edit elsewhere in this run, so a number written today is wrong tomorrow.
+  // Named here so a teammate reads it as a dispatch error, not something wrong in its own
+  // worktree that checking out a different branch would fix.
   '             "the run branch and the base branch are both" — the base this run resolved to',
   '                (an explicit --base above, or complete\'s own derived default when none is',
   '                shown) is the same as your own run branch. That is a dispatch error: the',
