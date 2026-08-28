@@ -853,6 +853,34 @@ test('parallel-execution makes prune-run the only supported cleanup', async () =
     1,
     `the cleanup section must contain exactly one code block, found ${cleanup.code.length}`,
   )
+  // `allow` GRANTS PERMISSION AND NEVER IMPOSES EXISTENCE. Measured on this tree: rewording any
+  // of the three sentences below is RED — 'parallel-execution makes prune-run the only supported
+  // cleanup' is the test that dies, because the anchored allow regex stops matching and the
+  // sentence becomes a stray — but DELETING any of them outright is GREEN, each one on its own,
+  // with nothing else in the suite noticing. So the safety prose two commits exist to add could
+  // be reverted and every check here would still pass. `assertStatement` is what makes a sentence
+  // required; the allow entries stay, because they are what keeps a FOURTH sentence about the
+  // same subject from appearing unreviewed.
+  assertStatement(
+    cleanup,
+    /^This is irreversible on every prunable worktree/,
+    'deleting this leaves the section introducing prune-run --yes with no warning that the removal '
+      + 'is irreversible on a worktree holding post-merge edits, and none that --force follows a '
+      + 'junction out of the worktree to its target',
+  )
+  assertStatement(
+    cleanup,
+    /^The one exception is a task going to a fresh implementer/,
+    'deleting this leaves the prohibition above it absolute, so the one case prune-run cannot yet '
+      + 'reach reads as forbidden — and takes with it the junction check and the rmdir instruction '
+      + 'that make the authorised hand removal safe',
+  )
+  assertStatement(
+    cleanup,
+    /^Without --yes it removes nothing and prints the prunable/,
+    'deleting this leaves the dry run undocumented: nothing then says the two runs recompute the '
+      + 'gate independently, nor that the per-branch ancestor verdict is decided only under --yes',
+  )
   assertClaim(cleanup, {
     label: 'cleanup command',
     claim: /^This is the only supported way to clean up after a phase\.$/i,
