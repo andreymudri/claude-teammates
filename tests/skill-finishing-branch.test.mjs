@@ -192,9 +192,10 @@ test('says .teammates is kept deliberately, and the very next statement distingu
     // branch survives a gate whose --base names it", "a lifecycle command never overwrites a
     // run branch that is already recorded", and "re-running init-run from another branch
     // keeps the recorded run branch". Re-measured in this task: that mutation fails those
-    // five and nothing else in the file. Deleting the directory before a `rebuild-state` run from a different
-    // checkout has nothing to carry forward, so that run's own checkout is what gets recorded —
-    // permanently, since fill-if-absent then protects it from every later writer.
+    // five and nothing else in the file. Deleting the directory before a `rebuild-state` run
+    // from a different checkout has nothing to carry forward, so that run's own checkout is
+    // what gets recorded — permanently, since fill-if-absent then protects it from every
+    // later writer.
     then: /^Delete it yourself when you no longer want the record: resume reads it to continue a run, while rebuild-state reads it twice: once to refuse when it exists, since it exists for the case where the directory is already gone, and once to keep the run branch it recorded — delete the directory and a later rebuild-state run from any other checkout records that checkout as the run branch, permanently, and complete --enforcement-only can no longer verify completion for the rest of the run\.$/,
   })
   // Three closed facts about one narrow topic — what is not cleaned up, how `resume` and
