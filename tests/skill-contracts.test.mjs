@@ -278,10 +278,20 @@ test('phase-gate documents the results file collect-reviews writes and the redir
     /two classes of refusal sit above it and leave the earlier round's file where it was/i,
     'phase-gate must bound the fail-closed claim, since a surviving results file is read back as this round\'s verdict',
   )
+  // SCOPED TO THE SUCCESS LINE, and the narrower wording is the whole of it. "a path this run did
+  // not print" was the earlier form and it forbids nothing here, because the clear-failure refusal
+  // PRINTS the results path — it is in the message. Measured on this tree: round 1 collects clean
+  // and writes its document; the findings file is replaced with one carrying a blocking high; the
+  // clear is made to fail; round 2 exits 4 naming that path; and `gate --results` on exactly the
+  // path that refusal printed exits 0 with verdict PASS over round 1's document, while the round
+  // that was refused held a blocking high. The two residual shapes differ exactly here: the
+  // symlink refusal names no results file at all, so its survivor is reachable only by a path
+  // carried over from an earlier run, which either wording forbids.
   assertStatement(
     section,
-    /never hand gate --results a path this run did not print/i,
-    'phase-gate must give the operator the rule that survives both residual shapes',
+    /only a path printed on a results written to … line is this command's answer/i,
+    'phase-gate must scope the operative rule to the success line: a refusal prints the results path too, '
+      + 'and handing the gate that printed path returns PASS over the superseded document',
   )
   assertStatement(
     section,
@@ -947,6 +957,25 @@ test('parallel-execution states --enforcement-only never authorises a prune on a
   })
 })
 
+// The three sentences § 5 carries beyond its pinned claim, each written once and used twice
+// below: as an `assertStatement` that REQUIRES it, and as an `allow` entry that PERMITS it past
+// the claim's subject inventory. Two copies of the same 500-character regex is a drift hazard
+// for nothing, and drift here is silent — the pin would go on matching a sentence the allow
+// entry no longer covers, or the reverse.
+//
+// ANCHORED END TO END, and that is the whole point of them. A prefix pin imposes only its
+// prefix: measured on this tree, replacing the first sentence with the bare
+// `This is irreversible on every prunable worktree:` — dropping the junction hazard and the
+// post-merge-edits warning its own failure message names — left the suite green under an
+// eight-word prefix pin, because the truncated sentence matched no subject alternative either
+// and so was not a stray. The other two survived the same truncation, but by ACCIDENT and in a
+// different test each: the exception sentence via the hand-sweep corpus losing its `by hand`
+// site, the dry-run sentence via the claim's own subject inventory catching `removes`. Anchored,
+// all three die where they are declared.
+const CLEANUP_IRREVERSIBLE = /^This is irreversible on every prunable worktree, not only a leaked preview: git worktree remove --force runs whether or not a teammate's worktree still holds edits made after its branch merged, and --force follows a junction out of the worktree to its target instead of stopping at the boundary — verified on Windows, and exactly the shape a dependency install during bootstrap \(see "Worktree mechanics" below\) can leave behind; nothing unlinks it first the way a leaked preview's own links are unlinked, because that sweep runs only for previews:$/i
+const CLEANUP_EXCEPTION = /^The one exception is a task going to a fresh implementer before its phase has passed: this command cannot reach that worktree yet, so it still has to be removed by hand with --force — authorised there because abandoning that teammate's unfinished worktree for a fresh dispatch is the deliberate point, and a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over — and that authorisation covers the teammate's unfinished work only: --force still follows a junction out of the worktree the same way, and nothing unlinks it first there either, so check the worktree for one first with dir \/AL \/S and remove the link itself with rd <link> — both from cmd\.exe, not PowerShell, where rd and rmdir are aliases for Remove-Item; never a recursive delete, which follows it — before forcing — see the matching exception in "Worktree mechanics" below\.$/i
+const CLEANUP_DRY_RUN = /^Without --yes it removes nothing and prints the prunable and leaked-preview lists it would act on if nothing changes before the --yes run — both runs recompute the gate from scratch, so a phase that fails a check during the dry run and passes during the --yes run has worktrees force-removed that never appeared in the list the operator approved; the per-branch "left <branch> in place: not an ancestor" line is decided only while --yes runs the removal, so a dry run does not yet show which merged worktree's branch would survive\.$/i
+
 test('parallel-execution makes prune-run the only supported cleanup', async () => {
   const doc = parseDoc(await readFile(new URL('parallel-execution/SKILL.md', dir), 'utf8'), 'parallel-execution')
   const cleanup = doc.section(/^5\. Clean up the phase$/)
@@ -972,18 +1001,23 @@ test('parallel-execution makes prune-run the only supported cleanup', async () =
     1,
     `the cleanup section must contain exactly one code block, found ${cleanup.code.length}`,
   )
-  // `allow` GRANTS PERMISSION AND NEVER IMPOSES EXISTENCE. Measured on this tree: rewording any
-  // of the three sentences below is RED — 'parallel-execution makes prune-run the only supported
-  // cleanup' is the test that dies, because the anchored allow regex stops matching and the
-  // sentence becomes a stray — but DELETING any of them outright is GREEN, each one on its own,
-  // with nothing else in the suite noticing. So the safety prose two commits exist to add could
-  // be reverted and every check here would still pass. `assertStatement` is what makes a sentence
-  // required; the allow entries stay, because they are what keeps a FOURTH sentence about the
-  // same subject from appearing unreviewed.
+  // `allow` GRANTS PERMISSION AND NEVER IMPOSES EXISTENCE. Measured on ed12b30, this task's prose
+  // commit, with these three calls not yet written: rewording any of the three sentences below
+  // was red, because the anchored allow regex stopped matching and the sentence became a stray —
+  // but DELETING any
+  // of them outright was GREEN, each one on its own, with nothing in the suite noticing. So the
+  // safety prose two commits exist to add could have been reverted and every check here would
+  // still have passed. That is a past measurement on a past tree, and it is written as one: on
+  // this tree each deletion is red, and so is each truncation to the sentence's opening words.
+  // What dies in either case is 'parallel-execution makes prune-run the only supported cleanup',
+  // at the `assertStatement` for the sentence that went, whose message names what that sentence
+  // buys. `assertStatement` is what makes a sentence required; the allow entries stay, because
+  // they are what keeps a FOURTH sentence about the same subject from appearing unreviewed.
   assertStatement(
     cleanup,
-    /^This is irreversible on every prunable worktree/,
-    'deleting this leaves the section introducing prune-run --yes with no warning that the removal '
+    CLEANUP_IRREVERSIBLE,
+    'deleting or truncating this leaves the section introducing prune-run --yes with no warning that '
+      + 'the removal '
       + 'is irreversible on a worktree holding post-merge edits, and none that --force follows a '
       + 'junction out of the worktree to its target',
   )
@@ -996,15 +1030,17 @@ test('parallel-execution makes prune-run the only supported cleanup', async () =
   // the target survived. Treat the behaviour as documented, not as tested.
   assertStatement(
     cleanup,
-    /^The one exception is a task going to a fresh implementer/,
-    'deleting this leaves the prohibition above it absolute, so the one case prune-run cannot yet '
+    CLEANUP_EXCEPTION,
+    'deleting or truncating this leaves the prohibition above it absolute, so the one case prune-run '
+      + 'cannot yet '
       + 'reach reads as forbidden — and takes with it the junction check and the rd instruction '
       + 'that make the authorised hand removal safe',
   )
   assertStatement(
     cleanup,
-    /^Without --yes it removes nothing and prints the prunable/,
-    'deleting this leaves the dry run undocumented: nothing then says the two runs recompute the '
+    CLEANUP_DRY_RUN,
+    'deleting or truncating this leaves the dry run undocumented: nothing then says the two runs '
+      + 'recompute the '
       + 'gate independently, nor that the per-branch ancestor verdict is decided only under --yes',
   )
   assertClaim(cleanup, {
@@ -1042,7 +1078,7 @@ test('parallel-execution makes prune-run the only supported cleanup', async () =
       // `git worktree remove --force` (scripts/git.mjs:464) takes both the same way — and the
       // junction hazard a bootstrap step in Worktree mechanics can leave behind, verified on
       // Windows at scripts/cli.mjs:1322-1326.
-      /^This is irreversible on every prunable worktree, not only a leaked preview: git worktree remove --force runs whether or not a teammate's worktree still holds edits made after its branch merged, and --force follows a junction out of the worktree to its target instead of stopping at the boundary — verified on Windows, and exactly the shape a dependency install during bootstrap \(see "Worktree mechanics" below\) can leave behind; nothing unlinks it first the way a leaked preview's own links are unlinked, because that sweep runs only for previews:$/i,
+      CLEANUP_IRREVERSIBLE,
       // Reviewed: the corrected git facts. `git worktree remove` (no `--force`) refuses on
       // uncommitted work, so the hazard is `--force` reaching an unpassed worktree, not the bare
       // command; `git branch -D` refuses only a branch a registered worktree still holds
@@ -1054,13 +1090,13 @@ test('parallel-execution makes prune-run the only supported cleanup', async () =
       // than left to contradict the prohibition above it, `--force` named and authorised for this
       // one case (a mid-stall worktree is exactly the one most likely to refuse a bare remove),
       // and its pointer down to the matching exception in Worktree mechanics.
-      /^The one exception is a task going to a fresh implementer before its phase has passed: this command cannot reach that worktree yet, so it still has to be removed by hand with --force — authorised there because abandoning that teammate's unfinished worktree for a fresh dispatch is the deliberate point, and a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over — and that authorisation covers the teammate's unfinished work only: --force still follows a junction out of the worktree the same way, and nothing unlinks it first there either, so check the worktree for one first with dir \/AL \/S and remove the link itself with rd <link> — both from cmd\.exe, not PowerShell, where rd and rmdir are aliases for Remove-Item; never a recursive delete, which follows it — before forcing — see the matching exception in "Worktree mechanics" below\.$/i,
+      CLEANUP_EXCEPTION,
       // Reviewed: the dry-run scoping. `renderPrunePlan` runs before the `--yes` check and shows
       // the prunable and leaked-preview lists either way (scripts/cli.mjs:3031-3037), but the
       // per-branch ancestor decision itself is at scripts/cli.mjs:3141, printed at :3149, both
       // inside the removal loop `--yes` reaches — so this states what a dry run does NOT yet show
       // rather than repeating the removal claim above.
-      /^Without --yes it removes nothing and prints the prunable and leaked-preview lists it would act on if nothing changes before the --yes run — both runs recompute the gate from scratch, so a phase that fails a check during the dry run and passes during the --yes run has worktrees force-removed that never appeared in the list the operator approved; the per-branch "left <branch> in place: not an ancestor" line is decided only while --yes runs the removal, so a dry run does not yet show which merged worktree's branch would survive\.$/i,
+      CLEANUP_DRY_RUN,
     ],
   })
 })
@@ -1464,17 +1500,28 @@ test('every sentence about the SubagentStop mechanism, in any document, is one a
 // test named it. The corpus inventory removes the LOCATION dimension: every sentence about
 // sweeping by hand, in either document, has to be in this list.
 //
-// WHAT THIS DOES NOT REACH, and the bound is wider than an earlier version of this comment said.
-// `claimSites` reads statements and headings, never code, so a hand-sweep BLOCK escapes anywhere
-// it parses as a block, in any section of either document. Measured on this tree: the same plant
-// with only its bullet line deleted — blank-line separated, which is how every indented command
-// block in these documents is written — parses as kind `code`, leaves the lexicon count at seven
-// sites in parallel-execution, and leaves the whole suite green. What this lock reaches is the
-// PROSE that introduces such a block, and only where that prose names something in the lexicon.
+// WHAT THIS LOCK DOES NOT REACH. `claimSites` reads statements and headings, never code, so a
+// hand-sweep BLOCK is invisible to THIS INVENTORY wherever it parses as a block. Measured on this
+// tree: the same plant with only its bullet line deleted — blank-line separated, which is how
+// every indented command block in these documents is written — parses as kind `code`, leaves the
+// lexicon count at seven sites in parallel-execution, and, placed in Worktree mechanics, leaves
+// the whole suite green. What this lock reaches is the PROSE that introduces such a block, and
+// only where that prose names something in the lexicon.
+//
 // An earlier version of this comment claimed the block-alone shape was caught; it is caught only
 // with the blank line ALSO removed, where the indented lines are read as a continuation of the
 // preceding list item and land inside that item's statement. That is a parsing accident, not
 // coverage, and describing it as coverage would tell the next reviewer a hole was closed.
+//
+// INVISIBLE TO THIS INVENTORY IS NOT UNCAUGHT, and the difference is load-bearing in exactly one
+// section: § 5 carries its own code-block count, so the byte-identical plant there is red either
+// way — `the cleanup section must contain exactly one code block, found 2` when it sits apart from
+// the real invocation, and `must show the exact prune-run invocation … and nothing else in the
+// same block` when it sits against it. Both measured. So do not read the paragraph above as "no
+// test anywhere catches a planted block", and do not drop `cleanup.code.length` as buying nothing:
+// it is what closes the same-section sandwich this inventory cannot see. The scope sentence here
+// has been wrong in both directions — too narrow, then too wide — so it now names the one section
+// that is covered as precisely as the ones that are not.
 //
 // The corpus is also two documents, not every document. Measured: `skills/` holds fourteen
 // SKILL.md files; the byte-identical bullet+block plant appended to `fleet-lifecycle` leaves the
