@@ -827,6 +827,40 @@ test('review-dispatch refuses an omitted --phase when the plan has more than one
   })
 })
 
+// A valueless `--phase` names no phase, so it is the omission in another spelling. `--phase` is
+// not in this command's REQUIRED list, so nothing upstream rejects the bare flag: without the
+// `=== true` arm it parses as `true`, reads as "a phase was given", and widens exactly as an
+// omitted flag would.
+test('collect-reviews refuses a valueless --phase the same way it refuses an omitted one', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await withStampedPhase(root, planPath, io, g)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(REVIEW_MANIFEST), 'utf8')
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--root', root, '--phase'], io)
+    assert.equal(code, 2, lines.join('\n'))
+    assert.match(lines.join('\n'), /1, 2/)
+  })
+})
+
+// The other arm: nothing says the omission is ambiguous, so it is not refused. A run with no
+// `plan.json` gets the answer it got before this refusal existed — the command's own missing-plan
+// message, exit 4 — rather than a refusal blamed on a file that is simply absent.
+test('an omitted --phase is not refused when the run has no plan to read', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await withStampedPhase(root, planPath, io, g)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(REVIEW_MANIFEST), 'utf8')
+    const planState = path.join(root, '.teammates', 'r1', 'plan.json')
+    // The fixture only proves anything if the file was there to remove.
+    assert.ok((await stat(planState)).isFile())
+    await rm(planState)
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--root', root], io)
+    assert.equal(code, 4, lines.join('\n'))
+    assert.match(lines.join('\n'), /no plan for run r1/)
+    assert.doesNotMatch(lines.join('\n'), /needs --phase/)
+  })
+})
+
 // A plan with one phase has nothing for the flag to disambiguate, and the pair above would be
 // satisfied just as well by refusing always — this is what makes them assertions about ambiguity.
 const SINGLE_PHASE_PLAN = `### Task 1: A

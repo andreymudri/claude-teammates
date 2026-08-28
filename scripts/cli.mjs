@@ -23,7 +23,7 @@ import { decideFix } from './fix-loop.mjs'
 import { runChecks, aggregateVerdict } from './gate-runner.mjs'
 import { renderDigest } from './digest.mjs'
 import { collectDoctorReport, renderDoctor } from './doctor.mjs'
-import { collectReviewResults, printable, printableBlock, reviewFileName, reviewStamp } from './reviews.mjs'
+import { collectReviewResults, isUnsafePathComponent, printable, printableBlock, reviewFileName, reviewStamp } from './reviews.mjs'
 import { generateReviewDispatch } from './review-gen.mjs'
 import { resolveTaskBranch, taskBranchName } from './enforce.mjs'
 import { tmpdir } from 'node:os'
@@ -1964,6 +1964,37 @@ function tasksOfPhase(plan, phaseName) {
   return Number.isInteger(phaseNumber)
     ? (plan.tasks ?? []).filter((t) => t.phase === phaseNumber)
     : (plan.tasks ?? [])
+}
+
+// Whether an omitted `--phase` is ambiguous for this run, and the refusal to print when it is.
+// Returns null when the flag was given, when the plan cannot be read, or when the plan has at most
+// one phase; a string otherwise.
+//
+// `--phase` defaults to the manifest key `default`, and `tasksOfPhase` reads a non-integer name as
+// EVERY task branch of the run — the honest reading of "this manifest phase's diff" when the
+// manifest has one phase, and a silent widening when the plan has several: a phase-3 review then
+// judges phase 1 and 2 branches that were integrated rounds ago. Refused rather than warned,
+// because the widening produces a review that reads as complete.
+// A single-phase plan is unaffected: there is nothing for the flag to disambiguate.
+//
+// Reading the plan may fail — a run with no `plan.json` — and that falls through to the old
+// behaviour rather than becoming a second refusal: what the caller omitted is unambiguous exactly
+// when nothing says otherwise, and both commands already have their own say about a missing plan.
+//
+// The phases come from `plan.tasks[].phase`, the same field `tasksOfPhase` filters on, so the set
+// named is the set the flag chooses between. Non-integers are dropped: `tasksOfPhase` compares
+// `t.phase === phaseNumber` against an integer, so a phase that is not one is not selectable — and
+// dropping them is also what keeps this sentence free of any byte a hand-edited `plan.json` chose.
+async function ambiguousPhaseRefusal(root, runId, flags, command) {
+  if (flags.phase !== undefined && flags.phase !== true) return null
+  const plan = await readState(root, runId, 'plan')
+  if (!plan) return null
+  const phases = [...new Set((plan.tasks ?? []).map((t) => t.phase))]
+    .filter((p) => Number.isInteger(p))
+    .sort((a, b) => a - b)
+  if (phases.length < 2) return null
+  return `${command} needs --phase: the plan for this run has ${phases.length} phases (${phases.join(', ')}), `
+    + 'and an omitted --phase reviews every task branch of the run — including branches integrated in earlier phases'
 }
 
 async function resolveBranchShas(git, tasks, runId) {
@@ -4092,6 +4123,13 @@ export async function runCli(argv, io = { out: console.log }) {
   }
 
   if (command === 'review-dispatch') {
+    // Before the manifest is even read: an invocation this command cannot act on unambiguously is
+    // rejected on its own terms, the way a missing argument is, rather than after the environment
+    // has had its say. 2 is what this CLI returns for a rejected invocation; 4 would say the
+    // command tried and could not verify, which is not what happened.
+    const ambiguous = await ambiguousPhaseRefusal(root, runId, flags, command)
+    if (ambiguous) { io.out(ambiguous); return 2 }
+
     // The TRACKED manifest, not the resolved config: the reviewer grades the diff, so letting
     // the gitignored local layer choose its tier would let the party being judged pick its own
     // judge. `config.mjs` already refuses `agents.reviewer` in the local layer; reading the
@@ -4258,6 +4296,11 @@ export async function runCli(argv, io = { out: console.log }) {
   }
 
   if (command === 'collect-reviews') {
+    // Refused before the manifest, for the reason given at the same call in `review-dispatch`:
+    // collecting under the widened default records a pass over branches this phase never reviewed.
+    const ambiguous = await ambiguousPhaseRefusal(root, runId, flags, command)
+    if (ambiguous) { io.out(ambiguous); return 2 }
+
     const config = await resolveGateConfig(root, io)
     if (config === GATE_CONFIG_REJECTED) return 2
     // 4, matching `complete`: this cannot verify what it was asked about. Inferring a manifest
@@ -4387,7 +4430,37 @@ export async function runCli(argv, io = { out: console.log }) {
       io.out(`no findings file for lens(es): ${lost.map(printable).join(', ')} — those reviews are lost, not empty; respawn them rather than recording a pass`)
     }
     if (lost.length > 0 || explained.size > 0) return 4
-    io.out(JSON.stringify({ results: collected.results }, null, 2))
+
+    // PRINTED AND PERSISTED, because printing alone is a trap this run fell into. `gate --results
+    // <path>` needs a FILE, and this command's only output was stdout — so an operator who ran it
+    // without redirecting had the review check sit `pending` forever while the gate reported FAIL
+    // with an empty `failed: []`, naming nothing to fix. Writing the file makes the next command's
+    // argument something that exists rather than something the operator had to know to create.
+    //
+    // The filename is `results-<phase>.json`, beside the findings files it was collected from, and
+    // the phase goes through `isUnsafePathComponent` — the predicate `reviewFileName` applies to
+    // each of its own components — so a phase name that is not a safe filename is refused rather
+    // than escaping the directory. Refused with the 4 the `reviewFileName` failure above returns,
+    // rather than a second code for the same flag on the same command.
+    //
+    // Coerced with `String` first for the same reason `reviewFileName` does it: the value that
+    // gets checked has to be the value that gets joined, or the two can differ.
+    const resultsName = String(phaseName)
+    if (isUnsafePathComponent(resultsName)) {
+      io.out(`a phase must be a non-empty name with no path separators, got ${JSON.stringify(printable(resultsName))}`)
+      return 4
+    }
+    const resultsPath = path.join(dir, `results-${resultsName}.json`)
+    const document = JSON.stringify({ results: collected.results }, null, 2)
+    await mkdir(dir, { recursive: true })
+    await writeFile(resultsPath, `${document}\n`, 'utf8')
+    // The JSON goes out first and the path after it, so nothing is prepended to what a caller
+    // already parses. A `> results.json` redirect is NOT preserved by that ordering — it captures
+    // this line too, and `gate --results` JSON.parses the whole file, so the redirect now yields
+    // `--results must be a readable JSON file` (measured on this branch). The file written above
+    // is the path to pass instead, which is what makes the redirect unnecessary.
+    io.out(document)
+    io.out(`results written to ${resultsPath} — pass that path to gate --results`)
     return 0
   }
 
