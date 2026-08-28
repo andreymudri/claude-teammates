@@ -845,14 +845,38 @@ test('collect-reviews refuses to write its results file outside the run director
 //        'emptyResultsOpenFlags refuses a flag word …'
 //   `readFindingsFile(…)` -> `readFile(…, 'utf8')` in the read loop
 //     -> 'a fifo planted at a findings path …'           (same, and with no chmod precondition)
+//   `fusedHolderOpenFlags()` -> `O_RDONLY|O_NONBLOCK` in `readFindingsFile` (O_NOFOLLOW dropped)
+//     -> 'a symlinked findings file is refused rather than followed'
 //   the accumulating walk -> a FIXED list of four components
 //     -> 'collect-reviews refuses a plant at .teammates however deep …'
-//        'plantedReviewsLink finds a plant at any depth …'
+//        'plantedReviewsLink finds a plant ten levels up …'
 //        and NOT the two nested fixtures above, which both plant four components from the end and
 //        therefore share a threshold rather than bracketing one — the reason those two are not the
 //        pin they were once claimed to be
+//   the accumulating walk -> a fixed climb of TWELVE, or of two
+//     -> 'plantedReviewsLink examines exactly as many components as the path has'
+//        'plantedReviewsLink stops at the outermost link and names it'
+//        The twelve case is why those two exist: it passes every fixture in this file, including
+//        the ten-level one, because a fixture can only rule out climbs shorter than itself.
 //   `info.isFile() && info.nlink === 1` -> `info.isFile()`
 //     -> 'the empty-instead-of-remove fallback does not destroy an inode with another name'
+//   the manifest resolution moved ABOVE the clear (the ordering `review-dispatch` uses)
+//     -> 'a round refusing because the manifest is gone leaves no results file behind'
+//        'a round refusing a malformed manifest leaves no results file behind'
+//   either plan read stops catching (`readState` rethrows for anything but ENOENT)
+//     -> 'an unparseable plan.json is refused rather than thrown, on both reads'
+//
+// The five rows above that name a position of the clear are one per refusal, deliberately: the
+// invariant is positional, and the last three were added after the manifest mutation was measured
+// passing the entire file at 607 pass / 0 fail while a probe walked the stale-PASS sequence to a
+// verdict. Two pinned positions out of five is not a pinned invariant.
+//
+// One negative result is recorded on purpose, because it cost a round to find: substituting the
+// path-based `lstat`-then-`truncate` body back in leaves the FIFO fixture GREEN. The old body
+// refused a FIFO on `lstat` without ever opening it, so the parking hazard is one the descriptor
+// rewrite introduced and O_NONBLOCK closes again — not one it inherited. A comment in `cli.mjs`
+// claimed the opposite, and claimed O_NONBLOCK was unpinned while the first row above names its
+// two kills.
 //
 // Earlier rounds measured the same way, against the code as it stood then: the vet moved below the
 // clear (kills 'refuses a symlinked reviews directory before it removes anything'), the phase vet
