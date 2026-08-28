@@ -23,7 +23,7 @@ import { decideFix } from './fix-loop.mjs'
 import { runChecks, aggregateVerdict } from './gate-runner.mjs'
 import { renderDigest } from './digest.mjs'
 import { collectDoctorReport, renderDoctor } from './doctor.mjs'
-import { collectReviewResults, printable, printableBlock, reviewFileName, reviewStamp } from './reviews.mjs'
+import { collectReviewResults, isUnsafePathComponent, printable, printableBlock, reviewFileName, reviewStamp } from './reviews.mjs'
 import { generateReviewDispatch } from './review-gen.mjs'
 import { resolveTaskBranch, taskBranchName } from './enforce.mjs'
 import { tmpdir } from 'node:os'
@@ -203,7 +203,10 @@ export const REQUIRED = {
   doctor: ['run', 'plan'],
   liveness: ['run', 'plan'],
   // `--phase` is the manifest phase key, not a plan phase number, so it stays out of
-  // NUMERIC_PHASE_COMMANDS and defaults to `default` exactly as `gate`'s does.
+  // NUMERIC_PHASE_COMMANDS and defaults to `default` exactly as `gate`'s does. Not required here
+  // even so, because whether that default is ambiguous depends on the RUN rather than on the argv
+  // this table is checked against: `ambiguousPhaseRefusal` refuses the omission on a plan with
+  // more than one phase, and lets it stand on a plan with one.
   'collect-reviews': ['run'],
   'review-dispatch': ['run'],
   // No required flags: it reads the manifest and the working tree, and belongs to no run.
@@ -1622,6 +1625,119 @@ export function fusedHolderOpenFlags(c = fsConstants) {
   return c.O_RDONLY | c.O_NONBLOCK | c.O_NOFOLLOW
 }
 
+// The run's plan, read through the same descriptor discipline as a findings file, or null when
+// there is none.
+//
+// THE THIRD DOOR of the class closed at the other two: `readState` opens by path,
+// so a FIFO at `.teammates/<run>/plan.json` parks the open forever. Measured — `master` hangs on it
+// too (SIGKILL at 15s, empty stdout), so the door is inherited rather than opened here; what IS
+// new is the reach. The ambiguity check above reads the plan BEFORE the manifest is resolved, so a
+// run with no manifest — which `master` answers in milliseconds without ever touching `plan.json`
+// — now arrives at that open. An inherited door that this branch newly walks through is this
+// branch's to close.
+//
+// The filename is spelled here rather than reached out of `scripts/state.mjs`, which owns the
+// layout and keeps `statePath` private. That duplication is real and is why it is called out: if
+// the two ever disagree, every fixture in this suite that runs `init-run` and then
+// `collect-reviews` fails at once, because the plan those fixtures write is the plan this reads.
+async function readRunPlan(root, runId) {
+  const file = path.join(runDir(root, runId), 'plan.json')
+  try {
+    return JSON.parse(await readEntryText(file, nonBlockingReadFlags()))
+  } catch (err) {
+    if (err.code === 'ENOENT') return null
+    throw err
+  }
+}
+
+// O_RDONLY|O_NONBLOCK, and deliberately WITHOUT O_NOFOLLOW, or null where this platform cannot
+// spell it. The property this read needs is that it cannot park; refusing a link is a different
+// property that came along for the ride when the plan borrowed the findings reader, and it made
+// these two commands the only ones in the CLI that refuse a symlinked `.teammates/<run>/plan.json`.
+// Measured across three trees: a symlinked plan read fine on `master` and at the fork point and
+// failed here with ELOOP — one cell of "used to proceed, now refuses" that nothing asked for.
+//
+// Every other reader of that same file goes through `readState`, which follows the link. A
+// hardening that only two of eleven commands apply is a trap for the next reader rather than a
+// defence; if state files should refuse links, that belongs in `scripts/state.mjs` where every
+// reader gets it. Parking is still impossible: O_NONBLOCK returns at once on a FIFO whether it was
+// reached directly or through a link, and the `isFile` check below refuses it either way.
+function nonBlockingReadFlags(c = fsConstants) {
+  if (typeof c.O_RDONLY !== 'number' || typeof c.O_NONBLOCK !== 'number') return null
+  return c.O_RDONLY | c.O_NONBLOCK
+}
+
+// A findings file read through a DESCRIPTOR that cannot park, or by path where this platform
+// cannot express that. `readFile` on a path opens blocking, and a FIFO planted at
+// `<phase>-<lens>.json` parks that open forever: measured on this branch, `collect-reviews` never
+// returned — killed at 20s, empty stdout, no exit code. This is the easier of the two FIFO doors,
+// with no permission precondition at all, because the reviews directory is where reviewers are
+// told to write and this loop opens whatever it finds under the manifest's lens names. It is the
+// one defect here that is not new: `git show master:scripts/cli.mjs` carries the same path-based
+// `readFile` at this site, so this is a fix rather than a regression introduced beside it.
+//
+// `fusedHolderOpenFlags` is exactly the right word — O_RDONLY|O_NONBLOCK|O_NOFOLLOW — and this is
+// the third caller of the rule it encodes. `stat` on the descriptor, not the path, so what is read
+// is what was vetted; anything that is not a regular file is refused, and the caller records it as
+// unreadable, which is the outcome a FIFO or a directory deserves and is never "no findings".
+//
+// A symlinked findings file is now refused rather than followed. That is a deliberate narrowing,
+// and it is scoped to FINDINGS: nothing this project writes creates one, and the class this
+// command distrusts is exactly the entries it did not create itself — files a reviewer was told to
+// drop in a directory anyone can write. The run's own `plan.json` is not in that class, is read
+// through `nonBlockingReadFlags` below, and still follows a link as the rest of the CLI does.
+//
+// DOCUMENTATION DOES NOT FOLLOW CODE THAT MOVES OUT FROM UNDER IT. This block stayed where it was
+// when the two readers were split, so for one commit it sat on `readRunPlan` and described that
+// function as refusing symlinked findings files — false of the function it named, and leaving this
+// one undocumented, while every claim in it stayed true of the code it was written for. Editing a
+// comment gets scrutiny; relocating the code beneath one does not, and the second is the easier
+// mistake to ship.
+async function readFindingsFile(file) {
+  return readEntryText(file, fusedHolderOpenFlags())
+}
+
+// The shared body: open with the caller's flag word, vet the DESCRIPTOR, read from that same
+// descriptor. Which hazards are refused is the caller's choice of flags and nothing else.
+async function readEntryText(file, flags) {
+  // No such flag word on this platform: the historical path-based read, stated rather than hidden,
+  // for the reason `livePreviewPaths` gives at its own fallback.
+  if (flags === null) return readFile(file, 'utf8')
+  const handle = await openFile(file, flags)
+  try {
+    const info = await handle.stat()
+    if (!info.isFile()) {
+      throw Object.assign(new Error(`${file} is not a regular file`), { code: 'ENOTREGULAR' })
+    }
+    return await handle.readFile('utf8')
+  } finally {
+    await handle.close().catch(() => {})
+  }
+}
+
+// The flag word for emptying a results file in place, or `null` when this platform's
+// `fs.constants` does not carry BOTH names — the same shape, and the same two reasons, as
+// `fusedHolderOpenFlags` above: a missing name is `undefined`, `O_WRONLY | undefined` is
+// `O_WRONLY`, and an inlined OR would quietly open through a symlink while looking like it
+// refused one. The caller treats `null` as "cannot empty safely" and refuses, rather than
+// emptying blind.
+//
+// O_NONBLOCK IS NOT OPTIONAL HERE, and leaving it out is how this function first shipped — citing
+// the precedent above while dropping the flag that precedent exists for, whose own header calls it
+// "the difference between a hung `prune-run` and a rejected entry". Measured on this branch: with
+// a FIFO at the results path and the `0555` directory this fallback is reached through,
+// `collect-reviews` never returned — killed at 20s with an empty stdout and no exit code, where
+// the same fixture with a regular file answers 4 in milliseconds. Isolated to the one flag:
+// `O_WRONLY|O_NOFOLLOW` on a FIFO stayed blocked past 5s, and adding O_NONBLOCK returns ENXIO at
+// once, which the caller already reports as a reason it could not empty the file.
+//
+// A FIFO is the only shape that parks the call: a directory and a socket refuse promptly, and
+// O_NOFOLLOW refuses a symlink to a device node before it can open one.
+export function emptyResultsOpenFlags(c = fsConstants) {
+  if (typeof c.O_NOFOLLOW !== 'number' || typeof c.O_NONBLOCK !== 'number') return null
+  return c.O_WRONLY | c.O_NONBLOCK | c.O_NOFOLLOW
+}
+
 async function openHolderEntry(p) {
   const handle = await openFile(p, fusedHolderOpenFlags())
   try {
@@ -1961,9 +2077,173 @@ function tasksOfPhase(plan, phaseName) {
   // the branches narrow to that phase; when it is not, every task branch of the run is in scope,
   // which is the honest reading of "this manifest phase's diff".
   const phaseNumber = Number(phaseName)
+  // `tasks` is whatever the plan file holds, and `?? []` only covers the one shape where it is
+  // absent: a `tasks` of `7` or `{}` reached `.filter` and threw, exiting 1 with an empty stdout on
+  // `master`, on the fork point and here alike. Narrowed to the shape this function can actually
+  // walk — the same treatment `ambiguousPhaseRefusal` gives the same field — so a malformed plan
+  // is a run with no task branches, which every caller already reports.
+  const tasks = Array.isArray(plan?.tasks) ? plan.tasks : []
   return Number.isInteger(phaseNumber)
-    ? (plan.tasks ?? []).filter((t) => t.phase === phaseNumber)
-    : (plan.tasks ?? [])
+    ? tasks.filter((t) => t?.phase === phaseNumber)
+    : tasks
+}
+
+// The component of the run's reviews path that is a symlink, or null when every one of them that
+// exists is a real entry. `lstat` reports only the FINAL component of a path, so asking it about
+// the reviews directory alone answers nothing about the directories above it: with
+// `.teammates/<run>` planted as a link to a directory the caller chose, `lstat(dir)` is a plain
+// directory, `mkdir` recursive builds `reviews/` inside the link's target, and every path built
+// from `dir` resolves through it — measured on this branch, the command exited 0 printing an
+// in-repo path while the bytes landed at `<root>/outside-the-run/reviews/results-1.json`.
+//
+// EVERY component from `root` down, accumulated over `path.relative`, and NOT a fixed list. A
+// fixed list of three — `<root>/.teammates`, the run directory, `reviews` — is right only for a
+// single-segment run id, because `path.dirname` climbs exactly one level. Run ids nest by design
+// (`scripts/state.mjs` names `--run 2026/substop`, and `idRefusal` caps bytes rather than depth),
+// and at depth two `<root>/.teammates` itself went unchecked. Measured on this branch, through a
+// real `init-run`: with `--run a/b` and `.teammates` symlinked out, the command exited 0 printing
+// `.teammates/a/b/reviews/results-default.json` while the bytes landed under the planted target;
+// with `--run 2026/substop` the same plant put the clear inside a victim tree; and at `--run
+// a/b/c` a plant at `.teammates/a` did the same. The control that settles it: the identical plant
+// with a FLAT run id was refused by the fixed list. The rule was right and its reach was wrong.
+//
+// Top down, so the refusal names the OUTERMOST planted component — the one an operator has to go
+// and look at. A component that does not exist yet is nothing to plant through: whatever creates
+// it creates a real directory, since its parent has just been vetted.
+//
+// A `dir` that is not under `root` is refused rather than walked. `assertContained` makes that
+// unreachable through the CLI today, which is exactly why it would sit unpinned: without it, the
+// accumulation would climb ABOVE the root this function promises never to look above, one `lstat`
+// per `..`. Exported for that reason — it is the only way to reach that arm, and the depth cases
+// above are cheaper to state here than to stage end to end.
+//
+// The depth property is pinned by COUNTING rather than by planting, and the difference matters: a
+// fixture plants at one depth, so it can only ever rule out climbs shorter than itself. A fixed
+// climb of twelve passed every fixture in this project's test file when that was all there was —
+// it now reddens the two counting tests, one of which exists because of that measurement. What is
+// asserted is that the number of components examined equals the number of components in the path,
+// at a range of depths, which no fixed climb satisfies at more than one of them.
+//
+// Deliberately the same three clauses `assertContained` uses, spelled the same way, because it is
+// the same question about the same kind of value. Worth knowing when changing either: they are
+// byte-identical, so a search-and-replace across this file hits the other one first — which is
+// exactly what a mutation run here did, silently mutating `assertContained` and leaving this
+// function's test green.
+//
+// Nothing AT OR ABOVE `root` is checked, `root` included. That is the same assumption every other
+// path in this CLI makes: the operator names the root, and a link on the way to it is theirs.
+//
+// A CHECK, NOT A LOCK, and narrower than it looks. It is not atomic, and no Node API makes it so:
+// there is no way to write relative to an opened directory descriptor here, so a link planted
+// between the last check and the `rename` is still a window, and so is one planted between this
+// check and the descriptor the clear opens.
+//
+// It sees LINKS only, and a BIND MOUNT is not a link. Staged in this worktree under `unshare -Urm`
+// and confirmed: `mount --bind` over the reviews directory left `lstat` reporting
+// `isSymbolicLink=false isDirectory=true`, this function answered null, and the write landed in
+// the victim tree. `realpath` does not help either — a bind mount resolves to the path it is
+// mounted at, not to its source — so closing this would mean reading `/proc/self/mountinfo`, which
+// exists on one platform of the three this suite targets. Left open, pinned by the test that
+// stages it, and stated as the boundary of what this walk promises.
+//
+// An earlier version of this paragraph said staging one "needs a privilege this worktree does not
+// have". That was asserted, not attempted: `unshare -Urm` returns 0 here. The rule that produced
+// the error is worth more than the correction — an environment wall is a measurement like any
+// other, and claiming one without running the command is the same defect as any other unbacked
+// claim.
+//
+// What it closes is every stationary symlink, and it is re-run immediately before the write so
+// that window is a few syscalls rather than a whole collection.
+// `deps.lstat` is a TEST SEAM and nothing else — every production caller passes two arguments.
+// It exists because the property this function is FOR cannot be pinned by a fixture: "every
+// component, however deep" is a claim about all depths, and a test can only plant at one. Planting
+// one level deeper than the last guess is what the fixtures below used to do, and it proves only
+// that the walk beats THAT climb — a fixed climb of twelve passed the entire suite. Counting the
+// components examined turns the claim into an equality that holds at every depth at once.
+export async function plantedReviewsLink(root, dir, deps = {}) {
+  const statLink = deps.lstat ?? lstat
+  const rel = path.relative(root, dir)
+  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new Error(`${printable(dir)} is not inside ${printable(root)}, so its components cannot be vetted`)
+  }
+  let component = root
+  for (const segment of rel.split(path.sep)) {
+    component = path.join(component, segment)
+    let info = null
+    try {
+      info = await statLink(component)
+    } catch (err) {
+      // ENOENT is a component that is not there yet; anything else is a component this process
+      // cannot see, and refusing to guess about it is the whole job. Swallowing these instead
+      // leaves the suite green, and a reviewer measured why: with a regular file at
+      // `.teammates/<run>`, the throw refuses with `cannot vet the run's reviews directory …
+      // ENOTDIR` and swallowing refuses with `could not clear the previous results file … unlink
+      // failed (ENOTDIR)` — a different sentence, the same exit, nothing removed either way. No
+      // wrong RESULT is reachable through this arm, because every operation that follows it acts
+      // on the same path and fails the same way. It is kept for the sentence, which names the
+      // component, and it is stated here as unpinned rather than left to look pinned.
+      if (err.code !== 'ENOENT') throw err
+    }
+    if (info?.isSymbolicLink()) return component
+  }
+  return null
+}
+
+// Whether an omitted `--phase` is ambiguous for this run, and the refusal to print when it is.
+// Returns null when the flag was given, when the plan cannot be read, or when the plan has at most
+// one phase; a string otherwise.
+//
+// `--phase` defaults to the manifest key `default`, and `tasksOfPhase` reads a non-integer name as
+// EVERY task branch of the run — the honest reading of "this manifest phase's diff" when the
+// manifest has one phase, and a silent widening when the plan has several: a phase-3 review then
+// judges phase 1 and 2 branches that were integrated rounds ago. Refused rather than warned,
+// because the widening produces a review that reads as complete.
+// A single-phase plan is unaffected: there is nothing for the flag to disambiguate.
+//
+// Reading the plan may fail — a run with no `plan.json` — and that falls through to the old
+// behaviour rather than becoming a second refusal: what the caller omitted is unambiguous exactly
+// when nothing says otherwise, and both commands already have their own say about a missing plan.
+//
+// The phases come from `plan.tasks[].phase`, the same field `tasksOfPhase` filters on, so the set
+// named is the set the flag chooses between. Non-integers are dropped: `tasksOfPhase` compares
+// `t.phase === phaseNumber` against an integer, so a phase that is not one is not selectable — and
+// dropping them is also what keeps this sentence free of any byte a hand-edited `plan.json` chose.
+async function ambiguousPhaseRefusal(root, runId, flags, command) {
+  if (flags.phase !== undefined && flags.phase !== true) return null
+  // CANNOT BE READ means exactly that, and `readState` answers null only for ENOENT — it rethrows
+  // a parse error, a mode-000 file, a directory at that path. The comment above promised a
+  // fall-through and delivered a crash: measured on this branch, a `plan.json` of `not json at
+  // all` with no manifest present exited 1 with an unhandled SyntaxError and an EMPTY stdout,
+  // where the fork point printed `no gate manifest` and exited 4. Exit 1 is not a code these
+  // commands otherwise return, and a refusal that prints nothing is the one shape this command's
+  // whole design refuses to produce.
+  //
+  // Swallowed rather than reported because of what this function IS: it decides whether an omitted
+  // flag is ambiguous, and an unreadable plan cannot say that it is. Every caller reads the plan
+  // again downstream and has its own answer for a plan it cannot use.
+  let plan = null
+  try {
+    plan = await readRunPlan(root, runId)
+  } catch {
+    return null
+  }
+  if (!plan) return null
+  // THE TRAVERSAL IS PART OF THE READ, and guarding only the read left this crashing on a plan it
+  // had just successfully parsed. `{"tasks":[null]}` reached `t.phase` on null and `{"tasks":"abc"}`
+  // reached `.map` on a string: both exited 1 with an EMPTY stdout, where `master` and the fork
+  // point printed a 70-byte refusal and exited 4 — the two properties the comment above condemns,
+  // reintroduced two lines below it. A plan is agent-written, so `tasks` is whatever is in the
+  // file, and neither `??` nor a property access says otherwise.
+  //
+  // `{"tasks":{…}}` and `{"tasks":7}` still crash further downstream, in `tasksOfPhase`, and that
+  // is fixed there rather than worked around here.
+  const tasks = Array.isArray(plan.tasks) ? plan.tasks : []
+  const phases = [...new Set(tasks.map((t) => t?.phase))]
+    .filter((p) => Number.isInteger(p))
+    .sort((a, b) => a - b)
+  if (phases.length < 2) return null
+  return `${command} needs --phase: the plan for this run has ${phases.length} phases (${phases.join(', ')}), `
+    + 'and an omitted --phase reviews every task branch of the run — including branches integrated in earlier phases'
 }
 
 async function resolveBranchShas(git, tasks, runId) {
@@ -2762,9 +3042,9 @@ export async function runCli(argv, io = { out: console.log }) {
       // then gets "none" rather than a name. The value it used to record in that state was the
       // string `HEAD`, which names a ref anyone can create — so the record asserted a branch that
       // a third party, not the teammate, controlled.
-      // The KIND again, for the label only — what is STORED is unchanged, and is null for both
-      // rejected states. Labelling by a null test called a worktree whose HEAD pointed at
-      // `refs/mine/wb` "detached" while `git status` there said `## refs/mine/wb`.
+      // The KIND again, for the label only — what is STORED is unchanged. Labelling by a null
+      // test called a worktree whose HEAD pointed at `refs/mine/wb` "detached" while `git status`
+      // there said `## refs/mine/wb`.
       const head = typeof flags.branch === 'string' ? null : await git.headBranch()
       const branch = typeof flags.branch === 'string' ? flags.branch : head.name
       await writeLocation(mainRoot, runId, flags.task, { worktree, branch })
@@ -4092,6 +4372,13 @@ export async function runCli(argv, io = { out: console.log }) {
   }
 
   if (command === 'review-dispatch') {
+    // Before the manifest is even read: an invocation this command cannot act on unambiguously is
+    // rejected on its own terms, the way a missing argument is, rather than after the environment
+    // has had its say. 2 is what this CLI returns for a rejected invocation; 4 would say the
+    // command tried and could not verify, which is not what happened.
+    const ambiguous = await ambiguousPhaseRefusal(root, runId, flags, command)
+    if (ambiguous) { io.out(ambiguous); return 2 }
+
     // The TRACKED manifest, not the resolved config: the reviewer grades the diff, so letting
     // the gitignored local layer choose its tier would let the party being judged pick its own
     // judge. `config.mjs` already refuses `agents.reviewer` in the local layer; reading the
@@ -4111,8 +4398,17 @@ export async function runCli(argv, io = { out: console.log }) {
     const tierModels = parseTierModels(flags, io)
     if (tierModels === TIER_MODELS_REJECTED) return 2
 
-    const plan = await readState(root, runId, 'plan')
-    if (!plan) { io.out(`no plan for run ${runId}`); return 4 }
+    // Through the same non-parking reader as `collect-reviews`, for the same inherited FIFO door:
+    // these two commands read the same file for the same reason, and a hang in one is a hang in
+    // the other.
+    let plan = null
+    try {
+      plan = await readRunPlan(root, runId)
+    } catch (err) {
+      io.out(`the plan for run ${printable(runId)} cannot be read: ${printable(err.message)}`)
+      return 4
+    }
+    if (!plan) { io.out(`no plan for run ${printable(runId)}`); return 4 }
 
     const git = createGit({ cwd: root })
     // Resolved to shas as well as names: the stamp each reviewer carries back names the tips it
@@ -4258,6 +4554,206 @@ export async function runCli(argv, io = { out: console.log }) {
   }
 
   if (command === 'collect-reviews') {
+    // `--phase` names the manifest key and comes off argv alone, so it is resolved here rather
+    // than after the manifest: everything below needs it, starting with the clear.
+    const phaseName = flags.phase ?? 'default'
+
+    const dir = path.join(runDir(root, runId), 'reviews')
+
+    // THE PREVIOUS ROUND'S RESULTS FILE IS REMOVED BEFORE THIS ROUND READS ANYTHING, and that is
+    // what keeps a deterministic, phase-scoped filename safe to advertise.
+    //
+    // The file is written only on success, so before it existed this command was fail-closed:
+    // there was no artefact unless the operator made one, and a `>` redirect truncates on the
+    // failing run. Writing it turned that fail-open. Measured on this branch before this removal:
+    // a clean round wrote `results-default.json` saying `"status": "pass"` and printed that path;
+    // a fix-round commit then made the round-2 collection refuse with exit 4 (`stale findings for
+    // lens correctness`), the round-1 file survived untouched still saying `"pass"`, and `gate
+    // --results` on exactly the path round 1 advertised exited 0 with verdict PASS — a pass over
+    // a tree no reviewer judged.
+    //
+    // REMOVAL rather than a stamp inside the document. A stamp is only worth what its reader
+    // checks, and `gate --results` does not check one: it `JSON.parse`s the file and trusts
+    // `results`, which is how the stale document above passed. Teaching the gate to verify a
+    // stamp would put that check on every run's gate path and still leave the document trusted by
+    // anything else that reads it, whereas removing it makes its EXISTENCE the claim — a results
+    // file is present only when the round that wrote it succeeded.
+    //
+    // Removed HERE — before the manifest is resolved, before the phase is matched to a check,
+    // before the findings are read — rather than on each failing exit. "Before the findings are
+    // read" was too weak, and the gap it left was measured: a round that refused at the empty-lens
+    // check, or at the agent-check count, returned 4 with the previous round's `"status": "pass"`
+    // still on disk, and `gate --results` on that file exited 0 with verdict PASS over a tree that
+    // round had refused to judge. Five refusals sat above it.
+    //
+    // The property is positional, so it is stated positionally, and it is checkable by reading
+    // rather than by counting: NO `return` in this command sits above this block, and the only
+    // three inside it are the guards below that decide whether the removal may happen at all —
+    // they cannot be moved after the thing they guard. Every other exit, all fifteen of them, is
+    // downstream. A count of the paths downstream was true and useless, which is what the earlier
+    // version of this sentence was: what mattered was the paths UPSTREAM. Clearing here also
+    // covers the exits no `return` can: a crash, a kill, a timeout mid-collection.
+    //
+    // `unlink` removes the LINK, never what it points at, so a symlink an earlier round (or
+    // another teammate) left AT THE RESULTS PATH is cleared without touching the file on the other
+    // end of it. That is true of a link at that path and false of a link at the DIRECTORY above
+    // it, which is why the directory is vetted first: through a planted `reviews` link this
+    // removal deleted the victim directory's own `results-1.json` — measured on this branch,
+    // before the vet was moved ahead of it. The destructive half must not be the unguarded one:
+    // a refused write costs a round, a deletion costs the file.
+    //
+    // The name is `results-<phase>.json`, beside the findings files this round reads, and the
+    // phase goes through `isUnsafePathComponent` — the predicate `reviewFileName` applies to each
+    // of its own components — so a phase name that is not a safe filename is refused rather than
+    // escaping the directory. Vetted HERE rather than beside the write, because this removal
+    // builds a path from the same value: unvetted, it is a delete-anything primitive as readily as
+    // the write was a write-anything one. Measured, with this block moved below the unlink and a
+    // real file planted at `.teammates/pwned.json`: the command still exited 4 with this same
+    // sentence, and the file was gone. The refusal is not what the ordering buys — the ordering is
+    // what stops the deletion happening on the way to it. Refused with the 4 the `reviewFileName`
+    // failure below returns, rather than a second code for the same flag on the same command.
+    //
+    // NOT redundant with the per-lens `reviewFileName` failure, which is the reading the lens loop
+    // invites. That loop runs AFTER this, and after the removal below: by the time it could refuse
+    // the phase, this code has already built a path from it and deleted whatever was there. The
+    // two refusals also read differently on purpose — this one names the results file — because
+    // they otherwise printed the same sentence, and a fixture could not tell which had fired.
+    // Measured on this branch, with this guard forced to false and the manifest declaring a phase
+    // key of `a/../../../pwned`: the results file was written to `.teammates/pwned.json`, two
+    // directories above the run's own reviews directory, and the command printed that path and
+    // exited 0; with the guard merely MOVED below the removal, a real file planted at that same
+    // path was deleted while the command still exited 4 with this very sentence.
+    //
+    // Coerced with `String` first for the same reason `reviewFileName` does it: the value that
+    // gets checked has to be the value that gets joined, or the two can differ.
+    const resultsName = String(phaseName)
+    if (isUnsafePathComponent(resultsName)) {
+      io.out(`the results file cannot be named: a phase must be a non-empty name with no path separators, got ${JSON.stringify(printable(resultsName))}`)
+      return 4
+    }
+    const resultsPath = path.join(dir, `results-${resultsName}.json`)
+
+    // The directory is resolved BEFORE the removal, not beside the write, because the removal is
+    // the half that cannot be undone.
+    let planted = null
+    try {
+      planted = await plantedReviewsLink(root, dir)
+    } catch (err) {
+      io.out(`cannot vet the run's reviews directory at ${printable(dir)}: ${printable(err.message)}`)
+      return 4
+    }
+    if (planted) {
+      io.out(`${printable(planted)} is a symlink, and every component of ${printable(dir)} must be a real directory — refusing before anything is removed or written`)
+      return 4
+    }
+
+    try {
+      await unlink(resultsPath)
+    } catch (err) {
+      // ENOENT is the ordinary case — no earlier round, or one that failed. Anything else is a
+      // document this command cannot account for, and leaving it in place would let it be read as
+      // this round's answer.
+      if (err.code !== 'ENOENT') {
+        // EMPTIED WHERE IT CANNOT BE REMOVED, which is a real case and not a defensive one: in a
+        // `0555` reviews directory `unlink` fails EACCES while `truncate` succeeds, because
+        // removing an entry needs write permission on the DIRECTORY and emptying a file needs it
+        // on the FILE. Measured on this branch: without this fallback that round exited 4 with the
+        // superseded document still on disk saying `"status": "pass"`, and `gate --results` on
+        // it exited 0 with verdict PASS over a tree no reviewer had judged — the exact failure the
+        // up-front clear exists to prevent. A zero-byte file is fail-closed: the gate refuses it
+        // with `--results must be a readable JSON file`, measured in the same run.
+        //
+        // THROUGH A DESCRIPTOR, never by path, and the property required is not the one that
+        // reads most naturally. "only a regular file is emptied" describes the CHECK; what the
+        // fallback actually needs is that the bytes it destroys BELONG TO THIS COMMAND, and
+        // `isFile()` does not say that. A hard link is a regular file: `unlink` on one is
+        // harmless because it removes a NAME, which is why such a plant is inert on the normal
+        // path, but `truncate` destroys the shared inode. Measured on this branch with the
+        // path-based check: `link('<outside>/secret.txt', '<reviews>/results-1.json')` in a `0555`
+        // directory — the very condition this fallback exists for — left that file outside the
+        // project at zero bytes, with nothing in the output naming it. `st_nlink` was never
+        // consulted.
+        //
+        // So: open with the O_WRONLY|O_NONBLOCK|O_NOFOLLOW word above, `fstat` the DESCRIPTOR,
+        // require a regular file with exactly one link, and `ftruncate` that same descriptor. This
+        // is the pattern `openHolderEntry` uses, against the same class of plant; there was no
+        // reason this site did not reach for it first.
+        //
+        // WHAT IT ACTUALLY BUYS, measured by substituting the old `lstat`-then-`truncate` body
+        // back in — which reddens 'the empty-instead-of-remove fallback does not destroy an inode
+        // with another name' and 'collect-reviews refuses when the previous results file can be
+        // neither removed nor emptied', and nothing else: exactly one hazard changes hands — the HARD LINK, which
+        // `isFile()` cannot see. The symlink and the directory were already refused by the old
+        // body: `lstat` reports the link, so `isFile()` is false and `truncate` was never called,
+        // and a directory fails the same test. The symlink fixture stays green under the old body,
+        // and the directory case still refuses with the same exit and the same sentence except for
+        // one parenthetical — the old body records no reason, because it decides on `lstat` and
+        // never opens, where this one records the EISDIR its open returns. That is what the second
+        // failing test above is: a wording difference, not a hazard. An earlier version of this
+        // comment claimed four hazards, counting two the check it replaced already covered.
+        //
+        // O_NONBLOCK IS NOT ONE OF THEM EITHER, and the claim that it "comes with the descriptor"
+        // was doubly wrong. It is PINNED — reverting the flag word reddens the FIFO-at-the-results-
+        // path fixture (SIGKILL at 20 000 ms) and the flag-word unit test, which are exactly the
+        // two kills the mutation record in the test file names for that substitution. And the hang
+        // it prevents is one THIS REWRITE INTRODUCED: the old body never opened a FIFO at all, so
+        // it refused one in milliseconds. Opening is what created the hazard; O_NONBLOCK is what
+        // closes it again. Measured in isolation: `O_WRONLY|O_NOFOLLOW` on a FIFO stayed blocked
+        // past 5s, and adding O_NONBLOCK returns ENXIO at once.
+        //
+        // One property really is unpinned, and it is the one left: the check and the destruction
+        // are now one object rather than two syscalls on a path, so nothing can be swapped in
+        // between. No test here holds that — staging the swap needs a scheduler this suite does
+        // not have.
+        let emptied = false
+        let emptyErr = null
+        const flags = emptyResultsOpenFlags()
+        if (flags === null) {
+          emptyErr = new Error('this platform has no O_NOFOLLOW, so the entry cannot be opened without risking following a link')
+        } else {
+          let handle = null
+          try {
+            handle = await openFile(resultsPath, flags)
+            const info = await handle.stat()
+            if (info.isFile() && info.nlink === 1) {
+              await handle.truncate(0)
+              emptied = true
+            } else {
+              emptyErr = new Error(`the entry there is not a single-linked regular file (nlink ${info.nlink}), so emptying it could destroy bytes this command does not own`)
+            }
+          } catch (err) {
+            emptyErr = err
+          } finally {
+            if (handle) await handle.close().catch(() => {})
+          }
+        }
+        if (!emptied) {
+          // ONLY WHAT WAS OBSERVED, which is narrower than "report the outcome" and is the rule
+          // this sentence has now broken twice. The first version asserted a norm ("must not
+          // survive this one"). The second asserted a state nobody had looked at — that the
+          // document is still on disk carrying a verdict `gate --results` would read as this
+          // round's — and that is false on three reachable paths, all measured on this branch: a
+          // DIRECTORY at the path (the state one of this command's own tests builds) makes the
+          // gate exit 2, not read a verdict, and `rm` without `-r` refuses the advice; the
+          // reviews entry replaced by a regular file fails ENOTDIR, so the file named as "still
+          // on disk" does not exist; and a `0666` reviews directory fails EACCES on both the
+          // unlink and the open, so nothing observed the entry at all.
+          //
+          // What IS observed is two attempts and two failures, so that is what is printed —
+          // together with the one consequence this code does control, which is that the round is
+          // refused before anything is read. Naming both errors is the whole of the diagnosis: an
+          // EACCES pair says the directory, an EISDIR says the entry.
+          io.out(`could not clear the previous results file at ${printable(resultsPath)}: unlink failed (${printable(err.message)}), and emptying it in place failed too (${printable(emptyErr?.message ?? 'no reason recorded')}) — this round is refused before reading any findings, so nothing here is its answer; inspect that path before re-running`)
+          return 4
+        }
+      }
+    }
+
+    // Refused before the manifest, for the reason given at the same call in `review-dispatch`:
+    // collecting under the widened default records a pass over branches this phase never reviewed.
+    const ambiguous = await ambiguousPhaseRefusal(root, runId, flags, command)
+    if (ambiguous) { io.out(ambiguous); return 2 }
+
     const config = await resolveGateConfig(root, io)
     if (config === GATE_CONFIG_REJECTED) return 2
     // 4, matching `complete`: this cannot verify what it was asked about. Inferring a manifest
@@ -4265,7 +4761,6 @@ export async function runCli(argv, io = { out: console.log }) {
     // the lens list is what decides whether a review is complete.
     if (!config) { io.out('no gate manifest — cannot tell which lenses were dispatched'); return 4 }
 
-    const phaseName = flags.phase ?? 'default'
     const checks = checksForPhase(config, phaseName)
     const agentChecks = checks.filter((c) => kindOf(c) === 'agent')
     if (agentChecks.length !== 1) {
@@ -4274,7 +4769,28 @@ export async function runCli(argv, io = { out: console.log }) {
     }
     const check = agentChecks[0]
 
-    const dir = path.join(runDir(root, runId), 'reviews')
+    // AN AGENT CHECK WITH NO LENS COLLECTS NOTHING, and a pass over nothing is the outcome this
+    // whole command exists to refuse. `checksForPhase` substitutes the manifest's lens list only
+    // for a check that OMITS one; an explicit `"lens": []` is kept, the read loop below runs zero
+    // times, and `collectReviewResults` reports a clean pass because no lens is missing. Measured
+    // on this branch before this refusal: exit 0, `0 finding(s), none blocking, recovered from the
+    // reviewers' findings files`, with no findings file opened at all — and the results file was
+    // written and advertised, so `gate --results` on it returned verdict PASS over a tree no
+    // reviewer had judged.
+    //
+    // The pass COMPUTATION is not new — `git show master:scripts/cli.mjs` prints the same document
+    // on stdout for the same manifest — but persisting it is what makes it reusable, and it
+    // contradicts this command's own contract that a results file exists only where a round
+    // succeeded. Refused at the COLLECTION
+    // rather than at the write, because the document is wrong wherever it goes: a reader of that
+    // stdout is as misled as a reader of the file. 4, matching every other "this cannot be
+    // verified" answer here.
+    if (Array.isArray(check.lens) && check.lens.length === 0) {
+      io.out(`the agent check ${printable(check.name ?? 'review')} declares an empty lens list, so no review was dispatched for this phase and there is nothing to collect — a pass over zero lenses is not a review`)
+      return 4
+    }
+
+
     const files = []
     const unreadable = []
     for (const lens of check.lens) {
@@ -4286,7 +4802,7 @@ export async function runCli(argv, io = { out: console.log }) {
         return 4
       }
       try {
-        const parsed = JSON.parse(await readFile(path.join(dir, name), 'utf8'))
+        const parsed = JSON.parse(await readFindingsFile(path.join(dir, name)))
         // A reviewer returns an array of findings; the file it writes may carry that array
         // directly or wrap it. Both are accepted, and anything else is unreadable rather than
         // an empty review — the distinction this whole command exists to preserve.
@@ -4320,9 +4836,43 @@ export async function runCli(argv, io = { out: console.log }) {
     // round moves a branch, and findings about the old tree are not findings about this one —
     // during run `codemap` that was worked around three times by deleting the files by hand
     // between rounds.
-    const plan = await readState(root, runId, 'plan')
+    // The same rethrow one command down, and PRE-EXISTING: `master` crashes identically on a
+    // `plan.json` that is not JSON — measured, exit 1 with an empty stdout on both, where this
+    // branch's only contribution is that the clear has already run by then.
+    // Folded into the refusal below rather than left to throw, because "no plan" and "a plan this
+    // cannot read" put the operator in the same position: nothing here says which tips were
+    // judged.
+    //
+    // `${runId}` goes through `printable` like every other value in this command's output, and the
+    // reason is precise: WHAT VALIDATES THIS ID IS CONTAINMENT, AND NOTHING VALIDATES ITS BYTES.
+    // `assertContained` runs before dispatch for every command — measured here, `--run ../../pwned`
+    // and `--run a/../../out` both exit 2 on `escapes the run directory` — so the path this block
+    // builds from `runId`, and deletes and renames files under, cannot leave the run directory.
+    // That guarantee is real and this comment must not talk a reader out of it.
+    //
+    // What no one checks is the CHARACTERS. `idRefusal` would refuse every payload below — it is
+    // an allowlist, and calling it directly with an ESC, a C1 CSI, a bare CR and a NUL refuses all
+    // four — but both of its call sites are inside `init-run`, so nothing on this path consults it
+    // and a control byte travels intact to this sentence. Measured: `--run $'r1\e[2K\rreview:
+    // PASS'` reached it raw and drew a forged verdict line under it. For those bytes the wrapper
+    // is not a second line of defence; it is the only one.
+    //
+    // Twice this sentence has been written from an inference about which validator applies, and
+    // twice the mechanism was wrong while the conclusion happened to hold. Both times one call —
+    // `idRefusal(…)` directly, `--run ../../pwned` through the CLI — settled it in seconds.
+    let plan = null
+    try {
+      plan = await readRunPlan(root, runId)
+    } catch (err) {
+      io.out(`the plan for run ${printable(runId)} cannot be read: ${printable(err.message)} — nothing says which branch tips this phase is at, and a findings file that cannot be vouched for is not a review`)
+      return 4
+    }
     if (!plan) {
-      io.out(`no plan for run ${runId} — nothing says which branch tips this phase is at, and a findings file that cannot be vouched for is not a review`)
+      // Wrapped for the reason above, and STRICTLY EASIER TO REACH than the sentence it sits under:
+      // that one needs a `plan.json` this cannot parse, this one needs no plan file at all.
+      // Measured before this wrap: a C1 CSI in `--run` reached the terminal raw here while the
+      // neighbouring line, already wrapped, tokenised the same bytes.
+      io.out(`no plan for run ${printable(runId)} — nothing says which branch tips this phase is at, and a findings file that cannot be vouched for is not a review`)
       return 4
     }
     let branchShas
@@ -4387,7 +4937,84 @@ export async function runCli(argv, io = { out: console.log }) {
       io.out(`no findings file for lens(es): ${lost.map(printable).join(', ')} — those reviews are lost, not empty; respawn them rather than recording a pass`)
     }
     if (lost.length > 0 || explained.size > 0) return 4
-    io.out(JSON.stringify({ results: collected.results }, null, 2))
+
+    // PRINTED AND PERSISTED, because printing alone is a trap this run fell into. `gate --results
+    // <path>` needs a FILE, and this command's only output was stdout — so an operator who ran it
+    // without redirecting had the review check sit `pending` forever while the gate reported FAIL
+    // with an empty `failed: []`, naming nothing to fix. Writing the file makes the next command's
+    // argument something that exists rather than something the operator had to know to create.
+    //
+    // The JSON goes out FIRST, before anything is written, and the path after it. Two reasons,
+    // and the ordering serves both. Nothing is prepended to what a caller already parses; and a
+    // collection that succeeded is never lost to a filesystem that refused it — with the results
+    // file made unwritable (an earlier round under another uid, or a read-only `.teammates`) the
+    // write-first version exited 1 with a raw Node stack and ZERO bytes on stdout, discarding a
+    // review it had already computed, and 1 is not a code this command otherwise returns.
+    //
+    // A `> results.json` redirect is NOT preserved by that ordering — it captures the path line
+    // too, and `gate --results` JSON.parses the whole file, so the redirect yields `--results must
+    // be a readable JSON file` (measured on this branch). The file written below is the path to
+    // pass instead, which is what makes the redirect unnecessary.
+    const document = JSON.stringify({ results: collected.results }, null, 2)
+    io.out(document)
+
+    // TEMP-THEN-RENAME, matching `writeState` in `scripts/state.mjs`, because a plain `writeFile`
+    // FOLLOWS A SYMLINK sitting at the target. `'w'` is `O_CREAT|O_WRONLY|O_TRUNC`, and the guard
+    // above vets the phase STRING while nothing vets the ENTRY already at the safe path — which
+    // any teammate can plant, since `.teammates/<run>/reviews/` is where reviewers are told to
+    // write and the filename is derivable from the phase in their own dispatch prompt. Measured on
+    // this branch before this change, each with the printed path still naming the innocuous
+    // in-repo location and the command exiting 0: a symlink to `teammates.gate.json` had the
+    // TRACKED MANIFEST overwritten with this document (`git status` reported it modified); a
+    // symlink to a file outside the project root had that file overwritten; and a DANGLING symlink
+    // to `hooks-new-file.mjs` CREATED that file. `rename` replaces a link rather than following
+    // it, so all three now end with the plant gone and the document at the real path.
+    //
+    // `'wx'` on the temp for the same reason `writeOwnerMarker` uses it (see
+    // scripts/merge-preview.mjs) — an entry already at the scratch name is refused, not followed.
+    // `'wx'` is wrong for the DESTINATION, and NOT for the reason that reads most naturally.
+    // "an exclusive create would refuse every round after the first" is false for this code: the
+    // unconditional clear above guarantees the destination is absent by the time the write runs,
+    // and a fixture collecting twice against the same run returned 0 both times with `'wx'`
+    // substituted at the destination — measured on this branch. What it would really break is the
+    // window this whole block exists for: a plant landing between the clear and the write turns
+    // `'wx'` into EEXIST, which fails a round whose collection had already succeeded. `rename`
+    // replaces that plant instead, which is the outcome the operator needs.
+    //
+    // Stated as UNCOVERED rather than as safe: no test here pins that `'wx'`, and removing it
+    // alone leaves the suite green — measured. The scratch name carries this pid and a
+    // microsecond clock reading, so no fixture can pre-plant the entry it would refuse, which is
+    // the same property that makes a plant there implausible in the first place. It stays because
+    // a `'w'` on a scratch path that did happen to be occupied would follow it, and it costs
+    // nothing; do not read a green suite as evidence for it.
+    let tmp = null
+    try {
+      // The shape neither `rename` nor `'wx'` reaches: a symlink anywhere on the way to the
+      // directory, where `mkdir` recursive is a no-op on the link and every path built from `dir`
+      // resolves through it, so the document lands wherever it points while the printed path still
+      // says in-repo. Re-checked here rather than trusted from the vet before the clear: that one
+      // ran before the whole collection, and this one runs immediately before the write, which is
+      // as close as this can be brought without an API for writing relative to an open directory.
+      // Checked BEFORE `mkdir`, so a planted chain has nothing created inside it.
+      const replanted = await plantedReviewsLink(root, dir)
+      if (replanted) {
+        throw new Error(`${printable(replanted)} is a symlink, and every component of ${printable(dir)} must be a real directory`)
+      }
+      await mkdir(dir, { recursive: true })
+      tmp = `${resultsPath}.${process.pid}.${Math.floor(performance.now() * 1000)}.tmp`
+      await writeFile(tmp, `${document}\n`, { encoding: 'utf8', flag: 'wx' })
+      await rename(tmp, resultsPath)
+    } catch (err) {
+      if (tmp) await unlink(tmp).catch(() => {})
+      // Reported, not thrown: the results are already on stdout above. 4 rather than 0 because
+      // this command's answer is now a FILE and there is not one — a caller told 0 would go
+      // looking for a path that does not exist. Wrapped for the reason `configFailureMessage`'s
+      // syscall branch is: a Node fs error quotes the path this CLI built, and nothing that
+      // reaches a terminal should carry bytes unfiltered.
+      io.out(`cannot write the results file at ${printable(resultsPath)}: ${printable(err.message)} — the results above are complete; redirect them to a file and pass that to gate --results`)
+      return 4
+    }
+    io.out(`results written to ${printable(resultsPath)} — pass that path to gate --results`)
     return 0
   }
 
