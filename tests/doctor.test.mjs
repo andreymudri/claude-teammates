@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { collectDoctorReport, renderDoctor } from '../scripts/doctor.mjs'
-import { GitError, createGit, defaultGitExec } from '../scripts/git.mjs'
+import { GitError, createGit, defaultGitExec, classifyHeadRef } from '../scripts/git.mjs'
 
 const RUN_ID = 'r1'
 const RUN_BRANCH = 'run/r1'
@@ -36,8 +36,22 @@ function fakeGit(overrides = {}) {
     // these no-op defaults and nothing calls them without both `anchorSha` and `runSha`.
     commitsBetween: async () => [],
     commitParents: async () => [],
+    headSha: async () => 'f'.repeat(40),
   }
-  return { ...defaults, ...overrides }
+  const merged = { ...defaults, ...overrides }
+  // `headBranch` is DERIVED from whatever `currentBranch` this double was given, and derived
+  // through the real `classifyHeadRef` rather than hand-rolled. A double that answered these two
+  // questions independently could disagree with production about what a branch is, which is the
+  // whole failure this fixture family exists to catch — and did: while only fakes covered
+  // `doctor`, two production regressions passed the entire suite. A test that needs the
+  // not-a-branch case overrides `headBranch` directly.
+  if (!('headBranch' in overrides)) {
+    merged.headBranch = async () => {
+      const name = await merged.currentBranch()
+      return classifyHeadRef(name === null || name === undefined ? null : `refs/heads/${name}`)
+    }
+  }
+  return merged
 }
 
 // The tip the default resolveRef gives T1's branch, which is what a merge of T1 would name as
@@ -630,7 +644,7 @@ test('renderDoctor names the detached state instead of printing a null branch', 
     problems: [],
   }).split('\n')
   assert.equal(line[0], `run ${RUN_ID} · run branch (none recorded) · base ${BASE_BRANCH}`)
-  assert.equal(line[1], 'main worktree on (detached HEAD) · clean')
+  assert.equal(line[1], 'main worktree on (no branch) · clean')
   // Never the word `null` standing where a branch name goes.
   assert.doesNotMatch(line.slice(0, 2).join('\n'), /\bnull\b/)
 })

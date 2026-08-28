@@ -25,6 +25,7 @@ import {
   MAX_TASK_ID_BYTES,
   planSectionsRefusal,
   runBranchDisagreement,
+  derive,
 } from '../scripts/cli.mjs'
 import { previewOwnerMarkerPath, previewClaimPath } from '../scripts/merge-preview.mjs'
 import { renderRunSummary } from '../scripts/finish.mjs'
@@ -3557,7 +3558,7 @@ test('prune-run refuses to act on a detached HEAD rather than deriving from an u
     assert.equal(hasBranch(root, 'teammates/r1/T1'), true)
     assert.equal(hasWorktree(root, 'a1'), true)
     assert.equal(code, 4)
-    assert.match(lines.join('\n'), /cannot decide what is prunable: HEAD is detached at [0-9a-f]{40}, so this run has no run branch to verify against/)
+    assert.match(lines.join('\n'), /cannot decide what is prunable: HEAD is detached, so it is on no branch \(HEAD is [0-9a-f]{40}\)/)
   })
 })
 
@@ -3641,7 +3642,7 @@ test('the refs/heads/HEAD plant does not make a detached HEAD look like a run br
     assert.equal(code, 4)
     assert.equal(hasBranch(root, 'teammates/r1/T1'), true)
     assert.equal(hasWorktree(root, 'a1'), true)
-    assert.match(lines.join('\n'), /HEAD is detached at [0-9a-f]{40}/)
+    assert.match(lines.join('\n'), /HEAD is detached, so it is on no branch \(HEAD is [0-9a-f]{40}\)/)
     assert.doesNotMatch(lines.join('\n'), /deleted teammates\/r1\/T1/)
     // The state that made the deletion catastrophic, pinned so the fixture cannot quietly become
     // a test about a branch that was safe to delete all along: the task tip is reachable from the
@@ -12538,7 +12539,7 @@ test('review-dispatch refuses on a detached HEAD instead of dispatching against 
     lines.length = 0
     const code = await runCli(['review-dispatch', '--run', 'r1', '--phase', '1', '--root', root], io)
     assert.equal(code, 4)
-    assert.match(lines.join('\n'), /HEAD is detached, so there is no run branch to review against/)
+    assert.match(lines.join('\n'), /HEAD is detached, so it is on no branch — there is no run branch to review against/)
     // And no dispatch was emitted: a reviewer must not be handed a spec naming a null branch.
     assert.doesNotMatch(lines.join('\n'), /"reviewers"/)
   })
@@ -12557,7 +12558,7 @@ test('brief refuses to read the plan at the anchor when HEAD is detached', async
     lines.length = 0
     const code = await runCli(['brief', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--root', root], io)
     assert.notEqual(code, 0)
-    assert.match(lines.join('\n'), /HEAD is detached, so there is no run branch to read the plan from/)
+    assert.match(lines.join('\n'), /HEAD is detached, so it is on no branch — there is no run branch to read the plan from/)
   })
 })
 
@@ -12640,4 +12641,136 @@ test('the same run with the task branch left alone does prune its worktree', asy
     assert.equal(code, 0)
     assert.equal(hasWorktree(root, 'a1'), false, 'the phase passes and the worktree is pruned when nothing moved')
   })
+})
+
+// DOCTOR AGAINST A REAL REPOSITORY, because every other doctor test in this file drives
+// `collectDoctorReport` through `fakeGit`, and a double cannot notice production breaking around
+// it. Two regressions survived the whole suite while only fakes covered this path: deleting the
+// `runBranch !== null &&` guard left 2111 green while the real command printed nothing but
+// `branchExists requires a non-empty branch name, got null` — the type guard added to
+// `branchExists` throws where the old interpolating version returned false — and re-minting the
+// `HEAD` sentinel left 2111 green while the real command printed `run branch HEAD` and resolved
+// the run sha through the planted ref.
+test('doctor on a detached HEAD reports it against a real repository', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    g(['checkout', '--quiet', '--detach', 'HEAD'])
+    lines.length = 0
+    const code = await runCli(['doctor', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    // 1 is "problems found" — the report still renders, which is the half that broke.
+    assert.equal(code, 1, out)
+    assert.match(out, /^run r1 · run branch \(none recorded\) · base main$/m)
+    assert.match(out, /^main worktree on \(no branch\) · clean$/m)
+    assert.match(out, /main worktree is detached at [0-9a-f]{40}/)
+    // The failure mode the fakes could not see: the report replaced by a git error.
+    assert.doesNotMatch(out, /branchExists requires/)
+    // And the sentinel must not come back.
+    assert.doesNotMatch(out, /run branch HEAD/)
+  })
+})
+
+// The other state the shared classifier rejects, end to end. `doctor` used to compare two equally
+// wrong values here and print `no problems found` for a repository whose HEAD the same commit's
+// `derive` refuses outright.
+test('doctor reports a HEAD repointed outside refs/heads/ rather than calling it a branch', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    g(['update-ref', 'refs/tags/x', 'HEAD'])
+    g(['symbolic-ref', 'HEAD', 'refs/tags/x'])
+    assert.equal(g(['symbolic-ref', '--quiet', 'HEAD']).trim(), 'refs/tags/x', 'the plant really did repoint HEAD')
+    lines.length = 0
+    const code = await runCli(['doctor', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    assert.equal(code, 1, out)
+    assert.match(out, /HEAD pointing at refs\/tags\/x, which is not a branch/)
+    // The header must not present the non-branch ref as the branch it is on.
+    assert.doesNotMatch(out, /^main worktree on refs\/tags\/x/m)
+    assert.doesNotMatch(out, /no problems found/)
+  })
+})
+
+// The sibling of the fixture above, for the OTHER reason there can be no run branch. It is a
+// separate test because the two arms print different causes and the cause is the whole point: on
+// a detached HEAD this used to print `because main is checked out and that is the base branch`
+// while main was not checked out at all — `resolveBaseBranch` answers from `branchExists` and
+// never looks at HEAD, so the base branch merely EXISTING was being read as evidence that it was
+// checked out. Setting the detached arm back to false restores exactly that false diagnosis.
+test('init-run says HEAD is detached, not that the base branch is checked out', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    g(['checkout', '--quiet', '--detach', 'HEAD'])
+    lines.length = 0
+    const code = await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    assert.equal(code, 0, lines.join('\n'))
+    const plan = JSON.parse(await readFile(path.join(root, '.teammates', 'r1', 'plan.json'), 'utf8'))
+    assert.equal(plan.runBranch, undefined)
+    const out = lines.join('\n')
+    assert.match(out, /recorded no run branch, because HEAD is detached and a detached HEAD is on no branch/)
+    // The false cause, named so a regression to it is unmistakable rather than merely "not the
+    // string we wanted".
+    assert.doesNotMatch(out, /is checked out and that is the base branch/)
+  })
+})
+
+// THE ROUND TRIP AT ITS CALL SITE, not merely as a pure function. The three helper tests above
+// pin what `runBranchDisagreement` returns; none of them notices if `derive` stops calling it, and
+// deleting `if (disagreement) throw new Error(disagreement)` left the whole suite green. The arm
+// is unreachable in a real repository now — the two shas can differ only if the branch moves
+// between `headSha` and `resolveRef`, two separate subprocesses — so the seam is what makes it
+// testable at all.
+test('derive throws when the run branch moved between the two reads', async () => {
+  const headSha = 'a'.repeat(40)
+  const movedSha = 'b'.repeat(40)
+  const git = {
+    headBranch: async () => ({ ok: true, kind: 'branch', ref: 'refs/heads/run-branch', name: 'run-branch', reason: null }),
+    headSha: async () => headSha,
+    // The second subprocess sees a branch that has moved since the first.
+    resolveRef: async () => movedSha,
+  }
+  await assert.rejects(
+    () => derive('/nowhere', 'r1', { base: 'main', plan: 'plan.md' }, { git }),
+    (err) => {
+      assert.match(err.message, new RegExp(`HEAD is ${headSha}`))
+      assert.match(err.message, new RegExp(`refs/heads/run-branch — the ref this run resolves the run branch through — is ${movedSha}`))
+      return true
+    },
+  )
+})
+
+// The pass arm of the same wiring: when the two agree, `derive` must get PAST this check rather
+// than throwing for some other reason that would make the test above vacuous. It still fails
+// afterwards — the fake git has no `branchExists` for the base branch — but not with the
+// round-trip message, and that is the discrimination.
+test('derive does not raise the round-trip refusal when the two reads agree', async () => {
+  const headSha = 'a'.repeat(40)
+  const git = {
+    headBranch: async () => ({ ok: true, kind: 'branch', ref: 'refs/heads/run-branch', name: 'run-branch', reason: null }),
+    headSha: async () => headSha,
+    resolveRef: async () => headSha,
+  }
+  await assert.rejects(
+    () => derive('/nowhere', 'r1', { base: 'main', plan: 'plan.md' }, { git }),
+    (err) => {
+      assert.doesNotMatch(err.message, /the ref this run resolves the run branch through/)
+      return true
+    },
+  )
+})
+
+// And the refusal arm of the shared classifier, likewise at the call site rather than in the
+// classifier's own unit tests.
+test('derive throws the classifier reason when HEAD names no branch', async () => {
+  for (const head of [
+    { ok: false, kind: 'detached', ref: null, name: null, reason: 'HEAD is detached, so it is on no branch' },
+    { ok: false, kind: 'not-a-branch', ref: 'refs/tags/x', name: null, reason: 'HEAD points at refs/tags/x, which is not a branch — a run branch must be a ref under refs/heads/' },
+  ]) {
+    const git = { headBranch: async () => head, headSha: async () => 'c'.repeat(40), resolveRef: async () => 'c'.repeat(40) }
+    await assert.rejects(
+      () => derive('/nowhere', 'r1', { base: 'main', plan: 'plan.md' }, { git }),
+      (err) => {
+        assert.match(err.message, new RegExp(head.reason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+        return true
+      },
+    )
+  }
 })

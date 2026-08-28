@@ -920,16 +920,20 @@ async function planAtAnchor(root, planPath, flags, io) {
   const git = createGit({ cwd: root })
   let anchorSha
   try {
-    // The REF, and a refusal when there is none. This reads the plan the whole dispatch is built
-    // from, and it does not go through `derive`, so it cannot inherit that refusal — on a detached
-    // HEAD the previous revision resolved `refs/heads/HEAD`, an ordinary creatable ref, and would
-    // have briefed every teammate from whatever plan a planted ref pointed at.
-    const runBranchRef = await git.currentBranchRef()
-    if (runBranchRef === null) {
-      throw new GitError('HEAD is detached, so there is no run branch to read the plan from — check out the run branch and re-run')
+    // THE SHARED CLASSIFIER, for the same reason `derive` uses it: this reads the plan every
+    // teammate is briefed from, and it does not go through `derive`, so it inherits none of that
+    // command's refusals. It guarded only the detached case for one round, and that was a genuine
+    // regression against the tree before this task — with `ref: refs/mine/rb` written straight
+    // into `.git/HEAD` (a plain file write, which no pseudo-ref guard sees), `brief` and
+    // `workflow` exited 0 and emitted dispatches whose `## Global Constraints` came from an anchor
+    // of the planter's choosing, with a real constraint silently absent. Measured: the merge base
+    // exits 2 in the identical state, so this had to refuse it too.
+    const head = await git.headBranch()
+    if (!head.ok) {
+      throw new GitError(`${head.reason} — there is no run branch to read the plan from; check out the run branch and re-run`)
     }
     const baseBranch = await resolveBaseBranch(git, flags.base)
-    const runSha = await git.resolveRef(runBranchRef)
+    const runSha = await git.resolveRef(head.ref)
     const baseSha = await git.resolveRef(`refs/heads/${baseBranch}`)
     anchorSha = await git.mergeBase(baseSha, runSha)
     // `git show <sha>:<path>` takes a repo-relative path and rejects an absolute one, but
@@ -1973,59 +1977,49 @@ async function resolveBranchShas(git, tasks, runId) {
   return branchShas
 }
 
-async function derive(root, runId, flags) {
-  const git = createGit({ cwd: root })
+// `deps.git` is a TEST SEAM and nothing else — every production caller passes three arguments and
+// gets a git built here. It exists because the round-trip refusal below could not otherwise be
+// pinned at its CALL SITE: with the run branch resolved from HEAD's own ref, the two shas can
+// disagree only if the branch moves between two subprocesses, which no in-process fixture can
+// stage, so `if (disagreement) throw` could be deleted with the whole suite green. The helper's
+// arms were pinned as a pure function; the wiring was not. Injecting git is the smallest seam that
+// covers both, and it is exported for the same reason.
+export async function derive(root, runId, flags, deps = {}) {
+  const git = deps.git ?? createGit({ cwd: root })
   // THE REF, NOT THE NAME, is what everything destructive downstream is given. `currentBranchRef`
   // is `git symbolic-ref --quiet HEAD` (scripts/git.mjs), so this is the ref HEAD literally points
   // at, never a name abbreviated toward it: no tag, no `heads/<name>` branch and no
   // `refs/heads/refs/heads/<name>` changes what it resolves. `runBranch` below is derived FROM it
   // for display and for the ordinary name comparisons, and `ctx.runBranchRef` is what
   // `prune-run` resolves at the `git branch -D`.
-  const runBranchRef = await git.currentBranchRef()
-  // REFUSED ON A DETACHED HEAD, rather than carried as a name. There is no safe name for this
-  // state: the previous revision returned the string `HEAD`, and `refs/heads/HEAD` is a ref
-  // `git update-ref` creates without complaint, so the name a detached HEAD produced was one an
-  // unprivileged teammate could point wherever it liked. Detaching the main worktree does not
-  // even need code running here — `git update-ref --no-deref main-worktree/HEAD <sha>` from a
-  // linked worktree does it, exit 0, leaving the tree clean (measured). Everything below fails
-  // closed on the value being absent, but this says so in one place with the actual reason.
-  if (runBranchRef === null) {
+  // THE SHARED CLASSIFIER, not a conditional of this function's own. `headBranch` is the single
+  // place that decides what HEAD has to be (scripts/git.mjs); every other run-branch consumer asks
+  // the same question through the same call, which is what keeps them from drifting apart the way
+  // they did for three rounds. What is local to `derive` is only the CONSEQUENCE: a throw, because
+  // everything downstream of here verifies or removes something.
+  const head = await git.headBranch()
+  if (!head.ok) {
     throw new Error(
-      `HEAD is detached at ${await git.headSha()}, so this run has no run branch to verify against.`
-      + ' Check out the run branch and re-run. Nothing is verified or removed against a detached'
-      + ' HEAD: the branch name such a state used to report was `HEAD`, and refs/heads/HEAD is an'
-      + ' ordinary ref anyone with a worktree can create and point at a commit of their choosing.',
+      `${head.reason}${head.kind === 'detached' ? ` (HEAD is ${await git.headSha()})` : ''}.`
+      + ' Check out the run branch and re-run. Nothing is verified or removed against a HEAD that'
+      + ' does not name a branch: the name such a state yields is either invented or the whole ref'
+      + ' string, and prefixing refs/heads/ onto either lands on a ref anyone with a worktree can'
+      + ' create and point at a commit of their choosing.',
     )
   }
-  // HEAD MUST POINT INSIDE refs/heads/, and this is not a formality. `git symbolic-ref HEAD
-  // <ref>` refuses only targets outside `refs/` entirely — `refs/tags/x` and `refs/mine/anything`
-  // are both accepted, exit 0 (measured). The strip below is anchored at `refs/heads/`, so on
-  // such a ref it is a NO-OP and `runBranch` becomes the whole string `refs/tags/x`; every
-  // consumer that prefixes `refs/heads/` — `deriveContext` above all — then resolves
-  // `refs/heads/refs/tags/x`, an ordinary ref an unprivileged teammate can create and point
-  // wherever it likes. Measured end to end: with HEAD pointed at a `refs/tags/x` that holds the
-  // REAL run tip, the working tree clean and nothing detached, the gate read the planter's commit
-  // as the run branch and `ownership` flipped from fail to PASS over a rogue commit.
-  if (!runBranchRef.startsWith('refs/heads/')) {
-    throw new Error(
-      `HEAD points at ${printable(runBranchRef)}, which is not a branch — a run branch must be a ref under refs/heads/.`
-      + ' git accepts any target inside refs/ for HEAD, so this state is reachable with one'
-      + ' `git symbolic-ref` and is not something a normal checkout produces. Nothing is verified'
-      + ' or removed against it: the name taken from such a ref is the whole ref string, and'
-      + ' prefixing refs/heads/ onto it lands on a ref anyone with a worktree can create.',
-    )
-  }
-  const runBranch = runBranchRef.replace(/^refs\/heads\//, '')
-  // A REAL ROUND TRIP, against the ref the rest of the run actually reads. The previous revision
-  // compared `resolveRef(runBranchRef)` with `headSha` — but `runBranchRef` IS HEAD's own target,
-  // so that comparison was trivially true and vetted nothing. What has to be bound is HEAD's sha
-  // to `refs/heads/${runBranch}`, because that is the string `deriveContext` builds and resolves.
-  // The prefix guard above makes the two the same ref in every honest run; this check is what
-  // makes that an assertion rather than an assumption, and it is the one that survives if some
-  // future caller reintroduces a name-derived path.
+  const runBranchRef = head.ref
+  const runBranch = head.name
+  // The two-subprocess race, and ONLY that. `headSha` and `resolveRef` are separate git
+  // invocations, so a commit or merge landing on the run branch between them shows up here as a
+  // disagreement; that is an honest race and the message says so.
   //
-  // It also still covers the honest race it was narrowed to: `headSha` and `resolveRef` are two
-  // subprocesses, and an integrator merging concurrently moves the branch between them.
+  // It is NOT what closes the repointed-HEAD hazard, and an earlier revision of this comment
+  // claimed it was. `refs/heads/${runBranch}` is rebuilt from a name that was itself taken off
+  // `head.ref`, so it reconstructs that ref character for character — the comparison cannot
+  // disagree about WHICH ref is the run branch, only about what that one ref held a moment
+  // earlier. The guard above is the whole of that closure. Reverting this to resolve `head.ref`
+  // directly changes nothing measurable, which is exactly why it must not be described as
+  // defence.
   const headSha = await git.headSha()
   const namedSha = await git.resolveRef(`refs/heads/${runBranch}`).catch(() => null)
   const disagreement = runBranchDisagreement({ resolvedRef: `refs/heads/${runBranch}`, headSha, namedSha })
@@ -4141,17 +4135,17 @@ export async function runCli(argv, io = { out: console.log }) {
     // that normalisation is a second net rather than the one that catches it.
     const linkPaths = previewLinks(config)
 
-    // REFUSED ON A DETACHED HEAD, before a dispatch is built. This command does not go through
-    // `derive`, so it does not inherit that refusal, and the value below is what every reviewer
-    // is told to diff the phase against. On the previous revision a detached HEAD made it the
-    // string `HEAD`, and `refs/heads/HEAD` is a ref any teammate can create and point anywhere —
-    // so a whole review round would have been computed against a tree of the planter's choosing
-    // and reported as fact.
-    const reviewRunBranch = await git.currentBranch()
-    if (reviewRunBranch === null) {
-      io.out('HEAD is detached, so there is no run branch to review against — check out the run branch and re-run')
+    // THE SHARED CLASSIFIER again, before a dispatch is built. This command does not go through
+    // `derive` either, and the value below is what every reviewer is told to diff the phase
+    // against — so a HEAD that names no branch would have a whole review round computed against a
+    // tree of the planter's choosing and reported as fact. The consequence here is an exit code
+    // rather than a throw, because `review-dispatch` reports its refusals that way.
+    const head = await git.headBranch()
+    if (!head.ok) {
+      io.out(`${head.reason} — there is no run branch to review against; check out the run branch and re-run`)
       return 4
     }
+    const reviewRunBranch = head.name
 
     let spec
     try {

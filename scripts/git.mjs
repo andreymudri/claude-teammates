@@ -88,6 +88,43 @@ export function defaultGitExec(args, cwd) {
   })
 }
 
+// What HEAD is, as a value rather than as a convention. Returns `{ ok, name, ref, reason }`:
+// `ok` with the short name and the full ref when HEAD is on a real branch, and otherwise `ok:
+// false` with `name: null` and a sentence naming the state.
+//
+// TWO REJECTED STATES, and they are rejected for the same underlying reason — HEAD does not
+// designate a branch — but they are reported separately because the remedies differ and because a
+// diagnostic that says "detached" for a repointed HEAD sends an operator to the wrong place.
+//
+//   - DETACHED. `symbolic-ref --quiet` exits 1, so there is no target at all. The string a caller
+//     might invent for this state is the danger: `HEAD` was used once, and `refs/heads/HEAD` is a
+//     ref `git update-ref` creates without complaint.
+//   - POINTING OUTSIDE refs/heads/. `git symbolic-ref HEAD refs/tags/x` exits 0 — git refuses only
+//     targets outside `refs/` entirely (`fatal: Refusing to point HEAD outside of refs/`), and the
+//     same state is reachable by writing `ref: refs/mine/rb` straight into `.git/HEAD`, which no
+//     pseudo-ref guard sees. A `refs/heads/` strip is a no-op on such a ref, so the "branch name"
+//     becomes the whole ref string and prefixing `refs/heads/` back onto it lands on
+//     `refs/heads/refs/tags/x`, an ordinary ref any teammate can create.
+//
+// Pure and exported so the rule can be tested without a repository, and so no caller has to
+// restate it. `name` is deliberately null on both rejections: a caller that ignores `ok` and reads
+// `name` gets an absence, never a hostile string.
+export function classifyHeadRef(ref) {
+  if (ref === null || ref === undefined) {
+    return { ok: false, kind: 'detached', ref: null, name: null, reason: 'HEAD is detached, so it is on no branch' }
+  }
+  if (typeof ref !== 'string' || !ref.startsWith('refs/heads/') || ref === 'refs/heads/') {
+    return {
+      ok: false,
+      kind: 'not-a-branch',
+      ref: typeof ref === 'string' ? ref : null,
+      name: null,
+      reason: `HEAD points at ${typeof ref === 'string' ? ref : JSON.stringify(ref)}, which is not a branch — a run branch must be a ref under refs/heads/`,
+    }
+  }
+  return { ok: true, kind: 'branch', ref, name: ref.slice('refs/heads/'.length), reason: null }
+}
+
 export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
   const runRaw = (args) => exec(args, cwd)
 
@@ -216,9 +253,25 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
     // Returning null makes the detached case unrepresentable as a branch name rather than
     // representable as a hostile one. Callers must format it for display themselves — there is no
     // string this could return that is both readable and incapable of naming a ref.
+    //
+    // NULL ALSO FOR A HEAD THAT POINTS OUTSIDE refs/heads/, via the shared classifier: `git
+    // symbolic-ref HEAD refs/tags/x` is accepted, and the old `replace(/^refs\/heads\//, '')`
+    // was a NO-OP on such a ref, so this used to hand back the whole string `refs/tags/x` as
+    // though it were a branch name. Every caller that stored or printed it then recorded a
+    // non-branch as a branch. "Not on a branch" is the honest answer for that state, and it is
+    // the same answer detachment gets, because for a caller that only wants a NAME the two are
+    // the same fact. A caller that needs to tell them apart asks `headBranch` instead.
     async currentBranch() {
-      const ref = await this.currentBranchRef()
-      return ref === null ? null : ref.replace(/^refs\/heads\//, '')
+      return (await this.headBranch()).name
+    },
+    // THE ONE PLACE THAT DECIDES WHAT HEAD HAS TO BE, so that four call sites cannot drift apart
+    // by each carrying their own conditional. They did: three successive rounds of review each
+    // closed the site a reviewer happened to reproduce and left the other three trusting HEAD's
+    // target, which is why each round found the next one. Everything that needs the run branch
+    // goes through here now, and what differs between callers is only what they DO with a
+    // rejection — throw, exit non-zero, or report it as a diagnosis.
+    async headBranch() {
+      return classifyHeadRef(await this.currentBranchRef())
     },
     // `--porcelain` reports untracked paths, and the harness stores each teammate's worktree
     // under `.claude/` inside the repo. Those directories exist for the whole run, so counting

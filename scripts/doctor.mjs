@@ -31,17 +31,21 @@ function insideRepo(worktreePath, repoRoot) {
 export async function collectDoctorReport({ git, runId, runBranch, baseBranch, tasks = [], repoRoot = null, anchorSha = null, runSha: passedRunSha = null, mergedFiles: passedMergedFiles = null }) {
   const problems = []
 
-  const mainBranch = await git.currentBranch()
-  // DETACHMENT IS ITS OWN PROBLEM, tested before the inequality and never through it. This
-  // comparison is the one alarm that reports the state the `refs/heads/HEAD` plant depends on,
-  // and while `currentBranch` minted the sentinel string `HEAD` for a detached HEAD the alarm
-  // silenced itself: `runBranch` here defaults to that same call, so both sides read `HEAD`, the
-  // branches compared EQUAL, and a repository detached onto an attacker's commit was reported as
-  // `no problems found` — executed, on the revision that returned the sentinel. Returning null
-  // does not fix that by itself; null === null is equally quiet. The state has to be named.
-  if (mainBranch === null) {
+  // THE SHARED CLASSIFIER, the same one `derive` refuses on. This comparison is the alarm that
+  // reports the states those plants depend on, and it has silenced itself twice by comparing two
+  // values that were equally wrong: while `currentBranch` minted the sentinel `HEAD`, both sides
+  // read `HEAD` and compared EQUAL; and while a repointed HEAD yielded the whole ref string, both
+  // sides read `refs/tags/x` and compared equal again, so `doctor` printed `no problems found` for
+  // a state the very same commit's `derive` calls hostile. Returning null fixes neither on its
+  // own — null === null is just as quiet. The STATE has to be named, which is what `ok` is for.
+  const head = await git.headBranch()
+  const mainBranch = head.name
+  if (!head.ok) {
     const at = await git.headSha().catch(() => 'an unknown commit')
-    problems.push(`main worktree is detached at ${at}, not on the run branch ${runBranch === null ? '(none recorded)' : runBranch} — a detached HEAD belongs to no branch, so nothing here can be verified against the run branch, and a commit reachable only from HEAD disappears the moment anything else is checked out`)
+    const where = runBranch === null ? '(none recorded)' : runBranch
+    problems.push(head.kind === 'detached'
+      ? `main worktree is detached at ${at}, not on the run branch ${where} — a detached HEAD belongs to no branch, so nothing here can be verified against the run branch, and a commit reachable only from HEAD disappears the moment anything else is checked out`
+      : `main worktree has HEAD pointing at ${head.ref}, which is not a branch, not at the run branch ${where} — git accepts any target inside refs/ for HEAD, and the gate refuses to run at all in this state, so nothing here has been verified against a run branch`)
   } else if (mainBranch !== runBranch) {
     problems.push(`main worktree is on ${mainBranch}, not the run branch ${runBranch === null ? '(none recorded)' : runBranch} — a teammate or reviewer that ran git checkout here moved it, and the gate reads the current branch to decide what it is protecting`)
   }
@@ -230,12 +234,16 @@ export async function collectDoctorReport({ git, runId, runBranch, baseBranch, t
 // Wrapping happens only here. `collectDoctorReport` returns the values as git reported them, so a
 // caller reading the report as data is unaffected, and no problem, task or exit code changes —
 // only how a value renders. This covers the sites in this function and says nothing about others.
-// A branch name for display, or an explicit marker for the two states that HAVE no branch name.
+// A branch name for display, or an explicit marker for the states that HAVE no branch name.
 // `printable(null)` renders the word `null`, which reads as a branch called "null" in a header
 // whose other fields are branch names — and the header line `main worktree on HEAD · clean` is
-// exactly how the detached case used to present itself as healthy. Neither marker can be confused
-// for a ref: both contain characters git refuses in a ref name.
-const branchLabel = (name) => (name === null || name === undefined ? '(detached HEAD)' : printable(name))
+// exactly how the detached case used to present itself as healthy. `(no branch)` rather than
+// `(detached HEAD)` because two different states reach it: a detached HEAD, and a HEAD repointed
+// outside refs/heads/, which printed `main worktree on refs/tags/x · clean` and so presented a
+// non-branch ref as a branch. The problem list names which one it is; this line only has to avoid
+// asserting a branch. The marker cannot be confused for a ref: it contains characters git refuses
+// in a ref name.
+const branchLabel = (name) => (name === null || name === undefined ? '(no branch)' : printable(name))
 
 export function renderDoctor(report) {
   const lines = [`run ${printable(report.runId)} · run branch ${report.runBranch === null || report.runBranch === undefined ? '(none recorded)' : printable(report.runBranch)} · base ${printable(report.baseBranch)}`]

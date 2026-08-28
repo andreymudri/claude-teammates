@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { createGit, GitError, defaultGitExec, teammateRef, COMMIT_MARKER } from '../scripts/git.mjs'
+import { createGit, GitError, defaultGitExec, teammateRef, COMMIT_MARKER, classifyHeadRef } from '../scripts/git.mjs'
 
 const recorder = (result = { code: 0, stdout: '', stderr: '' }) => {
   const calls = []
@@ -1739,4 +1739,53 @@ test('a repository can hold a branch named null, which is why branchExists must 
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+// THE SHARED RULE, tested once because it is now stated once. Four call sites used to carry their
+// own conditional and three of them only ever tested for null, which is how each review round
+// closed one site and left the next.
+test('classifyHeadRef accepts a branch and reports both spellings of it', () => {
+  const r = classifyHeadRef('refs/heads/run-branch')
+  assert.equal(r.ok, true)
+  assert.equal(r.kind, 'branch')
+  assert.equal(r.name, 'run-branch')
+  assert.equal(r.ref, 'refs/heads/run-branch')
+  // A branch name may itself contain slashes; only the first `refs/heads/` is the prefix.
+  assert.equal(classifyHeadRef('refs/heads/teammates/r1/T1').name, 'teammates/r1/T1')
+})
+
+test('classifyHeadRef reports a detached HEAD as on no branch, with no name', () => {
+  for (const v of [null, undefined]) {
+    const r = classifyHeadRef(v)
+    assert.equal(r.ok, false)
+    assert.equal(r.kind, 'detached')
+    assert.equal(r.name, null)
+    assert.match(r.reason, /detached/)
+  }
+})
+
+// The case three call sites missed. `git symbolic-ref HEAD refs/tags/x` exits 0, and a
+// `refs/heads/` strip is a no-op on the result — so a classifier that only tested for null handed
+// back the whole ref string as though it were a branch name.
+test('classifyHeadRef rejects a HEAD pointing outside refs/heads/ and yields no name', () => {
+  for (const ref of ['refs/tags/x', 'refs/mine/run-branch', 'refs/remotes/origin/main', 'refs/heads/']) {
+    const r = classifyHeadRef(ref)
+    assert.equal(r.ok, false, `${ref} must not be accepted`)
+    assert.equal(r.kind, ref === 'refs/heads/' ? 'not-a-branch' : 'not-a-branch')
+    // The name is null rather than the ref string: a caller that ignores `ok` gets an absence,
+    // never something it could prefix `refs/heads/` onto.
+    assert.equal(r.name, null, `${ref} must not yield a name`)
+    assert.match(r.reason, /not a branch/)
+  }
+})
+
+// `currentBranch` is now defined over the classifier, so the same rejection reaches every legacy
+// caller as a null rather than as a hostile string.
+test('currentBranch answers null for a HEAD pointing outside refs/heads/', async () => {
+  const exec = async () => ({ code: 0, signal: null, stdout: 'refs/tags/x\n', stderr: '' })
+  const git = createGit({ exec })
+  assert.equal(await git.currentBranch(), null)
+  const classified = await git.headBranch()
+  assert.equal(classified.ok, false)
+  assert.equal(classified.ref, 'refs/tags/x')
 })
