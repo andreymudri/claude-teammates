@@ -974,10 +974,14 @@ test('collect-reviews refuses a symlink one level above its reviews directory', 
 // Run ids nest by design — `scripts/state.mjs` names `--run 2026/substop`, and `idRefusal` caps
 // bytes rather than depth — and a walk of a FIXED list of three components is right only for a
 // single-segment one. `path.dirname` climbs exactly one level, so at depth two `<root>/.teammates`
-// itself was never checked and both hazards this phase closed reopened. These two tests are the
-// pair that distinguishes an accumulating walk from a `dirname` climb: the depth-2 case plants at
-// `.teammates`, which one extra `dirname` would also catch, and ONLY the depth-3 case, planting at
-// `.teammates/<first>`, tells the loop from a `dirname` applied twice.
+// itself was never checked and both hazards this phase closed reopened.
+//
+// WHAT THESE TWO ACTUALLY DISCRIMINATE, measured rather than argued, because the first version of
+// this comment claimed a bracketing that does not exist: both plant exactly FOUR components from
+// the end of the path, so they share one threshold instead of bracketing it. Both die on a
+// three-element list; both die on a `dirname` climb of two; and both SURVIVE a climb of three or a
+// fixed list of four — the whole file stays green under either. They are two fixtures of the same
+// depth, not a pair, and the third test below is the one that exceeds any fixed climb.
 //
 // Staged through the real `init-run` rather than by hand, because the nesting under test is the
 // nesting that command creates.
@@ -1038,6 +1042,97 @@ test('collect-reviews refuses a plant midway through a three-deep run id', NO_PL
     assert.match(lines.join('\n'), new RegExp(`${first.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} is a symlink`))
     await assert.rejects(stat(path.join(outside, 'b', 'c', 'reviews', 'results-default.json')), { code: 'ENOENT' })
   })
+})
+
+// THE DEPTH NO FIXED CLIMB REACHES. Six components from the end (`.teammates/a/b/c/d/reviews`),
+// so a list of three, four or five misses the plant while both fixtures above still pass. A finite
+// fixture cannot rule out an arbitrarily long fixed list — that is what the unit test below is for,
+// where the depth is chosen rather than staged — but this one closes every climb a plausible
+// regression would write, and it is the shape an operator actually creates: a dated run id under a
+// project prefix.
+test('collect-reviews refuses a plant at .teammates however deep the run id goes', NO_PLANTED_SYMLINK_ON_WIN32, async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await withNestedRun(root, planPath, io, g, 'a/b/c/d')
+    const teammates = path.join(root, '.teammates')
+    const outside = path.join(root, 'outside-the-run')
+    await rename(teammates, outside)
+    await symlink(outside, teammates)
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'a/b/c/d', '--root', root], io)
+    assert.equal(code, 4, lines.join('\n'))
+    assert.match(lines.join('\n'), /is a symlink, and every component of/)
+    await assert.rejects(stat(path.join(outside, 'a', 'b', 'c', 'd', 'reviews', 'results-default.json')), { code: 'ENOENT' })
+  })
+})
+
+// And the same property with the depth chosen rather than staged: ten components, plant at the
+// first. No fixed climb shorter than ten finds it, which is the claim the end-to-end fixtures
+// cannot make on their own.
+test('plantedReviewsLink finds a plant at any depth, not a fixed number of levels up', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'tm-deep-'))
+  try {
+    const segments = ['.teammates', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'reviews']
+    const dir = path.join(scratch, ...segments)
+    const outside = path.join(scratch, 'outside')
+    await mkdir(outside, { recursive: true })
+    await mkdir(path.dirname(dir), { recursive: true })
+    assert.equal(await plantedReviewsLink(scratch, dir), null, 'the unplanted tree must answer null')
+    // The outermost component becomes a link; everything below it stays exactly as it was.
+    const first = path.join(scratch, segments[0])
+    await rename(first, path.join(scratch, 'moved'))
+    await symlink(path.join(scratch, 'moved'), first)
+    assert.equal(await plantedReviewsLink(scratch, dir), first)
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
+// THE BOUNDARY OF THE GUARANTEE, pinned so nobody has to take the residual on trust — including
+// me, who wrote it down as untestable without trying. `lstat` answers about links; a BIND MOUNT is
+// not a link, and the walk cannot see one. This test stages it under `unshare -Urm`, which needs
+// no privilege here (measured: exit 0), re-execing a probe inside a user+mount namespace so the
+// mount is namespace-local and nothing outside the child sees it.
+//
+// It asserts the CURRENT boundary — the walk answers null — and that is deliberate. If someone
+// later teaches the walk about `/proc/self/mountinfo`, this test goes red, and the right response
+// is to delete it and narrow the residual in `plantedReviewsLink`'s comment, not to restore the
+// blindness. A residual nobody can reproduce is one a reader has to believe; this one is one they
+// can run.
+const NO_USERNS_OFF_LINUX = {
+  skip: process.platform !== 'linux'
+    || spawnSync('unshare', ['-Urm', 'true'], { encoding: 'utf8' }).status !== 0,
+}
+
+test('a bind mount over the reviews directory is not seen by the containment walk', NO_USERNS_OFF_LINUX, async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'tm-bind-'))
+  try {
+    const reviews = path.join(scratch, '.teammates', 'r1', 'reviews')
+    const victim = path.join(scratch, 'victim')
+    await mkdir(reviews, { recursive: true })
+    await mkdir(victim, { recursive: true })
+    const cliUrl = new URL('../scripts/cli.mjs', import.meta.url).href
+    const probe = path.join(scratch, 'probe.mjs')
+    await writeFile(probe, [
+      `const { plantedReviewsLink } = await import(${JSON.stringify(cliUrl)})`,
+      `const info = (await import('node:fs')).lstatSync(${JSON.stringify(reviews)})`,
+      `const planted = await plantedReviewsLink(${JSON.stringify(scratch)}, ${JSON.stringify(reviews)})`,
+      'console.log(JSON.stringify({ link: info.isSymbolicLink(), dir: info.isDirectory(), planted }))',
+      '',
+    ].join('\n'), 'utf8')
+    // The mount and the probe must share the namespace, so both run in the one child.
+    const r = spawnSync('unshare', [
+      '-Urm', 'sh', '-c',
+      `mount --bind ${JSON.stringify(victim)} ${JSON.stringify(reviews)} && ${JSON.stringify(process.execPath)} ${JSON.stringify(probe)}`,
+    ], { encoding: 'utf8', timeout: 30000 })
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`)
+    const answer = JSON.parse(r.stdout.trim().split('\n').pop())
+    // What the walk is looking for, and what a mount presents instead.
+    assert.equal(answer.link, false, 'a bind mount is not a symlink')
+    assert.equal(answer.dir, true, 'it presents as an ordinary directory')
+    assert.equal(answer.planted, null, 'so the walk finds nothing — this is the stated residual')
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
 })
 
 // The destructive half of the same gap, at depth: through a plant at `.teammates` the up-front
@@ -1158,6 +1253,65 @@ test('a failing round leaves no results file from the round before it', async ()
   })
 })
 
+// UPSTREAM of the clear is where this invariant was actually broken, and "before the findings are
+// read" was too weak to catch it. Five refusals sat above the removal — the empty-lens check, the
+// agent-check count, the two manifest refusals and the ambiguous-phase one — and a round refusing
+// at any of them left the previous round's `"pass"` in place. Measured: the gate then read that
+// file and returned verdict PASS over a tree the round had refused to judge.
+//
+// The empty-lens refusal is the fixture because it is the one an operator reaches by editing a
+// manifest between rounds, and because it returns furthest from the clear.
+test('a round refusing before it reads anything still leaves no results file behind', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const resultsPath = await stagedPhaseOneReviews(root, planPath, io, g)
+    lines.length = 0
+    assert.equal(await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io), 0, lines.join('\n'))
+    assert.equal(JSON.parse(await readFile(resultsPath, 'utf8')).results[0].status, 'pass')
+
+    // The manifest is edited between rounds — the check now declares no lens, so round two refuses
+    // upstream of every read.
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      lens: ['correctness', 'security'],
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: [] }] } },
+    }), 'utf8')
+    lines.length = 0
+    assert.equal(await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io), 4)
+    assert.match(lines.join('\n'), /empty lens list/)
+    await assert.rejects(stat(resultsPath), { code: 'ENOENT' })
+
+    // The end the operator sees: the path round one advertised no longer passes a gate.
+    lines.length = 0
+    const gateCode = await runCli(
+      ['gate', '--run', 'r1', '--plan', planPath, '--phase', '1', '--results', resultsPath, '--root', root, '--no-fleet'],
+      io,
+    )
+    assert.equal(gateCode, 2, lines.join('\n'))
+    assert.doesNotMatch(lines.join('\n'), /"verdict": "PASS"/)
+  })
+})
+
+// The same, one refusal further out: two agent checks in the phase. Its own test because it is a
+// different `return`, and the invariant is positional — one fixture per position is what stops a
+// later edit reintroducing a refusal above the clear.
+test('a round refusing on the agent-check count leaves no results file behind', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const resultsPath = await stagedPhaseOneReviews(root, planPath, io, g)
+    lines.length = 0
+    assert.equal(await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io), 0, lines.join('\n'))
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      lens: ['correctness', 'security'],
+      phases: { default: { checks: [
+        { name: 'a', kind: 'agent', agent: 'tm-reviewer' },
+        { name: 'b', kind: 'agent', agent: 'tm-reviewer' },
+      ] } },
+    }), 'utf8')
+    lines.length = 0
+    assert.equal(await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io), 4)
+    assert.match(lines.join('\n'), /2 agent checks/)
+    await assert.rejects(stat(resultsPath), { code: 'ENOENT' })
+  })
+})
+
 // The removal is what makes a present file mean "this round succeeded", so a removal that cannot
 // happen has to stop the round rather than be skipped. ENOENT is the ordinary case and must not be
 // confused with it; a directory at the path is a non-ENOENT failure with no permissions in it, and
@@ -1259,6 +1413,82 @@ test('the empty-instead-of-remove fallback does not truncate through a planted s
       assert.match(out, /emptying it in place failed too/)
       assert.equal(await readFile(bait, 'utf8'), before, 'the link target must not be emptied')
       assert.ok((await lstat(resultsPath)).isSymbolicLink())
+    } finally {
+      await chmod(reviews, 0o755).catch(() => {})
+    }
+  })
+})
+
+// --- an entry that parks the call ------------------------------------------------------------
+//
+// A FIFO answers no syscall until somebody opens the other end, so a blocking open on one does not
+// fail — it waits, forever, with nothing on stdout and no exit code. That is worse than any wrong
+// answer this command can give: an operator sees a command that has not finished, and a phase gate
+// waiting on it sees nothing at all.
+//
+// RUN IN A CHILD PROCESS UNDER A WALL CLOCK, the same shape the preview suite uses lower down and
+// for the same reason: `runCli` in-process cannot be timed out — a promise racing a parked open
+// never settles and the handle keeps the runner alive — so a regression here would hang the suite
+// instead of failing it. `spawnSync` with `timeout` and SIGKILL turns the hang into a verdict:
+// `signal === 'SIGKILL'` means it parked, and that is the assertion.
+// `mkfifo` is a POSIX utility with no Node binding and no Windows equivalent — the same reason
+// `NO_FIFO_ON_WIN32` gives further down, declared again here rather than reached backwards: a
+// `test()` option object is evaluated when the test is REGISTERED, so a const declared below this
+// point is in its temporal dead zone and throws during module evaluation, taking the rest of the
+// file's initialisation with it. Measured: referencing that one aborted evaluation and left a
+// later const uninitialised, reddening an unrelated test.
+const NO_MKFIFO_ON_WIN32 = { skip: process.platform === 'win32' }
+
+const FIFO_BUDGET_MS = 20000
+
+function collectInChildProcess(root, argv) {
+  const cliUrl = new URL('../scripts/cli.mjs', import.meta.url).href
+  const source = [
+    `const { runCli } = await import(${JSON.stringify(cliUrl)})`,
+    `const code = await runCli(${JSON.stringify(argv)}, { out: (t) => console.log(t), err: () => {} })`,
+    'process.exit(code)',
+    '',
+  ].join('\n')
+  return spawnSync(process.execPath, ['--input-type=module', '-e', source], {
+    cwd: root,
+    timeout: FIFO_BUDGET_MS,
+    killSignal: 'SIGKILL',
+    encoding: 'utf8',
+  })
+}
+
+// The read side, and the easier of the two doors: no permission precondition at all, because this
+// loop opens whatever it finds under the manifest's lens names and the reviews directory is where
+// reviewers are told to write. Pre-existing — the same `readFile` sits at the fork point.
+test('a fifo planted at a findings path is refused, and collect-reviews terminates', NO_MKFIFO_ON_WIN32, async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await stagedPhaseOneReviews(root, planPath, io, g)
+    const findings = path.join(root, '.teammates', 'r1', 'reviews', '1-correctness.json')
+    await rm(findings)
+    execFileSync('mkfifo', [findings])
+    const r = collectInChildProcess(root, ['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root])
+    assert.equal(r.signal, null, `collect-reviews had to be killed after ${FIFO_BUDGET_MS}ms: it parked in open(2)`)
+    // Unreadable, never "no findings": a lens whose file cannot be read has not been reviewed.
+    assert.equal(r.status, 4, r.stdout)
+    assert.match(r.stdout, /unreadable findings file/)
+  })
+})
+
+// The write side: the empty-in-place fallback, reached through the `0555` directory that is the
+// only way to get there. Both flags are needed on that open — O_NOFOLLOW alone parked here.
+test('a fifo planted at the results path is refused, and collect-reviews terminates', {
+  skip: NO_MKFIFO_ON_WIN32.skip || NO_MODE_BITS_AS_ROOT_OR_WIN32.skip,
+}, async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const resultsPath = await stagedPhaseOneReviews(root, planPath, io, g)
+    const reviews = path.dirname(resultsPath)
+    execFileSync('mkfifo', [resultsPath])
+    await chmod(reviews, 0o555)
+    try {
+      const r = collectInChildProcess(root, ['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root])
+      assert.equal(r.signal, null, `collect-reviews had to be killed after ${FIFO_BUDGET_MS}ms: it parked in open(2)`)
+      assert.equal(r.status, 4, r.stdout)
+      assert.match(r.stdout, /could not clear the previous results file/)
     } finally {
       await chmod(reviews, 0o755).catch(() => {})
     }
