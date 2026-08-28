@@ -892,8 +892,11 @@ test('collect-reviews refuses to write its results file outside the run director
 //        'review-dispatch is refused by the same plan, not thrown'
 //   `tasksOfPhase` reverts the same way, to `(plan.tasks ?? []).filter((t) => t.phase === …)`
 //     -> 'a plan whose tasks are not tasks is refused, never thrown'
-//   `readRunPlan` reads by path again (the plan.json FIFO door)
+//   `readEntryText(file, …)` -> `readFile(file, 'utf8')` inside `readRunPlan`, or
+//   `nonBlockingReadFlags` drops `| c.O_NONBLOCK` — the two ways to reopen the plan.json FIFO door
 //     -> 'a fifo planted at plan.json is refused, and collect-reviews terminates'
+//        Dropping O_NOFOLLOW there does NOT reopen it, which is what makes the link decision below
+//        separable from the parking one: O_NONBLOCK alone keeps the open from parking.
 //   the run id in the unreadable-plan refusal loses its `printable`
 //     -> 'cli.mjs collect-reviews — the run id and the plan bytes in the unreadable-plan refusal
 //        cannot be made to draw a forged terminal write'
