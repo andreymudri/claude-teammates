@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { collectDoctorReport, renderDoctor } from '../scripts/doctor.mjs'
-import { GitError, createGit, defaultGitExec } from '../scripts/git.mjs'
+import { GitError, createGit, defaultGitExec, classifyHeadRef } from '../scripts/git.mjs'
 
 const RUN_ID = 'r1'
 const RUN_BRANCH = 'run/r1'
@@ -36,8 +36,22 @@ function fakeGit(overrides = {}) {
     // these no-op defaults and nothing calls them without both `anchorSha` and `runSha`.
     commitsBetween: async () => [],
     commitParents: async () => [],
+    headSha: async () => 'f'.repeat(40),
   }
-  return { ...defaults, ...overrides }
+  const merged = { ...defaults, ...overrides }
+  // `headBranch` is DERIVED from whatever `currentBranch` this double was given, and derived
+  // through the real `classifyHeadRef` rather than hand-rolled. A double that answered these two
+  // questions independently could disagree with production about what a branch is, which is the
+  // whole failure this fixture family exists to catch — and did: while only fakes covered
+  // `doctor`, two production regressions passed the entire suite. A test that needs the
+  // not-a-branch case overrides `headBranch` directly.
+  if (!('headBranch' in overrides)) {
+    merged.headBranch = async () => {
+      const name = await merged.currentBranch()
+      return classifyHeadRef(name === null || name === undefined ? null : `refs/heads/${name}`)
+    }
+  }
+  return merged
 }
 
 // The tip the default resolveRef gives T1's branch, which is what a merge of T1 would name as
@@ -576,4 +590,61 @@ test('renderDoctor neutralises control bytes in a problem message', () => {
   const out = renderDoctor(doctorReport({ problems: [`T1: branch ${PAYLOAD} does not exist`] }))
   assert.match(out, /1 problem/)
   assertNeutralised(out)
+})
+
+// THE ALARM THAT USED TO SILENCE ITSELF. `doctor` compares the main worktree's branch against the
+// run branch, and both sides come from the same `currentBranch` call when no `--run-branch` is
+// given. While that call minted the sentinel string `HEAD` for a detached HEAD, the two sides
+// compared EQUAL and a repository detached onto a commit reachable from no branch reported
+// `no problems found` — which is what made the `refs/heads/HEAD` plant invisible. Returning null
+// does not fix it on its own: null === null is just as quiet. Detachment has to be its own test.
+test('a detached main worktree is reported as a problem, not silently equal to the run branch', async () => {
+  const report = await collectDoctorReport({
+    git: fakeGit({ currentBranch: async () => null, headSha: async () => 'f'.repeat(40) }),
+    runId: RUN_ID,
+    runBranch: RUN_BRANCH,
+    baseBranch: BASE_BRANCH,
+    tasks: [T1],
+  })
+  assert.equal(report.problems.length > 0, true, 'detachment must raise a problem')
+  assert.match(report.problems.join('\n'), new RegExp(`main worktree is detached at ${'f'.repeat(40)}`))
+  assert.match(report.problems.join('\n'), /not on the run branch run\/r1/)
+})
+
+// The shape the CLI actually produces on a detached HEAD with no `--run-branch`: BOTH sides null,
+// which is precisely the comparison that used to pass. Without this the fix could be reverted to
+// a bare inequality and the test above would still pass, because it supplies a run branch name.
+test('a detached main worktree is reported even when no run branch name is known either', async () => {
+  const report = await collectDoctorReport({
+    git: fakeGit({ currentBranch: async () => null, headSha: async () => 'f'.repeat(40) }),
+    runId: RUN_ID,
+    runBranch: null,
+    baseBranch: BASE_BRANCH,
+    tasks: [T1],
+  })
+  assert.match(report.problems.join('\n'), /main worktree is detached at/)
+  // And the missing name is shown as absent rather than as the word "null".
+  assert.match(report.problems.join('\n'), /\(none recorded\)/)
+  assert.doesNotMatch(report.problems.join('\n'), /not on the run branch null/)
+})
+
+// The HEADER is a display site too, and it is where the silence was most convincing: with the
+// sentinel in place this line read `main worktree on HEAD · clean`, which an operator scanning a
+// report has no reason to question. Rendering the null as the bare word `null` would be no better
+// — it reads as a branch called "null" beside two fields that really are branch names.
+test('renderDoctor names the detached state instead of printing a null branch', () => {
+  const line = renderDoctor({
+    runId: RUN_ID,
+    runBranch: null,
+    baseBranch: BASE_BRANCH,
+    mainBranch: null,
+    dirty: [],
+    worktrees: [],
+    tasks: [],
+    problems: [],
+  }).split('\n')
+  assert.equal(line[0], `run ${RUN_ID} · run branch (none recorded) · base ${BASE_BRANCH}`)
+  assert.equal(line[1], 'main worktree on (no branch) · clean')
+  // Never the word `null` standing where a branch name goes.
+  assert.doesNotMatch(line.slice(0, 2).join('\n'), /\bnull\b/)
 })
