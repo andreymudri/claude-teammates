@@ -73,7 +73,14 @@ export function defaultGitExec(args, cwd) {
     // wrappers) must not see a plain Error here — spawn failure (git missing from PATH,
     // cwd absent) has to read as a gate FAIL with a message, not an uncaught crash.
     child.on('error', (err) => reject(new GitError(err.message)))
-    child.on('close', (code) => resolve({ code: code ?? 1, stdout, stderr }))
+    // SIGNAL SURFACED SEPARATELY, because `code ?? 1` is lossy in a way two readers below
+    // cannot recover from. A killed child reports `code: null, signal: 'SIGKILL'` (measured),
+    // so collapsing it to 1 produces `{code: 1, stdout: '', stderr: ''}` — byte for byte the
+    // shape git uses for two ORDINARY answers: `symbolic-ref --quiet` on a detached HEAD, and
+    // `rev-parse --verify --quiet` on a name that is not a branch. Both readers then treat a
+    // process that never ran to completion as a definite negative answer. `signal` is the only
+    // field that still tells them apart once `code` has been defaulted.
+    child.on('close', (code, signal) => resolve({ code: code ?? 1, signal: signal ?? null, stdout, stderr }))
   })
 }
 
@@ -103,10 +110,18 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
       throw new GitError(`a branch name must be a non-empty string, got ${JSON.stringify(name)}`)
     }
     if (name.startsWith('refs/')) return name
-    const { code, stdout } = await exec(
+    const { code, stdout, signal } = await exec(
       [...prefix, 'rev-parse', '--verify', '--quiet', '--end-of-options', `refs/heads/${name}`, '--'],
       cwd,
     )
+    // A KILLED probe is not an answer. The fallback below hands the BARE name onward, and a bare
+    // name is exactly what this function exists to stop git resolving through refs/tags/ first —
+    // so reading a signal death as "no such branch" reopens the tag-shadowing hazard at the worst
+    // possible moment, silently and for every caller at once. Fail instead: a name that could not
+    // be checked is not a name that was checked and found absent.
+    if (signal) {
+      throw new GitError(`git rev-parse --verify refs/heads/${name} was killed by ${signal} — the branch could not be resolved, and continuing would pass an unqualified name to git`)
+    }
     // Exit 1 with no output is git's "no such branch"; only a resolved sha displaces the name.
     if (code === 0 && stdout.trim() !== '') return stdout.trim()
     return name
@@ -155,15 +170,24 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
     // three-ref plant; it is the regression test in tests/git.test.mjs.
     //
     // `--quiet` is what makes a detached HEAD a value: it exits 1 with EMPTY stdout and EMPTY
-    // stderr rather than writing a diagnostic, so an empty stderr on a non-zero exit is
-    // detachment and anything else is a real failure that still throws. Confirmed on the same
-    // git: detached, `--quiet` exits 1 silently while the bare form exits 128 printing
-    // `fatal: ref HEAD is not a symbolic ref`; outside a repository it exits 128 with
-    // `fatal: not a git repository` on stderr, which this therefore raises rather than
-    // mistaking for detachment.
+    // stderr rather than writing a diagnostic, so an empty stderr on a non-zero exit that was
+    // NOT a signal death is detachment, and anything else is a real failure that still throws.
+    // Confirmed on the same git: detached, `--quiet` exits 1 silently while the bare form exits
+    // 128 printing `fatal: ref HEAD is not a symbolic ref`; outside a repository it exits 128
+    // with `fatal: not a git repository` on stderr, which this therefore raises rather than
+    // mistaking for detachment. The signal test below is what keeps a killed process out of the
+    // detachment arm, since a kill produces that same empty-and-non-zero shape.
     async currentBranchRef() {
-      const { code, stdout, stderr } = await runRaw(['symbolic-ref', '--quiet', 'HEAD'])
+      const { code, stdout, stderr, signal } = await runRaw(['symbolic-ref', '--quiet', 'HEAD'])
       if (code === 0) return stdout.trim()
+      // Before the empty-stderr test, because a killed process produces an EMPTY stderr and a
+      // defaulted exit 1 — indistinguishable from `--quiet`'s detached-HEAD answer by the two
+      // fields that test reads. Measured: SIGKILL yields `{code: null, signal: 'SIGKILL'}`, which
+      // the exec layer defaults to code 1. Reporting that as "detached" would be inventing a
+      // repository state out of a scheduling accident.
+      if (signal) {
+        throw new GitError(`git symbolic-ref --quiet HEAD was killed by ${signal} — whether HEAD is detached is unknown, and it must not be guessed`)
+      }
       if (stderr.trim() === '') return null
       throw new GitError(describeGitFailure(['symbolic-ref', '--quiet', 'HEAD'], code, stderr))
     },
@@ -172,17 +196,25 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
     // construction: the prefix every caller adds lands back on the ref HEAD actually points
     // at, whatever else exists in the ref namespace.
     //
-    // `'HEAD'` on a detached HEAD is the PRESERVED CONTRACT of the old `--abbrev-ref` form,
-    // not an accident. Measured on a detached scratch repository with this implementation in
-    // place: this answers `'HEAD'`, `resolveRef('refs/heads/HEAD')` rejects, and `gate` on that
-    // repository failed at `derive` with its own stated reason — `HEAD is <sha>, but
-    // refs/heads/HEAD … is not a ref at all` — rather than crashing. `scripts/cli.mjs`'s
-    // init-run path only compares the value against the base branch name, and its map path only
-    // takes it as the default `--run-branch` overrides; neither inspects its shape. Returning
-    // null or throwing here would change all three at once, for a state each already survives.
+    // `null` ON A DETACHED HEAD, AND NEVER THE STRING `'HEAD'`. An earlier revision of this
+    // function returned that string, on the reasoning that it preserved the old `--abbrev-ref`
+    // contract. It did — and it was a hole, because `refs/heads/HEAD` is a ref git will happily
+    // CREATE: `git update-ref refs/heads/HEAD <sha>` exits 0 (only `git branch HEAD` refuses the
+    // name, with `fatal: 'HEAD' is not a valid branch name`). So every caller that prefixed
+    // `refs/heads/` onto this value resolved an ordinary ref that any teammate can write, and the
+    // abbreviation hazard this function was written to close came straight back under a different
+    // spelling. Executed end to end against that revision: with the main worktree detached at a
+    // merge commit reachable from no branch and `refs/heads/HEAD` pointed at it, `prune-run --yes`
+    // exited 0 and deleted an UNMERGED task branch whose tip was then reachable from the planted
+    // ref alone. The same plant against the tree before this task exits 4 and deletes nothing, so
+    // the sentinel was a regression, not an inherited defect.
+    //
+    // Returning null makes the detached case unrepresentable as a branch name rather than
+    // representable as a hostile one. Callers must format it for display themselves — there is no
+    // string this could return that is both readable and incapable of naming a ref.
     async currentBranch() {
       const ref = await this.currentBranchRef()
-      return ref === null ? 'HEAD' : ref.replace(/^refs\/heads\//, '')
+      return ref === null ? null : ref.replace(/^refs\/heads\//, '')
     },
     // `--porcelain` reports untracked paths, and the harness stores each teammate's worktree
     // under `.claude/` inside the repo. Those directories exist for the whole run, so counting
@@ -346,8 +378,14 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
     },
     async branchExists(name) {
       const args = ['rev-parse', '--verify', '--quiet', `refs/heads/${name}`]
-      const { code, stderr } = await runRaw(args)
+      const { code, stderr, signal } = await runRaw(args)
       if (code === 0) return true
+      // A killed probe is not an absence. `code ?? 1` in the exec layer turns a signal death into
+      // the same exit 1 git uses for "no such ref", and callers act on a false here by skipping a
+      // branch or judging that a task contributed nothing.
+      if (signal) {
+        throw new GitError(`git ${args.join(' ')} was killed by ${signal} — whether the branch exists is unknown`)
+      }
       // Exit 1 is git's answer for "no such ref" — a real absence, not a failure.
       // Any other non-zero (e.g. 128 outside a repository) is a failure carrying stderr.
       if (code === 1) return false

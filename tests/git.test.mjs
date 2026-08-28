@@ -177,11 +177,69 @@ test('currentBranchRef throws when symbolic-ref fails for a reason that is not d
   await assert.rejects(() => createGit({ exec }).currentBranchRef(), GitError)
 })
 
-test('currentBranch strips refs/heads/ and reports HEAD when detached', async () => {
+// NULL, and specifically not the string `HEAD`. The sentinel this used to assert was a hole:
+// `refs/heads/HEAD` is a ref `git update-ref` creates happily, so every caller that prefixed
+// `refs/heads/` onto the sentinel resolved a ref an unprivileged teammate can point anywhere.
+// The `git branch HEAD` refusal below is what makes the name look reserved when it is not — it
+// is `git branch`'s own name check, not a constraint on the ref namespace.
+test('currentBranch answers null on a detached HEAD and never a name', async () => {
   const named = async () => ({ code: 0, stdout: 'refs/heads/run-branch\n', stderr: '' })
   assert.equal(await createGit({ exec: named }).currentBranch(), 'run-branch')
   const detached = async () => ({ code: 1, stdout: '', stderr: '' })
-  assert.equal(await createGit({ exec: detached }).currentBranch(), 'HEAD')
+  assert.equal(await createGit({ exec: detached }).currentBranch(), null)
+})
+
+// The precondition behind that null, measured against real git rather than assumed: the name the
+// old sentinel produced denotes a ref that can be CREATED. If this ever starts failing because
+// git began rejecting the ref write, the sentinel would still be wrong for the reason above.
+test('refs/heads/HEAD is a creatable ref even though git branch refuses the name', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-'))
+  const sh = (args) => defaultGitExec(args, root)
+  try {
+    await sh(['init', '--initial-branch=main'])
+    await sh(['config', 'user.email', 'test@example.com'])
+    await sh(['config', 'user.name', 'test'])
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    const sha = (await sh(['rev-parse', 'HEAD'])).stdout.trim()
+    // `git branch` refuses it, which is the whole reason the name reads as safe.
+    assert.notEqual((await sh(['branch', 'HEAD', sha])).code, 0)
+    // `update-ref` does not, which is the whole reason it is not.
+    assert.equal((await sh(['update-ref', 'refs/heads/HEAD', sha])).code, 0)
+    assert.equal((await sh(['rev-parse', '--verify', 'refs/heads/HEAD'])).stdout.trim(), sha)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+// A killed process and a detached HEAD are the same three fields once `code` has been defaulted:
+// `{code: 1, stdout: '', stderr: ''}`. Measured on this platform, a SIGKILLed child reports
+// `code: null, signal: 'SIGKILL'`, so the signal is the only thing that still separates them.
+test('currentBranchRef throws rather than reporting detachment when the process was killed', async () => {
+  const exec = async () => ({ code: 1, signal: 'SIGKILL', stdout: '', stderr: '' })
+  await assert.rejects(() => createGit({ exec }).currentBranchRef(), GitError)
+})
+
+// The same collapse in the other reader, and this one is worse: the fallback hands the BARE name
+// onward, which git resolves through refs/tags/ before refs/heads/ — reopening the exact
+// tag-shadowing hazard qualifyBranch exists to close, for every caller at once.
+test('qualifyBranch throws rather than falling back to the bare name when the process was killed', async () => {
+  const exec = async (args) => (args[0] === 'rev-parse'
+    ? { code: 1, signal: 'SIGKILL', stdout: '', stderr: '' }
+    : { code: 0, signal: null, stdout: '', stderr: '' })
+  await assert.rejects(
+    () => createGit({ exec }).addWorktreeDetached('/tmp/whatever', 'run-branch'),
+    GitError,
+  )
+})
+
+// The third reader of the same collapsed shape. `branchExists` reads exit 1 as "no such ref",
+// so a killed probe answers a confident false — and callers branch on that to decide a task
+// contributed nothing, or to skip a branch entirely.
+test('branchExists throws rather than answering false when the process was killed', async () => {
+  const exec = async () => ({ code: 1, signal: 'SIGKILL', stdout: '', stderr: '' })
+  await assert.rejects(() => createGit({ exec }).branchExists('run-branch'), GitError)
 })
 
 // The exact plant from the followups document: three ordinary ref writes, each of which an

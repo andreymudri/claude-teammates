@@ -24,6 +24,7 @@ import {
   MAX_RUN_ID_BYTES,
   MAX_TASK_ID_BYTES,
   planSectionsRefusal,
+  runBranchDisagreement,
 } from '../scripts/cli.mjs'
 import { previewOwnerMarkerPath, previewClaimPath } from '../scripts/merge-preview.mjs'
 import { renderRunSummary } from '../scripts/finish.mjs'
@@ -3447,20 +3448,53 @@ test('prune-run --yes is not fooled by a tag on the run branch planted while the
   })
 })
 
-// The other arm of the same guard, and it is live rather than defensive. `currentBranch` answers
-// the literal string `HEAD` on a detached HEAD — `git symbolic-ref --quiet HEAD` exits 1 silently
-// and the null is mapped to that string, its preserved contract — `refs/heads/HEAD` is not a ref,
-// and `resolveRef` rejects it, so `namedSha` is null and the comparison fails on the null side.
-// The three-ref test below never reaches this: its plant makes `refs/heads/refs/heads/run-branch`
-// a real ref, and in any case the name no longer resolves through it at all.
+// BOTH ARMS OF THE ROUND-TRIP CHECK, pinned directly. Before this the sha-disagreement arm had no
+// coverage at all: with the run branch resolved symbolically the two shas can only differ if the
+// ref moves between two subprocesses, which no in-process fixture can stage, so mutating the
+// comparison to `namedSha === null` left the entire suite green while deleting the only thing
+// standing between a moved run branch and `git branch -D`.
+test('runBranchDisagreement passes only when the ref holds the commit HEAD is on', () => {
+  const headSha = 'a'.repeat(40)
+  assert.equal(
+    runBranchDisagreement({ runBranchRef: 'refs/heads/run-branch', headSha, namedSha: headSha }),
+    null,
+  )
+})
+
+// The arm no fixture can reach: the ref resolved, to a DIFFERENT commit. This is the honest race
+// — an integrator merging between `headSha` and `resolveRef` — and the message must name both
+// shas, because an operator's next move is to compare them.
+test('runBranchDisagreement reports the ref and both shas when the ref moved', () => {
+  const headSha = 'a'.repeat(40)
+  const namedSha = 'b'.repeat(40)
+  const message = runBranchDisagreement({ runBranchRef: 'refs/heads/run-branch', headSha, namedSha })
+  assert.match(message, new RegExp(`HEAD is ${headSha}`))
+  assert.match(message, new RegExp(`refs/heads/run-branch — the ref HEAD points at — is ${namedSha}`))
+  // It must NOT claim the ref is absent: that is the other arm, and it has a different remedy.
+  assert.doesNotMatch(message, /not a ref at all/)
+})
+
+// The arm the detached-HEAD fixture reaches end to end, kept here too so the wording is pinned
+// without a repository.
+test('runBranchDisagreement says the ref is absent rather than printing null as a sha', () => {
+  const headSha = 'a'.repeat(40)
+  const message = runBranchDisagreement({ runBranchRef: 'refs/heads/run-branch', headSha, namedSha: null })
+  assert.match(message, /is not a ref at all/)
+  assert.doesNotMatch(message, /is null/)
+})
+
+// Detachment is refused BY NAME AND FIRST, not left to fall out of an unresolvable name. That
+// distinction is the whole finding: `currentBranch` used to answer the literal string `HEAD` here,
+// and the refusal depended on `refs/heads/HEAD` happening not to exist. It is a ref `git
+// update-ref` creates without complaint, so the safety was contingent on the attacker not having
+// made it — see the plant fixture below, which stages exactly that.
 //
-// WHAT THIS FIXTURE ACTUALLY PINS IS THE MESSAGE REGEX, and only that. Measured by mutating the
-// `.catch(() => null)` in `derive` to `.catch(() => headSha)`, which removes the null arm
-// entirely: all three behavioural assertions below still passed — the branch survived, the
-// worktree survived, and the exit code was still 4 — and the run still printed `cannot decide
-// what is prunable`, because `resolveRef`'s own rejection then propagates from further
-// downstream. Only the regex told the two apart. So relaxing it to `/cannot decide what is
-// prunable/` would leave a fixture that passes with the null arm deleted; do not weaken it.
+// The regex pins the SPECIFIC refusal, and that is deliberate. `derive` reaches this state
+// through an explicit `runBranchRef === null` test, and a mutation that removes that test does
+// not restore the old message: it produces a different failure further down, or none at all. So
+// the discrimination has to be the wording, not merely a non-zero exit. Do not relax it to
+// `/cannot decide what is prunable/` — the run prints that line for every underivable context,
+// including ones where nothing was wrong with HEAD.
 test('prune-run refuses to act on a detached HEAD rather than deriving from an unresolvable name', async () => {
   await withRepo(async (ctx) => {
     const { root, io, lines, git: g } = ctx
@@ -3472,7 +3506,7 @@ test('prune-run refuses to act on a detached HEAD rather than deriving from an u
     assert.equal(hasBranch(root, 'teammates/r1/T1'), true)
     assert.equal(hasWorktree(root, 'a1'), true)
     assert.equal(code, 4)
-    assert.match(lines.join('\n'), /cannot decide what is prunable: HEAD is [0-9a-f]{40}, but refs\/heads\/HEAD .* is not a ref at all/)
+    assert.match(lines.join('\n'), /cannot decide what is prunable: HEAD is detached at [0-9a-f]{40}, so this run has no run branch to verify against/)
   })
 })
 
@@ -3513,6 +3547,59 @@ test('the three-ref plant no longer redirects the run branch: prune-run resolves
     // The planted ref still holds exactly what it was given, so the run demonstrably neither read
     // it nor wrote through it.
     assert.equal(g(['rev-parse', 'refs/heads/refs/heads/run-branch']).trim(), tip, 'the planted ref was left untouched')
+  })
+})
+
+// THE FOURTH REF, and the one that actually bit. `refs/heads/HEAD` completes the plant above: with
+// the main worktree detached, the run branch's "name" was the string `HEAD`, so `refs/heads/` +
+// that name landed on this ref — which `git update-ref` creates without complaint even though
+// `git branch HEAD` refuses the name outright.
+//
+// The plant is STATIC: no code runs during the run, and no check has to be subverted. M is a real
+// merge of the run tip and the task tip, sitting on no branch, so `fileset` credits the task
+// through the merge's own secondary parent and `ownership` sees a clean tree. Detaching the main
+// worktree does not even need access to it — `git update-ref --no-deref main-worktree/HEAD <sha>`
+// from a LINKED worktree does it, exit 0, files untouched (measured).
+//
+// Executed against the revision that returned the `HEAD` sentinel, this deleted an UNMERGED task
+// branch and exited 0, leaving its tip reachable from the planted ref alone. The two ancestry
+// assertions at the end are what make that concrete rather than a claim about exit codes.
+test('the refs/heads/HEAD plant does not make a detached HEAD look like a run branch', async () => {
+  await withRepo(async (ctx) => {
+    const { root, io, lines, git: g } = ctx
+    await stagePrunableRun(ctx, { merged: false })
+    const taskTip = g(['rev-parse', 'refs/heads/teammates/r1/T1']).trim()
+    const runTip = g(['rev-parse', 'refs/heads/run-branch']).trim()
+    // M = merge(runTip, taskTip), built on the run branch and then abandoned there, so it is a
+    // commit no branch points at — exactly what a planter can construct without write access to
+    // any branch this run cares about.
+    g(['merge', '--no-ff', '--quiet', '-m', 'M', 'teammates/r1/T1'])
+    const M = g(['rev-parse', 'HEAD']).trim()
+    g(['update-ref', 'refs/heads/run-branch', runTip])
+    g(['checkout', '--quiet', '--detach', M])
+    g(['update-ref', 'refs/heads/HEAD', M])
+    // The plant is real: the ref exists and holds M, and HEAD is genuinely detached.
+    assert.equal(g(['rev-parse', 'refs/heads/HEAD']).trim(), M, 'the planted ref really was created')
+    // Asserted through `symbolic-ref` rather than `--abbrev-ref`: once `refs/heads/HEAD` exists
+    // the abbreviated form answers an EMPTY string, because the plant has made `HEAD` ambiguous.
+    // That is worth knowing on its own — the old resolution did not even survive its own plant.
+    assert.throws(() => g(['symbolic-ref', '--quiet', 'HEAD']), 'the repository really is detached')
+    lines.length = 0
+    const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
+    // REFUSES. Nothing is deleted and nothing is removed.
+    assert.equal(code, 4)
+    assert.equal(hasBranch(root, 'teammates/r1/T1'), true)
+    assert.equal(hasWorktree(root, 'a1'), true)
+    assert.match(lines.join('\n'), /HEAD is detached at [0-9a-f]{40}/)
+    assert.doesNotMatch(lines.join('\n'), /deleted teammates\/r1\/T1/)
+    // The state that made the deletion catastrophic, pinned so the fixture cannot quietly become
+    // a test about a branch that was safe to delete all along: the task tip is reachable from the
+    // planted ref and from NO branch of this run.
+    const contains = (ref) => {
+      try { g(['merge-base', '--is-ancestor', taskTip, ref]); return true } catch { return false }
+    }
+    assert.equal(contains('refs/heads/HEAD'), true, 'the plant does reach the task tip')
+    assert.equal(contains('refs/heads/run-branch'), false, 'the real run branch does not')
   })
 })
 

@@ -32,8 +32,18 @@ export async function collectDoctorReport({ git, runId, runBranch, baseBranch, t
   const problems = []
 
   const mainBranch = await git.currentBranch()
-  if (mainBranch !== runBranch) {
-    problems.push(`main worktree is on ${mainBranch}, not the run branch ${runBranch} — a teammate or reviewer that ran git checkout here moved it, and the gate reads the current branch to decide what it is protecting`)
+  // DETACHMENT IS ITS OWN PROBLEM, tested before the inequality and never through it. This
+  // comparison is the one alarm that reports the state the `refs/heads/HEAD` plant depends on,
+  // and while `currentBranch` minted the sentinel string `HEAD` for a detached HEAD the alarm
+  // silenced itself: `runBranch` here defaults to that same call, so both sides read `HEAD`, the
+  // branches compared EQUAL, and a repository detached onto an attacker's commit was reported as
+  // `no problems found` — executed, on the revision that returned the sentinel. Returning null
+  // does not fix that by itself; null === null is equally quiet. The state has to be named.
+  if (mainBranch === null) {
+    const at = await git.headSha().catch(() => 'an unknown commit')
+    problems.push(`main worktree is detached at ${at}, not on the run branch ${runBranch === null ? '(none recorded)' : runBranch} — a detached HEAD belongs to no branch, so nothing here can be verified against the run branch, and a commit reachable only from HEAD disappears the moment anything else is checked out`)
+  } else if (mainBranch !== runBranch) {
+    problems.push(`main worktree is on ${mainBranch}, not the run branch ${runBranch === null ? '(none recorded)' : runBranch} — a teammate or reviewer that ran git checkout here moved it, and the gate reads the current branch to decide what it is protecting`)
   }
 
   const dirty = await git.dirtyPaths()
@@ -55,7 +65,14 @@ export async function collectDoctorReport({ git, runId, runBranch, baseBranch, t
   // report about everything else rather than a single failure standing in for all of it.
   let baseSha = null
   if (baseBranch && await git.branchExists(baseBranch)) baseSha = await git.resolveRef(`refs/heads/${baseBranch}`)
-  const runSha = passedRunSha ?? (await git.branchExists(runBranch) ? await git.resolveRef(`refs/heads/${runBranch}`) : null)
+  // `runBranch` is null when the main worktree is detached and no `--run-branch` was given, and
+  // `branchExists` rejects a non-string outright — so the null is tested here rather than allowed
+  // to throw and take the whole report down. Every question below degrades to "cannot tell" on a
+  // null run sha, which is the honest answer in that state and the one the problem raised above
+  // explains.
+  const runSha = passedRunSha ?? (runBranch !== null && await git.branchExists(runBranch)
+    ? await git.resolveRef(`refs/heads/${runBranch}`)
+    : null)
 
   // The files each merge on the run branch's own first-parent chain actually carried, indexed
   // by that merge's secondary parent — one walk for the whole report, not one per task, because
@@ -209,9 +226,16 @@ export async function collectDoctorReport({ git, runId, runBranch, baseBranch, t
 // Wrapping happens only here. `collectDoctorReport` returns the values as git reported them, so a
 // caller reading the report as data is unaffected, and no problem, task or exit code changes —
 // only how a value renders. This covers the sites in this function and says nothing about others.
+// A branch name for display, or an explicit marker for the two states that HAVE no branch name.
+// `printable(null)` renders the word `null`, which reads as a branch called "null" in a header
+// whose other fields are branch names — and the header line `main worktree on HEAD · clean` is
+// exactly how the detached case used to present itself as healthy. Neither marker can be confused
+// for a ref: both contain characters git refuses in a ref name.
+const branchLabel = (name) => (name === null || name === undefined ? '(detached HEAD)' : printable(name))
+
 export function renderDoctor(report) {
-  const lines = [`run ${printable(report.runId)} · run branch ${printable(report.runBranch)} · base ${printable(report.baseBranch)}`]
-  lines.push(`main worktree on ${printable(report.mainBranch)}${report.dirty.length ? ` · ${report.dirty.length} dirty path(s)` : ' · clean'}`)
+  const lines = [`run ${printable(report.runId)} · run branch ${report.runBranch === null || report.runBranch === undefined ? '(none recorded)' : printable(report.runBranch)} · base ${printable(report.baseBranch)}`]
+  lines.push(`main worktree on ${branchLabel(report.mainBranch)}${report.dirty.length ? ` · ${report.dirty.length} dirty path(s)` : ' · clean'}`)
 
   if (report.worktrees.length) {
     lines.push('worktrees')
