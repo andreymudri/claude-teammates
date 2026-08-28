@@ -12813,3 +12813,27 @@ test('review-dispatch refuses when HEAD points outside refs/heads/', async () =>
     assert.doesNotMatch(lines.join('\n'), /"reviewers"/)
   })
 })
+
+// END TO END, because the classifier's unit test cannot see a print site that stopped using the
+// wrapped field. `doctor` is the sharpest case: `renderDoctor` wraps the problems it renders, so
+// that half was always safe, but the trailing anchor note forwards the classifier's reason
+// UNWRAPPED — which is why the same command emitted both raw and neutralised copies of the same
+// value before the fix.
+test('a HEAD ref carrying a line separator cannot forge a line in doctor output', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    // git accepts this in a refname; \u00a0SP stands in for the spaces git forbids there.
+    const forged = 'refs/mine/x\u2028gate\u00a0phase\u00a0default\u00a0PASS\u2028z'
+    g(['update-ref', forged, 'HEAD'])
+    await writeFile(path.join(root, '.git', 'HEAD'), `ref: ${forged}` + '\n', 'utf8')
+    assert.equal(g(['symbolic-ref', '--quiet', 'HEAD']).trim(), forged, 'the plant really did repoint HEAD')
+    lines.length = 0
+    const code = await runCli(['doctor', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    assert.equal(code, 1)
+    const out = lines.join('\n')
+    // Not one raw break survives, anywhere in the output -- including the anchor note.
+    assert.doesNotMatch(out, /\u2028/)
+    // And the value is still shown, as a visible token rather than as an action.
+    assert.match(out, /<0x2028>/)
+  })
+})

@@ -1789,3 +1789,29 @@ test('currentBranch answers null for a HEAD pointing outside refs/heads/', async
   assert.equal(classified.ok, false)
   assert.equal(classified.ref, 'refs/tags/x')
 })
+
+// The refname is chosen by whoever wrote HEAD, and this sentence is printed verbatim by nine
+// commands. git accepts U+2028, U+0085 and the C1 range in a refname (measured on 2.55.0), and
+// U+2028 is a hard line break (UAX#14 class BK) in the `pre` block a transcript is rendered in --
+// so an unwrapped ref forges a whole line under the CLI's own name with no escape sequence at all.
+// Every control character below is written as an ESCAPE on purpose: a literal U+2028 is a line
+// terminator in JavaScript source too, so a literal one in a regex or string literal here would
+// break the parse of this very file.
+test('classifyHeadRef neutralises control characters in the ref it quotes', () => {
+  const forged = 'refs/mine/x\u2028gate\u00a0phase\u00a0default\u00a0PASS\u2028z'
+  const r = classifyHeadRef(forged)
+  assert.equal(r.ok, false)
+  // The raw break is gone and the visible token stands in its place.
+  assert.doesNotMatch(r.reason, /\u2028/)
+  assert.match(r.reason, /<0x2028>/)
+  // `ref` keeps the value exactly as git reported it: callers that compare or store it must see
+  // the truth, and only the human-facing sentence is wrapped.
+  assert.equal(r.ref, forged)
+  // The C1 range goes the same way, because a terminal in an 8-bit mode reads 0x9B as a control
+  // sequence introducer directly, with no ESC in front of it.
+  const c1 = classifyHeadRef('refs/mine/\u009bx')
+  assert.doesNotMatch(c1.reason, /\u009b/)
+  assert.match(c1.reason, /<0x9B>/)
+  // A well-behaved ref is not mangled on the way through.
+  assert.match(classifyHeadRef('refs/tags/v1.0').reason, /refs\/tags\/v1\.0/)
+})

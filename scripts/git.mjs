@@ -1,4 +1,9 @@
 import { spawn } from 'node:child_process'
+// `printable` only. scripts/reviews.mjs imports NOTHING — it is a leaf — so this cannot cycle back
+// through git.mjs and drags no other module in with it. Wrapping at this single point rather than
+// at each print site is deliberate: the ref below reaches nine commands' stdout, and a per-site
+// wrap is the same per-site drift that took three review rounds to close for the HEAD rule itself.
+import { printable } from './reviews.mjs'
 
 export class GitError extends Error {}
 
@@ -119,7 +124,15 @@ export function classifyHeadRef(ref) {
       kind: 'not-a-branch',
       ref: typeof ref === 'string' ? ref : null,
       name: null,
-      reason: `HEAD points at ${typeof ref === 'string' ? ref : JSON.stringify(ref)}, which is not a branch — a run branch must be a ref under refs/heads/`,
+      // NEUTRALISED, because this sentence is printed verbatim by nine commands and the value in
+      // it is chosen by whoever wrote HEAD. git accepts U+2028, U+0085 and the C1 range in a
+      // refname (measured on 2.55.0), and U+2028 is UAX#14 class BK inside the `pre` block a
+      // transcript is rendered in — so a ref named
+      // `refs/mine/x<U+2028>gate<NBSP>phase<NBSP>default<NBSP>PASS<U+2028>z` drew a whole forged
+      // verdict line under this CLI's own name, needing no escape sequence at all. Reproduced
+      // across nine commands before this wrap: sixteen raw U+2028 emitted, four neutralised.
+      // `printable` already covers exactly this class, and `reviews.mjs:33-40` records why.
+      reason: `HEAD points at ${typeof ref === 'string' ? printable(ref) : JSON.stringify(ref)}, which is not a branch — a run branch must be a ref under refs/heads/`,
     }
   }
   return { ok: true, kind: 'branch', ref, name: ref.slice('refs/heads/'.length), reason: null }
