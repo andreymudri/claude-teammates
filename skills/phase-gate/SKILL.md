@@ -91,15 +91,29 @@ those you execute:
   must be a readable JSON file shaped { "results": [...] }`, while the file the same command
   wrote exits 0 with verdict PASS — both measured on this tree. This is a breaking change to a
   workflow this skill used to invite, not a nicety. The file's existence is itself the claim: the
-  previous `results-<phase>.json` is removed at the start of every run, above every refusal, so a
-  round that refuses leaves no results file at all and a stale `"pass"` from an earlier round can
-  never be read back as this round's verdict — measured, by making a second round refuse on a
-  stale stamp and watching the first round's file go with it. It
+  previous `results-<phase>.json` is removed at the start of the command body, before the manifest
+  is read and before any findings file is opened, so every refusal that judges this round's work
+  is downstream of the clear and leaves no results file behind — measured, by making a second
+  round refuse on a stale stamp and watching the first round's file go with it. Two classes of
+  refusal sit above it and leave the earlier round's file where it was. An argv refusal — an
+  unknown flag, a missing `--run` — exits 2 before this command body runs at all. And the clear
+  itself can fail: a previous file that can be neither unlinked nor emptied exits 4 with `could
+  not clear the previous results file at …`, and a `reviews` directory that is a symlink exits 4
+  with `… must be a real directory` before the clear is even attempted; either way the earlier
+  round's file is still on disk saying what that round said. After any refusal, never hand `gate
+  --results` a path this run did not print: the gate parses that file and trusts it, so a
+  surviving `"status": "pass"` is read back as this round's verdict — measured on this tree for
+  both shapes, one with the file and its directory owned by another uid under ordinary modes and
+  one with the directory symlinked, each leaving a byte-identical file the gate then returned
+  verdict PASS on. A read-only directory ALONE is not one of these: there `unlink` fails and the
+  in-place empty succeeds, and the gate refuses the zero-byte file it leaves. It
   exits 4 and prints nothing usable while any lens has no file, or when a file exists and does
   not parse — respawn those lenses instead. A third condition exits 4 and does print something
   usable: when the collection succeeded and only the write failed, the complete results go to
-  stdout above `cannot write the results file at …`, so redirect those bytes and pass them on
-  rather than re-running the reviews. A file for a lens this phase did not dispatch is
+  stdout above `cannot write the results file at …`, so keep those bytes rather than re-running
+  the reviews — but drop that last line before passing them on, because a plain redirect captures
+  it and `gate --results` then exits 2 for exactly the reason above; `head -n -1` is enough, and
+  with it the gate exits 0 with verdict PASS, measured on this tree. A file for a lens this phase did not dispatch is
   reported and ignored, never merged.
 
   Where a line quotes a value an agent wrote — a lens, a stamp or a reason out of a findings file;
