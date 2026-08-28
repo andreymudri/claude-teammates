@@ -1639,7 +1639,8 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 // in a sentence beside a value that is in the class, and those wrappers are driven by rows.
 // `collect-reviews`' results-file sentences are where a whole group of those sit, and they wrap
 // with nothing in the class beside them: the unsafe-phase refusal, the two directory-vet refusals,
-// the clear-or-empty report, the write-failure report and the line naming what was written. Each
+// `plantedReviewsLink`'s own not-inside-the-root refusal, the clear-or-empty report, the
+// write-failure report and the line naming what was written. Each
 // carries a path this CLI built out of `--run` and `--phase`, or a Node fs error quoting one,
 // which is exactly what `configFailureMessage`'s syscall branch in group 0 carries — argv, never
 // an agent-written file, so no row could forge one. Named as a GROUP and not counted, for the
@@ -1647,7 +1648,9 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 // them and a reader would otherwise have to re-derive why they are not sites this table vouches
 // for. They are wrapped anyway because an operator-supplied `--phase` reaches a terminal through
 // them: a forged one was measured drawing raw ESC into the write-failure sentence while the fs
-// error beside it, already wrapped, rendered its escape tokenised.
+// error beside it, already wrapped, rendered its escape tokenised. The one value in that command's
+// newer refusals that IS in the class — the manifest-supplied check name in its empty-lens refusal
+// — has a row above rather than a place in this paragraph.
 //
 // Where the census lines outside `cli.mjs` are driven. `reviews.mjs` holds six: the two
 // `reviewFileName` refusals (a lens, and a phase, with a path separator), the three `reviewStale`
@@ -1959,6 +1962,21 @@ const SANITISED_SITES = [
         stamp: stampFor(CLI_C1_FORGERY),
         findings: [],
         unableToVerify: 7,
+      })
+      return ['collect-reviews', '--run', 'r1', '--phase', '1']
+    },
+  },
+  {
+    site: 'cli.mjs collect-reviews — the check name in the empty-lens refusal',
+    exit: 4,
+    // The one value in this command's new refusals that comes out of an agent-written FILE rather
+    // than off argv: `check.name` is whatever the manifest says. The refusal fires before any
+    // findings file is opened, so nothing else is needed to reach it.
+    async setup({ root, planPath, io, git: g }) {
+      await withStampedPhase(root, planPath, io, g)
+      await writeManifest(root, {
+        lens: ['correctness'],
+        phases: { default: { checks: [{ ...AGENT_CHECK, name: CLI_ESC_FORGERY, lens: [] }] } },
       })
       return ['collect-reviews', '--run', 'r1', '--phase', '1']
     },

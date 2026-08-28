@@ -2009,6 +2009,12 @@ function tasksOfPhase(plan, phaseName) {
 // per `..`. Exported for that reason — it is the only way to reach that arm, and the depth cases
 // above are cheaper to state here than to stage end to end.
 //
+// Deliberately the same three clauses `assertContained` uses, spelled the same way, because it is
+// the same question about the same kind of value. Worth knowing when changing either: they are
+// byte-identical, so a search-and-replace across this file hits the other one first — which is
+// exactly what a mutation run here did, silently mutating `assertContained` and leaving this
+// function's test green.
+//
 // Nothing AT OR ABOVE `root` is checked, `root` included. That is the same assumption every other
 // path in this CLI makes: the operator names the root, and a link on the way to it is theirs.
 //
