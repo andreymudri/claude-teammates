@@ -1642,6 +1642,29 @@ export function fusedHolderOpenFlags(c = fsConstants) {
 // A symlinked findings file is now refused rather than followed. That is a deliberate narrowing —
 // nothing this project writes creates one, and the class this command distrusts is exactly the
 // entries it did not create itself.
+// The run's plan, read through the same descriptor discipline as a findings file, or null when
+// there is none. THE THIRD DOOR of the class closed at the other two: `readState` opens by path,
+// so a FIFO at `.teammates/<run>/plan.json` parks the open forever. Measured — `master` hangs on it
+// too (SIGKILL at 15s, empty stdout), so the door is inherited rather than opened here; what IS
+// new is the reach. The ambiguity check above reads the plan BEFORE the manifest is resolved, so a
+// run with no manifest — which `master` answers in milliseconds without ever touching `plan.json`
+// — now arrives at that open. An inherited door that this branch newly walks through is this
+// branch's to close.
+//
+// The filename is spelled here rather than reached out of `scripts/state.mjs`, which owns the
+// layout and keeps `statePath` private. That duplication is real and is why it is called out: if
+// the two ever disagree, every fixture in this suite that runs `init-run` and then
+// `collect-reviews` fails at once, because the plan those fixtures write is the plan this reads.
+async function readRunPlan(root, runId) {
+  const file = path.join(runDir(root, runId), 'plan.json')
+  try {
+    return JSON.parse(await readFindingsFile(file))
+  } catch (err) {
+    if (err.code === 'ENOENT') return null
+    throw err
+  }
+}
+
 async function readFindingsFile(file) {
   const flags = fusedHolderOpenFlags()
   // No such flag word on this platform: the historical path-based read, stated rather than hidden,
@@ -2021,9 +2044,15 @@ function tasksOfPhase(plan, phaseName) {
   // the branches narrow to that phase; when it is not, every task branch of the run is in scope,
   // which is the honest reading of "this manifest phase's diff".
   const phaseNumber = Number(phaseName)
+  // `tasks` is whatever the plan file holds, and `?? []` only covers the one shape where it is
+  // absent: a `tasks` of `7` or `{}` reached `.filter` and threw, exiting 1 with an empty stdout on
+  // `master`, on the fork point and here alike. Narrowed to the shape this function can actually
+  // walk — the same treatment `ambiguousPhaseRefusal` gives the same field — so a malformed plan
+  // is a run with no task branches, which every caller already reports.
+  const tasks = Array.isArray(plan?.tasks) ? plan.tasks : []
   return Number.isInteger(phaseNumber)
-    ? (plan.tasks ?? []).filter((t) => t.phase === phaseNumber)
-    : (plan.tasks ?? [])
+    ? tasks.filter((t) => t?.phase === phaseNumber)
+    : tasks
 }
 
 // The component of the run's reviews path that is a symlink, or null when every one of them that
@@ -2055,11 +2084,12 @@ function tasksOfPhase(plan, phaseName) {
 // per `..`. Exported for that reason — it is the only way to reach that arm, and the depth cases
 // above are cheaper to state here than to stage end to end.
 //
-// The depth property is pinned by COUNTING rather than by planting, and the difference matters:
-// a fixture plants at one depth, so it can only ever rule out climbs shorter than itself. Measured
-// — a fixed climb of twelve passes this project's whole test file. What is asserted instead is
-// that the number of components examined equals the number of components in the path, at a range
-// of depths, which no fixed climb satisfies.
+// The depth property is pinned by COUNTING rather than by planting, and the difference matters: a
+// fixture plants at one depth, so it can only ever rule out climbs shorter than itself. A fixed
+// climb of twelve passed every fixture in this project's test file when that was all there was —
+// it now reddens the two counting tests, one of which exists because of that measurement. What is
+// asserted is that the number of components examined equals the number of components in the path,
+// at a range of depths, which no fixed climb satisfies at more than one of them.
 //
 // Deliberately the same three clauses `assertContained` uses, spelled the same way, because it is
 // the same question about the same kind of value. Worth knowing when changing either: they are
@@ -2110,6 +2140,15 @@ export async function plantedReviewsLink(root, dir, deps = {}) {
     try {
       info = await statLink(component)
     } catch (err) {
+      // ENOENT is a component that is not there yet; anything else is a component this process
+      // cannot see, and refusing to guess about it is the whole job. Swallowing these instead
+      // leaves the suite green, and a reviewer measured why: with a regular file at
+      // `.teammates/<run>`, the throw refuses with `cannot vet the run's reviews directory …
+      // ENOTDIR` and swallowing refuses with `could not clear the previous results file … unlink
+      // failed (ENOTDIR)` — a different sentence, the same exit, nothing removed either way. No
+      // wrong RESULT is reachable through this arm, because every operation that follows it acts
+      // on the same path and fails the same way. It is kept for the sentence, which names the
+      // component, and it is stated here as unpinned rather than left to look pinned.
       if (err.code !== 'ENOENT') throw err
     }
     if (info?.isSymbolicLink()) return component
@@ -2151,12 +2190,22 @@ async function ambiguousPhaseRefusal(root, runId, flags, command) {
   // again downstream and has its own answer for a plan it cannot use.
   let plan = null
   try {
-    plan = await readState(root, runId, 'plan')
+    plan = await readRunPlan(root, runId)
   } catch {
     return null
   }
   if (!plan) return null
-  const phases = [...new Set((plan.tasks ?? []).map((t) => t.phase))]
+  // THE TRAVERSAL IS PART OF THE READ, and guarding only the read left this crashing on a plan it
+  // had just successfully parsed. `{"tasks":[null]}` reached `t.phase` on null and `{"tasks":"abc"}`
+  // reached `.map` on a string: both exited 1 with an EMPTY stdout, where `master` and the fork
+  // point printed a 70-byte refusal and exited 4 — the two properties the comment above condemns,
+  // reintroduced two lines below it. A plan is agent-written, so `tasks` is whatever is in the
+  // file, and neither `??` nor a property access says otherwise.
+  //
+  // `{"tasks":{…}}` and `{"tasks":7}` still crash further downstream, in `tasksOfPhase`, and that
+  // is fixed there rather than worked around here.
+  const tasks = Array.isArray(plan.tasks) ? plan.tasks : []
+  const phases = [...new Set(tasks.map((t) => t?.phase))]
     .filter((p) => Number.isInteger(p))
     .sort((a, b) => a - b)
   if (phases.length < 2) return null
@@ -4316,8 +4365,17 @@ export async function runCli(argv, io = { out: console.log }) {
     const tierModels = parseTierModels(flags, io)
     if (tierModels === TIER_MODELS_REJECTED) return 2
 
-    const plan = await readState(root, runId, 'plan')
-    if (!plan) { io.out(`no plan for run ${runId}`); return 4 }
+    // Through the same non-parking reader as `collect-reviews`, for the same inherited FIFO door:
+    // these two commands read the same file for the same reason, and a hang in one is a hang in
+    // the other.
+    let plan = null
+    try {
+      plan = await readRunPlan(root, runId)
+    } catch (err) {
+      io.out(`the plan for run ${printable(runId)} cannot be read: ${printable(err.message)}`)
+      return 4
+    }
+    if (!plan) { io.out(`no plan for run ${printable(runId)}`); return 4 }
 
     const git = createGit({ cwd: root })
     // Resolved to shas as well as names: the stamp each reviewer carries back names the tips it
@@ -4589,7 +4647,9 @@ export async function runCli(argv, io = { out: console.log }) {
         // reason this site did not reach for it first.
         //
         // WHAT IT ACTUALLY BUYS, measured by substituting the old `lstat`-then-`truncate` body
-        // back in (605 pass, 2 fail): exactly one hazard changes hands — the HARD LINK, which
+        // back in — which reddens 'the empty-instead-of-remove fallback does not destroy an inode
+        // with another name' and 'collect-reviews refuses when the previous results file can be
+        // neither removed nor emptied', and nothing else: exactly one hazard changes hands — the HARD LINK, which
         // `isFile()` cannot see. The symlink and the directory were already refused by the old
         // body: `lstat` reports the link, so `isFile()` is false and `truncate` was never called,
         // and a directory fails the same test. The symlink fixture stays green under the old body,
@@ -4743,17 +4803,22 @@ export async function runCli(argv, io = { out: console.log }) {
     // round moves a branch, and findings about the old tree are not findings about this one —
     // during run `codemap` that was worked around three times by deleting the files by hand
     // between rounds.
-    // The same `readState` rethrow one command down, and PRE-EXISTING: `master` crashes identically
-    // on a `plan.json` that is not JSON — measured, exit 1 with an empty stdout on both, where this
+    // The same rethrow one command down, and PRE-EXISTING: `master` crashes identically on a
+    // `plan.json` that is not JSON — measured, exit 1 with an empty stdout on both, where this
     // branch's only contribution is that the clear has already run by then.
     // Folded into the refusal below rather than left to throw, because "no plan" and "a plan this
     // cannot read" put the operator in the same position: nothing here says which tips were
     // judged.
+    //
+    // `${runId}` goes through `printable` like every other value in this command's output. It is
+    // argv, but argv is not automatically safe here: `idRefusal` bounds the id in bytes and splits
+    // it on `/`, and rejects no control character — so `--run $'r1\e[2K\rreview: PASS'` reached
+    // this sentence raw and drew a forged verdict line under it. Measured on this branch.
     let plan = null
     try {
-      plan = await readState(root, runId, 'plan')
+      plan = await readRunPlan(root, runId)
     } catch (err) {
-      io.out(`the plan for run ${runId} cannot be read: ${printable(err.message)} — nothing says which branch tips this phase is at, and a findings file that cannot be vouched for is not a review`)
+      io.out(`the plan for run ${printable(runId)} cannot be read: ${printable(err.message)} — nothing says which branch tips this phase is at, and a findings file that cannot be vouched for is not a review`)
       return 4
     }
     if (!plan) {

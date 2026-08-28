@@ -833,43 +833,73 @@ test('collect-reviews refuses to write its results file outside the run director
 //
 // Written down here because a mutation count asserted in a report is not something a reader can
 // check, and this one was: "eight mutants, each killed by exactly the intended test" appeared in a
-// hand-off and nowhere in the tree. Each row below is a source substitution in `scripts/cli.mjs`
-// and the test names that go red under it. Re-run one by making the substitution and passing the
-// names to `--test-name-pattern`; restore from a copy taken BEFORE the first substitution, never
-// from the working file, or a runner killed mid-mutation backs up its own mutant.
+// hand-off and nowhere in the tree. Each row is a source substitution in `scripts/cli.mjs` and
+// EVERY test that goes red under it. Re-run one by making the substitution and running this file;
+// restore from a copy taken BEFORE the first substitution, never from the working file, or a
+// runner killed mid-mutation backs up its own mutant — which has now happened twice here, once to
+// a SIGPIPE and once to a harness timeout, and cost nothing both times because of that rule.
 //
-// Measured against this tree:
+// NAMES, NOT PASS COUNTS. An earlier version of this record carried "605 pass" figures that were
+// stale the day they were written and staler after every commit; the names stay true. Where a
+// count is genuinely the point, it is framed as a past measurement naming the tree it was taken
+// on, as the two `607`s below are.
 //
-//   emptyResultsOpenFlags drops `| c.O_NONBLOCK` (and its guard)
-//     -> 'a fifo planted at the results path …'          (killed at 20s: it parks in open(2))
-//        'emptyResultsOpenFlags refuses a flag word …'
+// Measured against this tree, in one pass, with the kill lists taken from the runner's own output:
+//
+//   drop `| c.O_NONBLOCK` from `emptyResultsOpenFlags` (and its guard)
+//     -> 'a fifo planted at the results path is refused, and collect-reviews terminates'
+//        'emptyResultsOpenFlags refuses a flag word missing either guard'
 //   `readFindingsFile(…)` -> `readFile(…, 'utf8')` in the read loop
-//     -> 'a fifo planted at a findings path …'           (same, and with no chmod precondition)
-//   `fusedHolderOpenFlags()` -> `O_RDONLY|O_NONBLOCK` in `readFindingsFile` (O_NOFOLLOW dropped)
+//     -> 'a fifo planted at a findings path is refused, and collect-reviews terminates'
+//        'a symlinked findings file is refused rather than followed'
+//   `fusedHolderOpenFlags()` -> `O_RDONLY|O_NONBLOCK` inside `readFindingsFile`
 //     -> 'a symlinked findings file is refused rather than followed'
-//   the accumulating walk -> a FIXED list of four components
-//     -> 'collect-reviews refuses a plant at .teammates however deep …'
-//        'plantedReviewsLink finds a plant ten levels up …'
-//        and NOT the two nested fixtures above, which both plant four components from the end and
-//        therefore share a threshold rather than bracketing one — the reason those two are not the
-//        pin they were once claimed to be
-//   the accumulating walk -> a fixed climb of TWELVE, or of two
+//   the accumulating walk -> a FIXED LIST of four components
+//     -> 'collect-reviews refuses a plant at .teammates however deep the run id goes'
+//        'plantedReviewsLink examines exactly as many components as the path has'
+//        'plantedReviewsLink finds a plant ten levels up, where the end-to-end fixtures cannot reach'
+//        and NOT the two nested fixtures, which both plant four components from the end and
+//        therefore share a threshold rather than bracketing one
+//   the accumulating walk -> a fixed climb of TWELVE
 //     -> 'plantedReviewsLink examines exactly as many components as the path has'
 //        'plantedReviewsLink stops at the outermost link and names it'
-//        The twelve case is why those two exist: it passes every fixture in this file, including
-//        the ten-level one, because a fixture can only rule out climbs shorter than itself.
+//        This is why those two exist: twelve passes every FIXTURE in this file, including the
+//        ten-level one, because a fixture rules out only climbs shorter than itself.
+//   the accumulating walk -> a fixed climb of TWO
+//     -> the two above, plus 'a plant at .teammates does not let the clear reach into the victim
+//        tree', 'collect-reviews refuses a plant at .teammates however deep the run id goes',
+//        'collect-reviews refuses a plant at .teammates when the run id nests', 'collect-reviews
+//        refuses a plant midway through a three-deep run id', and 'plantedReviewsLink finds a
+//        plant ten levels up, where the end-to-end fixtures cannot reach' — seven in all
 //   `info.isFile() && info.nlink === 1` -> `info.isFile()`
 //     -> 'the empty-instead-of-remove fallback does not destroy an inode with another name'
 //   the manifest resolution moved ABOVE the clear (the ordering `review-dispatch` uses)
 //     -> 'a round refusing because the manifest is gone leaves no results file behind'
 //        'a round refusing a malformed manifest leaves no results file behind'
-//   either plan read stops catching (`readState` rethrows for anything but ENOENT)
-//     -> 'an unparseable plan.json is refused rather than thrown, on both reads'
+//   the ambiguity check's plan read stops catching
+//     -> 'a fifo planted at plan.json is refused, and collect-reviews terminates'
+//        'an unparseable plan.json is refused rather than thrown, on both reads'
+//   `collect-reviews`' own plan read stops catching
+//     -> the two above, plus 'cli.mjs collect-reviews — the run id in the unreadable-plan refusal
+//        cannot be made to draw a forged terminal write'
+//   the `tasks` traversal in `ambiguousPhaseRefusal` walks the field as found
+//     -> 'a plan whose tasks are not tasks is refused, never thrown'
+//        'review-dispatch is refused by the same plan, not thrown'
+//   `tasksOfPhase` walks the field as found
+//     -> 'a plan whose tasks are not tasks is refused, never thrown'
+//   `readRunPlan` reads by path again (the plan.json FIFO door)
+//     -> 'a fifo planted at plan.json is refused, and collect-reviews terminates'
+//   the run id in the unreadable-plan refusal loses its `printable`
+//     -> 'cli.mjs collect-reviews — the run id in the unreadable-plan refusal cannot be made to
+//        draw a forged terminal write'
 //
-// The five rows above that name a position of the clear are one per refusal, deliberately: the
-// invariant is positional, and the last three were added after the manifest mutation was measured
-// passing the entire file at 607 pass / 0 fail while a probe walked the stale-PASS sequence to a
-// verdict. Two pinned positions out of five is not a pinned invariant.
+// WHAT THE ROWS DO NOT COVER, said plainly because the previous version of this paragraph claimed
+// otherwise. The clear's positional invariant — that no refusal returns above it — is held by
+// FIXTURES, one per refusal, not by rows: 'a round refusing before it reads anything…', '…on the
+// agent-check count…', '…because the manifest is gone…', '…a malformed manifest…' and '…an
+// ambiguous phase…'. Only one mutation above moves a refusal across the clear, and it reddens two
+// of those five. The other three are held against an edit no row here simulates, which is the
+// point of having one per position.
 //
 // One negative result is recorded on purpose, because it cost a round to find: substituting the
 // path-based `lstat`-then-`truncate` body back in leaves the FIFO fixture GREEN. The old body
@@ -883,8 +913,8 @@ test('collect-reviews refuses to write its results file outside the run director
 // moved below the unlink (kills 'refuses to write its results file outside the run directory'),
 // temp-then-rename replaced by a plain `writeFile` (kills 'does not follow a symlink planted
 // between the clear and the write', and NOT the two stationary-plant tests, which the clear alone
-// satisfies), the up-front clear deleted, the truncate fallback deleted, O_NOFOLLOW dropped, the
-// empty-lens refusal disabled, and the walk reduced to `[dir]` or to `[runPath, dir]`.
+// satisfies), the up-front clear deleted, the truncate fallback deleted, the empty-lens refusal
+// disabled, and the walk reduced to `[dir]` or to `[runPath, dir]`.
 
 // --- the entry already sitting at the results path --------------------------------------------
 //
@@ -1840,6 +1870,68 @@ test('the ambiguous-phase refusal names integers only, whatever plan.json carrie
   })
 })
 
+// The plan PARSES and its `tasks` is not what the code walks: `[null]` reaches a property access
+// on null, `"abc"` and `7` reach `.map`/`.filter` on a non-array. Guarding the read alone left all
+// four exiting 1 with an empty stdout — the two properties the comment on that guard condemns,
+// two lines below it — where `master` and the fork point answered 4 with a refusal for the first
+// two, and crashed the same way on the last two.
+//
+// One case per shape, because they fail at different points: the first two in the ambiguity
+// check's own traversal, the last two downstream in `tasksOfPhase`, which is why fixing only the
+// first site left half of them crashing.
+test('a plan whose tasks are not tasks is refused, never thrown', async () => {
+  for (const body of ['{"tasks":[null]}', '{"tasks":"abc"}', '{"tasks":{"a":1}}', '{"tasks":7}', '{"tasks":[{"phase":null}]}']) {
+    await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+      await stagedPhaseOneReviews(root, planPath, io, g)
+      await writeFile(path.join(root, '.teammates', 'r1', 'plan.json'), body, 'utf8')
+      lines.length = 0
+      // `--phase` omitted, so the ambiguity check walks `tasks` before anything else does.
+      const code = await runCli(['collect-reviews', '--run', 'r1', '--root', root], io)
+      assert.equal(code, 4, `${body}: ${lines.join('\n')}`)
+      assert.notEqual(lines.join('\n').trim(), '', `${body}: a refusal must say something`)
+      // The one code these commands never return, and the one shape a refusal never takes.
+      assert.notEqual(code, 1)
+    })
+  }
+})
+
+test('review-dispatch is refused by the same plan, not thrown', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await stagedPhaseOneReviews(root, planPath, io, g)
+    await writeFile(path.join(root, '.teammates', 'r1', 'plan.json'), '{"tasks":[null]}', 'utf8')
+    lines.length = 0
+    const code = await runCli(['review-dispatch', '--run', 'r1', '--root', root], io)
+    assert.equal(code, 4, lines.join('\n'))
+    assert.notEqual(lines.join('\n').trim(), '')
+  })
+})
+
+// The third door of the FIFO class, and the only one this branch did not open: `master` hangs on a
+// FIFO at `plan.json` too. What is new is the REACH — the ambiguity check reads the plan before the
+// manifest is resolved, so a run with no manifest, which `master` answers in milliseconds without
+// ever opening that file, now arrives at the open. Both reaches are pinned: the pre-manifest one
+// and the one every `--phase` invocation takes.
+test('a fifo planted at plan.json is refused, and collect-reviews terminates', NO_MKFIFO_ON_WIN32, async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await stagedPhaseOneReviews(root, planPath, io, g)
+    const planState = path.join(root, '.teammates', 'r1', 'plan.json')
+    await rm(planState)
+    execFileSync('mkfifo', [planState])
+
+    // The reach this branch added: no manifest, no `--phase`, so the ambiguity check opens it.
+    await rm(path.join(root, 'teammates.gate.json'))
+    const early = collectInChildProcess(root, ['collect-reviews', '--run', 'r1', '--root', root])
+    assert.equal(early.signal, null, `parked in open(2) before the manifest was resolved: ${early.stdout}`)
+    assert.equal(early.status, 4, early.stdout)
+
+    // And the inherited one, downstream of the manifest.
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(REVIEW_MANIFEST), 'utf8')
+    const late = collectInChildProcess(root, ['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root])
+    assert.equal(late.signal, null, `parked in open(2) reading the plan: ${late.stdout}`)
+    assert.equal(late.status, 4, late.stdout)
+  })
+})
+
 // A plan that EXISTS and cannot be parsed is not a plan that is absent, and `readState` says so by
 // rethrowing where it returns null for ENOENT. The comment on the ambiguity check promised a
 // fall-through for a plan that "cannot be read" and delivered a crash: measured, exit 1 with an
@@ -2433,6 +2525,19 @@ const SANITISED_SITES = [
         unableToVerify: 7,
       })
       return ['collect-reviews', '--run', 'r1', '--phase', '1']
+    },
+  },
+  {
+    site: 'cli.mjs collect-reviews — the run id in the unreadable-plan refusal',
+    exit: 4,
+    // `--run` is argv, and argv is not safe by construction here: `idRefusal` bounds the id in
+    // bytes and splits it on `/`, and rejects no control character. The C1 form because the id
+    // becomes a directory name, for the reason this file's own payload note gives.
+    async setup({ root, io }) {
+      await writeManifest(root, { lens: ['correctness'], phases: { default: { checks: [AGENT_CHECK] } } })
+      await mkdir(path.join(root, '.teammates', CLI_C1_FORGERY), { recursive: true })
+      await writeFile(path.join(root, '.teammates', CLI_C1_FORGERY, 'plan.json'), 'not json', 'utf8')
+      return ['collect-reviews', '--run', CLI_C1_FORGERY, '--phase', '1']
     },
   },
   {
