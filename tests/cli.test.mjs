@@ -1099,9 +1099,9 @@ test('collect-reviews refuses a plant at .teammates however deep the run id goes
 })
 
 // And the same property with the depth chosen rather than staged: ten components, plant at the
-// first. No fixed climb shorter than ten finds it, which is the claim the end-to-end fixtures
-// cannot make on their own.
-test('plantedReviewsLink finds a plant at any depth, not a fixed number of levels up', async () => {
+// first. This one rules out fixed climbs shorter than ten and nothing more — a climb of TWELVE
+// passes it, and passes the whole file, which is what the counting test below exists to catch.
+test('plantedReviewsLink finds a plant ten levels up, where the end-to-end fixtures cannot reach', async () => {
   const scratch = await mkdtemp(path.join(tmpdir(), 'tm-deep-'))
   try {
     const segments = ['.teammates', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'reviews']
@@ -1118,6 +1118,47 @@ test('plantedReviewsLink finds a plant at any depth, not a fixed number of level
   } finally {
     await rm(scratch, { recursive: true, force: true })
   }
+})
+
+// "EVERY COMPONENT, HOWEVER DEEP" IS A CLAIM ABOUT ALL DEPTHS, and no fixture can make it: a test
+// plants at one depth and therefore rules out only the climbs shorter than that one. Two comments
+// in this file disagreed about which depth the fixtures above reach — one said they beat any fixed
+// list, the other said any climb shorter than ten — and the second was right. Measured: a fixed
+// climb of twelve passes every test in this file.
+//
+// So the property is asserted as an EQUALITY instead. The number of components examined must equal
+// the number of components in the path, at each of a range of depths. No fixed climb satisfies
+// that at more than one depth, and no deeper literal is needed to say so.
+test('plantedReviewsLink examines exactly as many components as the path has', async () => {
+  for (const depth of [1, 2, 3, 5, 8, 13]) {
+    const segments = Array.from({ length: depth }, (_, i) => `d${i}`)
+    const seen = []
+    const answer = await plantedReviewsLink('/root', path.join('/root', ...segments), {
+      lstat: async (component) => {
+        seen.push(component)
+        return { isSymbolicLink: () => false }
+      },
+    })
+    assert.equal(answer, null)
+    assert.equal(seen.length, depth, `depth ${depth}: examined ${seen.length} components`)
+    // And they are the right ones, in order from the root down, so the count cannot be met by
+    // looking at the same component repeatedly.
+    assert.deepEqual(seen, segments.map((_, i) => path.join('/root', ...segments.slice(0, i + 1))))
+  }
+})
+
+// The counterpart: the FIRST link found is the one returned, and nothing below it is examined —
+// which is what makes the refusal name the outermost planted component rather than an inner one.
+test('plantedReviewsLink stops at the outermost link and names it', async () => {
+  const seen = []
+  const answer = await plantedReviewsLink('/root', '/root/a/b/c/d', {
+    lstat: async (component) => {
+      seen.push(component)
+      return { isSymbolicLink: () => component === path.join('/root', 'a', 'b') }
+    },
+  })
+  assert.equal(answer, path.join('/root', 'a', 'b'))
+  assert.deepEqual(seen, [path.join('/root', 'a'), path.join('/root', 'a', 'b')])
 })
 
 // THE BOUNDARY OF THE GUARANTEE, pinned so nobody has to take the residual on trust — including
@@ -1152,10 +1193,17 @@ test('a bind mount over the reviews directory is not seen by the containment wal
       'console.log(JSON.stringify({ link: info.isSymbolicLink(), dir: info.isDirectory(), planted }))',
       '',
     ].join('\n'), 'utf8')
-    // The mount and the probe must share the namespace, so both run in the one child.
+    // The mount and the probe must share the namespace, so both run in the one child — and every
+    // path goes in as a POSITIONAL ARGUMENT, never interpolated into the script.
+    //
+    // `JSON.stringify` is not shell quoting, which is what the first version of this line assumed.
+    // `sh` expands `$`, backticks and backslashes inside double quotes, so a path containing a
+    // command substitution runs it: measured with TMPDIR set to a directory literally named
+    // `$(touch <base>/PWNED-BIND)`, the file appeared and the mount then failed on the collapsed
+    // empty path, reddening the test as well. `"$1"` cannot be re-parsed that way.
     const r = spawnSync('unshare', [
-      '-Urm', 'sh', '-c',
-      `mount --bind ${JSON.stringify(victim)} ${JSON.stringify(reviews)} && ${JSON.stringify(process.execPath)} ${JSON.stringify(probe)}`,
+      '-Urm', 'sh', '-c', 'mount --bind "$1" "$2" && "$3" "$4"',
+      'sh', victim, reviews, process.execPath, probe,
     ], { encoding: 'utf8', timeout: 30000 })
     assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`)
     const answer = JSON.parse(r.stdout.trim().split('\n').pop())
@@ -1292,8 +1340,12 @@ test('a failing round leaves no results file from the round before it', async ()
 // at any of them left the previous round's `"pass"` in place. Measured: the gate then read that
 // file and returned verdict PASS over a tree the round had refused to judge.
 //
-// The empty-lens refusal is the fixture because it is the one an operator reaches by editing a
-// manifest between rounds, and because it returns furthest from the clear.
+// ONE FIXTURE PER REFUSAL, all five, and that is not belt-and-braces. The first version of this
+// block claimed the invariant was positional and then pinned two of the five positions; moving the
+// manifest resolution back above the clear — which is the ordering `review-dispatch` itself uses,
+// so it is the natural edit rather than a contrived one — left the whole file green at 607 pass
+// while a probe walked the same stale-PASS sequence to its end. A positional invariant is only as
+// strong as its least-pinned position.
 test('a round refusing before it reads anything still leaves no results file behind', async () => {
   await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     const resultsPath = await stagedPhaseOneReviews(root, planPath, io, g)
@@ -1320,6 +1372,68 @@ test('a round refusing before it reads anything still leaves no results file beh
     )
     assert.equal(gateCode, 2, lines.join('\n'))
     assert.doesNotMatch(lines.join('\n'), /"verdict": "PASS"/)
+  })
+})
+
+// The manifest refusals, which are the two the mutation above proved unheld. `no gate manifest` is
+// the one an operator reaches by moving the file, and it is furthest upstream of all: at the fork
+// point it was the FIRST thing this command answered.
+test('a round refusing because the manifest is gone leaves no results file behind', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const resultsPath = await stagedPhaseOneReviews(root, planPath, io, g)
+    lines.length = 0
+    assert.equal(await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io), 0, lines.join('\n'))
+    assert.equal(JSON.parse(await readFile(resultsPath, 'utf8')).results[0].status, 'pass')
+
+    await rm(path.join(root, 'teammates.gate.json'))
+    lines.length = 0
+    assert.equal(await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io), 4)
+    assert.match(lines.join('\n'), /no gate manifest/)
+    await assert.rejects(stat(resultsPath), { code: 'ENOENT' })
+  })
+})
+
+// And the manifest that exists and is refused, which returns 2 rather than 4 — a different exit
+// through a different branch, so it is a different position.
+test('a round refusing a malformed manifest leaves no results file behind', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const resultsPath = await stagedPhaseOneReviews(root, planPath, io, g)
+    lines.length = 0
+    assert.equal(await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io), 0, lines.join('\n'))
+
+    await writeFile(path.join(root, 'teammates.gate.json'), '{ not a manifest', 'utf8')
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 2, lines.join('\n'))
+    await assert.rejects(stat(resultsPath), { code: 'ENOENT' })
+  })
+})
+
+// The fifth position: the ambiguous-phase refusal, which is the only one that returns 2 before the
+// manifest is even looked at. Round one names the phase explicitly, so it is not ambiguous; round
+// two omits it on the same two-phase plan and is.
+test('a round refusing an ambiguous phase leaves no results file behind', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await withStampedPhase(root, planPath, io, g)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(REVIEW_MANIFEST), 'utf8')
+    // Stamped for the manifest key `default`, which is what an explicit `--phase default` collects.
+    const sha = g(['rev-parse', 'refs/heads/teammates/r1/T1']).trim()
+    for (const lens of ['correctness', 'security']) {
+      await writeReviewFile(root, 'r1', `default-${lens}.json`, {
+        stamp: { phase: 'default', lens, branches: [`teammates/r1/T1@${sha}`] },
+        findings: [],
+      })
+    }
+    const resultsPath = path.join(root, '.teammates', 'r1', 'reviews', 'results-default.json')
+    lines.length = 0
+    assert.equal(await runCli(['collect-reviews', '--run', 'r1', '--phase', 'default', '--root', root], io), 0, lines.join('\n'))
+    assert.equal(JSON.parse(await readFile(resultsPath, 'utf8')).results[0].status, 'pass')
+
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--root', root], io)
+    assert.equal(code, 2, lines.join('\n'))
+    assert.match(lines.join('\n'), /needs --phase/)
+    await assert.rejects(stat(resultsPath), { code: 'ENOENT' })
   })
 })
 
@@ -1507,6 +1621,30 @@ test('a fifo planted at a findings path is refused, and collect-reviews terminat
   })
 })
 
+// The other half of the same open, and the half that shipped unpinned: dropping O_NOFOLLOW there
+// while keeping O_NONBLOCK left the whole file green, because the FIFO fixture above pins only the
+// flag that stops the parking. `<phase>-<lens>.json` is a path every reviewer is told to write to,
+// so following a link from it is exactly the narrowing this rewrite claimed to make.
+//
+// Unreadable, not missing: a lens whose file cannot be opened has not been reviewed, and the
+// distinction between "no findings" and "no review" is what this command exists to keep.
+test('a symlinked findings file is refused rather than followed', NO_PLANTED_SYMLINK_ON_WIN32, async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await stagedPhaseOneReviews(root, planPath, io, g)
+    const findings = path.join(root, '.teammates', 'r1', 'reviews', '1-correctness.json')
+    const elsewhere = path.join(root, 'elsewhere.json')
+    await rename(findings, elsewhere)
+    await symlink(elsewhere, findings)
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 4, lines.join('\n'))
+    assert.match(lines.join('\n'), /unreadable findings file\(s\): 1-correctness\.json/)
+    // Never silently collected: a followed link would have produced a clean pass here, since the
+    // target is a perfectly valid findings file.
+    assert.doesNotMatch(lines.join('\n'), /"status": "pass"/)
+  })
+})
+
 // The write side: the empty-in-place fallback, reached through the `0555` directory that is the
 // only way to get there. Both flags are needed on that open — O_NOFOLLOW alone parked here.
 test('a fifo planted at the results path is refused, and collect-reviews terminates', {
@@ -1675,6 +1813,34 @@ test('the ambiguous-phase refusal names integers only, whatever plan.json carrie
     const out = lines.join('\n')
     assert.match(out, /2 phases \(1, 2\)/)
     assert.ok(!out.includes(CLI_ESC), 'no escape byte may reach stdout')
+  })
+})
+
+// A plan that EXISTS and cannot be parsed is not a plan that is absent, and `readState` says so by
+// rethrowing where it returns null for ENOENT. The comment on the ambiguity check promised a
+// fall-through for a plan that "cannot be read" and delivered a crash: measured, exit 1 with an
+// unhandled SyntaxError and an empty stdout, where the fork point printed a refusal and exited 4.
+// Two properties this suite pins elsewhere fail at once there — the exit codes these commands use,
+// and that a refusal always says something.
+test('an unparseable plan.json is refused rather than thrown, on both reads', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await stagedPhaseOneReviews(root, planPath, io, g)
+    const planState = path.join(root, '.teammates', 'r1', 'plan.json')
+    await writeFile(planState, 'not json at all', 'utf8')
+
+    // The ambiguity check reads it first, with `--phase` omitted; it must fall through rather than
+    // decide anything, leaving the refusal to the read below.
+    lines.length = 0
+    const omitted = await runCli(['collect-reviews', '--run', 'r1', '--root', root], io)
+    assert.equal(omitted, 4, lines.join('\n'))
+    assert.match(lines.join('\n'), /the plan for run r1 cannot be read/)
+    assert.notEqual(lines.join('\n').trim(), '', 'a refusal must say something')
+
+    // And with the flag given, where only the second read is reached.
+    lines.length = 0
+    const named = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(named, 4, lines.join('\n'))
+    assert.match(lines.join('\n'), /the plan for run r1 cannot be read/)
   })
 })
 

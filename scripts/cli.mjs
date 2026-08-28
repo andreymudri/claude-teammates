@@ -2055,6 +2055,12 @@ function tasksOfPhase(plan, phaseName) {
 // per `..`. Exported for that reason — it is the only way to reach that arm, and the depth cases
 // above are cheaper to state here than to stage end to end.
 //
+// The depth property is pinned by COUNTING rather than by planting, and the difference matters:
+// a fixture plants at one depth, so it can only ever rule out climbs shorter than itself. Measured
+// — a fixed climb of twelve passes this project's whole test file. What is asserted instead is
+// that the number of components examined equals the number of components in the path, at a range
+// of depths, which no fixed climb satisfies.
+//
 // Deliberately the same three clauses `assertContained` uses, spelled the same way, because it is
 // the same question about the same kind of value. Worth knowing when changing either: they are
 // byte-identical, so a search-and-replace across this file hits the other one first — which is
@@ -2085,7 +2091,14 @@ function tasksOfPhase(plan, phaseName) {
 //
 // What it closes is every stationary symlink, and it is re-run immediately before the write so
 // that window is a few syscalls rather than a whole collection.
-export async function plantedReviewsLink(root, dir) {
+// `deps.lstat` is a TEST SEAM and nothing else — every production caller passes two arguments.
+// It exists because the property this function is FOR cannot be pinned by a fixture: "every
+// component, however deep" is a claim about all depths, and a test can only plant at one. Planting
+// one level deeper than the last guess is what the fixtures below used to do, and it proves only
+// that the walk beats THAT climb — a fixed climb of twelve passed the entire suite. Counting the
+// components examined turns the claim into an equality that holds at every depth at once.
+export async function plantedReviewsLink(root, dir, deps = {}) {
+  const statLink = deps.lstat ?? lstat
   const rel = path.relative(root, dir)
   if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
     throw new Error(`${printable(dir)} is not inside ${printable(root)}, so its components cannot be vetted`)
@@ -2095,7 +2108,7 @@ export async function plantedReviewsLink(root, dir) {
     component = path.join(component, segment)
     let info = null
     try {
-      info = await lstat(component)
+      info = await statLink(component)
     } catch (err) {
       if (err.code !== 'ENOENT') throw err
     }
@@ -2125,7 +2138,23 @@ export async function plantedReviewsLink(root, dir) {
 // dropping them is also what keeps this sentence free of any byte a hand-edited `plan.json` chose.
 async function ambiguousPhaseRefusal(root, runId, flags, command) {
   if (flags.phase !== undefined && flags.phase !== true) return null
-  const plan = await readState(root, runId, 'plan')
+  // CANNOT BE READ means exactly that, and `readState` answers null only for ENOENT — it rethrows
+  // a parse error, a mode-000 file, a directory at that path. The comment above promised a
+  // fall-through and delivered a crash: measured on this branch, a `plan.json` of `not json at
+  // all` with no manifest present exited 1 with an unhandled SyntaxError and an EMPTY stdout,
+  // where the fork point printed `no gate manifest` and exited 4. Exit 1 is not a code these
+  // commands otherwise return, and a refusal that prints nothing is the one shape this command's
+  // whole design refuses to produce.
+  //
+  // Swallowed rather than reported because of what this function IS: it decides whether an omitted
+  // flag is ambiguous, and an unreadable plan cannot say that it is. Every caller reads the plan
+  // again downstream and has its own answer for a plan it cannot use.
+  let plan = null
+  try {
+    plan = await readState(root, runId, 'plan')
+  } catch {
+    return null
+  }
   if (!plan) return null
   const phases = [...new Set((plan.tasks ?? []).map((t) => t.phase))]
     .filter((p) => Number.isInteger(p))
@@ -4560,15 +4589,29 @@ export async function runCli(argv, io = { out: console.log }) {
         // reason this site did not reach for it first.
         //
         // WHAT IT ACTUALLY BUYS, measured by substituting the old `lstat`-then-`truncate` body
-        // back in: exactly one hazard changes hands — the HARD LINK, which `isFile()` cannot see.
-        // The symlink and the directory were already refused by the old body (`lstat` reports the
-        // link, so `isFile()` is false and `truncate` was never called; a directory failed the
-        // same test), and with the old body the symlink test still passes and the directory case
-        // still refuses with the same exit and sentence. The earlier version of this comment
-        // claimed four, counting two the check it replaced already covered. Two further properties
-        // come with the descriptor and are NOT pinned by any test here: the check and the
-        // destruction are now one object rather than two syscalls on a path, so nothing can be
-        // swapped in between, and O_NONBLOCK is what stops a FIFO parking the call.
+        // back in (605 pass, 2 fail): exactly one hazard changes hands — the HARD LINK, which
+        // `isFile()` cannot see. The symlink and the directory were already refused by the old
+        // body: `lstat` reports the link, so `isFile()` is false and `truncate` was never called,
+        // and a directory fails the same test. The symlink fixture stays green under the old body,
+        // and the directory case still refuses with the same exit and the same sentence except for
+        // one parenthetical — the old body records no reason, because it decides on `lstat` and
+        // never opens, where this one records the EISDIR its open returns. That is what the second
+        // failing test above is: a wording difference, not a hazard. An earlier version of this
+        // comment claimed four hazards, counting two the check it replaced already covered.
+        //
+        // O_NONBLOCK IS NOT ONE OF THEM EITHER, and the claim that it "comes with the descriptor"
+        // was doubly wrong. It is PINNED — reverting the flag word reddens the FIFO-at-the-results-
+        // path fixture (SIGKILL at 20 000 ms) and the flag-word unit test, which are exactly the
+        // two kills the mutation record in the test file names for that substitution. And the hang
+        // it prevents is one THIS REWRITE INTRODUCED: the old body never opened a FIFO at all, so
+        // it refused one in milliseconds. Opening is what created the hazard; O_NONBLOCK is what
+        // closes it again. Measured in isolation: `O_WRONLY|O_NOFOLLOW` on a FIFO stayed blocked
+        // past 5s, and adding O_NONBLOCK returns ENXIO at once.
+        //
+        // One property really is unpinned, and it is the one left: the check and the destruction
+        // are now one object rather than two syscalls on a path, so nothing can be swapped in
+        // between. No test here holds that — staging the swap needs a scheduler this suite does
+        // not have.
         let emptied = false
         let emptyErr = null
         const flags = emptyResultsOpenFlags()
@@ -4699,7 +4742,19 @@ export async function runCli(argv, io = { out: console.log }) {
     // round moves a branch, and findings about the old tree are not findings about this one —
     // during run `codemap` that was worked around three times by deleting the files by hand
     // between rounds.
-    const plan = await readState(root, runId, 'plan')
+    // The same `readState` rethrow one command down, and PRE-EXISTING: the fork point crashes
+    // identically on a `plan.json` that is not JSON — measured, exit 1 with an empty stdout on
+    // both, where this branch's only contribution is that the clear has already run by then.
+    // Folded into the refusal below rather than left to throw, because "no plan" and "a plan this
+    // cannot read" put the operator in the same position: nothing here says which tips were
+    // judged.
+    let plan = null
+    try {
+      plan = await readState(root, runId, 'plan')
+    } catch (err) {
+      io.out(`the plan for run ${runId} cannot be read: ${printable(err.message)} — nothing says which branch tips this phase is at, and a findings file that cannot be vouched for is not a review`)
+      return 4
+    }
     if (!plan) {
       io.out(`no plan for run ${runId} — nothing says which branch tips this phase is at, and a findings file that cannot be vouched for is not a review`)
       return 4
