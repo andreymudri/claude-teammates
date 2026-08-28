@@ -180,19 +180,24 @@ test('phase-gate documents the two claims results that are not findings', async 
   )
 })
 
-// The three sentences that tell an operator where the results actually are, each written once and
-// used twice below. `assertStatement` alone was not enough for them, and both escapes were
-// measured on this tree with the bare `/head -n -1/i` token in place, each leaving the suite fully
-// green: rewriting the clause to "a plain redirect of those bytes is enough, and do not bother
-// with `head -n -1`" — the exact thing the pin's own message says it forbids, still matching
-// because the token survives the inversion — and APPENDING "In practice capturing stdout with a
-// plain redirect and passing that capture works fine, so use whichever is convenient." Anchoring
-// end to end closes the first; only a subject inventory closes the second, so the last of the
-// three is stated as a claim with the other two as its reviewed neighbours. Fail-closed either
-// way — `gate --results` on a plain capture exits 2, never a false PASS — but a document that
-// contradicts itself about where its own output went is the defect, not the exit code.
+// The five sentences that tell an operator where the results actually are. Each is DEFINED ONCE
+// and anchored END TO END, and each has exactly ONE use below: the `assertStatement` that requires
+// it. They are named constants for readability and for the anchoring, not to be shared between two
+// call sites the way the `CLEANUP_*` regexes are — the second use two of these briefly had was an
+// `allow` entry, and the document-scoped inventory further down does that job for all five now.
+//
+// Anchoring is what stops a sentence being REWRITTEN into its own negation: measured on this tree,
+// with the bare `/head -n -1/i` token in place, rewriting the remedy to "a plain redirect of those
+// bytes is enough, and do not bother with `head -n -1`" — the exact thing the pin's own message
+// says it forbids — left the suite fully green, because the token survives the inversion.
+//
+// Anchoring is NOT what stops a sentence being CONTRADICTED by a new one beside it. Three such
+// insertions were measured green here, and the inventory below is what closes them; see its own
+// comment for the scope decision and what remains open.
 const PG_WRITES_FILE = /^It also writes that same document to \.teammates\/<runId>\/reviews\/results-<phase>\.json and prints that path last, so the gate --results <path> that follows names a file that exists — run without a redirect and without this, the review check stays pending forever while the gate reports FAIL with an empty failed list, naming nothing to fix\.$/i
 const PG_DEAD_REDIRECT = /^Pass the written path, not a capture of stdout: a > results\.json redirect no longer round-trips, because the trailing path line is inside the captured bytes and gate --results on that capture exits 2 on --results must be a readable JSON file shaped \{ "results": \[\.\.\.\] \}, while the file the same command wrote exits 0 with verdict PASS — both measured on this tree\.$/i
+const PG_RESIDUAL_CLASSES = /^Two classes of refusal sit above it and leave the earlier round's file where it was\.$/i
+const PG_RESULTS_PATH_RULE = /^After any refusal, hand gate --results nothing at all: only a path printed on a results written to … line is this command's answer, and no refusal prints one — least of all the clear failure above, which names that very path while refusing to stand behind what is at it\.$/i
 const PG_WRITE_FAILURE = /^A third condition exits 4 and does print something usable: when the collection succeeded and only the write failed, the complete results go to stdout above cannot write the results file at …, so keep those bytes rather than re-running the reviews — but drop that last line before passing them on, because a plain redirect captures it and gate --results then exits 2 for exactly the reason above; head -n -1 is enough, and with it the gate exits 0 with verdict PASS, measured on this tree\.$/i
 
 // `collect-reviews` now writes its results file and refuses an omitted `--phase` on a multi-phase
@@ -293,7 +298,7 @@ test('phase-gate documents the results file collect-reviews writes and the redir
   // sentence the section promises a fail-closed property the command does not deliver in either.
   assertStatement(
     section,
-    /two classes of refusal sit above it and leave the earlier round's file where it was/i,
+    PG_RESIDUAL_CLASSES,
     'phase-gate must bound the fail-closed claim, since a surviving results file is read back as this round\'s verdict',
   )
   // SCOPED TO THE SUCCESS LINE, and the narrower wording is the whole of it. "a path this run did
@@ -307,30 +312,77 @@ test('phase-gate documents the results file collect-reviews writes and the redir
   // carried over from an earlier run, which either wording forbids.
   assertStatement(
     section,
-    /only a path printed on a results written to … line is this command's answer/i,
+    PG_RESULTS_PATH_RULE,
     'phase-gate must scope the operative rule to the success line: a refusal prints the results path too, '
       + 'and handing the gate that printed path returns PASS over the superseded document',
   )
   assertStatement(
     section,
-    /a third condition exits 4 and does print something usable/i,
+    PG_WRITE_FAILURE,
     'phase-gate must name the write-failure path, where the complete results are on stdout and re-running the reviews would waste them',
   )
-  // The remedy has to differ from the redirect retracted above it, and for the same cause: the
-  // last line is a PATH line. Measured on this tree — a plain redirect of the write-failure output
-  // makes gate --results exit 2, and the same bytes with the last line dropped exit 0 with verdict
-  // PASS.
-  assertClaim(section, {
-    label: 'write-failure remedy',
-    claim: PG_WRITE_FAILURE,
-    // Every other sentence in this section about redirecting or capturing stdout has to be one of
-    // the two below, so a fourth cannot appear unreviewed — which is how the "use whichever is
-    // convenient" escape got in. `round-trip` is in the lexicon because that is the word the
-    // retraction itself uses, and a rewrite of it would otherwise be reachable only through
-    // `redirect`.
-    subject: /redirect|captur(e|es|ing|ed)|head -n -1|round-trip/i,
-    allow: [PG_WRITES_FILE, PG_DEAD_REDIRECT],
-  })
+})
+
+// SCOPE: THE WHOLE phase-gate DOCUMENT, and the choice was measured rather than argued. Three
+// contradictions were planted, each leaving the full suite green under the section-scoped subject
+// inventory this replaces:
+//
+//   1. after `SKILL.md:106`, inside the locked section — "In practice the file at that path is the
+//      same document either way, so passing it back after a refusal is fine." A section-scoped
+//      inventory reaches this one, but only if the lexicon names something in it, and the earlier
+//      lexicon named nothing: no `redirect`, no `capture`, no `--results`.
+//   2. inside the section — "In practice, piping stdout into results.json with `>` and handing the
+//      gate that file works fine, so use whichever is convenient." Missed for the same reason:
+//      `stdout` and `pipe` were not in the lexicon.
+//   3. under `## On FAIL`, ONE HEADING AWAY — "When collect-reviews exits 4 saying it could not
+//      clear the previous results file, it still names that path: pass that path to gate --results
+//      to get the phase verdict without re-running the reviews." No section-scoped lock can ever
+//      reach this, whatever its lexicon.
+//
+// Each walks the operator into the bypass measured at the results-path pin above: the clear-failure
+// refusal prints that path, and handing it to `gate --results` exits 0 with verdict PASS over the
+// previous round's document while this round held a blocking high.
+//
+// THE DOCUMENT IS THE NARROWEST SCOPE THAT CLOSES ALL THREE, and at this lexicon it is free:
+// measured, the lexicon matches the same TEN statements whether scoped to `Finish the pending
+// checks` or to the whole document, so widening the scope locks not one additional sentence today
+// while making (3) impossible. `\b(that|this) path\b` is deliberately narrower than `\bpaths?\b`,
+// which reaches the same three escapes but drags in two unrelated statements — the `preview.link`
+// entry rule and the merge-conflict sentence — that have nothing to do with where the results are.
+//
+// NOT WIDER THAN ONE DOCUMENT. The rule from the hand-sweep lock still holds: widening to other
+// skills would pin prose nobody has reviewed for this purpose. Within this document the argument is
+// different, because every sentence here is about this command's own output.
+//
+// WHAT STAYS OPEN, and it is the same pair every lexicon lock in this file leaves: a contradiction
+// written in vocabulary none of these alternatives names is invisible, and so is one written as a
+// CODE BLOCK, because `claimSites` reads statements and headings and never code. Neither is closed
+// by scope, and neither is closed here.
+const PG_RESULTS_PATH_LEXICON =
+  /--results|results file|results\.json|results-<phase>|results written to|redirect|captur(e|es|ing|ed)|head -n -1|round-trip|stdout|pip(e|es|ing|ed)|\b(that|this) path\b/i
+
+const PG_RESULTS_PATH_CORPUS = [
+  "phase-gate :: To rebuild the results file from those drops rather than by hand:",
+  "phase-gate :: It prints a --results file with source: \"file\", applying the manifest's own blockOn.",
+  "phase-gate :: It also writes that same document to .teammates/<runId>/reviews/results-<phase>.json and prints that path last, so the gate --results <path> that follows names a file that exists — run without a redirect and without this, the review check stays pending forever while the gate reports FAIL with an empty failed list, naming nothing to fix.",
+  "phase-gate :: Pass the written path, not a capture of stdout: a > results.json redirect no longer round-trips, because the trailing path line is inside the captured bytes and gate --results on that capture exits 2 on --results must be a readable JSON file shaped { \"results\": [...] }, while the file the same command wrote exits 0 with verdict PASS — both measured on this tree.",
+  "phase-gate :: The file's existence is itself the claim: the previous results-<phase>.json is removed at the start of the command body, before the manifest is read and before any findings file is opened, so every refusal that judges this round's work is downstream of the clear and leaves no results file behind — measured, by making a second round refuse on a stale stamp and watching the first round's file go with it.",
+  "phase-gate :: And the clear itself can fail: a previous file that can be neither unlinked nor emptied exits 4 with could not clear the previous results file at …, and a reviews directory that is a symlink exits 4 with … must be a real directory before the clear is even attempted; either way the earlier round's file is still on disk saying what that round said.",
+  "phase-gate :: After any refusal, hand gate --results nothing at all: only a path printed on a results written to … line is this command's answer, and no refusal prints one — least of all the clear failure above, which names that very path while refusing to stand behind what is at it.",
+  "phase-gate :: Scoping to the success line is what closes a bypass, and the bypass was measured too: a round-2 collection refused at the clear over findings carrying a blocking high, and gate --results on the path that refusal itself printed exited 0 with verdict PASS over round 1's document.",
+  "phase-gate :: A third condition exits 4 and does print something usable: when the collection succeeded and only the write failed, the complete results go to stdout above cannot write the results file at …, so keep those bytes rather than re-running the reviews — but drop that last line before passing them on, because a plain redirect captures it and gate --results then exits 2 for exactly the reason above; head -n -1 is enough, and with it the gate exits 0 with verdict PASS, measured on this tree.",
+  "phase-gate :: Where a line quotes a value an agent wrote — a lens, a stamp or a reason out of a findings file; a check name, kind or preview.link entry out of the gate manifest, whose contents this CLI validates for shape and not for content; the bytes a JSON parse error quotes back out of a --results file or the verdict file fix is handed below — the value is printed with its control bytes and line separators replaced by a visible <0x1B>-style token.",
+]
+
+test('every sentence in phase-gate about where the results file is, in any section, is one a human locked', async () => {
+  const { doc } = await skill('phase-gate')
+  assertCorpusInventory(
+    [{ label: 'phase-gate', doc }],
+    PG_RESULTS_PATH_LEXICON,
+    PG_RESULTS_PATH_CORPUS,
+    'a refusal prints the results path too, so prose telling an operator to reuse it walks them into '
+      + 'a measured PASS over a superseded document — and no section lock spans this document',
+  )
 })
 
 // The statements above are claims about code, so they are pinned against the code rather than
