@@ -7,7 +7,36 @@ import {
   assertStatement,
   parseDoc,
   splitFrontmatter,
+  statementsOf,
 } from './md-contract.mjs'
+
+// A vocabulary lock is an arms race the lexicon loses by construction: the attacker picks the
+// register after the words are picked. Round 3 widened `subject:` to catch four demonstrated
+// permissive-register mutants; a fifth register — "Where your run has no separate base, pass the
+// run branch instead." appended to the `--base` gloss — stayed green, because nothing short of
+// covering every possible register closes a lexicon hole. `assertBlockStatementCount` closes the
+// class instead of the instance: it pins how many statements the bound block (the one carrying
+// the claim and its `then:` consequence) contains, so ANY appended sentence — in any register —
+// changes that count and fails, whatever words it uses. `subject:` stays alongside it for a
+// different threat: a sentence inserted ELSEWHERE in the section, in a different block, which a
+// per-block count cannot see (that block's count is unaffected). The two are complementary, not
+// redundant: count guards the bound block, subject guards the rest of the section.
+//
+// This is deliberately tight, not defensive-loose: the block count must be exactly right for
+// today's tree, not "at least N". A bullet whose prose legitimately grows over time would need
+// this number bumped alongside the edit — that is the review step Task 3's uniqueness rule and
+// the module's own `allow` pattern already ask for elsewhere, not a new cost. The four Hard-rules
+// bullets and the reviewer bullet below are closed, enumerated rules, not prose meant to
+// accumulate; the count is pinned at the size they are today.
+function assertBlockStatementCount(hit, expected, message) {
+  const count = statementsOf(hit.block.text).length
+  assert.equal(
+    count,
+    expected,
+    `${message}\n  expected exactly ${expected} statement(s) in the bound block, found ${count}: ` +
+      JSON.stringify(statementsOf(hit.block.text)),
+  )
+}
 
 const dir = new URL('../agents/', import.meta.url)
 
@@ -366,14 +395,28 @@ test('the implementer names the locate and complete commands it must run, with -
 // "run branch" and "base branch" are used throughout Hard rules for the unrelated fork-point-diff
 // bullet (`git merge-base <run branch> ...`) and the branch-convention bullets, so a section-wide
 // vocabulary lock on those two phrases would flag statements this claim has nothing to do with.
+//
+// A THIRD register defeated even the widened lexicons elsewhere in this file: appending "Where
+// your run has no separate base, pass the run branch instead." after the bound consequence here
+// shipped an implementer definition instructing a teammate to pass the ONE value `complete
+// --base` refuses outright — measured, 28/28 green, because this test has no `subject:` to widen
+// (by design, for the reason above) and a lexicon is an arms race lost by construction: the
+// attacker picks the register after the words are picked. `assertBlockStatementCount` pins how
+// many statements the bound paragraph contains instead of which words appear in them, so ANY
+// appended sentence changes the count and fails, whatever register it uses.
 test("the implementer's --base gloss names the base branch, not the run branch", async () => {
   const { doc } = await agent('tm-implementer.md')
   const hardRules = doc.section('Hard rules')
-  assertClaim(hardRules, {
+  const hit = assertClaim(hardRules, {
     label: 'implementer --base gloss',
     claim: /^--base must name the same branch your worktree checked out from, or the gate anchors its plan lookup where the plan does not exist\.$/,
     then: /^That is the base branch, not the run branch: complete refuses outright when --base names the run branch itself\.$/,
   })
+  assertBlockStatementCount(
+    hit,
+    2,
+    'the --base gloss paragraph must hold exactly its claim and its consequence, and nothing appended after either',
+  )
 })
 
 // Bare `assertStatement` matches a phrase ANYWHERE inside a statement, so an inverted rewrite
@@ -404,10 +447,16 @@ test("the implementer's --base gloss names the base branch, not the run branch",
 // and `giving up` extend the lexicon into that permissive register without colliding with any
 // other statement in Hard rules — verified by listing every statement in this section and
 // confirming none of the other 40-odd already contain those words.
+// The lexicon above is widened, not closed — it dies against the four registers measured so far
+// and no others. `assertBlockStatementCount` closes the class: this bullet's block holds exactly
+// the claim, its consequence, and the two `allow`-listed sentences, four statements total, so a
+// FIFTH appended sentence fails on its count regardless of which words it uses. `subject:` still
+// earns its keep for a sentence inserted in a DIFFERENT block of Hard rules — this count has no
+// reach there, since it only measures the one block `hit.block` names.
 test('the implementer is told its shell cannot prompt and what to do instead', async () => {
   const { doc } = await agent('tm-implementer.md')
   const hardRules = doc.section('Hard rules')
-  assertClaim(hardRules, {
+  const hit = assertClaim(hardRules, {
     label: 'implementer environment walls',
     claim: /^Your shell cannot prompt — no terminal is attached and no human is watching\.$/,
     then: /^Do not run sudo, pkexec or doas; do not start an interactive login, a device-code flow or any 2FA prompt; do not run a command that pages, opens an editor, or waits on a confirmation\.$/,
@@ -418,6 +467,11 @@ test('the implementer is told its shell cannot prompt and what to do instead', a
       /^If the task genuinely needs one, return status: "blocked" naming the exact command and what it asked for\.$/,
     ],
   })
+  assertBlockStatementCount(
+    hit,
+    4,
+    'the environment bullet must hold exactly its claim, consequence, and its two allow-listed sentences',
+  )
 })
 
 // Same class of gap as above, closed the same way: "For a short comment this is more than is
@@ -426,10 +480,12 @@ test('the implementer is told its shell cannot prompt and what to do instead', a
 // `then:` nor the old `subject:` reached. `careful read`, `more than is needed`, `short comment`
 // and `surrounding code` are specific enough to this permissive phrasing that none collides with
 // the rest of Hard rules.
+// Same instrument as the environment bullet above: the count closes the class of appended
+// sentence, in any register, that a lexicon can only ever chase one instance of at a time.
 test('the implementer must back every behavioural claim with a command it ran', async () => {
   const { doc } = await agent('tm-implementer.md')
   const hardRules = doc.section('Hard rules')
-  assertClaim(hardRules, {
+  const hit = assertClaim(hardRules, {
     label: 'implementer claim discipline',
     claim: /^Every sentence you write that says what the code does — in a comment, a skill, a test comment, or your summary — must be backed by a command you ran in this worktree\.$/,
     then: /^Not by reading, and not by inference from a neighbouring comment\.$/,
@@ -440,15 +496,22 @@ test('the implementer must back every behavioural claim with a command it ran', 
       /^When you are correcting an existing claim, reproduce the old one failing first: that is how you learn which half of it was wrong, and a correction written without it is how the same sentence comes back wrong a third time\.$/,
     ],
   })
+  assertBlockStatementCount(
+    hit,
+    4,
+    'the claims bullet must hold exactly its claim, consequence, and its two allow-listed sentences',
+  )
 })
 
 // Same gap, same fix: "Where a path is obviously dead weight, removing it is a courtesy to the
 // next teammate." reads as an exception carved out for exactly the case the bullet forbids.
 // `dead weight`, `courtesy` and `next teammate` do not appear anywhere else in Hard rules.
+// Same instrument again: three statements exactly — claim, consequence, one allow-listed
+// sentence — so a fourth, whatever it says, fails on count rather than needing a fourth pattern.
 test('the implementer may not act on inferred staleness inside its own file set', async () => {
   const { doc } = await agent('tm-implementer.md')
   const hardRules = doc.section('Hard rules')
-  assertClaim(hardRules, {
+  const hit = assertClaim(hardRules, {
     label: 'implementer scope discipline',
     claim: /^Do not delete, archive, rename or empty anything on the strength of what you inferred about it\.$/,
     then: /^Being inside your declared file set is permission to edit those paths for this task, not a judgement that what they hold is stale\.$/,
@@ -458,6 +521,11 @@ test('the implementer may not act on inferred staleness inside its own file set'
       /^Where the plan and the tree disagree, return status: "blocked" quoting both rather than reconciling them by guessing\.$/,
     ],
   })
+  assertBlockStatementCount(
+    hit,
+    3,
+    'the scope bullet must hold exactly its claim, consequence, and its one allow-listed sentence',
+  )
 })
 
 // The same substring hole as the implementer bullets, and the same fix: a bare `assertStatement`
@@ -473,10 +541,12 @@ test('the implementer may not act on inferred staleness inside its own file set'
 // usually enough on its own." reads as licence to skip the reproduction this rule requires,
 // added after the bound consequence where `then:` and the old `subject:` had no reach. `careful
 // read`, `small diff` and `on its own` do not appear anywhere else in this section.
+// Same instrument once more, so the reviewer bullet is held to the same standard as the
+// implementer bullets: three statements exactly, and a fourth of any register fails on count.
 test('the reviewer reports a finding it could not reproduce as unreproduced', async () => {
   const { doc } = await agent('tm-reviewer.md')
   const rules = doc.section('Rules')
-  assertClaim(rules, {
+  const hit = assertClaim(rules, {
     label: 'reviewer reproduction discipline',
     claim: /^A finding is a reproduction, not a reading\.$/,
     then: /^Before you report one, run the thing that makes it fail and paste what you ran and what came back into failureScenario, the field the return shape below already carries for it — this schema names no separate reproduction key\.$/,
@@ -486,4 +556,9 @@ test('the reviewer reports a finding it could not reproduce as unreproduced', as
       /^A finding you could not reproduce is reported as unreproduced, with what you tried — it is still worth reporting, and mislabelling it as reproduced is what turns one review round into three\.$/,
     ],
   })
+  assertBlockStatementCount(
+    hit,
+    3,
+    'the reviewer reproduction bullet must hold exactly its claim, consequence, and its one allow-listed sentence',
+  )
 })
