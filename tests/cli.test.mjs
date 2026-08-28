@@ -829,6 +829,39 @@ test('collect-reviews refuses to write its results file outside the run director
   })
 })
 
+// --- what these tests were measured against ---------------------------------------------------
+//
+// Written down here because a mutation count asserted in a report is not something a reader can
+// check, and this one was: "eight mutants, each killed by exactly the intended test" appeared in a
+// hand-off and nowhere in the tree. Each row below is a source substitution in `scripts/cli.mjs`
+// and the test names that go red under it. Re-run one by making the substitution and passing the
+// names to `--test-name-pattern`; restore from a copy taken BEFORE the first substitution, never
+// from the working file, or a runner killed mid-mutation backs up its own mutant.
+//
+// Measured against this tree:
+//
+//   emptyResultsOpenFlags drops `| c.O_NONBLOCK` (and its guard)
+//     -> 'a fifo planted at the results path …'          (killed at 20s: it parks in open(2))
+//        'emptyResultsOpenFlags refuses a flag word …'
+//   `readFindingsFile(…)` -> `readFile(…, 'utf8')` in the read loop
+//     -> 'a fifo planted at a findings path …'           (same, and with no chmod precondition)
+//   the accumulating walk -> a FIXED list of four components
+//     -> 'collect-reviews refuses a plant at .teammates however deep …'
+//        'plantedReviewsLink finds a plant at any depth …'
+//        and NOT the two nested fixtures above, which both plant four components from the end and
+//        therefore share a threshold rather than bracketing one — the reason those two are not the
+//        pin they were once claimed to be
+//   `info.isFile() && info.nlink === 1` -> `info.isFile()`
+//     -> 'the empty-instead-of-remove fallback does not destroy an inode with another name'
+//
+// Earlier rounds measured the same way, against the code as it stood then: the vet moved below the
+// clear (kills 'refuses a symlinked reviews directory before it removes anything'), the phase vet
+// moved below the unlink (kills 'refuses to write its results file outside the run directory'),
+// temp-then-rename replaced by a plain `writeFile` (kills 'does not follow a symlink planted
+// between the clear and the write', and NOT the two stationary-plant tests, which the clear alone
+// satisfies), the up-front clear deleted, the truncate fallback deleted, O_NOFOLLOW dropped, the
+// empty-lens refusal disabled, and the walk reduced to `[dir]` or to `[runPath, dir]`.
+
 // --- the entry already sitting at the results path --------------------------------------------
 //
 // The phase guard above vets the path this command BUILDS. These vet what it finds there, which
