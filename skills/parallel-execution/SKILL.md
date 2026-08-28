@@ -172,30 +172,30 @@ the way a leaked preview's own links are unlinked, because that sweep runs only 
 
     node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" prune-run --run <runId> --plan <planPath> --root <project root> --yes
 
-This is the only supported way to clean up after a phase. It recomputes each phase's gate
-rather than reading `status.gates`, removes only this run's worktrees whose phase passes,
-sweeps every leaked merge-preview worktree under the system temp directory regardless of which
-run left it — even one holding an operator's own uncommitted work — deletes each removed
-worktree's branch where `git merge-base --is-ancestor` proves it is already in the run branch
-— the run branch it proves against is the ref HEAD symbolically points at, so no tag or
-same-named branch can redirect that proof — and names every worktree it leaves alone with the
-reason. Do not remove a worktree or delete a teammate branch by hand: `git worktree remove`
-refuses one holding uncommitted work only until `--force` is added, and nothing then stops `--force` from reaching
-a worktree whose phase has not passed yet; `git branch -D` does not measure "merged" at all —
-the one thing it refuses is a branch a registered worktree still has checked out, which is why
-the worktree has to go first, and otherwise it force-deletes regardless of ancestry — and
-`-d`, the flag that does measure, measures against the branch's own upstream or HEAD, never
-against the run branch. The one exception is a task going to a fresh implementer before its
-phase has passed: this command cannot reach that worktree yet, so it still has to be removed
-by hand with `--force` — authorised there because abandoning that teammate's unfinished
-worktree for a fresh dispatch is the deliberate point, and a mid-stall worktree is exactly the
-one most likely to hold modified or untracked files a bare remove refuses over — and that
-authorisation covers the teammate's unfinished work only: `--force` still follows a
-junction out of the worktree the same way, and nothing unlinks it first there either, so
-check the worktree for one first with `dir /AL /S` and remove the link itself with `rd <link>`
-— both from cmd.exe, not PowerShell, where `rd` and `rmdir` are aliases for `Remove-Item`;
-never a recursive delete, which follows it — before forcing — see the matching exception in
-"Worktree mechanics" below.
+This is the only supported way to clean up after a phase. It recomputes each phase's gate rather
+than reading `status.gates`, removes only this run's worktrees whose phase passes, sweeps every
+leaked merge-preview worktree under the system temp directory regardless of which run left it —
+even one holding an operator's own uncommitted work — deletes each removed worktree's branch
+where `git merge-base --is-ancestor` proves it is already in the run branch — the run branch it
+proves against is the ref HEAD symbolically points at, so no tag or same-named branch can
+redirect that proof — and names every worktree it leaves alone with the reason. Do not remove a
+worktree or delete a teammate branch by hand: `git worktree remove` refuses one holding
+uncommitted work only until `--force` is added, and nothing then stops `--force` from reaching a
+worktree whose phase has not passed yet; `git branch -D` does not measure "merged" at all — the
+one thing it refuses is a branch a registered worktree still has checked out, which is why the
+worktree has to go first, and otherwise it force-deletes regardless of ancestry — and `-d`, the
+flag that does measure, measures against the branch's own upstream or HEAD, never against the
+run branch. The one exception is a task going to a fresh implementer before its phase has
+passed: this command cannot reach that worktree yet, so it still has to be removed by hand with
+`--force` — authorised there because abandoning that teammate's unfinished worktree for a fresh
+dispatch is the deliberate point, and a mid-stall worktree is exactly the one most likely to
+hold modified or untracked files a bare remove refuses over — and that authorisation covers the
+teammate's unfinished work only: `--force` still follows a junction out of the worktree the same
+way, and nothing unlinks it first there either, so check the worktree for one first with
+`dir /AL /S` and remove the link itself with `rd <link>` — both from cmd.exe, not PowerShell,
+where
+`rd` and `rmdir` are aliases for `Remove-Item`; never a recursive delete, which follows it —
+before forcing — see the matching exception in "Worktree mechanics" below.
 
 Without `--yes` it removes nothing and prints the prunable and leaked-preview lists it would
 act on if nothing changes before the `--yes` run — both runs recompute the gate from scratch,
