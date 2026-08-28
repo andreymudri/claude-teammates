@@ -180,8 +180,7 @@ worktree's branch where `git merge-base --is-ancestor` proves it is already in t
 — the run branch it proves against is the ref HEAD symbolically points at, so no tag or
 same-named branch can redirect that proof — and names every worktree it leaves alone with the
 reason. Do not remove a worktree or delete a teammate branch by hand: `git worktree remove`
-refuses one holding
-uncommitted work only until `--force` is added, and nothing then stops `--force` from reaching
+refuses one holding uncommitted work only until `--force` is added, and nothing then stops `--force` from reaching
 a worktree whose phase has not passed yet; `git branch -D` does not measure "merged" at all —
 the one thing it refuses is a branch a registered worktree still has checked out, which is why
 the worktree has to go first, and otherwise it force-deletes regardless of ancestry — and
@@ -201,8 +200,9 @@ never a recursive delete, which follows it — before forcing — see the matchi
 Without `--yes` it removes nothing and prints the prunable and leaked-preview lists it would
 act on if nothing changes before the `--yes` run — both runs recompute the gate from scratch,
 so a phase that fails a check during the dry run and passes during the `--yes` run has
-worktrees force-removed that never appeared in the list the operator approved; the per-branch "left `<branch>` in place: not an ancestor" line is decided only while `--yes` runs
-the removal, so a dry run does not yet show which merged worktree's branch would survive.
+worktrees force-removed that never appeared in the list the operator approved; the per-branch
+"left `<branch>` in place: not an ancestor" line is decided only while `--yes` runs the
+removal, so a dry run does not yet show which merged worktree's branch would survive.
 
 ## Choosing a model per dispatch
 
@@ -419,5 +419,5 @@ teammate automatically; a teammate never shares a worktree with another.
   `rd <link>` — both from cmd.exe, not PowerShell, where `rd` and `rmdir` are aliases for
   `Remove-Item`; never a recursive delete, which follows it — before forcing — because a
   returned teammate's worktree keeps its branch checked out and the new dispatch would
-  otherwise fail with "already used by worktree"; then restate the findings, the branch and the file set in its dispatch,
-  because none of that survives the handover.
+  otherwise fail with "already used by worktree"; then restate the findings, the branch and
+  the file set in its dispatch, because none of that survives the handover.
