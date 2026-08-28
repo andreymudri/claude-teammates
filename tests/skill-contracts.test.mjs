@@ -219,12 +219,13 @@ test('phase-gate documents the results file collect-reviews writes and the redir
   // a continuation line, failed `must show --phase <name>`, and asserted the opposite of what the
   // document said. Joining continuations first makes the reflow invisible and leaves the real
   // guard intact.
-  let checked = 0
+  const documented = new Set()
   for (const block of section.code) {
     const joined = block.code.replace(/\\\s*\r?\n\s*/g, ' ')
     for (const line of joined.split(/\r?\n/)) {
-      if (!/cli\.mjs["']?\s+(review-dispatch|collect-reviews)\b/.test(line)) continue
-      checked++
+      const hit = /cli\.mjs["']?\s+(review-dispatch|collect-reviews)\b/.exec(line)
+      if (!hit) continue
+      documented.add(hit[1])
       assert.ok(
         !line.includes('[--phase'),
         `phase-gate shows --phase as optional on a command whose omission the CLI refuses: ${line.trim()}`,
@@ -235,10 +236,20 @@ test('phase-gate documents the results file collect-reviews writes and the redir
       )
     }
   }
-  // `>= 2`, not `=== 2`: the guard is that every invocation shown carries the flag unbracketed,
-  // and a THIRD correct invocation is not a defect. An equality here rejected it with
-  // `must invoke both commands, found 3` — a message naming a shortage as the cause of a surplus.
-  assert.ok(checked >= 2, `precondition: phase-gate must invoke both commands, found ${checked}`)
+  // WHICH commands, not HOW MANY invocations, because the message says "both commands" and a
+  // count cannot check that. Measured on this tree, both directions green under a count: replacing
+  // the `collect-reviews` invocation with a second `review-dispatch`, and replacing the
+  // `review-dispatch` one with a second `collect-reviews`. Each keeps the tally at two while the
+  // document stops naming a command it must name, and nothing else in the suite requires
+  // phase-gate to document `review-dispatch` at all. A count also cannot say whether a THIRD
+  // correct invocation is a defect; a set has no opinion about it, which is the right one.
+  for (const name of ['review-dispatch', 'collect-reviews']) {
+    assert.ok(
+      documented.has(name),
+      `precondition: phase-gate must document the ${name} invocation, and names only `
+        + `${[...documented].join(', ') || 'none'}`,
+    )
+  }
 
   assertStatement(
     section,
@@ -1123,10 +1134,10 @@ test('parallel-execution makes prune-run the only supported cleanup', async () =
     label: 'cleanup command',
     claim: /^This is the only supported way to clean up after a phase\.$/i,
     // Anchored end to end, not a prefix: `assertClaim` exempts the `then` consequence from the
-    // subject inventory below (tests/md-contract.mjs:441-459 compares against `consequence`
-    // by identity, so the allow list can never see it), so an unanchored prefix match would
-    // leave the sentence's TAIL — including the ancestor-proof bound — pinned nowhere. This
-    // regex is the one and only place that bound is checked.
+    // subject inventory below (`consequence` is assigned at tests/md-contract.mjs:452 and the
+    // stray scan compares against it by identity at :472, so the allow list can never see it), so
+    // an unanchored prefix match would leave the sentence's TAIL — including the ancestor-proof
+    // bound — pinned nowhere. This regex is the one and only place that bound is checked.
     // Reviewed: the ancestor-proof bound, AS IT NOW STANDS. The proof does not resolve the run
     // branch by name: `derive` takes `runBranchRef` straight off `head.ref`
     // (scripts/cli.mjs:2280-2290), which is `git symbolic-ref --quiet HEAD`
@@ -1139,11 +1150,14 @@ test('parallel-execution makes prune-run the only supported cleanup', async () =
     // only two comments describing what was replaced — and `tests/git.test.mjs:158-161` pins
     // `currentBranchRef` to `symbolic-ref`.
     //
-    // This comment previously asserted the OPPOSITE, and outlived the sentence it justifies by
-    // one commit: the prose was corrected in ed12b30 and these lines were left from a800266,
-    // still describing an operator pre-flight that § 5 no longer carries. Both of its citations
-    // had gone stale too — `scripts/git.mjs:147` is the name-slice inside `classifyHeadRef`, and
-    // `scripts/cli.mjs:3092-3117` is the body of the `brief` command. Left standing it would have
+    // This comment previously asserted the OPPOSITE, and outlived the sentence it justifies by a
+    // long way: the prose was corrected in ed12b30 while these lines were left over from a800266,
+    // fifteen commits earlier counting first-parent (91 counting every ancestor), still describing
+    // an operator pre-flight that § 5 no longer carries. Both of its citations had gone stale too
+    // — `scripts/git.mjs:147` is the name-slice inside `classifyHeadRef`, and
+    // `scripts/cli.mjs:3092-3117` spans a command boundary rather than naming any proof: `brief`
+    // ends at :3103 and `workflow` opens at :3105, so half those lines belong to a command with no
+    // bearing on ancestry at all. Left standing it would have
     // argued a maintainer into RESTORING the deleted warning, which
     // `finishing-a-development-branch/SKILL.md:99-104` already contradicts in the same words the
     // regex below pins.
@@ -1166,27 +1180,27 @@ test('parallel-execution makes prune-run the only supported cleanup', async () =
       // Reviewed: the irreversibility and junction warning that introduces the command block.
       // Names the general prunable-worktree case, not only a leaked preview — a phase can pass on
       // committed work while a teammate's worktree separately holds uncommitted edits, and
-      // `git worktree remove --force` (scripts/git.mjs:464) takes both the same way — and the
+      // `git worktree remove --force` (scripts/git.mjs:673-678) takes both the same way — and the
       // junction hazard a bootstrap step in Worktree mechanics can leave behind, verified on
-      // Windows at scripts/cli.mjs:1322-1326.
+      // Windows at scripts/cli.mjs:1337-1345.
       CLEANUP_IRREVERSIBLE,
       // Reviewed: the corrected git facts. `git worktree remove` (no `--force`) refuses on
       // uncommitted work, so the hazard is `--force` reaching an unpassed worktree, not the bare
       // command; `git branch -D` refuses only a branch a registered worktree still holds
-      // (scripts/git.mjs:474-476, scripts/cli.mjs:3049-3053) — the ordering constraint this
-      // command relies on — and otherwise force-deletes without measuring ancestry; `-d` measures
-      // upstream-or-HEAD, never the run branch.
+      // (scripts/git.mjs:696-702) — the ordering constraint this command relies on — and
+      // otherwise force-deletes without measuring ancestry; `-d` measures upstream-or-HEAD, never
+      // the run branch.
       /^Do not remove a worktree or delete a teammate branch by hand: git worktree remove refuses one holding uncommitted work only until --force is added, and nothing then stops --force from reaching a worktree whose phase has not passed yet; git branch -D does not measure "merged" at all — the one thing it refuses is a branch a registered worktree still has checked out, which is why the worktree has to go first, and otherwise it force-deletes regardless of ancestry — and -d, the flag that does measure, measures against the branch's own upstream or HEAD, never against the run branch\.$/i,
       // Reviewed: the fresh-implementer exception — named and justified in the same breath rather
       // than left to contradict the prohibition above it, `--force` named and authorised for this
       // one case (a mid-stall worktree is exactly the one most likely to refuse a bare remove),
       // and its pointer down to the matching exception in Worktree mechanics.
       CLEANUP_EXCEPTION,
-      // Reviewed: the dry-run scoping. `renderPrunePlan` runs before the `--yes` check and shows
-      // the prunable and leaked-preview lists either way (scripts/cli.mjs:3031-3037), but the
-      // per-branch ancestor decision itself is at scripts/cli.mjs:3141, printed at :3149, both
-      // inside the removal loop `--yes` reaches — so this states what a dry run does NOT yet show
-      // rather than repeating the removal claim above.
+      // Reviewed: the dry-run scoping. `renderPrunePlan` (scripts/cli.mjs:3706) runs above the
+      // `--yes` check (:3711) and shows the prunable and leaked-preview lists either way, but the
+      // per-branch ancestor decision itself is at :3847, printed at :3853 and :3855, all three
+      // inside the removal loop only `--yes` reaches — so this states what a dry run does NOT yet
+      // show rather than repeating the removal claim above.
       CLEANUP_DRY_RUN,
     ],
   })
