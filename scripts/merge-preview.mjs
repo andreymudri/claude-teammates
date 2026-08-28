@@ -194,9 +194,10 @@ export async function withMergePreview({
       // Guarded on `markerHeld`, not unconditional: an EEXIST from `writeOwnerMarker` means
       // this process never wrote the entry at `marker`, so releasing it anyway would unlink
       // whatever is actually there — including a marker another local process is holding.
-      // scripts/cli.mjs:1488 states the same rule for the sibling claim path: EEXIST is
-      // tolerated and never unlinked, so a holder that writer did not create is never released
-      // by it.
+      // Named by section rather than by line number, because that file has its own fix rounds
+      // in flight: see the claim-vetting comment above `livePreviewPaths` in scripts/cli.mjs,
+      // which states the same rule for the sibling claim path — "EEXIST is tolerated and never
+      // unlinked, so a claim that writer did not create is never released by it."
       if (markerHeld) await rm(marker, { force: true }).catch(() => {})
     }
   }

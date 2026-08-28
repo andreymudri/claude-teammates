@@ -621,12 +621,14 @@ test('withMergePreview writes the owner marker naming its own pid', async () => 
 // node:fs/promises or racing the real mkdtemp.
 //
 // The release in the `finally` is guarded on `markerHeld`, so an EEXIST from `writeOwnerMarker`
-// must leave the planted entry untouched rather than unlinking it — the same rule
-// scripts/cli.mjs:1488 states for the sibling claim path: "EEXIST is tolerated and never
-// unlinked, so a claim that writer did not create is never released by it." That is why this
-// plant needs no foreign uid, no user namespace and no sticky bit to be meaningful: the
-// invariant now belongs to the `markerHeld` guard rather than to the filesystem, so an ordinary
-// same-uid `writeFile` is enough to make it fail if the guard regresses.
+// must leave the planted entry untouched rather than unlinking it — the same rule the
+// claim-vetting comment above `livePreviewPaths` in scripts/cli.mjs states for the sibling claim
+// path (cited by section, not by line number, because that file has its own fix rounds in
+// flight): "EEXIST is tolerated and never unlinked, so a claim that writer did not create is
+// never released by it." That is why this plant needs no foreign uid, no user namespace and no
+// sticky bit to be meaningful: the invariant now belongs to the `markerHeld` guard rather than to
+// the filesystem, so an ordinary same-uid `writeFile` is enough to make it fail if the guard
+// regresses.
 test('a marker write that fails still removes the preview directory the seam handed it, and never unlinks the marker it did not write', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'tm-preview-'))
   const marker = previewOwnerMarkerPath(dir)
