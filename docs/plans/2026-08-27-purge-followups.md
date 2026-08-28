@@ -527,8 +527,18 @@ discipline before it starts rather than after three review rounds.
 - Test: `tests/git.test.mjs`
 - Modify: `scripts/cli.mjs`
 - Test: `tests/cli.test.mjs`
+- Modify: `scripts/doctor.mjs`
+- Test: `tests/doctor.test.mjs`
 
 **Depends:** T6
+
+`scripts/doctor.mjs` and its test were added to this file set on 2026-08-27, after review round 1
+of phase 2. `doctor.mjs:34-36` compares `currentBranch()` against the recorded run branch to raise
+"main worktree is on X, not the run branch" — the one alarm that reports the state this task's
+hazard depends on. While `currentBranch()` mints the sentinel string `HEAD` for a detached HEAD,
+both sides of that comparison are `HEAD` under the plant and the alarm is silenced: a reviewer
+executed it and `doctor` printed `no problems found` with the main worktree detached onto an
+attacker's commit. The fix therefore cannot be contained to `cli.mjs`.
 
 This task absorbed what was Task 1. The two are one unit of work and could not be split: the
 change to `scripts/git.mjs` turns `tests/cli.test.mjs:3476` red by construction, and only a tree
