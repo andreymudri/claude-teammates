@@ -795,6 +795,30 @@ test('collect-reviews prints the JSON first, and the path it wrote after the clo
   })
 })
 
+// The results file is named for the phase, so the phase decides where it lands. The per-lens
+// `reviewFileName` call looks like it has already vetted that, and it has not: a check may declare
+// its own empty `lens` array — `checksForPhase` keeps an empty one rather than falling back to the
+// manifest's list, and the manifest validator only ever looks at the top-level `lens` key — so the
+// loop runs zero times and the phase reaches the write unexamined. With the guard forced to false
+// this fixture wrote `.teammates/pwned.json`, two directories above the reviews directory.
+test('collect-reviews refuses to write its results file outside the run directory', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await withStampedPhase(root, planPath, io, g)
+    const phase = 'a/../../../pwned'
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      lens: ['correctness'],
+      // The empty per-check list is the whole point of the fixture: with the manifest's own list
+      // in force the loop refuses this phase first and the guard under test is never reached.
+      phases: { [phase]: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: [] }] } },
+    }), 'utf8')
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', phase, '--root', root], io)
+    assert.equal(code, 4, lines.join('\n'))
+    assert.match(lines.join('\n'), /no path separators/)
+    await assert.rejects(stat(path.join(root, '.teammates', 'pwned.json')), { code: 'ENOENT' })
+  })
+})
+
 // `tasksOfPhase` reads a non-integer phase name as EVERY task branch of the run, so the `default`
 // this flag used to fall back to silently widens a multi-phase run's review to branches that were
 // integrated rounds ago. 2 rather than 4: this is a rejected invocation, not a failure to verify.
@@ -839,6 +863,30 @@ test('collect-reviews refuses a valueless --phase the same way it refuses an omi
     const code = await runCli(['collect-reviews', '--run', 'r1', '--root', root, '--phase'], io)
     assert.equal(code, 2, lines.join('\n'))
     assert.match(lines.join('\n'), /1, 2/)
+  })
+})
+
+// The refusal names phase numbers read out of `plan.json`, which is an agent-written file, and it
+// does not wrap them. What makes that safe is the `Number.isInteger` filter: a phase that is not
+// an integer is not selectable by `--phase` either, since `tasksOfPhase` compares against one. So
+// the filter is a sanitiser as well as a correctness rule, and it is pinned here — without it the
+// forged string below is printed straight into the sentence.
+test('the ambiguous-phase refusal names integers only, whatever plan.json carries', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await withStampedPhase(root, planPath, io, g)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(REVIEW_MANIFEST), 'utf8')
+    const statePath = path.join(root, '.teammates', 'r1', 'plan.json')
+    const plan = JSON.parse(await readFile(statePath, 'utf8'))
+    // Two integer phases are kept so the refusal still fires; the forged one is a third task.
+    assert.deepEqual([...new Set(plan.tasks.map((t) => t.phase))], [1, 2])
+    plan.tasks.push({ ...plan.tasks[0], id: 'T3', phase: CLI_ESC_FORGERY })
+    await writeFile(statePath, JSON.stringify(plan), 'utf8')
+    lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--root', root], io)
+    assert.equal(code, 2, lines.join('\n'))
+    const out = lines.join('\n')
+    assert.match(out, /2 phases \(1, 2\)/)
+    assert.ok(!out.includes(CLI_ESC), 'no escape byte may reach stdout')
   })
 })
 
@@ -1080,6 +1128,10 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 // is named below with the reason it cannot be. Values this CLI was handed on its own argv are a
 // different class and are not enumerated as a class; several are wrapped anyway, where one sits
 // in a sentence beside a value that is in the class, and those wrappers are driven by rows.
+// `collect-reviews`' unsafe-phase refusal wraps such a value with nothing in the class beside it:
+// `--phase` is argv, so no agent-written file reaches that sentence and no row could forge it.
+// Named here because the grep below finds the line, and a reader counting its results would
+// otherwise have to re-derive why it is not one of the sites this table vouches for.
 //
 // Where the census lines outside `cli.mjs` are driven. `reviews.mjs` holds six: the two
 // `reviewFileName` refusals (a lens, and a phase, with a path separator), the three `reviewStale`
@@ -1177,7 +1229,12 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 //    `tests/config.test.mjs`, not here.
 // 4. Computed by this code rather than read from anything: the phase numbers in
 //    `--enforcement-only`'s refusal (integers `assignPhases` produced), `tierSource`, and the
-//    task states, which are a closed set.
+//    task states, which are a closed set. `review-dispatch`'s and `collect-reviews`' `needs
+//    --phase` refusal names phase numbers out of `plan.json` too, and that one is filtered rather
+//    than assumed: `Number.isInteger` drops every phase that is not one before the sentence is
+//    built, so no string a hand-edited `plan.json` chose can reach it. Pinned by 'the
+//    ambiguous-phase refusal names integers only, whatever plan.json carries' above, which forges
+//    a phase and asserts on the bytes — the one entry in this group with a row of its own.
 // 5. The one stderr site, which prints a `GitError` message carrying no agent-written value.
 // 6. Constrained to `T<digits>` before the print by the plan grammar — `TASK_HEADING` matches
 //    the number with `(\d+)` and `plan-parser.mjs` builds the id as `T${n}`: `doctor`'s rendered

@@ -203,7 +203,10 @@ export const REQUIRED = {
   doctor: ['run', 'plan'],
   liveness: ['run', 'plan'],
   // `--phase` is the manifest phase key, not a plan phase number, so it stays out of
-  // NUMERIC_PHASE_COMMANDS and defaults to `default` exactly as `gate`'s does.
+  // NUMERIC_PHASE_COMMANDS and defaults to `default` exactly as `gate`'s does. Not required here
+  // even so, because whether that default is ambiguous depends on the RUN rather than on the argv
+  // this table is checked against: `ambiguousPhaseRefusal` refuses the omission on a plan with
+  // more than one phase, and lets it stand on a plan with one.
   'collect-reviews': ['run'],
   'review-dispatch': ['run'],
   // No required flags: it reads the manifest and the working tree, and belongs to no run.
@@ -2793,9 +2796,9 @@ export async function runCli(argv, io = { out: console.log }) {
       // then gets "none" rather than a name. The value it used to record in that state was the
       // string `HEAD`, which names a ref anyone can create — so the record asserted a branch that
       // a third party, not the teammate, controlled.
-      // The KIND again, for the label only — what is STORED is unchanged, and is null for both
-      // rejected states. Labelling by a null test called a worktree whose HEAD pointed at
-      // `refs/mine/wb` "detached" while `git status` there said `## refs/mine/wb`.
+      // The KIND again, for the label only — what is STORED is unchanged. Labelling by a null
+      // test called a worktree whose HEAD pointed at `refs/mine/wb` "detached" while `git status`
+      // there said `## refs/mine/wb`.
       const head = typeof flags.branch === 'string' ? null : await git.headBranch()
       const branch = typeof flags.branch === 'string' ? flags.branch : head.name
       await writeLocation(mainRoot, runId, flags.task, { worktree, branch })
@@ -4442,6 +4445,16 @@ export async function runCli(argv, io = { out: console.log }) {
     // each of its own components — so a phase name that is not a safe filename is refused rather
     // than escaping the directory. Refused with the 4 the `reviewFileName` failure above returns,
     // rather than a second code for the same flag on the same command.
+    //
+    // NOT redundant with that failure, which is the reading the loop above invites: it fires once
+    // PER LENS, and a check may declare its own empty `lens` array. `checksForPhase` keeps an
+    // empty array as it is (only a MISSING one falls back to the manifest's list) and
+    // `ENFORCEMENT_VALIDATORS.lens` validates the top-level key, never a check's own — so with
+    // `"lens": []` on the agent check the loop runs zero times and nothing has looked at the phase
+    // when the write is reached. Measured on this branch, with this guard forced to false and the
+    // manifest declaring a phase key of `a/../../../pwned`: the results file was written to
+    // `.teammates/pwned.json`, two directories above the run's own reviews directory, and the
+    // command printed that path and exited 0.
     //
     // Coerced with `String` first for the same reason `reviewFileName` does it: the value that
     // gets checked has to be the value that gets joined, or the two can differ.
