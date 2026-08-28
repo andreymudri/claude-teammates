@@ -193,15 +193,15 @@ worktree for a fresh dispatch is the deliberate point, and a mid-stall worktree 
 one most likely to hold modified or untracked files a bare remove refuses over — and that
 authorisation covers the teammate's unfinished work only: `--force` still follows a
 junction out of the worktree the same way, and nothing unlinks it first there either, so
-check the worktree for one first (`dir /AL` in the worktree, or `Get-Item <path> |
-Select-Object LinkType`) and remove the link itself with `rmdir <link>` — never a recursive
-delete, which follows it — before forcing — see the matching exception in "Worktree
-mechanics" below.
+check the worktree for one first with `dir /AL /S` and remove the link itself with `rd <link>`
+— both from cmd.exe, not PowerShell, where `rd` and `rmdir` are aliases for `Remove-Item`;
+never a recursive delete, which follows it — before forcing — see the matching exception in
+"Worktree mechanics" below.
 
 Without `--yes` it removes nothing and prints the prunable and leaked-preview lists it would
 act on if nothing changes before the `--yes` run — both runs recompute the gate from scratch,
-so a phase that fails a check in one and passes in the other differs between them; the
-per-branch "left `<branch>` in place: not an ancestor" line is decided only while `--yes` runs
+so a phase that fails a check during the dry run and passes during the `--yes` run has
+worktrees force-removed that never appeared in the list the operator approved; the per-branch "left `<branch>` in place: not an ancestor" line is decided only while `--yes` runs
 the removal, so a dry run does not yet show which merged worktree's branch would survive.
 
 ## Choosing a model per dispatch
@@ -415,9 +415,9 @@ teammate automatically; a teammate never shares a worktree with another.
   point of abandoning it for a fresh implementer — that authorisation covers the teammate's
   unfinished work only, not a junction: `--force` still follows one out of the worktree and
   deletes its target, and nothing unlinks it first the way it does for a leaked preview, so
-  check the worktree for one first (`dir /AL` in the worktree, or `Get-Item <path> |
-  Select-Object LinkType`) and remove the link itself with `rmdir <link>` — never a recursive
-  delete, which follows it — before forcing — because a returned teammate's worktree keeps
-  its branch checked out and the new dispatch would otherwise fail with "already used by
-  worktree"; then restate the findings, the branch and the file set in its dispatch,
+  check the worktree for one first with `dir /AL /S` and remove the link itself with
+  `rd <link>` — both from cmd.exe, not PowerShell, where `rd` and `rmdir` are aliases for
+  `Remove-Item`; never a recursive delete, which follows it — before forcing — because a
+  returned teammate's worktree keeps its branch checked out and the new dispatch would
+  otherwise fail with "already used by worktree"; then restate the findings, the branch and the file set in its dispatch,
   because none of that survives the handover.

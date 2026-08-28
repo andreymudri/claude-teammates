@@ -185,24 +185,35 @@ test('phase-gate documents the two claims results that are not findings', async 
 // capture-and-pass workflow it described no longer reaches a verdict — so the skill has to say so
 // or it teaches a sequence the CLI answers with an exit code.
 test('phase-gate documents the results file collect-reviews writes and the redirect that no longer round-trips', async () => {
-  const { doc, body } = await skill('phase-gate')
+  const { doc } = await skill('phase-gate')
   const section = doc.section('Finish the pending checks')
 
   // A bracketed flag reads as optional, and for these two commands the omission is refused rather
   // than defaulted. Measured on a scratch run whose plan carries two integer phases:
   // `review-dispatch --run r1 --root <root>` exits 2 naming both, where `--phase 1` exits 0.
+  //
+  // Read off PARSED CODE BLOCKS with their continuations joined, never off raw body lines. This
+  // whole file exists because assertions measured in characters of raw markdown break on
+  // meaning-preserving edits (see tests/md-contract.mjs) — and an earlier version of this loop had
+  // exactly that defect: splitting an invocation across a trailing backslash would have left the flag on
+  // a continuation line, failed `must show --phase <name>`, and asserted the opposite of what the
+  // document said. Joining continuations first makes the reflow invisible and leaves the real
+  // guard intact.
   let checked = 0
-  for (const line of body.split(/\r?\n/)) {
-    if (!/cli\.mjs["']?\s+(review-dispatch|collect-reviews)\b/.test(line)) continue
-    checked++
-    assert.ok(
-      !line.includes('[--phase'),
-      `phase-gate shows --phase as optional on a command whose omission the CLI refuses: ${line.trim()}`,
-    )
-    assert.ok(
-      line.includes('--phase <name>'),
-      `phase-gate must show --phase <name> on this invocation: ${line.trim()}`,
-    )
+  for (const block of section.code) {
+    const joined = block.code.replace(/\\\s*\r?\n\s*/g, ' ')
+    for (const line of joined.split(/\r?\n/)) {
+      if (!/cli\.mjs["']?\s+(review-dispatch|collect-reviews)\b/.test(line)) continue
+      checked++
+      assert.ok(
+        !line.includes('[--phase'),
+        `phase-gate shows --phase as optional on a command whose omission the CLI refuses: ${line.trim()}`,
+      )
+      assert.ok(
+        line.includes('--phase <name>'),
+        `phase-gate must show --phase <name> on this invocation: ${line.trim()}`,
+      )
+    }
   }
   assert.equal(checked, 2, `precondition: phase-gate must invoke both commands, found ${checked}`)
 
@@ -256,10 +267,35 @@ test('phase-gate documents the results file collect-reviews writes and the redir
     /^It exits 4 and prints nothing usable while any lens has no file, or when a file exists and does not parse — respawn those lenses instead\.$/i,
     'the two conditions this sentence names are still true, so it must be added to rather than rewritten',
   )
+  // The clear is upstream of every refusal that JUDGES the round, and downstream of two that do
+  // not. Both leave the earlier round's file on disk, and both were reproduced on this tree: the
+  // file and its reviews directory owned by another uid under ordinary 755/644 modes, and the
+  // reviews directory replaced by a symlink. In each the file survived byte-identical still saying
+  // `"status": "pass"`, and `gate --results` on it returned verdict PASS at exit 0. Without this
+  // sentence the section promises a fail-closed property the command does not deliver in either.
+  assertStatement(
+    section,
+    /two classes of refusal sit above it and leave the earlier round's file where it was/i,
+    'phase-gate must bound the fail-closed claim, since a surviving results file is read back as this round\'s verdict',
+  )
+  assertStatement(
+    section,
+    /never hand gate --results a path this run did not print/i,
+    'phase-gate must give the operator the rule that survives both residual shapes',
+  )
   assertStatement(
     section,
     /a third condition exits 4 and does print something usable/i,
     'phase-gate must name the write-failure path, where the complete results are on stdout and re-running the reviews would waste them',
+  )
+  // The remedy has to differ from the redirect retracted above it, and for the same cause: the
+  // last line is a PATH line. Measured on this tree — a plain redirect of the write-failure output
+  // makes gate --results exit 2, and the same bytes with the last line dropped exit 0 with verdict
+  // PASS.
+  assertStatement(
+    section,
+    /head -n -1/i,
+    'phase-gate must not hand the write-failure path the same plain redirect it retracts seven lines above',
   )
 })
 
@@ -594,7 +630,7 @@ test('parallel-execution keeps a returned teammate’s worktree until its phase 
       // contradict the rule above it. `--force` is named and authorised for this one case: a
       // mid-stall worktree is exactly the one most likely to hold modified or untracked files a
       // bare remove refuses over, and discarding that work is the deliberate point.
-      /^The one exception is a task going to a fresh implementer instead of a resume, because resuming stalled: prune that task's worktree first, since prune-run only removes a worktree whose phase already recomputes to PASS and a mid-phase stall has none yet to rest that removal on — do it by hand with git worktree remove --force <path>, then git worktree prune; --force is required and authorised here, because a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over, and discarding that work is the deliberate point of abandoning it for a fresh implementer — that authorisation covers the teammate's unfinished work only, not a junction: --force still follows one out of the worktree and deletes its target, and nothing unlinks it first the way it does for a leaked preview, so check the worktree for one first \(dir \/AL in the worktree, or Get-Item <path> \| Select-Object LinkType\) and remove the link itself with rmdir <link> — never a recursive delete, which follows it — before forcing — because a returned teammate's worktree keeps its branch checked out and the new dispatch would otherwise fail with "already used by worktree"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover\.$/i,
+      /^The one exception is a task going to a fresh implementer instead of a resume, because resuming stalled: prune that task's worktree first, since prune-run only removes a worktree whose phase already recomputes to PASS and a mid-phase stall has none yet to rest that removal on — do it by hand with git worktree remove --force <path>, then git worktree prune; --force is required and authorised here, because a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over, and discarding that work is the deliberate point of abandoning it for a fresh implementer — that authorisation covers the teammate's unfinished work only, not a junction: --force still follows one out of the worktree and deletes its target, and nothing unlinks it first the way it does for a leaked preview, so check the worktree for one first with dir \/AL \/S and remove the link itself with rd <link> — both from cmd\.exe, not PowerShell, where rd and rmdir are aliases for Remove-Item; never a recursive delete, which follows it — before forcing — because a returned teammate's worktree keeps its branch checked out and the new dispatch would otherwise fail with "already used by worktree"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover\.$/i,
       // Reviewed: the command bullet states the same rule mechanically — it recomputes each
       // phase's gate and removes only worktrees whose phase passes — so it reinforces the claim
       // rather than qualifying it.
@@ -878,7 +914,7 @@ test('parallel-execution states --enforcement-only refuses a phase with no enfor
       // Reviewed: the fresh-implementer exception's own justification for hand-forcing a
       // worktree removal — an unrelated refusal (git's, on a dirty worktree) used to explain why
       // `--force` is authorised there, not a claim about this flag's exit-2 refusal.
-      /^The one exception is a task going to a fresh implementer instead of a resume, because resuming stalled: prune that task's worktree first, since prune-run only removes a worktree whose phase already recomputes to PASS and a mid-phase stall has none yet to rest that removal on — do it by hand with git worktree remove --force <path>, then git worktree prune; --force is required and authorised here, because a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over, and discarding that work is the deliberate point of abandoning it for a fresh implementer — that authorisation covers the teammate's unfinished work only, not a junction: --force still follows one out of the worktree and deletes its target, and nothing unlinks it first the way it does for a leaked preview, so check the worktree for one first \(dir \/AL in the worktree, or Get-Item <path> \| Select-Object LinkType\) and remove the link itself with rmdir <link> — never a recursive delete, which follows it — before forcing — because a returned teammate's worktree keeps its branch checked out and the new dispatch would otherwise fail with "already used by worktree"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover\.$/i,
+      /^The one exception is a task going to a fresh implementer instead of a resume, because resuming stalled: prune that task's worktree first, since prune-run only removes a worktree whose phase already recomputes to PASS and a mid-phase stall has none yet to rest that removal on — do it by hand with git worktree remove --force <path>, then git worktree prune; --force is required and authorised here, because a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over, and discarding that work is the deliberate point of abandoning it for a fresh implementer — that authorisation covers the teammate's unfinished work only, not a junction: --force still follows one out of the worktree and deletes its target, and nothing unlinks it first the way it does for a leaked preview, so check the worktree for one first with dir \/AL \/S and remove the link itself with rd <link> — both from cmd\.exe, not PowerShell, where rd and rmdir are aliases for Remove-Item; never a recursive delete, which follows it — before forcing — because a returned teammate's worktree keeps its branch checked out and the new dispatch would otherwise fail with "already used by worktree"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover\.$/i,
     ],
   })
 })
@@ -906,7 +942,7 @@ test('parallel-execution states --enforcement-only never authorises a prune on a
       // Reviewed: the same bullet's fresh-implementer exception. A named, justified hand removal
       // for the one case prune-run cannot yet reach — again a different claim than this flag's
       // guardrail, which is about a PASS resting on what the flag itself skipped.
-      /^The one exception is a task going to a fresh implementer instead of a resume, because resuming stalled: prune that task's worktree first, since prune-run only removes a worktree whose phase already recomputes to PASS and a mid-phase stall has none yet to rest that removal on — do it by hand with git worktree remove --force <path>, then git worktree prune; --force is required and authorised here, because a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over, and discarding that work is the deliberate point of abandoning it for a fresh implementer — that authorisation covers the teammate's unfinished work only, not a junction: --force still follows one out of the worktree and deletes its target, and nothing unlinks it first the way it does for a leaked preview, so check the worktree for one first \(dir \/AL in the worktree, or Get-Item <path> \| Select-Object LinkType\) and remove the link itself with rmdir <link> — never a recursive delete, which follows it — before forcing — because a returned teammate's worktree keeps its branch checked out and the new dispatch would otherwise fail with "already used by worktree"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover\.$/i,
+      /^The one exception is a task going to a fresh implementer instead of a resume, because resuming stalled: prune that task's worktree first, since prune-run only removes a worktree whose phase already recomputes to PASS and a mid-phase stall has none yet to rest that removal on — do it by hand with git worktree remove --force <path>, then git worktree prune; --force is required and authorised here, because a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over, and discarding that work is the deliberate point of abandoning it for a fresh implementer — that authorisation covers the teammate's unfinished work only, not a junction: --force still follows one out of the worktree and deletes its target, and nothing unlinks it first the way it does for a leaked preview, so check the worktree for one first with dir \/AL \/S and remove the link itself with rd <link> — both from cmd\.exe, not PowerShell, where rd and rmdir are aliases for Remove-Item; never a recursive delete, which follows it — before forcing — because a returned teammate's worktree keeps its branch checked out and the new dispatch would otherwise fail with "already used by worktree"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover\.$/i,
     ],
   })
 })
@@ -951,11 +987,18 @@ test('parallel-execution makes prune-run the only supported cleanup', async () =
       + 'is irreversible on a worktree holding post-merge edits, and none that --force follows a '
       + 'junction out of the worktree to its target',
   )
+  // NOT MEASURED, and nothing in this repository can measure it: the junction commands this
+  // sentence carries are Windows-only and every run of this suite is on POSIX. What was verified
+  // here is the CONTRACT — that the sentence exists, and that both halves name cmd.exe rather than
+  // mixing a PowerShell detection command with a removal whose spelling aliases `Remove-Item`
+  // there. On a Windows host the checks would be `dir /AL /S` inside the worktree to list reparse
+  // points, `rd <link>` to remove one, and `dir` on the junction's target afterwards to confirm
+  // the target survived. Treat the behaviour as documented, not as tested.
   assertStatement(
     cleanup,
     /^The one exception is a task going to a fresh implementer/,
     'deleting this leaves the prohibition above it absolute, so the one case prune-run cannot yet '
-      + 'reach reads as forbidden — and takes with it the junction check and the rmdir instruction '
+      + 'reach reads as forbidden — and takes with it the junction check and the rd instruction '
       + 'that make the authorised hand removal safe',
   )
   assertStatement(
@@ -1011,13 +1054,13 @@ test('parallel-execution makes prune-run the only supported cleanup', async () =
       // than left to contradict the prohibition above it, `--force` named and authorised for this
       // one case (a mid-stall worktree is exactly the one most likely to refuse a bare remove),
       // and its pointer down to the matching exception in Worktree mechanics.
-      /^The one exception is a task going to a fresh implementer before its phase has passed: this command cannot reach that worktree yet, so it still has to be removed by hand with --force — authorised there because abandoning that teammate's unfinished worktree for a fresh dispatch is the deliberate point, and a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over — and that authorisation covers the teammate's unfinished work only: --force still follows a junction out of the worktree the same way, and nothing unlinks it first there either, so check the worktree for one first \(dir \/AL in the worktree, or Get-Item <path> \| Select-Object LinkType\) and remove the link itself with rmdir <link> — never a recursive delete, which follows it — before forcing — see the matching exception in "Worktree mechanics" below\.$/i,
+      /^The one exception is a task going to a fresh implementer before its phase has passed: this command cannot reach that worktree yet, so it still has to be removed by hand with --force — authorised there because abandoning that teammate's unfinished worktree for a fresh dispatch is the deliberate point, and a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over — and that authorisation covers the teammate's unfinished work only: --force still follows a junction out of the worktree the same way, and nothing unlinks it first there either, so check the worktree for one first with dir \/AL \/S and remove the link itself with rd <link> — both from cmd\.exe, not PowerShell, where rd and rmdir are aliases for Remove-Item; never a recursive delete, which follows it — before forcing — see the matching exception in "Worktree mechanics" below\.$/i,
       // Reviewed: the dry-run scoping. `renderPrunePlan` runs before the `--yes` check and shows
       // the prunable and leaked-preview lists either way (scripts/cli.mjs:3031-3037), but the
       // per-branch ancestor decision itself is at scripts/cli.mjs:3141, printed at :3149, both
       // inside the removal loop `--yes` reaches — so this states what a dry run does NOT yet show
       // rather than repeating the removal claim above.
-      /^Without --yes it removes nothing and prints the prunable and leaked-preview lists it would act on if nothing changes before the --yes run — both runs recompute the gate from scratch, so a phase that fails a check in one and passes in the other differs between them; the per-branch "left <branch> in place: not an ancestor" line is decided only while --yes runs the removal, so a dry run does not yet show which merged worktree's branch would survive\.$/i,
+      /^Without --yes it removes nothing and prints the prunable and leaked-preview lists it would act on if nothing changes before the --yes run — both runs recompute the gate from scratch, so a phase that fails a check during the dry run and passes during the --yes run has worktrees force-removed that never appeared in the list the operator approved; the per-branch "left <branch> in place: not an ancestor" line is decided only while --yes runs the removal, so a dry run does not yet show which merged worktree's branch would survive\.$/i,
     ],
   })
 })
@@ -1421,20 +1464,26 @@ test('every sentence about the SubagentStop mechanism, in any document, is one a
 // test named it. The corpus inventory removes the LOCATION dimension: every sentence about
 // sweeping by hand, in either document, has to be in this list.
 //
-// The `cleanup.code.length === 1` assertion in the cleanup test is one heading wide, so it never
-// looks at Worktree mechanics at all, and `claimSites` is built from statements and headings — a
-// code block is neither. Two different bounds, and the plant walked between them. What this lock
-// reaches is the PROSE: the bullet is a list item and therefore a statement. Measured on this
-// tree, the block alone with the bullet removed is caught too, but for a reason worth naming
-// rather than counting as strength — placed between two bullets, its indented lines are read as a
-// continuation of the PRECEDING list item, so they land inside that item's statement rather than
-// in a block of their own.
+// WHAT THIS DOES NOT REACH, and the bound is wider than an earlier version of this comment said.
+// `claimSites` reads statements and headings, never code, so a hand-sweep BLOCK escapes anywhere
+// it parses as a block, in any section of either document. Measured on this tree: the same plant
+// with only its bullet line deleted — blank-line separated, which is how every indented command
+// block in these documents is written — parses as kind `code`, leaves the lexicon count at seven
+// sites in parallel-execution, and leaves the whole suite green. What this lock reaches is the
+// PROSE that introduces such a block, and only where that prose names something in the lexicon.
+// An earlier version of this comment claimed the block-alone shape was caught; it is caught only
+// with the blank line ALSO removed, where the indented lines are read as a continuation of the
+// preceding list item and land inside that item's statement. That is a parsing accident, not
+// coverage, and describing it as coverage would tell the next reviewer a hole was closed.
 //
-// WHAT IS STILL OPEN, measured rather than reasoned: a genuine standalone block, under its own
-// `## Leftovers` heading, introduced by `Sometimes a run ends untidily. Then:` — prose that names
-// nothing in the lexicon — left the whole suite green, with the sweep sitting in the document. So
-// this buys nothing about MEANING, exactly as the lexicon above buys nothing. What is spent is the
-// location; the vocabulary is not.
+// The corpus is also two documents, not every document. Measured: `skills/` holds fourteen
+// SKILL.md files; the byte-identical bullet+block plant appended to `fleet-lifecycle` leaves the
+// suite green, and a `claimSites` scan finds lexicon sites already outside the lock in
+// `fleet-lifecycle`, `phase-gate` and `teammates-config`. Widening the corpus would pin prose in
+// documents nobody has reviewed for this purpose, so the bound is stated instead of closed.
+//
+// So this buys nothing about MEANING, exactly as the lexicon above buys nothing, and nothing about
+// blocks. What is spent is the location OF PROSE naming the lexicon, in these two documents.
 const HAND_SWEEP_LEXICON = /rm -rf|rm -fr|by hand|hand-run|hand sweep/i
 
 const HAND_SWEEP_CORPUS = [
@@ -1442,10 +1491,10 @@ const HAND_SWEEP_CORPUS = [
   "parallel-execution :: On a detached HEAD init-run records the literal string HEAD, which is not a run branch and which no command overwrites, so it disarms the second layer until the field is removed by hand.",
   "parallel-execution :: On either direct-Agent path — the fallback above and the fewer-than-three-task case — build each teammate's brief with the CLI rather than composing it by hand:",
   "parallel-execution :: Do not remove a worktree or delete a teammate branch by hand: git worktree remove refuses one holding uncommitted work only until --force is added, and nothing then stops --force from reaching a worktree whose phase has not passed yet; git branch -D does not measure \"merged\" at all — the one thing it refuses is a branch a registered worktree still has checked out, which is why the worktree has to go first, and otherwise it force-deletes regardless of ancestry — and -d, the flag that does measure, measures against the branch's own upstream or HEAD, never against the run branch.",
-  "parallel-execution :: The one exception is a task going to a fresh implementer before its phase has passed: this command cannot reach that worktree yet, so it still has to be removed by hand with --force — authorised there because abandoning that teammate's unfinished worktree for a fresh dispatch is the deliberate point, and a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over — and that authorisation covers the teammate's unfinished work only: --force still follows a junction out of the worktree the same way, and nothing unlinks it first there either, so check the worktree for one first (dir /AL in the worktree, or Get-Item <path> | Select-Object LinkType) and remove the link itself with rmdir <link> — never a recursive delete, which follows it — before forcing — see the matching exception in \"Worktree mechanics\" below.",
+  "parallel-execution :: The one exception is a task going to a fresh implementer before its phase has passed: this command cannot reach that worktree yet, so it still has to be removed by hand with --force — authorised there because abandoning that teammate's unfinished worktree for a fresh dispatch is the deliberate point, and a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over — and that authorisation covers the teammate's unfinished work only: --force still follows a junction out of the worktree the same way, and nothing unlinks it first there either, so check the worktree for one first with dir /AL /S and remove the link itself with rd <link> — both from cmd.exe, not PowerShell, where rd and rmdir are aliases for Remove-Item; never a recursive delete, which follows it — before forcing — see the matching exception in \"Worktree mechanics\" below.",
   "parallel-execution :: Prune with the command rather than by hand:",
   "parallel-execution :: Once the phase has a recorded PASS, run prune-run to remove the worktree, not git worktree remove by hand — the command above already covers this case.",
-  "parallel-execution :: The one exception is a task going to a fresh implementer instead of a resume, because resuming stalled: prune that task's worktree first, since prune-run only removes a worktree whose phase already recomputes to PASS and a mid-phase stall has none yet to rest that removal on — do it by hand with git worktree remove --force <path>, then git worktree prune; --force is required and authorised here, because a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over, and discarding that work is the deliberate point of abandoning it for a fresh implementer — that authorisation covers the teammate's unfinished work only, not a junction: --force still follows one out of the worktree and deletes its target, and nothing unlinks it first the way it does for a leaked preview, so check the worktree for one first (dir /AL in the worktree, or Get-Item <path> | Select-Object LinkType) and remove the link itself with rmdir <link> — never a recursive delete, which follows it — before forcing — because a returned teammate's worktree keeps its branch checked out and the new dispatch would otherwise fail with \"already used by worktree\"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover.",
+  "parallel-execution :: The one exception is a task going to a fresh implementer instead of a resume, because resuming stalled: prune that task's worktree first, since prune-run only removes a worktree whose phase already recomputes to PASS and a mid-phase stall has none yet to rest that removal on — do it by hand with git worktree remove --force <path>, then git worktree prune; --force is required and authorised here, because a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over, and discarding that work is the deliberate point of abandoning it for a fresh implementer — that authorisation covers the teammate's unfinished work only, not a junction: --force still follows one out of the worktree and deletes its target, and nothing unlinks it first the way it does for a leaked preview, so check the worktree for one first with dir /AL /S and remove the link itself with rd <link> — both from cmd.exe, not PowerShell, where rd and rmdir are aliases for Remove-Item; never a recursive delete, which follows it — before forcing — because a returned teammate's worktree keeps its branch checked out and the new dispatch would otherwise fail with \"already used by worktree\"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover.",
 ]
 
 test('every sentence about sweeping worktrees by hand, in either cleanup skill, is one a human locked', async () => {
