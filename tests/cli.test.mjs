@@ -12837,3 +12837,47 @@ test('a HEAD ref carrying a line separator cannot forge a line in doctor output'
     assert.match(out, /<0x2028>/)
   })
 })
+
+// The REPOINTED arm of the same pair. The fixtures above pin the genuinely-detached arm, and a
+// null test satisfies both — which is exactly how these two sites kept saying "detached" for a
+// state `git status` reports as `## refs/mine/rb`. Pinning only one arm is what let the
+// distinction rot in the first place.
+test('init-run names a repointed HEAD as not-a-branch rather than calling it detached', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    g(['update-ref', 'refs/mine/rb', 'HEAD'])
+    await writeFile(path.join(root, '.git', 'HEAD'), 'ref: refs/mine/rb\n', 'utf8')
+    assert.equal(g(['symbolic-ref', '--quiet', 'HEAD']).trim(), 'refs/mine/rb', 'the plant really did repoint HEAD')
+    lines.length = 0
+    const code = await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    assert.equal(code, 0, lines.join('\n'))
+    const out = lines.join('\n')
+    assert.match(out, /recorded no run branch, because HEAD points at a ref that is not a branch/)
+    // The two causes it must NOT give: this HEAD is not detached, and main is not checked out.
+    assert.doesNotMatch(out, /HEAD is detached/)
+    assert.doesNotMatch(out, /is checked out and that is the base branch/)
+    // Nothing hostile is stored either way.
+    const plan = JSON.parse(await readFile(path.join(root, '.teammates', 'r1', 'plan.json'), 'utf8'))
+    assert.equal(plan.runBranch, undefined)
+  })
+})
+
+test('locate names a repointed worktree HEAD rather than calling it detached', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const { findTaskByWorktree } = await stateModule()
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const wt = path.join(root, 'wt-T1')
+    g(['worktree', 'add', '--quiet', '--detach', wt, 'HEAD'])
+    g(['update-ref', 'refs/mine/wb', 'HEAD'])
+    // A linked worktree keeps its own HEAD file; this is the same plain file write, one level in.
+    await writeFile(path.join(root, '.git', 'worktrees', 'wt-T1', 'HEAD'), 'ref: refs/mine/wb\n', 'utf8')
+    lines.length = 0
+    const code = await runCli(['locate', '--run', 'r1', '--task', 'T1', '--root', wt], io)
+    assert.equal(code, 0, lines.join('\n'))
+    const out = lines.join('\n')
+    assert.match(out, /on \(no branch: HEAD points at refs\/mine\/wb\)/)
+    assert.doesNotMatch(out, /\(detached HEAD\)/)
+    // The RECORD is unchanged by any of this: null, never the ref string.
+    const found = await findTaskByWorktree(root, wt)
+    assert.equal(found.branch, null)
+  })
+})

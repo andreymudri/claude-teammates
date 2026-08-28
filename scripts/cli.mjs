@@ -2558,13 +2558,18 @@ export async function runCli(argv, io = { out: console.log }) {
     // checked out — `resolveBaseBranch` answers from `branchExists` and never looks at HEAD. On a
     // detached HEAD that printed `because main is checked out and that is the base branch` while
     // main was not checked out at all (measured), sending an operator to fix the wrong thing.
-    let headDetached = false
+    // The KIND, from the shared classifier, not a null test. There are two ways to be on no
+    // branch and they need different sentences: a null test collapses them, so a HEAD repointed
+    // to `refs/mine/rb` was reported as detached while `git status` in the same repository said
+    // `## refs/mine/rb` (measured). That is the same failure this comment already describes —
+    // naming a cause the operator cannot act on — one spelling further along.
+    let headKind = null
     try {
       const git = createGit({ cwd: root })
-      const head = await git.currentBranch()
-      headDetached = head === null
+      const head = await git.headBranch()
+      headKind = head.kind
       baseHere = await resolveBaseBranch(git, flags.base)
-      runBranch = head === baseHere ? null : head
+      runBranch = head.name === baseHere ? null : head.name
     } catch {
       runBranch = null
     }
@@ -2586,9 +2591,11 @@ export async function runCli(argv, io = { out: console.log }) {
     if (recorded.runBranch === null) {
       io.out(
         `note: run ${printable(runId)} recorded no run branch`
-        + (headDetached
+        + (headKind === 'detached'
           ? ', because HEAD is detached and a detached HEAD is on no branch'
-          : (baseHere ? `, because ${printable(baseHere)} is checked out and that is the base branch` : ''))
+          : headKind === 'not-a-branch'
+            ? ', because HEAD points at a ref that is not a branch, and only a branch can be a run branch'
+            : (baseHere ? `, because ${printable(baseHere)} is checked out and that is the base branch` : ''))
         + '. Check out this run\'s branch before gating — `gate` refuses to run from the base branch,'
         + ' and until some command derives a context from the run branch, stop-time enforcement'
         + ' cannot confirm the checkout and will allow every stop rather than risk blocking on the wrong ref.',
@@ -2753,9 +2760,16 @@ export async function runCli(argv, io = { out: console.log }) {
       // which branch this worktree is on then gets "none" rather than a name. The value it used
       // to record in that state was the string `HEAD`, which names a ref anyone can create — so
       // the record asserted a branch that a third party, not the teammate, controlled.
-      const branch = typeof flags.branch === 'string' ? flags.branch : await git.currentBranch()
+      // The KIND again, for the label only — what is STORED is unchanged, and is null for both
+      // rejected states. Labelling by a null test called a worktree whose HEAD pointed at
+      // `refs/mine/wb` "detached" while `git status` there said `## refs/mine/wb`.
+      const head = typeof flags.branch === 'string' ? null : await git.headBranch()
+      const branch = typeof flags.branch === 'string' ? flags.branch : head.name
       await writeLocation(mainRoot, runId, flags.task, { worktree, branch })
-      io.out(`recorded ${printable(flags.task)} at ${printable(worktree)} on ${branch === null ? '(detached HEAD)' : printable(branch)}`)
+      const label = branch !== null
+        ? printable(branch)
+        : (head.kind === 'detached' ? '(detached HEAD)' : `(no branch: HEAD points at ${printable(head.ref)})`)
+      io.out(`recorded ${printable(flags.task)} at ${printable(worktree)} on ${label}`)
       return 0
     } catch (err) {
       // Never swallowed. A `locate` that exits 0 having written nothing leaves the teammate

@@ -1815,3 +1815,33 @@ test('classifyHeadRef neutralises control characters in the ref it quotes', () =
   // A well-behaved ref is not mangled on the way through.
   assert.match(classifyHeadRef('refs/tags/v1.0').reason, /refs\/tags\/v1\.0/)
 })
+
+// A git that really dies BY SIGNAL, which is the only thing that distinguishes surfacing the
+// field from hard-coding it. The test above asserts `signal` is present and null on a SUCCESSFUL
+// call — and on a successful call null is the CORRECT value, so `signal: null` written as a
+// constant satisfies it too. Measured: that falsification passed the whole suite at 2127 while
+// making all five signal guards dead code again, which is the round-3 regression returning under
+// a different spelling. Here the expected value is derived from the close event rather than from
+// a constant, so only an implementation that actually reads it can pass.
+//
+// `!kill -9 $PPID` is a git alias run through a shell, and the shell git spawns is its own parent
+// — so the child this exec is waiting on is the process that dies. It reproduces the exact
+// collapsed shape the guards care about: exit 1 with empty stdout AND empty stderr, which is also
+// what `symbolic-ref --quiet` reports for a detached HEAD.
+const POSIX_ONLY = process.platform === 'win32' && 'git aliases beginning with ! need a POSIX shell'
+
+test('defaultGitExec reports the real signal when git is killed', { skip: POSIX_ONLY }, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-'))
+  try {
+    await defaultGitExec(['init', '--initial-branch=main'], root)
+    const result = await defaultGitExec(['-c', 'alias.selfkill=!kill -9 $PPID', 'selfkill'], root)
+    assert.equal(result.signal, 'SIGKILL')
+    // And the shape that makes the field necessary: this is byte for byte how git reports two
+    // ordinary negative answers, so `code`/`stdout`/`stderr` cannot tell the two apart.
+    assert.equal(result.code, 1)
+    assert.equal(result.stdout, '')
+    assert.equal(result.stderr, '')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
