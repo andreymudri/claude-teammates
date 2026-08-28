@@ -127,17 +127,36 @@ test('routes worktree removal through the recomputed phase gate and branch delet
     // throwaway repository detached at HEAD reports `classifyHeadRef` as
     // `{ok:false,kind:'detached',...}` and `currentBranch()` as `null`; symref'ing HEAD at
     // `refs/heads/refs/heads/run-branch` (the plant this section used to describe) reports
-    // `{ok:false,kind:'ref-path-name',...}`. `tests/git.test.mjs:1747-1914` hold the same three
-    // refusals as fixtures, and three tests in `tests/cli.test.mjs` drive them through the
-    // `prune-run` command: "prune-run refuses to act on a detached HEAD rather than deriving
-    // from an unresolvable name", "the three-ref plant no longer redirects the run branch:
-    // prune-run resolves the real one", and "the refs/heads/HEAD plant does not make a
-    // detached HEAD look like a run branch". Named by command and sentence rather than by
-    // line, because that file's own header rules it out: a sibling task editing the same file
-    // shifts every number under a line citation, so such a citation is only ever invalidated
-    // by a merge — which is precisely when nobody re-reads it.
+    // `{ok:false,kind:'ref-path-name',...}`. Three tests in `tests/git.test.mjs` hold the same
+    // refusals as fixtures — "classifyHeadRef reports a detached HEAD as on no branch, with
+    // no name", "classifyHeadRef rejects a HEAD pointing outside refs/heads/ and yields no
+    // name", and "classifyHeadRef refuses a branch whose name is itself a ref path" — and three
+    // tests in `tests/cli.test.mjs` drive them through the `prune-run` command: "prune-run
+    // refuses to act on a detached HEAD rather than deriving from an unresolvable name", "the
+    // three-ref plant no longer redirects the run branch: prune-run resolves the real one",
+    // and "the refs/heads/HEAD plant does not make a detached HEAD look like a run branch".
+    // All six are named by test rather than by line, because `tests/cli.test.mjs`'s own header
+    // rules line citations out: a sibling task editing either file shifts every number under
+    // such a citation, so it is invalidated exactly by a merge — which is precisely when
+    // nobody re-reads it. "No sibling shifts it this time" is not that property, which is why
+    // the range that used to stand here was replaced even though it was still accurate today:
+    // naming the three is also tighter than the range, which held nine tests in all.
     then: /^That proof is against the ref derive takes directly off git symbolic-ref --quiet HEAD, not off an abbreviated name, and derive refuses to produce a run branch at all when HEAD is detached, when HEAD points outside refs\/heads\/, or when the name that ref strips to is itself a ref path — so nothing a teammate can plant under refs\/heads\/ changes which ref this proof or the deletion it authorises runs against\.$/,
-    subject: /merge-base --is-ancestor|symbolic-ref --quiet HEAD/i,
+    // The third alternative names a phrase that appears NOWHERE in the document, and that is
+    // deliberate: it is the wording a6a65d2 deleted as wrong, not the wording it wrote. A
+    // sentence is only finished being removed once its return is pinned, and the lock that
+    // pins it must keep naming the phrasing that was removed — the replacement phrasing
+    // cannot, since a reinstated sentence does not use it. This inverts the `allow` rule in
+    // the header above, so the two are easy to confuse: an `allow` pattern matching nothing
+    // is dead and silently WIDENS what may be said, while a `subject:` alternative matching
+    // nothing is load-bearing and NARROWS it. Do not prune this for being unmatched.
+    // Measured in this task, on this tree: with only the two surviving commands listed, an
+    // abbrev-ref pre-flight sentence appended to the paragraph this claim opens passed at
+    // 14 pass / 0 fail with the whole suite green; with this alternative added the same
+    // sentence fails this test as an unreviewed statement, and the clean tree stays at
+    // 14 pass / 0 fail. The verbatim sentence a6a65d2 removed fails twice over, here and
+    // in the --yes inventory above, because it also names the flag.
+    subject: /merge-base --is-ancestor|symbolic-ref --quiet HEAD|rev-parse --abbrev-ref HEAD/i,
   })
 })
 
