@@ -1448,14 +1448,17 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 // is named below with the reason it cannot be. Values this CLI was handed on its own argv are a
 // different class and are not enumerated as a class; several are wrapped anyway, where one sits
 // in a sentence beside a value that is in the class, and those wrappers are driven by rows.
-// `collect-reviews`' unsafe-phase refusal wraps such a value with nothing in the class beside it:
-// `--phase` is argv, so no agent-written file reaches that sentence and no row could forge it.
-// Named here because the grep below finds the line, and a reader counting its results would
-// otherwise have to re-derive why it is not one of the sites this table vouches for. Its two
-// results-file failure reports — the previous file that cannot be cleared, and the write that
-// cannot be made — are the same case one step removed: each wraps a Node fs error quoting a path
-// this CLI built out of argv, which is exactly what `configFailureMessage`'s syscall branch does
-// in group 0, and each is wrapped defensively so there is nothing for a row to forge.
+// `collect-reviews`' results-file sentences are where a whole group of those sit, and they wrap
+// with nothing in the class beside them: the unsafe-phase refusal, the two directory-vet refusals,
+// the clear-or-empty report, the write-failure report and the line naming what was written. Each
+// carries a path this CLI built out of `--run` and `--phase`, or a Node fs error quoting one,
+// which is exactly what `configFailureMessage`'s syscall branch in group 0 carries — argv, never
+// an agent-written file, so no row could forge one. Named as a GROUP and not counted, for the
+// reason the header above gives about counts; they are named at all because the grep below finds
+// them and a reader would otherwise have to re-derive why they are not sites this table vouches
+// for. They are wrapped anyway because an operator-supplied `--phase` reaches a terminal through
+// them: a forged one was measured drawing raw ESC into the write-failure sentence while the fs
+// error beside it, already wrapped, rendered its escape tokenised.
 //
 // Where the census lines outside `cli.mjs` are driven. `reviews.mjs` holds six: the two
 // `reviewFileName` refusals (a lens, and a phase, with a path separator), the three `reviewStale`
