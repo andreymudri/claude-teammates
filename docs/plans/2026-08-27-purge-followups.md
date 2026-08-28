@@ -852,7 +852,14 @@ HEAD`.
 - Modify: `skills/finishing-a-development-branch/SKILL.md`
 - Test: `tests/skill-finishing-branch.test.mjs`
 
-**Depends:** T3
+**Depends:** T3, T7
+
+The dependency on T7 was added on 2026-08-27, after this task was dispatched and reported
+blocked on it. Steps 1 and 6 assert that `prune-run` resolves the run branch symbolically; that
+resolution is T7's work (absorbed from the excised Task 1). When Task 1 was folded into Task 7,
+this task's `**Depends:** T1, T3` was rewritten to `T3` by removing the excised id — which was
+arithmetic, not a trace of where the content went. Steps 2, 3, 4, 5 and 7 do not depend on T7 and
+were completed in the first dispatch.
 
 - [ ] **Step 1:** Replace the run-branch-name precondition at
   `skills/finishing-a-development-branch/SKILL.md:92`. The sentence `That proof is only as good
