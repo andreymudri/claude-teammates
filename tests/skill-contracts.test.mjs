@@ -180,6 +180,222 @@ test('phase-gate documents the two claims results that are not findings', async 
   )
 })
 
+// The five sentences that tell an operator where the results actually are. Each is DEFINED ONCE
+// and anchored END TO END, and each has exactly ONE use below: the `assertStatement` that requires
+// it. They are named constants for readability and for the anchoring, not to be shared between two
+// call sites the way the `CLEANUP_*` regexes are — the second use two of these briefly had was an
+// `allow` entry, and the document-scoped inventory further down does that job for all five now.
+//
+// Anchoring is what stops a sentence being REWRITTEN into its own negation: measured on this tree,
+// with the bare `/head -n -1/i` token in place, rewriting the remedy to "a plain redirect of those
+// bytes is enough, and do not bother with `head -n -1`" — the exact thing the pin's own message
+// says it forbids — left the suite fully green, because the token survives the inversion.
+//
+// Anchoring is NOT what stops a sentence being CONTRADICTED by a new one beside it. Three such
+// insertions were measured green here, and the inventory below is what closes them; see its own
+// comment for the scope decision and what remains open.
+const PG_WRITES_FILE = /^It also writes that same document to \.teammates\/<runId>\/reviews\/results-<phase>\.json and prints that path last, so the gate --results <path> that follows names a file that exists — run without a redirect and without this, the review check stays pending forever while the gate reports FAIL with an empty failed list, naming nothing to fix\.$/i
+const PG_DEAD_REDIRECT = /^Pass the written path, not a capture of stdout: a > results\.json redirect no longer round-trips, because the trailing path line is inside the captured bytes and gate --results on that capture exits 2 on --results must be a readable JSON file shaped \{ "results": \[\.\.\.\] \}, while the file the same command wrote exits 0 with verdict PASS — both measured on this tree\.$/i
+const PG_RESIDUAL_CLASSES = /^Two classes of refusal sit above it and leave the earlier round's file where it was\.$/i
+const PG_RESULTS_PATH_RULE = /^After any refusal, hand gate --results nothing at all: only a path printed on a results written to … line is this command's answer, and no refusal prints one — least of all the clear failure above, which names that very path while refusing to stand behind what is at it\.$/i
+const PG_WRITE_FAILURE = /^A third condition exits 4 and does print something usable: when the collection succeeded and only the write failed, the complete results go to stdout above cannot write the results file at …, so keep those bytes rather than re-running the reviews — but drop that last line before passing them on, because a plain redirect captures it and gate --results then exits 2 for exactly the reason above; head -n -1 is enough, and with it the gate exits 0 with verdict PASS, measured on this tree\.$/i
+
+// `collect-reviews` now writes its results file and refuses an omitted `--phase` on a multi-phase
+// plan. Both are BREAKING changes to what this section used to tell an operator to do — the
+// capture-and-pass workflow it described no longer reaches a verdict — so the skill has to say so
+// or it teaches a sequence the CLI answers with an exit code.
+test('phase-gate documents the results file collect-reviews writes and the redirect that no longer round-trips', async () => {
+  const { doc } = await skill('phase-gate')
+  const section = doc.section('Finish the pending checks')
+
+  // A bracketed flag reads as optional, and for these two commands the omission is refused rather
+  // than defaulted. Measured on a scratch run whose plan carries two integer phases:
+  // `review-dispatch --run r1 --root <root>` exits 2 naming both, where `--phase 1` exits 0.
+  //
+  // Read off PARSED CODE BLOCKS with their continuations joined, never off raw body lines. This
+  // whole file exists because assertions measured in characters of raw markdown break on
+  // meaning-preserving edits (see tests/md-contract.mjs) — and an earlier version of this loop had
+  // exactly that defect: splitting an invocation across a trailing backslash would have left the flag on
+  // a continuation line, failed `must show --phase <name>`, and asserted the opposite of what the
+  // document said. Joining continuations first makes the reflow invisible and leaves the real
+  // guard intact.
+  const documented = new Set()
+  for (const block of section.code) {
+    const joined = block.code.replace(/\\\s*\r?\n\s*/g, ' ')
+    for (const line of joined.split(/\r?\n/)) {
+      const hit = /cli\.mjs["']?\s+(review-dispatch|collect-reviews)\b/.exec(line)
+      if (!hit) continue
+      documented.add(hit[1])
+      assert.ok(
+        !line.includes('[--phase'),
+        `phase-gate shows --phase as optional on a command whose omission the CLI refuses: ${line.trim()}`,
+      )
+      assert.ok(
+        line.includes('--phase <name>'),
+        `phase-gate must show --phase <name> on this invocation: ${line.trim()}`,
+      )
+    }
+  }
+  // WHICH commands, not HOW MANY invocations, because the message says "both commands" and a
+  // count cannot check that. Measured on this tree, both directions green under a count: replacing
+  // the `collect-reviews` invocation with a second `review-dispatch`, and replacing the
+  // `review-dispatch` one with a second `collect-reviews`. Each keeps the tally at two while the
+  // document stops naming a command it must name, and nothing else in the suite requires
+  // phase-gate to document `review-dispatch` at all. A count also cannot say whether a THIRD
+  // correct invocation is a defect; a set has no opinion about it, which is the right one.
+  for (const name of ['review-dispatch', 'collect-reviews']) {
+    assert.ok(
+      documented.has(name),
+      `precondition: phase-gate must document the ${name} invocation, and names only `
+        + `${[...documented].join(', ') || 'none'}`,
+    )
+  }
+
+  assertStatement(
+    section,
+    /--phase is not optional on a plan with more than one phase/i,
+    'phase-gate must say the flag is required rather than leaving the reader to infer it from the invocation',
+  )
+  assertStatement(
+    section,
+    /it names the manifest key default, which scopes the review to every task branch in the run/i,
+    'phase-gate must say what the omitted flag actually widens to, not merely that it is refused',
+  )
+  assertStatement(
+    section,
+    /the CLI refuses that with exit 2 rather than reviewing it/i,
+    'phase-gate must name the exit code, since an orchestrator branches on it',
+  )
+  // A guard's bound belongs beside the guard. Without this the section teaches a refusal that
+  // reads as total, and a plan mixing an integer phase with a string one silently reviews every
+  // branch in the run under one `default` stamp.
+  assertStatement(
+    section,
+    /the guard counts INTEGER phases only/i,
+    'phase-gate must state the bound of the ambiguity refusal beside the refusal itself',
+  )
+
+  assertStatement(
+    section,
+    PG_WRITES_FILE,
+    'phase-gate must name the file collect-reviews writes, or the gate --results below names a path nobody created',
+  )
+  assertStatement(
+    section,
+    PG_DEAD_REDIRECT,
+    'phase-gate must retract the capture-and-pass workflow it used to invite: the captured bytes now '
+      + 'carry the trailing path line, and gate --results on them exits 2',
+  )
+  assertStatement(
+    section,
+    /the file's existence is itself the claim/i,
+    'phase-gate must state the fail-closed property — a results file exists only where the round that '
+      + 'wrote it succeeded — since that is what stops a stale pass being read back',
+  )
+  // PINNED AGAINST RETRACTION, not merely required. This sentence scopes itself to two named
+  // conditions with `while … or when …`; the write-failure path is a third, and it was twice
+  // reported as making this sentence false. It does not. The correction is the sentence below it,
+  // and an edit that rewrites this one instead is the defect this anchor catches.
+  assertStatement(
+    section,
+    /^It exits 4 and prints nothing usable while any lens has no file, or when a file exists and does not parse — respawn those lenses instead\.$/i,
+    'the two conditions this sentence names are still true, so it must be added to rather than rewritten',
+  )
+  // The clear is upstream of every refusal that JUDGES the round, and downstream of two that do
+  // not. Both leave the earlier round's file on disk, and both were reproduced on this tree: the
+  // file and its reviews directory owned by another uid under ordinary 755/644 modes, and the
+  // reviews directory replaced by a symlink. In each the file survived byte-identical still saying
+  // `"status": "pass"`, and `gate --results` on it returned verdict PASS at exit 0. Without this
+  // sentence the section promises a fail-closed property the command does not deliver in either.
+  assertStatement(
+    section,
+    PG_RESIDUAL_CLASSES,
+    'phase-gate must bound the fail-closed claim, since a surviving results file is read back as this round\'s verdict',
+  )
+  // SCOPED TO THE SUCCESS LINE, and the narrower wording is the whole of it. "a path this run did
+  // not print" was the earlier form and it forbids nothing here, because the clear-failure refusal
+  // PRINTS the results path — it is in the message. Measured on this tree: round 1 collects clean
+  // and writes its document; the findings file is replaced with one carrying a blocking high; the
+  // clear is made to fail; round 2 exits 4 naming that path; and `gate --results` on exactly the
+  // path that refusal printed exits 0 with verdict PASS over round 1's document, while the round
+  // that was refused held a blocking high. The two residual shapes differ exactly here: the
+  // symlink refusal names no results file at all, so its survivor is reachable only by a path
+  // carried over from an earlier run, which either wording forbids.
+  assertStatement(
+    section,
+    PG_RESULTS_PATH_RULE,
+    'phase-gate must scope the operative rule to the success line: a refusal prints the results path too, '
+      + 'and handing the gate that printed path returns PASS over the superseded document',
+  )
+  assertStatement(
+    section,
+    PG_WRITE_FAILURE,
+    'phase-gate must name the write-failure path, where the complete results are on stdout and re-running the reviews would waste them',
+  )
+})
+
+// SCOPE: THE WHOLE phase-gate DOCUMENT, and the choice was measured rather than argued. Three
+// contradictions were planted, each leaving the full suite green under the section-scoped subject
+// inventory this replaces:
+//
+//   1. after `SKILL.md:106`, inside the locked section — "In practice the file at that path is the
+//      same document either way, so passing it back after a refusal is fine." A section-scoped
+//      inventory reaches this one, but only if the lexicon names something in it, and the earlier
+//      lexicon named nothing: no `redirect`, no `capture`, no `--results`.
+//   2. inside the section — "In practice, piping stdout into results.json with `>` and handing the
+//      gate that file works fine, so use whichever is convenient." Missed for the same reason:
+//      `stdout` and `pipe` were not in the lexicon.
+//   3. under `## On FAIL`, ONE HEADING AWAY — "When collect-reviews exits 4 saying it could not
+//      clear the previous results file, it still names that path: pass that path to gate --results
+//      to get the phase verdict without re-running the reviews." No section-scoped lock can ever
+//      reach this, whatever its lexicon.
+//
+// Each walks the operator into the bypass measured at the results-path pin above: the clear-failure
+// refusal prints that path, and handing it to `gate --results` exits 0 with verdict PASS over the
+// previous round's document while this round held a blocking high.
+//
+// THE DOCUMENT IS THE NARROWEST SCOPE THAT CLOSES ALL THREE, and at this lexicon it is free:
+// measured, the lexicon matches the same TEN statements whether scoped to `Finish the pending
+// checks` or to the whole document, so widening the scope locks not one additional sentence today
+// while making (3) impossible. `\b(that|this) path\b` is deliberately narrower than `\bpaths?\b`,
+// which reaches the same three escapes but drags in two unrelated statements — the `preview.link`
+// entry rule and the merge-conflict sentence — that have nothing to do with where the results are.
+//
+// NOT WIDER THAN ONE DOCUMENT. The rule from the hand-sweep lock still holds: widening to other
+// skills would pin prose nobody has reviewed for this purpose. Within this document the argument is
+// different, because every sentence here is about this command's own output.
+//
+// WHAT STAYS OPEN, and it is the same pair every lexicon lock in this file leaves: a contradiction
+// written in vocabulary none of these alternatives names is invisible, and so is one written as a
+// CODE BLOCK, because `claimSites` reads statements and headings and never code. Neither is closed
+// by scope, and neither is closed here.
+const PG_RESULTS_PATH_LEXICON =
+  /--results|results file|results\.json|results-<phase>|results written to|redirect|captur(e|es|ing|ed)|head -n -1|round-trip|stdout|pip(e|es|ing|ed)|\b(that|this) path\b/i
+
+const PG_RESULTS_PATH_CORPUS = [
+  "phase-gate :: To rebuild the results file from those drops rather than by hand:",
+  "phase-gate :: It prints a --results file with source: \"file\", applying the manifest's own blockOn.",
+  "phase-gate :: It also writes that same document to .teammates/<runId>/reviews/results-<phase>.json and prints that path last, so the gate --results <path> that follows names a file that exists — run without a redirect and without this, the review check stays pending forever while the gate reports FAIL with an empty failed list, naming nothing to fix.",
+  "phase-gate :: Pass the written path, not a capture of stdout: a > results.json redirect no longer round-trips, because the trailing path line is inside the captured bytes and gate --results on that capture exits 2 on --results must be a readable JSON file shaped { \"results\": [...] }, while the file the same command wrote exits 0 with verdict PASS — both measured on this tree.",
+  "phase-gate :: The file's existence is itself the claim: the previous results-<phase>.json is removed at the start of the command body, before the manifest is read and before any findings file is opened, so every refusal that judges this round's work is downstream of the clear and leaves no results file behind — measured, by making a second round refuse on a stale stamp and watching the first round's file go with it.",
+  "phase-gate :: And the clear itself can fail: a previous file that can be neither unlinked nor emptied exits 4 with could not clear the previous results file at …, and a reviews directory that is a symlink exits 4 with … must be a real directory before the clear is even attempted; either way the earlier round's file is still on disk saying what that round said.",
+  "phase-gate :: After any refusal, hand gate --results nothing at all: only a path printed on a results written to … line is this command's answer, and no refusal prints one — least of all the clear failure above, which names that very path while refusing to stand behind what is at it.",
+  "phase-gate :: Scoping to the success line is what closes a bypass, and the bypass was measured too: a round-2 collection refused at the clear over findings carrying a blocking high, and gate --results on the path that refusal itself printed exited 0 with verdict PASS over round 1's document.",
+  "phase-gate :: A third condition exits 4 and does print something usable: when the collection succeeded and only the write failed, the complete results go to stdout above cannot write the results file at …, so keep those bytes rather than re-running the reviews — but drop that last line before passing them on, because a plain redirect captures it and gate --results then exits 2 for exactly the reason above; head -n -1 is enough, and with it the gate exits 0 with verdict PASS, measured on this tree.",
+  "phase-gate :: Where a line quotes a value an agent wrote — a lens, a stamp or a reason out of a findings file; a check name, kind or preview.link entry out of the gate manifest, whose contents this CLI validates for shape and not for content; the bytes a JSON parse error quotes back out of a --results file or the verdict file fix is handed below — the value is printed with its control bytes and line separators replaced by a visible <0x1B>-style token.",
+]
+
+test('every sentence in phase-gate about where the results file is, in any section, is one a human locked', async () => {
+  const { doc } = await skill('phase-gate')
+  assertCorpusInventory(
+    [{ label: 'phase-gate', doc }],
+    PG_RESULTS_PATH_LEXICON,
+    PG_RESULTS_PATH_CORPUS,
+    'a refusal prints the results path too, so prose telling an operator to reuse it walks them into '
+      + 'a measured PASS over a superseded document — and no section lock spans this document',
+  )
+})
+
 // The statements above are claims about code, so they are pinned against the code rather than
 // only against themselves. If `collectReviewResults` ever stops refusing an `unableToVerify`
 // lens, this fails and the skill sentences saying it does have to be rewritten — which is the
@@ -511,7 +727,7 @@ test('parallel-execution keeps a returned teammate’s worktree until its phase 
       // contradict the rule above it. `--force` is named and authorised for this one case: a
       // mid-stall worktree is exactly the one most likely to hold modified or untracked files a
       // bare remove refuses over, and discarding that work is the deliberate point.
-      /^The one exception is a task going to a fresh implementer instead of a resume, because resuming stalled: prune that task's worktree first, since prune-run only removes a worktree whose phase already recomputes to PASS and a mid-phase stall has none yet to rest that removal on — do it by hand with git worktree remove --force <path>, then git worktree prune; --force is required and authorised here, because a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over, and discarding that work is the deliberate point of abandoning it for a fresh implementer — that authorisation covers the teammate's unfinished work only, not a junction: --force still follows one out of the worktree and deletes its target, and nothing unlinks it first the way it does for a leaked preview, so check the worktree for one before forcing it — because a returned teammate's worktree keeps its branch checked out and the new dispatch would otherwise fail with "already used by worktree"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover\.$/i,
+      /^The one exception is a task going to a fresh implementer instead of a resume, because resuming stalled: prune that task's worktree first, since prune-run only removes a worktree whose phase already recomputes to PASS and a mid-phase stall has none yet to rest that removal on — do it by hand with git worktree remove --force <path>, then git worktree prune; --force is required and authorised here, because a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over, and discarding that work is the deliberate point of abandoning it for a fresh implementer — that authorisation covers the teammate's unfinished work only, not a junction: --force still follows one out of the worktree and deletes its target, and nothing unlinks it first the way it does for a leaked preview, so check the worktree for one first with dir \/AL \/S and remove the link itself with rd <link> — both from cmd\.exe, not PowerShell, where rd and rmdir are aliases for Remove-Item; never a recursive delete, which follows it — before forcing — because a returned teammate's worktree keeps its branch checked out and the new dispatch would otherwise fail with "already used by worktree"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover\.$/i,
       // Reviewed: the command bullet states the same rule mechanically — it recomputes each
       // phase's gate and removes only worktrees whose phase passes — so it reinforces the claim
       // rather than qualifying it.
@@ -795,7 +1011,7 @@ test('parallel-execution states --enforcement-only refuses a phase with no enfor
       // Reviewed: the fresh-implementer exception's own justification for hand-forcing a
       // worktree removal — an unrelated refusal (git's, on a dirty worktree) used to explain why
       // `--force` is authorised there, not a claim about this flag's exit-2 refusal.
-      /^The one exception is a task going to a fresh implementer instead of a resume, because resuming stalled: prune that task's worktree first, since prune-run only removes a worktree whose phase already recomputes to PASS and a mid-phase stall has none yet to rest that removal on — do it by hand with git worktree remove --force <path>, then git worktree prune; --force is required and authorised here, because a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over, and discarding that work is the deliberate point of abandoning it for a fresh implementer — that authorisation covers the teammate's unfinished work only, not a junction: --force still follows one out of the worktree and deletes its target, and nothing unlinks it first the way it does for a leaked preview, so check the worktree for one before forcing it — because a returned teammate's worktree keeps its branch checked out and the new dispatch would otherwise fail with "already used by worktree"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover\.$/i,
+      /^The one exception is a task going to a fresh implementer instead of a resume, because resuming stalled: prune that task's worktree first, since prune-run only removes a worktree whose phase already recomputes to PASS and a mid-phase stall has none yet to rest that removal on — do it by hand with git worktree remove --force <path>, then git worktree prune; --force is required and authorised here, because a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over, and discarding that work is the deliberate point of abandoning it for a fresh implementer — that authorisation covers the teammate's unfinished work only, not a junction: --force still follows one out of the worktree and deletes its target, and nothing unlinks it first the way it does for a leaked preview, so check the worktree for one first with dir \/AL \/S and remove the link itself with rd <link> — both from cmd\.exe, not PowerShell, where rd and rmdir are aliases for Remove-Item; never a recursive delete, which follows it — before forcing — because a returned teammate's worktree keeps its branch checked out and the new dispatch would otherwise fail with "already used by worktree"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover\.$/i,
     ],
   })
 })
@@ -823,10 +1039,29 @@ test('parallel-execution states --enforcement-only never authorises a prune on a
       // Reviewed: the same bullet's fresh-implementer exception. A named, justified hand removal
       // for the one case prune-run cannot yet reach — again a different claim than this flag's
       // guardrail, which is about a PASS resting on what the flag itself skipped.
-      /^The one exception is a task going to a fresh implementer instead of a resume, because resuming stalled: prune that task's worktree first, since prune-run only removes a worktree whose phase already recomputes to PASS and a mid-phase stall has none yet to rest that removal on — do it by hand with git worktree remove --force <path>, then git worktree prune; --force is required and authorised here, because a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over, and discarding that work is the deliberate point of abandoning it for a fresh implementer — that authorisation covers the teammate's unfinished work only, not a junction: --force still follows one out of the worktree and deletes its target, and nothing unlinks it first the way it does for a leaked preview, so check the worktree for one before forcing it — because a returned teammate's worktree keeps its branch checked out and the new dispatch would otherwise fail with "already used by worktree"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover\.$/i,
+      /^The one exception is a task going to a fresh implementer instead of a resume, because resuming stalled: prune that task's worktree first, since prune-run only removes a worktree whose phase already recomputes to PASS and a mid-phase stall has none yet to rest that removal on — do it by hand with git worktree remove --force <path>, then git worktree prune; --force is required and authorised here, because a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over, and discarding that work is the deliberate point of abandoning it for a fresh implementer — that authorisation covers the teammate's unfinished work only, not a junction: --force still follows one out of the worktree and deletes its target, and nothing unlinks it first the way it does for a leaked preview, so check the worktree for one first with dir \/AL \/S and remove the link itself with rd <link> — both from cmd\.exe, not PowerShell, where rd and rmdir are aliases for Remove-Item; never a recursive delete, which follows it — before forcing — because a returned teammate's worktree keeps its branch checked out and the new dispatch would otherwise fail with "already used by worktree"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover\.$/i,
     ],
   })
 })
+
+// The three sentences § 5 carries beyond its pinned claim, each written once and used twice
+// below: as an `assertStatement` that REQUIRES it, and as an `allow` entry that PERMITS it past
+// the claim's subject inventory. Two copies of the same 500-character regex is a drift hazard
+// for nothing, and drift here is silent — the pin would go on matching a sentence the allow
+// entry no longer covers, or the reverse.
+//
+// ANCHORED END TO END, and that is the whole point of them. A prefix pin imposes only its
+// prefix: measured on this tree, replacing the first sentence with the bare
+// `This is irreversible on every prunable worktree:` — dropping the junction hazard and the
+// post-merge-edits warning its own failure message names — left the suite green under an
+// eight-word prefix pin, because the truncated sentence matched no subject alternative either
+// and so was not a stray. The other two survived the same truncation, but by ACCIDENT and in a
+// different test each: the exception sentence via the hand-sweep corpus losing its `by hand`
+// site, the dry-run sentence via the claim's own subject inventory catching `removes`. Anchored,
+// all three die where they are declared.
+const CLEANUP_IRREVERSIBLE = /^This is irreversible on every prunable worktree, not only a leaked preview: git worktree remove --force runs whether or not a teammate's worktree still holds edits made after its branch merged, and --force follows a junction out of the worktree to its target instead of stopping at the boundary — verified on Windows, and exactly the shape a dependency install during bootstrap \(see "Worktree mechanics" below\) can leave behind; nothing unlinks it first the way a leaked preview's own links are unlinked, because that sweep runs only for previews:$/i
+const CLEANUP_EXCEPTION = /^The one exception is a task going to a fresh implementer before its phase has passed: this command cannot reach that worktree yet, so it still has to be removed by hand with --force — authorised there because abandoning that teammate's unfinished worktree for a fresh dispatch is the deliberate point, and a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over — and that authorisation covers the teammate's unfinished work only: --force still follows a junction out of the worktree the same way, and nothing unlinks it first there either, so check the worktree for one first with dir \/AL \/S and remove the link itself with rd <link> — both from cmd\.exe, not PowerShell, where rd and rmdir are aliases for Remove-Item; never a recursive delete, which follows it — before forcing — see the matching exception in "Worktree mechanics" below\.$/i
+const CLEANUP_DRY_RUN = /^Without --yes it removes nothing and prints the prunable and leaked-preview lists it would act on if nothing changes before the --yes run — both runs recompute the gate from scratch, so a phase that fails a check during the dry run and passes during the --yes run has worktrees force-removed that never appeared in the list the operator approved; the per-branch "left <branch> in place: not an ancestor" line is decided only while --yes runs the removal, so a dry run does not yet show which merged worktree's branch would survive\.$/i
 
 test('parallel-execution makes prune-run the only supported cleanup', async () => {
   const doc = parseDoc(await readFile(new URL('parallel-execution/SKILL.md', dir), 'utf8'), 'parallel-execution')
@@ -853,20 +1088,80 @@ test('parallel-execution makes prune-run the only supported cleanup', async () =
     1,
     `the cleanup section must contain exactly one code block, found ${cleanup.code.length}`,
   )
+  // `allow` GRANTS PERMISSION AND NEVER IMPOSES EXISTENCE. Measured on ed12b30, this task's prose
+  // commit, with these three calls not yet written: rewording any of the three sentences below
+  // was red, because the anchored allow regex stopped matching and the sentence became a stray —
+  // but DELETING any
+  // of them outright was GREEN, each one on its own, with nothing in the suite noticing. So the
+  // safety prose two commits exist to add could have been reverted and every check here would
+  // still have passed. That is a past measurement on a past tree, and it is written as one: on
+  // this tree each deletion is red, and so is each truncation to the sentence's opening words.
+  // What dies in either case is 'parallel-execution makes prune-run the only supported cleanup',
+  // at the `assertStatement` for the sentence that went, whose message names what that sentence
+  // buys. `assertStatement` is what makes a sentence required; the allow entries stay, because
+  // they are what keeps a FOURTH sentence about the same subject from appearing unreviewed.
+  assertStatement(
+    cleanup,
+    CLEANUP_IRREVERSIBLE,
+    'deleting or truncating this leaves the section introducing prune-run --yes with no warning that '
+      + 'the removal '
+      + 'is irreversible on a worktree holding post-merge edits, and none that --force follows a '
+      + 'junction out of the worktree to its target',
+  )
+  // NOT MEASURED, and nothing in this repository can measure it: the junction commands this
+  // sentence carries are Windows-only and every run of this suite is on POSIX. What was verified
+  // here is the CONTRACT — that the sentence exists, and that both halves name cmd.exe rather than
+  // mixing a PowerShell detection command with a removal whose spelling aliases `Remove-Item`
+  // there. On a Windows host the checks would be `dir /AL /S` inside the worktree to list reparse
+  // points, `rd <link>` to remove one, and `dir` on the junction's target afterwards to confirm
+  // the target survived. Treat the behaviour as documented, not as tested.
+  assertStatement(
+    cleanup,
+    CLEANUP_EXCEPTION,
+    'deleting or truncating this leaves the prohibition above it absolute, so the one case prune-run '
+      + 'cannot yet '
+      + 'reach reads as forbidden — and takes with it the junction check and the rd instruction '
+      + 'that make the authorised hand removal safe',
+  )
+  assertStatement(
+    cleanup,
+    CLEANUP_DRY_RUN,
+    'deleting or truncating this leaves the dry run undocumented: nothing then says the two runs '
+      + 'recompute the '
+      + 'gate independently, nor that the per-branch ancestor verdict is decided only under --yes',
+  )
   assertClaim(cleanup, {
     label: 'cleanup command',
     claim: /^This is the only supported way to clean up after a phase\.$/i,
     // Anchored end to end, not a prefix: `assertClaim` exempts the `then` consequence from the
-    // subject inventory below (tests/md-contract.mjs:441-459 compares against `consequence`
-    // by identity, so the allow list can never see it), so an unanchored prefix match would
-    // leave the sentence's TAIL — including the ancestor-proof bound — pinned nowhere. This
-    // regex is the one and only place that bound is checked.
-    // Reviewed: the ancestor-proof bound. `git rev-parse --abbrev-ref HEAD` resolves the run
-    // branch BY NAME (scripts/git.mjs:147), and a teammate that plants a same-named tag plus a
-    // `refs/heads/heads/<name>` branch can make an unmerged branch read as contained — verified
-    // end to end (scripts/cli.mjs:3092-3117). Stated as the observable symptom, not the two
-    // known plant shapes, because an enumeration goes stale the moment a third exists.
-    then: /^It recomputes each phase's gate rather than reading status\.gates, removes only this run's worktrees whose phase passes, sweeps every leaked merge-preview worktree under the system temp directory regardless of which run left it — even one holding an operator's own uncommitted work — deletes each removed worktree's branch where git merge-base --is-ancestor proves it is already in the run branch — that proof holds only while the run branch's name is unambiguous, so before --yes confirm git rev-parse --abbrev-ref HEAD prints the run branch's plain name and not heads\/<name> or refs\/heads\/<name> — and names every worktree it leaves alone with the reason\.$/i,
+    // subject inventory below (`consequence` is assigned at tests/md-contract.mjs:452 and the
+    // stray scan compares against it by identity at :472, so the allow list can never see it), so
+    // an unanchored prefix match would leave the sentence's TAIL — including the ancestor-proof
+    // bound — pinned nowhere. This regex is the one and only place that bound is checked.
+    // Reviewed: the ancestor-proof bound, AS IT NOW STANDS. The proof does not resolve the run
+    // branch by name: `derive` takes `runBranchRef` straight off `head.ref`
+    // (scripts/cli.mjs:2280-2290), which is `git symbolic-ref --quiet HEAD`
+    // (scripts/git.mjs:271), and the deletion resolves that same ref at the moment it decides
+    // (scripts/cli.mjs:3845-3847). Abbreviation is what the tag / `heads/<name>` /
+    // `refs/heads/refs/heads/<name>` plant redirected, and `symbolic-ref` abbreviates nothing;
+    // `classifyHeadRef` (scripts/git.mjs:126) additionally refuses a detached HEAD, a HEAD
+    // outside `refs/heads/`, and a stripped name that is itself a ref path. The mechanism the
+    // old plant needed is gone from this tree — `command grep -rn 'abbrev-ref' scripts/` finds
+    // only two comments describing what was replaced — and `tests/git.test.mjs:158-161` pins
+    // `currentBranchRef` to `symbolic-ref`.
+    //
+    // This comment previously asserted the OPPOSITE, and outlived the sentence it justifies by a
+    // long way: the prose was corrected in ed12b30 while these lines were left over from a800266,
+    // fifteen commits earlier counting first-parent (91 counting every ancestor), still describing
+    // an operator pre-flight that § 5 no longer carries. Both of its citations had gone stale too
+    // — `scripts/git.mjs:147` is the name-slice inside `classifyHeadRef`, and
+    // `scripts/cli.mjs:3092-3117` spans a command boundary rather than naming any proof: `brief`
+    // ends at :3103 and `workflow` opens at :3105, so half those lines belong to a command with no
+    // bearing on ancestry at all. Left standing it would have
+    // argued a maintainer into RESTORING the deleted warning, which
+    // `finishing-a-development-branch/SKILL.md:99-104` already contradicts in the same words the
+    // regex below pins.
+    then: /^It recomputes each phase's gate rather than reading status\.gates, removes only this run's worktrees whose phase passes, sweeps every leaked merge-preview worktree under the system temp directory regardless of which run left it — even one holding an operator's own uncommitted work — deletes each removed worktree's branch where git merge-base --is-ancestor proves it is already in the run branch — the run branch it proves against is the ref HEAD symbolically points at, so no tag or same-named branch can redirect that proof — and names every worktree it leaves alone with the reason\.$/i,
     // Widened to match the sibling lock at :813 in this file: the behaviour claims themselves
     // ("removes only...", "sweeps every...", "deletes each...") are the substance of this
     // section, and the narrower `prune-run|by hand|...` lexicon alone does not reach a rewrite of
@@ -885,28 +1180,28 @@ test('parallel-execution makes prune-run the only supported cleanup', async () =
       // Reviewed: the irreversibility and junction warning that introduces the command block.
       // Names the general prunable-worktree case, not only a leaked preview — a phase can pass on
       // committed work while a teammate's worktree separately holds uncommitted edits, and
-      // `git worktree remove --force` (scripts/git.mjs:464) takes both the same way — and the
+      // `git worktree remove --force` (scripts/git.mjs:673-678) takes both the same way — and the
       // junction hazard a bootstrap step in Worktree mechanics can leave behind, verified on
-      // Windows at scripts/cli.mjs:1322-1326.
-      /^This is irreversible on every prunable worktree, not only a leaked preview: git worktree remove --force runs whether or not a teammate's worktree still holds edits made after its branch merged, and --force follows a junction out of the worktree to its target instead of stopping at the boundary — verified on Windows, and exactly the shape a dependency install during bootstrap \(see "Worktree mechanics" below\) can leave behind; nothing unlinks it first the way a leaked preview's own links are unlinked, because that sweep runs only for previews:$/i,
+      // Windows at scripts/cli.mjs:1337-1345.
+      CLEANUP_IRREVERSIBLE,
       // Reviewed: the corrected git facts. `git worktree remove` (no `--force`) refuses on
       // uncommitted work, so the hazard is `--force` reaching an unpassed worktree, not the bare
       // command; `git branch -D` refuses only a branch a registered worktree still holds
-      // (scripts/git.mjs:474-476, scripts/cli.mjs:3049-3053) — the ordering constraint this
-      // command relies on — and otherwise force-deletes without measuring ancestry; `-d` measures
-      // upstream-or-HEAD, never the run branch.
+      // (scripts/git.mjs:696-702) — the ordering constraint this command relies on — and
+      // otherwise force-deletes without measuring ancestry; `-d` measures upstream-or-HEAD, never
+      // the run branch.
       /^Do not remove a worktree or delete a teammate branch by hand: git worktree remove refuses one holding uncommitted work only until --force is added, and nothing then stops --force from reaching a worktree whose phase has not passed yet; git branch -D does not measure "merged" at all — the one thing it refuses is a branch a registered worktree still has checked out, which is why the worktree has to go first, and otherwise it force-deletes regardless of ancestry — and -d, the flag that does measure, measures against the branch's own upstream or HEAD, never against the run branch\.$/i,
       // Reviewed: the fresh-implementer exception — named and justified in the same breath rather
       // than left to contradict the prohibition above it, `--force` named and authorised for this
       // one case (a mid-stall worktree is exactly the one most likely to refuse a bare remove),
       // and its pointer down to the matching exception in Worktree mechanics.
-      /^The one exception is a task going to a fresh implementer before its phase has passed: this command cannot reach that worktree yet, so it still has to be removed by hand with --force — authorised there because abandoning that teammate's unfinished worktree for a fresh dispatch is the deliberate point, and a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over — and that authorisation covers the teammate's unfinished work only: --force still follows a junction out of the worktree the same way, and nothing unlinks it first there either, so check the worktree for one before forcing it — see the matching exception in "Worktree mechanics" below\.$/i,
-      // Reviewed: the dry-run scoping. `renderPrunePlan` runs before the `--yes` check and shows
-      // the prunable and leaked-preview lists either way (scripts/cli.mjs:3031-3037), but the
-      // per-branch ancestor decision itself is at scripts/cli.mjs:3141, printed at :3149, both
-      // inside the removal loop `--yes` reaches — so this states what a dry run does NOT yet show
-      // rather than repeating the removal claim above.
-      /^Without --yes it removes nothing and prints the same prunable and leaked-preview lists; the per-branch "left <branch> in place: not an ancestor" line is decided only while --yes runs the removal, so a dry run does not yet show which merged worktree's branch would survive\.$/i,
+      CLEANUP_EXCEPTION,
+      // Reviewed: the dry-run scoping. `renderPrunePlan` (scripts/cli.mjs:3706) runs above the
+      // `--yes` check (:3711) and shows the prunable and leaked-preview lists either way, but the
+      // per-branch ancestor decision itself is at :3847, printed at :3853 and :3855, all three
+      // inside the removal loop only `--yes` reaches — so this states what a dry run does NOT yet
+      // show rather than repeating the removal claim above.
+      CLEANUP_DRY_RUN,
     ],
   })
 })
@@ -1298,6 +1593,73 @@ test('every sentence about the SubagentStop mechanism, in any document, is one a
     SUBAGENT_STOP_MECHANISM,
     SUBAGENT_STOP_CORPUS,
     'the SubagentStop mechanism is described across several documents and no section lock spans them',
+  )
+})
+
+// A section lock binds one section, so the cheapest escape was never to reword a locked sentence
+// but to add a contradicting one under the next heading. Measured on this tree: a
+// `Clear leftovers by hand when you are in a hurry:` bullet plus an `rm -rf
+// .claude/worktrees/agent-* && git branch -D $(git branch --list 'teammates/*')` block, placed in
+// Worktree mechanics, left the whole suite green — the document then carried an unsupported hand
+// sweep two sections below the claim that prune-run is the only supported way to clean up, and no
+// test named it. The corpus inventory removes the LOCATION dimension: every sentence about
+// sweeping by hand, in either document, has to be in this list.
+//
+// WHAT THIS LOCK DOES NOT REACH. `claimSites` reads statements and headings, never code, so a
+// hand-sweep BLOCK is invisible to THIS INVENTORY wherever it parses as a block. Measured on this
+// tree: the same plant with only its bullet line deleted — blank-line separated, which is how
+// every indented command block in these documents is written — parses as kind `code`, leaves the
+// lexicon count at seven sites in parallel-execution, and, placed in Worktree mechanics, leaves
+// the whole suite green. What this lock reaches is the PROSE that introduces such a block, and
+// only where that prose names something in the lexicon.
+//
+// An earlier version of this comment claimed the block-alone shape was caught; it is caught only
+// with the blank line ALSO removed, where the indented lines are read as a continuation of the
+// preceding list item and land inside that item's statement. That is a parsing accident, not
+// coverage, and describing it as coverage would tell the next reviewer a hole was closed.
+//
+// INVISIBLE TO THIS INVENTORY IS NOT UNCAUGHT, and the difference is load-bearing in exactly one
+// section: § 5 carries its own code-block count, so the byte-identical plant there is red either
+// way — `the cleanup section must contain exactly one code block, found 2` when it sits apart from
+// the real invocation, and `must show the exact prune-run invocation … and nothing else in the
+// same block` when it sits against it. Both measured. So do not read the paragraph above as "no
+// test anywhere catches a planted block", and do not drop `cleanup.code.length` as buying nothing:
+// it is what closes the same-section sandwich this inventory cannot see. The scope sentence here
+// has been wrong in both directions — too narrow, then too wide — so it now names the one section
+// that is covered as precisely as the ones that are not.
+//
+// The corpus is also two documents, not every document. Measured: `skills/` holds fourteen
+// SKILL.md files; the byte-identical bullet+block plant appended to `fleet-lifecycle` leaves the
+// suite green, and a `claimSites` scan finds lexicon sites already outside the lock in
+// `fleet-lifecycle`, `phase-gate` and `teammates-config`. Widening the corpus would pin prose in
+// documents nobody has reviewed for this purpose, so the bound is stated instead of closed.
+//
+// So this buys nothing about MEANING, exactly as the lexicon above buys nothing, and nothing about
+// blocks. What is spent is the location OF PROSE naming the lexicon, in these two documents.
+const HAND_SWEEP_LEXICON = /rm -rf|rm -fr|by hand|hand-run|hand sweep/i
+
+const HAND_SWEEP_CORPUS = [
+  "finishing-a-development-branch :: Do not sweep by hand: a hand-run git worktree remove --force or git branch -D supplies neither the recomputed phase gate nor the ancestry proof above — it only does what the flag itself says, on whatever you point it at.",
+  "parallel-execution :: On a detached HEAD init-run records the literal string HEAD, which is not a run branch and which no command overwrites, so it disarms the second layer until the field is removed by hand.",
+  "parallel-execution :: On either direct-Agent path — the fallback above and the fewer-than-three-task case — build each teammate's brief with the CLI rather than composing it by hand:",
+  "parallel-execution :: Do not remove a worktree or delete a teammate branch by hand: git worktree remove refuses one holding uncommitted work only until --force is added, and nothing then stops --force from reaching a worktree whose phase has not passed yet; git branch -D does not measure \"merged\" at all — the one thing it refuses is a branch a registered worktree still has checked out, which is why the worktree has to go first, and otherwise it force-deletes regardless of ancestry — and -d, the flag that does measure, measures against the branch's own upstream or HEAD, never against the run branch.",
+  "parallel-execution :: The one exception is a task going to a fresh implementer before its phase has passed: this command cannot reach that worktree yet, so it still has to be removed by hand with --force — authorised there because abandoning that teammate's unfinished worktree for a fresh dispatch is the deliberate point, and a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over — and that authorisation covers the teammate's unfinished work only: --force still follows a junction out of the worktree the same way, and nothing unlinks it first there either, so check the worktree for one first with dir /AL /S and remove the link itself with rd <link> — both from cmd.exe, not PowerShell, where rd and rmdir are aliases for Remove-Item; never a recursive delete, which follows it — before forcing — see the matching exception in \"Worktree mechanics\" below.",
+  "parallel-execution :: Prune with the command rather than by hand:",
+  "parallel-execution :: Once the phase has a recorded PASS, run prune-run to remove the worktree, not git worktree remove by hand — the command above already covers this case.",
+  "parallel-execution :: The one exception is a task going to a fresh implementer instead of a resume, because resuming stalled: prune that task's worktree first, since prune-run only removes a worktree whose phase already recomputes to PASS and a mid-phase stall has none yet to rest that removal on — do it by hand with git worktree remove --force <path>, then git worktree prune; --force is required and authorised here, because a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over, and discarding that work is the deliberate point of abandoning it for a fresh implementer — that authorisation covers the teammate's unfinished work only, not a junction: --force still follows one out of the worktree and deletes its target, and nothing unlinks it first the way it does for a leaked preview, so check the worktree for one first with dir /AL /S and remove the link itself with rd <link> — both from cmd.exe, not PowerShell, where rd and rmdir are aliases for Remove-Item; never a recursive delete, which follows it — before forcing — because a returned teammate's worktree keeps its branch checked out and the new dispatch would otherwise fail with \"already used by worktree\"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover.",
+]
+
+test('every sentence about sweeping worktrees by hand, in either cleanup skill, is one a human locked', async () => {
+  const docs = []
+  for (const name of ['parallel-execution', 'finishing-a-development-branch']) {
+    docs.push({ label: name, doc: (await skill(name)).doc })
+  }
+  assertCorpusInventory(
+    docs,
+    HAND_SWEEP_LEXICON,
+    HAND_SWEEP_CORPUS,
+    'the two documents that tell an operator not to sweep by hand each carry authorised exceptions, '
+      + 'and no section lock spans them',
   )
 })
 

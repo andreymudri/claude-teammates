@@ -30,7 +30,7 @@ those you execute:
 
 - **agent** — generate the dispatches rather than assembling them by hand:
 
-    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" review-dispatch --run <runId> --root <project root> [--phase <name>] [--models <json>]
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" review-dispatch --run <runId> --root <project root> --phase <name> [--models <json>]
 
   It prints one reviewer per lens with the tier, effort, findings path, scratch worktree and
   prompt already resolved, and exits 4 rather than emitting a dispatch when the phase has no
@@ -68,11 +68,58 @@ those you execute:
 
   To rebuild the results file from those drops rather than by hand:
 
-    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" collect-reviews --run <runId> --root <project root> [--phase <name>]
+    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" collect-reviews --run <runId> --root <project root> --phase <name>
+
+  `--phase` is not optional on a plan with more than one phase, on either command above:
+  omitted, it names the manifest key `default`, which scopes the review to every task branch in
+  the run — including ones integrated rounds ago. The CLI refuses that with exit 2 rather than
+  reviewing it. The guard counts INTEGER phases only, so a `plan.json` mixing phase `1` with
+  phase `"2"` leaves it one countable phase, nothing is refused, and the omitted flag reviews
+  both branches under one `default` stamp — measured on this tree, where `review-dispatch`
+  without `--phase` exited 0 and dispatched both task branches while `--phase 1` dispatched one,
+  and the same plan with both phases written as integers exited 2. Nothing in this repository
+  writes a non-integer phase; a plan is agent-written, which is why that bound is stated beside
+  the guard rather than left to be discovered.
 
   It prints a `--results` file with `source: "file"`, applying the manifest's own `blockOn`. It
-  exits 4 and prints nothing usable while any lens has no file, or when a file exists and does
-  not parse — respawn those lenses instead. A file for a lens this phase did not dispatch is
+  also writes that same document to `.teammates/<runId>/reviews/results-<phase>.json` and prints
+  that path last, so the `gate --results <path>` that follows names a file that exists — run
+  without a redirect and without this, the review check stays `pending` forever while the gate
+  reports FAIL with an empty `failed` list, naming nothing to fix. Pass the written path, not a
+  capture of stdout: a `> results.json` redirect no longer round-trips, because the trailing
+  path line is inside the captured bytes and `gate --results` on that capture exits 2 on
+  `--results must be a readable JSON file shaped { "results": [...] }`, while the file the same
+  command wrote exits 0 with verdict PASS — both measured on this tree. This is a breaking
+  change to a workflow this skill used to invite, not a nicety. The file's existence is itself
+  the claim: the previous `results-<phase>.json` is removed at the start of the command body,
+  before the manifest is read and before any findings file is opened, so every refusal that
+  judges this round's work is downstream of the clear and leaves no results file behind —
+  measured, by making a second round refuse on a stale stamp and watching the first round's file
+  go with it. Two classes of refusal sit above it and leave the earlier round's file where it
+  was. An argv refusal — an unknown flag, a missing `--run` — exits 2 before this command body
+  runs at all. And the clear itself can fail: a previous file that can be neither unlinked nor
+  emptied exits 4 with `could not clear the previous results file at …`, and a `reviews`
+  directory that is a symlink exits 4 with `… must be a real directory` before the clear is even
+  attempted; either way the earlier round's file is still on disk saying what that round said.
+  After any refusal, hand `gate --results` nothing at all: only a path printed on a `results
+  written to …` line is this command's answer, and no refusal prints one — least of all the
+  clear failure above, which names that very path while refusing to stand behind what is at it.
+  The gate parses whatever file it is handed and trusts it, so a surviving `"status": "pass"` is
+  read back as this round's verdict — measured on this tree for both shapes, one with the file
+  and its directory owned by another uid under ordinary modes and one with the directory
+  symlinked, each leaving a byte-identical file the gate then returned verdict PASS on. Scoping
+  to the success line is what closes a bypass, and the bypass was measured too: a round-2
+  collection refused at the clear over findings carrying a blocking high, and `gate --results`
+  on the path that refusal itself printed exited 0 with verdict PASS over round 1's document. A
+  read-only directory ALONE is not one of these: there `unlink` fails and the in-place empty
+  succeeds, and the gate refuses the zero-byte file it leaves. It exits 4 and prints nothing
+  usable while any lens has no file, or when a file exists and does not parse — respawn those
+  lenses instead. A third condition exits 4 and does print something usable: when the collection
+  succeeded and only the write failed, the complete results go to stdout above `cannot write the
+  results file at …`, so keep those bytes rather than re-running the reviews — but drop that
+  last line before passing them on, because a plain redirect captures it and `gate --results`
+  then exits 2 for exactly the reason above; `head -n -1` is enough, and with it the gate exits
+  0 with verdict PASS, measured on this tree. A file for a lens this phase did not dispatch is
   reported and ignored, never merged.
 
   Where a line quotes a value an agent wrote — a lens, a stamp or a reason out of a findings file;
