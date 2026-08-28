@@ -143,8 +143,46 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
     async headSha() {
       return (await run(['rev-parse', 'HEAD'])).trim()
     },
+    // HEAD RESOLVED SYMBOLICALLY, never through git's abbreviation rules. `git rev-parse
+    // --abbrev-ref HEAD` shortens only as far as stays UNAMBIGUOUS: plant a tag named like
+    // the run branch and it answers `heads/<name>`; add a branch literally named
+    // `heads/<name>` on top and it answers `refs/heads/<name>`. Every caller then prefixes
+    // `refs/heads/`, so that last one resolves `refs/heads/refs/heads/<name>` — an ordinary
+    // ref an unprivileged teammate can create in its own worktree, and thereby choose the sha
+    // a whole run treats as the run branch. `symbolic-ref` reads the ref HEAD literally
+    // points at and abbreviates nothing, so no ref any third party can create changes its
+    // answer. All four resolutions confirmed against real git (2.55.0) by running that exact
+    // three-ref plant; it is the regression test in tests/git.test.mjs.
+    //
+    // `--quiet` is what makes a detached HEAD a value: it exits 1 with EMPTY stdout and EMPTY
+    // stderr rather than writing a diagnostic, so an empty stderr on a non-zero exit is
+    // detachment and anything else is a real failure that still throws. Confirmed on the same
+    // git: detached, `--quiet` exits 1 silently while the bare form exits 128 printing
+    // `fatal: ref HEAD is not a symbolic ref`; outside a repository it exits 128 with
+    // `fatal: not a git repository` on stderr, which this therefore raises rather than
+    // mistaking for detachment.
+    async currentBranchRef() {
+      const { code, stdout, stderr } = await runRaw(['symbolic-ref', '--quiet', 'HEAD'])
+      if (code === 0) return stdout.trim()
+      if (stderr.trim() === '') return null
+      throw new GitError(describeGitFailure(['symbolic-ref', '--quiet', 'HEAD'], code, stderr))
+    },
+    // The short name, taken off the SYMBOLIC ref rather than from abbreviation — see
+    // `currentBranchRef`. The name and `refs/heads/<name>` therefore round-trip by
+    // construction: the prefix every caller adds lands back on the ref HEAD actually points
+    // at, whatever else exists in the ref namespace.
+    //
+    // `'HEAD'` on a detached HEAD is the PRESERVED CONTRACT of the old `--abbrev-ref` form,
+    // not an accident. Measured on a detached scratch repository with this implementation in
+    // place: this answers `'HEAD'`, `resolveRef('refs/heads/HEAD')` rejects, and `gate` on that
+    // repository failed at `derive` with its own stated reason — `HEAD is <sha>, but
+    // refs/heads/HEAD … is not a ref at all` — rather than crashing. `scripts/cli.mjs`'s
+    // init-run path only compares the value against the base branch name, and its map path only
+    // takes it as the default `--run-branch` overrides; neither inspects its shape. Returning
+    // null or throwing here would change all three at once, for a state each already survives.
     async currentBranch() {
-      return (await run(['rev-parse', '--abbrev-ref', 'HEAD'])).trim()
+      const ref = await this.currentBranchRef()
+      return ref === null ? 'HEAD' : ref.replace(/^refs\/heads\//, '')
     },
     // `--porcelain` reports untracked paths, and the harness stores each teammate's worktree
     // under `.claude/` inside the repo. Those directories exist for the whole run, so counting
