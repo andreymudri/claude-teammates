@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { chmod, lstat, mkdir, mkdtemp, readdir, rename, rm, stat, symlink, utimes, writeFile, readFile } from 'node:fs/promises'
-import { constants as fsConstants } from 'node:fs'
+import { constants as fsConstants, readFileSync, symlinkSync } from 'node:fs'
 import net from 'node:net'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -868,6 +868,43 @@ test('collect-reviews does not create the target of a dangling symlink at its re
     assert.equal(await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io), 0, lines.join('\n'))
     await assert.rejects(stat(target), { code: 'ENOENT' })
     assert.equal((await lstat(resultsPath)).isSymbolicLink(), false)
+  })
+})
+
+// THE PLANT THAT ARRIVES AFTER THE CLEAR, and the only one of these that pins the WRITE rather
+// than the removal. The two tests above are satisfied by either mechanism on its own: the clear
+// unlinks a stationary plant before the write is ever attempted, so replacing temp-then-rename
+// with a plain `writeFile` leaves both of them green — measured. What no stationary fixture can
+// reach is the window between the clear and the write, which is exactly where a concurrent
+// teammate plants: the reviewers of this very phase are running while this command is.
+//
+// `io.out` is the seam, and it is a real one rather than a contrivance: the command prints the
+// results document immediately before it writes the file, so planting from that callback puts the
+// link in place after the clear and before the write, with no timing to lose. With a plain
+// `writeFile` at the destination this truncates the bait; `rename` replaces the link instead.
+test('collect-reviews does not follow a symlink planted between the clear and the write', NO_PLANTED_SYMLINK_ON_WIN32, async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const resultsPath = await stagedPhaseOneReviews(root, planPath, io, g)
+    const bait = path.join(root, 'teammates.gate.json')
+    const before = readFileSync(bait, 'utf8')
+    let planted = false
+    const racing = {
+      out: (t) => {
+        lines.push(t)
+        // The results document is the last thing printed before the write.
+        if (!planted && t.startsWith('{')) {
+          symlinkSync(bait, resultsPath)
+          planted = true
+        }
+      },
+      err: () => {},
+    }
+    lines.length = 0
+    assert.equal(await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], racing), 0, lines.join('\n'))
+    assert.equal(planted, true, 'the fixture never planted: it pins nothing unless it did')
+    assert.equal(readFileSync(bait, 'utf8'), before, 'the link target must be untouched')
+    assert.equal((await lstat(resultsPath)).isSymbolicLink(), false)
+    assert.ok(Array.isArray(JSON.parse(await readFile(resultsPath, 'utf8')).results))
   })
 })
 

@@ -4536,6 +4536,13 @@ export async function runCli(argv, io = { out: console.log }) {
     // scripts/merge-preview.mjs) — an entry already at the scratch name is refused, not followed.
     // `'wx'` is wrong for the DESTINATION: `collect-reviews` legitimately re-runs, and an
     // exclusive create there would refuse every round after the first.
+    //
+    // Stated as UNCOVERED rather than as safe: no test here pins that `'wx'`, and removing it
+    // alone leaves the suite green — measured. The scratch name carries this pid and a
+    // microsecond clock reading, so no fixture can pre-plant the entry it would refuse, which is
+    // the same property that makes a plant there implausible in the first place. It stays because
+    // a `'w'` on a scratch path that did happen to be occupied would follow it, and it costs
+    // nothing; do not read a green suite as evidence for it.
     let tmp = null
     try {
       await mkdir(dir, { recursive: true })
