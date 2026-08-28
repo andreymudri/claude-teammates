@@ -233,7 +233,15 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
     // detachment arm, since a kill produces that same empty-and-non-zero shape.
     async currentBranchRef() {
       const { code, stdout, stderr, signal } = await runRaw(['symbolic-ref', '--quiet', 'HEAD'])
-      if (code === 0) return stdout.trim()
+      // ONLY THE TRAILING NEWLINE git appends, never JS `trim()`. Git's refname rules and
+      // JavaScript's whitespace set are different sets, and that mismatch is the whole defect:
+      // git accepts U+00A0 and other non-ASCII whitespace in a refname, `trim()` removes them, so
+      // HEAD on `refs/heads/run-branch<NBSP>` answered the name `run-branch` — a DIFFERENT ref
+      // that also exists. Measured: `doctor` then printed `main worktree on run-branch` while HEAD
+      // sat on the decoy at a commit the real branch did not hold. Bounded to the diagnosis,
+      // because `derive`'s round trip still compares SHAS and refuses when they differ, but a
+      // report that names the wrong branch is exactly what this one exists not to do.
+      if (code === 0) return stdout.replace(/\r?\n$/, '')
       // Before the empty-stderr test, because a killed process produces an EMPTY stderr and a
       // defaulted exit 1 — indistinguishable from `--quiet`'s detached-HEAD answer by the two
       // fields that test reads. Measured: SIGKILL yields `{code: null, signal: 'SIGKILL'}`, which

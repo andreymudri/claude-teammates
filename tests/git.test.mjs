@@ -1794,9 +1794,13 @@ test('currentBranch answers null for a HEAD pointing outside refs/heads/', async
 // commands. git accepts U+2028, U+0085 and the C1 range in a refname (measured on 2.55.0), and
 // U+2028 is a hard line break (UAX#14 class BK) in the `pre` block a transcript is rendered in --
 // so an unwrapped ref forges a whole line under the CLI's own name with no escape sequence at all.
-// Every control character below is written as an ESCAPE on purpose: a literal U+2028 is a line
-// terminator in JavaScript source too, so a literal one in a regex or string literal here would
-// break the parse of this very file.
+// Every control character below is written as an ESCAPE on purpose, and the reason is narrower
+// than "U+2028 breaks JavaScript". Measured on node v26.7.0, one construct at a time: a literal
+// U+2028 in a STRING literal parses, in a TEMPLATE literal parses, and in a COMMENT parses --
+// ES2019 subsumed JSON and admitted U+2028/U+2029 into string and template literals, and
+// `engines.node` here is >=24.2.0, so that is true on every supported runtime. Only a REGEX
+// literal still rejects it, with `SyntaxError: Invalid regular expression: missing /`. This file
+// asserts through regex literals, so the escapes are required -- but for that reason alone.
 test('classifyHeadRef neutralises control characters in the ref it quotes', () => {
   const forged = 'refs/mine/x\u2028gate\u00a0phase\u00a0default\u00a0PASS\u2028z'
   const r = classifyHeadRef(forged)
@@ -1844,4 +1848,29 @@ test('defaultGitExec reports the real signal when git is killed', { skip: POSIX_
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+// Git's refname rules and JavaScript's whitespace set are DIFFERENT SETS, and a JS `trim()` on
+// git's output silently converts one real ref into another. `refs/heads/run-branch<NBSP>` and
+// `refs/heads/run-branch` are two distinct refs that can hold different commits; trimming made
+// the first answer the name of the second, so `doctor` reported the main worktree as being on a
+// branch it was not on. Only the trailing newline git appends may be stripped.
+test('currentBranchRef strips git\'s newline without trimming whitespace git allows in a refname', async () => {
+  const exec = async () => ({ code: 0, signal: null, stdout: 'refs/heads/run-branch\u00a0\n', stderr: '' })
+  const git = createGit({ exec })
+  assert.equal(await git.currentBranchRef(), 'refs/heads/run-branch\u00a0')
+  // And the name carried forward keeps it, so it cannot be mistaken for the neighbouring ref.
+  const head = await git.headBranch()
+  assert.equal(head.ok, true)
+  assert.equal(head.name, 'run-branch\u00a0')
+  assert.notEqual(head.name, 'run-branch')
+})
+
+// A CRLF platform still gets the newline removed, and a name with no trailing whitespace is
+// unchanged -- so the narrower strip does not become a no-op.
+test('currentBranchRef removes a CRLF terminator and leaves an ordinary name alone', async () => {
+  const crlf = async () => ({ code: 0, signal: null, stdout: 'refs/heads/run-branch\r\n', stderr: '' })
+  assert.equal(await createGit({ exec: crlf }).currentBranchRef(), 'refs/heads/run-branch')
+  const plain = async () => ({ code: 0, signal: null, stdout: 'refs/heads/run-branch\n', stderr: '' })
+  assert.equal(await createGit({ exec: plain }).currentBranchRef(), 'refs/heads/run-branch')
 })
