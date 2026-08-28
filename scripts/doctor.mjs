@@ -239,13 +239,12 @@ export async function collectDoctorReport({ git, runId, runBranch, baseBranch, t
 // Wrapping happens only here. `collectDoctorReport` returns the values as git reported them, so a
 // caller reading the report as data is unaffected, and no problem, task or exit code changes —
 // only how a value renders. This covers the sites in this function and says nothing about others.
-// A branch name for display, or an explicit marker for the states that HAVE no branch name.
-// `printable(null)` renders the word `null`, which reads as a branch called "null" in a header
-// whose other fields are branch names — and the header line `main worktree on HEAD · clean` is
-// exactly how the detached case used to present itself as healthy. `(no branch)` rather than
-// `(detached HEAD)` because two different states reach it: a detached HEAD, and a HEAD repointed
-// outside refs/heads/, which printed `main worktree on refs/tags/x · clean` and so presented a
-// non-branch ref as a branch. The problem list names which one it is; this line only has to avoid
+// A branch name for display, or an explicit marker for the states that have no branch name the
+// tool will accept. `printable(null)` renders the word `null`, which reads as a branch called
+// "null" in a header whose other fields are branch names — and the header line
+// `main worktree on HEAD · clean` is exactly how the detached case used to present itself as
+// healthy. `(no branch)` rather than `(detached HEAD)` because detachment is not the only state
+// that reaches it; the problem list names which one it is, and this line only has to avoid
 // asserting a branch. The marker cannot be confused for a ref: it contains characters git refuses
 // in a ref name.
 const branchLabel = (name) => (name === null || name === undefined ? '(no branch)' : printable(name))

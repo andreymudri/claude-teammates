@@ -1771,7 +1771,7 @@ test('classifyHeadRef rejects a HEAD pointing outside refs/heads/ and yields no 
   for (const ref of ['refs/tags/x', 'refs/mine/run-branch', 'refs/remotes/origin/main', 'refs/heads/']) {
     const r = classifyHeadRef(ref)
     assert.equal(r.ok, false, `${ref} must not be accepted`)
-    assert.equal(r.kind, ref === 'refs/heads/' ? 'not-a-branch' : 'not-a-branch')
+    assert.equal(r.kind, 'not-a-branch')
     // The name is null rather than the ref string: a caller that ignores `ok` gets an absence,
     // never something it could prefix `refs/heads/` onto.
     assert.equal(r.name, null, `${ref} must not yield a name`)

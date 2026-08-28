@@ -12999,13 +12999,24 @@ test('review-dispatch orders reviewers to fully qualified refs a tag cannot shad
     // them. Asserted on the PROMPT, because that is the channel the agent actually obeys.
     assert.match(prompt, /git merge-base refs\/heads\/run-branch <branch>/)
     assert.doesNotMatch(prompt, /git merge-base run-branch <branch>/)
-    for (const b of spec.reviewers[0].branches || spec.branches || []) {
-      assert.match(b, /^refs\/heads\//, `branch ${b} must be fully qualified`)
-    }
-    // And the end the whole finding is about: following the prompt reaches the REAL fork point,
-    // so the diff under review is not empty.
-    const base = g(['merge-base', 'refs/heads/run-branch', 'refs/heads/teammates/r1/T1']).trim()
-    const diff = g(['diff', '--name-only', base, 'refs/heads/teammates/r1/T1']).trim()
+    // The TASK-branch half, on the prompt for the same reason. An earlier version of this looped
+    // over `spec.reviewers[0].branches || spec.branches || []` — neither object has a `branches`
+    // key, so it iterated the empty fallback and the loop body never ran. Reverting the map in
+    // `review-dispatch` left the whole suite green: a test that cannot fail. The `|| []` chain is
+    // what hid it, which is why there is no fallback here.
+    // Read the ref the prompt actually LISTS, then assert on that value. Asserting the qualified
+    // spelling merely appears somewhere would pass on a prompt that also lists the bare form, and
+    // a blanket "bare form absent" is wrong too: the task id legitimately appears elsewhere, in
+    // the findings path among others.
+    const runRef = prompt.match(/git merge-base (\S+) <branch>/)[1]
+    const taskRef = prompt.match(/^ {2}(\S+)$/m)[1]
+    assert.equal(taskRef, 'refs/heads/teammates/r1/T1', 'the branch the reviewer is told to diff must be a full ref')
+    assert.equal(runRef, 'refs/heads/run-branch')
+    // Then the end the whole finding is about: following the prompt reaches the REAL fork point,
+    // so the diff under review is not empty. Both refs come from the PROMPT rather than being
+    // written here, or this would assert against strings the dispatch never emitted.
+    const base = g(['merge-base', runRef, taskRef]).trim()
+    const diff = g(['diff', '--name-only', base, taskRef]).trim()
     assert.equal(diff, 'a.mjs', 'the reviewer sees the task diff rather than an empty one')
   })
 })
@@ -13028,5 +13039,51 @@ test('doctor calls a ref-path branch name what it is rather than denying it is a
     assert.equal(code, 1, out)
     assert.match(out, /a real branch whose NAME is itself a ref path/)
     assert.doesNotMatch(out, /HEAD pointing at .*which is not a branch/)
+  })
+})
+
+// `locate` is the THIRD consumer of `kind`, and it was the one not visited when the third state
+// was added -- it switched on two of three, so a ref-path name fell through to the not-a-branch
+// wording. That ref IS a branch: `git branch --list` marks it with `*` in this very worktree.
+test('locate names a ref-path branch as a branch rather than denying it is one', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    const { findTaskByWorktree } = await stateModule()
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const wt = path.join(root, 'wt-T1')
+    g(['worktree', 'add', '--quiet', '--detach', wt, 'HEAD'])
+    g(['branch', 'refs/heads/wb', 'run-branch'])
+    await writeFile(path.join(root, '.git', 'worktrees', 'wt-T1', 'HEAD'), 'ref: refs/heads/refs/heads/wb\n', 'utf8')
+    const gw = (a) => execFileSync('git', a, { cwd: wt, encoding: 'utf8' })
+    assert.match(gw(['branch', '--list', 'refs/heads/wb']), /[*]/, 'git itself marks it as the current branch')
+    lines.length = 0
+    const code = await runCli(['locate', '--run', 'r1', '--task', 'T1', '--root', wt], io)
+    assert.equal(code, 0, lines.join('\n'))
+    const out = lines.join('\n')
+    assert.match(out, /whose name is itself a ref path/)
+    assert.doesNotMatch(out, /no branch: HEAD points at/)
+    assert.doesNotMatch(out, /[(]detached HEAD[)]/)
+    // What is STORED is unchanged: null, never the ref string.
+    const found = await findTaskByWorktree(root, wt)
+    assert.equal(found.branch, null)
+  })
+})
+
+// `init-run`'s third arm, whose two siblings each have a fixture. Without one, replacing the arm
+// with `false` restores verbatim the false diagnosis those siblings exist to forbid.
+test('init-run names a ref-path branch name rather than blaming the base branch', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    g(['branch', 'refs/heads/rb', 'run-branch'])
+    await writeFile(path.join(root, '.git', 'HEAD'), 'ref: refs/heads/refs/heads/rb\n', 'utf8')
+    assert.equal(g(['symbolic-ref', '--quiet', 'HEAD']).trim(), 'refs/heads/refs/heads/rb')
+    lines.length = 0
+    const code = await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    assert.equal(code, 0, lines.join('\n'))
+    const out = lines.join('\n')
+    assert.match(out, /because the checked-out branch has a name that is itself a ref path/)
+    // The false cause the siblings forbid, named so a regression to it is unmistakable.
+    assert.doesNotMatch(out, /is checked out and that is the base branch/)
+    assert.doesNotMatch(out, /HEAD is detached/)
+    const plan = JSON.parse(await readFile(path.join(root, '.teammates', 'r1', 'plan.json'), 'utf8'))
+    assert.equal(plan.runBranch, undefined)
   })
 })
