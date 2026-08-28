@@ -177,10 +177,10 @@ rather than reading `status.gates`, removes only this run's worktrees whose phas
 sweeps every leaked merge-preview worktree under the system temp directory regardless of which
 run left it — even one holding an operator's own uncommitted work — deletes each removed
 worktree's branch where `git merge-base --is-ancestor` proves it is already in the run branch
-— that proof holds only while the run branch's name is unambiguous, so before `--yes` confirm
-`git rev-parse --abbrev-ref HEAD` prints the run branch's plain name and not `heads/<name>` or
-`refs/heads/<name>` — and names every worktree it leaves alone with the reason. Do not remove
-a worktree or delete a teammate branch by hand: `git worktree remove` refuses one holding
+— the run branch it proves against is the ref HEAD symbolically points at, so no tag or
+same-named branch can redirect that proof — and names every worktree it leaves alone with the
+reason. Do not remove a worktree or delete a teammate branch by hand: `git worktree remove`
+refuses one holding
 uncommitted work only until `--force` is added, and nothing then stops `--force` from reaching
 a worktree whose phase has not passed yet; `git branch -D` does not measure "merged" at all —
 the one thing it refuses is a branch a registered worktree still has checked out, which is why
@@ -193,10 +193,14 @@ worktree for a fresh dispatch is the deliberate point, and a mid-stall worktree 
 one most likely to hold modified or untracked files a bare remove refuses over — and that
 authorisation covers the teammate's unfinished work only: `--force` still follows a
 junction out of the worktree the same way, and nothing unlinks it first there either, so
-check the worktree for one before forcing it — see the matching exception in "Worktree
+check the worktree for one first (`dir /AL` in the worktree, or `Get-Item <path> |
+Select-Object LinkType`) and remove the link itself with `rmdir <link>` — never a recursive
+delete, which follows it — before forcing — see the matching exception in "Worktree
 mechanics" below.
 
-Without `--yes` it removes nothing and prints the same prunable and leaked-preview lists; the
+Without `--yes` it removes nothing and prints the prunable and leaked-preview lists it would
+act on if nothing changes before the `--yes` run — both runs recompute the gate from scratch,
+so a phase that fails a check in one and passes in the other differs between them; the
 per-branch "left `<branch>` in place: not an ancestor" line is decided only while `--yes` runs
 the removal, so a dry run does not yet show which merged worktree's branch would survive.
 
@@ -411,7 +415,9 @@ teammate automatically; a teammate never shares a worktree with another.
   point of abandoning it for a fresh implementer — that authorisation covers the teammate's
   unfinished work only, not a junction: `--force` still follows one out of the worktree and
   deletes its target, and nothing unlinks it first the way it does for a leaked preview, so
-  check the worktree for one before forcing it — because a returned teammate's worktree keeps
+  check the worktree for one first (`dir /AL` in the worktree, or `Get-Item <path> |
+  Select-Object LinkType`) and remove the link itself with `rmdir <link>` — never a recursive
+  delete, which follows it — before forcing — because a returned teammate's worktree keeps
   its branch checked out and the new dispatch would otherwise fail with "already used by
   worktree"; then restate the findings, the branch and the file set in its dispatch,
   because none of that survives the handover.
