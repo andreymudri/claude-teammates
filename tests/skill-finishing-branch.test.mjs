@@ -57,7 +57,7 @@ test('states the --yes flag is destructive before showing the command, with the 
     subject: /--yes|--force/i,
     allow: [
       /^Do not sweep by hand: a hand-run git worktree remove --force or git branch -D supplies neither the recomputed phase gate nor the ancestry proof above/,
-      /^Without --yes the command removes nothing, and it prints the same worktree and branch list --yes would act on/,
+      /^Without --yes the command removes nothing, and it prints the worktrees and branches it would act on if nothing changes before the --yes run/,
       /^That proof is only as good as the run branch's name being unambiguous, so before --yes confirm/,
       /^Run it first without --yes to read the plan, then add --yes to remove what it lists:/,
     ],
@@ -73,7 +73,7 @@ test('the Windows-junction limit leads into the dry-run sentence, which no longe
   const scope = await cleanup()
   assertClaim(scope, {
     claim: /^On Windows, it also follows a junction a worktree holds, so a worktree provisioned with a junction back into the repository — the kind a fresh worktree's own dependency install might use as a shortcut, such as a junction into the repository's real node_modules — has that target's contents deleted too, not just the worktree's own\.$/,
-    then: /^Without --yes the command removes nothing, and it prints the same worktree and branch list --yes would act on, but not which of those branches would actually be deleted — that verdict is computed only inside the removal itself\.$/,
+    then: /^Without --yes the command removes nothing, and it prints the worktrees and branches it would act on if nothing changes before the --yes run — both runs recompute the gate from scratch, but not which of those branches would actually be deleted — that verdict is computed only inside the removal itself\.$/,
   })
 })
 
@@ -126,11 +126,17 @@ test('says .teammates is kept deliberately, and the very next statement distingu
   const scope = await cleanup()
   assertClaim(scope, {
     claim: /^What this does not clean up: \.teammates\/<run-id>\/ stays on disk on purpose\.$/,
-    // `resume` reads it to continue a run; `rebuild-state` also reads it (`readState` on every
-    // invocation), but only to REFUSE when it exists, since it exists for the case where the
-    // directory is already gone. Neither "list both" nor "keep only resume" is accurate — each
-    // command needs its own clause.
-    then: /^Delete it yourself when you no longer want the record: resume reads it to continue a run, while rebuild-state reads it only to refuse — it exists for the case where the directory is already gone\.$/,
+    // `resume` reads it to continue a run. `rebuild-state` reads it TWICE, for two different
+    // reasons: `readState` refuses when the run's status file exists — that refusal is what the
+    // directory-already-gone case exists to bypass — and then, inside `writePlan`, it reads
+    // `.teammates/<runId>/plan.json` again and carries forward whatever `runBranch` was already
+    // recorded there. Verified in this worktree: mutating `writePlan`'s `carried` to always be
+    // `null` turns `tests/cli.test.mjs:11669` ("rebuild-state keeps the recorded run branch
+    // rather than adopting the checkout") red, along with four other tests pinning the same
+    // carry-forward. Deleting the directory before a `rebuild-state` run from a different
+    // checkout has nothing to carry forward, so that run's own checkout is what gets recorded —
+    // permanently, since fill-if-absent then protects it from every later writer.
+    then: /^Delete it yourself when you no longer want the record: resume reads it to continue a run, while rebuild-state reads it twice: once to refuse when it exists, since it exists for the case where the directory is already gone, and once to keep the run branch it recorded — delete the directory and a later rebuild-state run from any other checkout records that checkout as the run branch, permanently, and complete --enforcement-only can no longer verify completion for the rest of the run\.$/,
   })
 })
 

@@ -87,9 +87,10 @@ junction a worktree holds, so a worktree provisioned with a junction back into t
 repository — the kind a fresh worktree's own dependency install might use as a shortcut,
 such as a junction into the repository's real `node_modules` — has that target's
 contents deleted too, not just the worktree's own. Without `--yes` the command removes
-nothing, and it prints the same worktree and branch list `--yes` would act on, but not
-which of those branches would actually be deleted — that verdict is computed only inside
-the removal itself. Run it first without `--yes` to read the plan, then add `--yes` to
+nothing, and it prints the worktrees and branches it would act on if nothing changes
+before the `--yes` run — both runs recompute the gate from scratch, but not which of
+those branches would actually be deleted — that verdict is computed only inside the
+removal itself. Run it first without `--yes` to read the plan, then add `--yes` to
 remove what it lists:
 
     node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" prune-run --run <runId> --plan <planPath> --root <project root> [--yes]
@@ -118,8 +119,11 @@ itself says, on whatever you point it at.
 
 What this does not clean up: `.teammates/<run-id>/` stays on disk on purpose. Delete it
 yourself when you no longer want the record: `resume` reads it to continue a run, while
-`rebuild-state` reads it only to refuse — it exists for the case where the directory is
-already gone. It is gitignored.
+`rebuild-state` reads it twice: once to refuse when it exists, since it exists for the
+case where the directory is already gone, and once to keep the run branch it recorded —
+delete the directory and a later `rebuild-state` run from any other checkout records that
+checkout as the run branch, permanently, and `complete --enforcement-only` can no longer
+verify completion for the rest of the run. It is gitignored.
 
 ## Surface unresolved findings
 
