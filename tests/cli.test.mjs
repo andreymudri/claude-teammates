@@ -9475,6 +9475,144 @@ test('livePreviewPaths does not follow a claim entry that is a symlink to a live
   }
 })
 
+// THE `ownerGone` WAIVER STOPS AT THE MARKER. Three comments assert that boundary and nothing
+// pinned it: the test above stubs `list` to return no claim names at all, so the claim loop is
+// never entered with the preview directory missing, and a mutant reading
+// `if (!info.isFile() || (!ownerGone && info.uid !== ownerUid)) continue` — waiving claim vetting
+// exactly as the marker's is waived — kept the whole suite green.
+//
+// It is a real behaviour change and a dangerous one. With the directory gone the marker path is
+// one guessable name, but the claim PREFIX admits unboundedly many, all free for any local user
+// to plant at. Waiving the uid comparison there would let a planted claim naming a live pid force
+// `live`, and a preview that is always live is a preview that can never be reaped — the exact
+// direction the vetting section says a forged entry must never be able to force.
+test('a claim under a preview whose directory is gone is still ignored, even naming a live pid', async () => {
+  const dir = path.join(tmpdir(), 'tm-preview-dir-gone-foreign-claim')
+  const claimName = path.basename(previewClaimPath(dir, 4242))
+  const readPaths = []
+  const live = await livePreviewPaths([dir], {
+    read: async (p) => { readPaths.push(p); return '4242\n' },
+    list: async () => [claimName],
+    stat: async (p) => {
+      // The preview directory is gone, so there is no uid for a claim to be compared against.
+      if (p === dir) { const e = new Error('no such file'); e.code = 'ENOENT'; throw e }
+      // The marker is absent; the CLAIM is a regular file planted by somebody else.
+      if (p === previewOwnerMarkerPath(dir)) { const e = new Error('no such file'); e.code = 'ENOENT'; throw e }
+      return { uid: FOREIGN_UID, isFile: () => true }
+    },
+    // Would report the preview live if the planted claim were honoured.
+    probe: () => true,
+  })
+  assert.equal(live.has(dir), false, 'a claim with no owner to vet against must not force live')
+  assert.deepEqual(readPaths, [], 'an unvetted claim must never be opened')
+})
+
+// ---------------------------------------------------------------------------
+// The default `openHolderEntry`: vetting and reading as ONE descriptor.
+//
+// These stage real entries and inject nothing, because the doubles cannot reach this at all — a
+// double hands back an object, not a file descriptor, so injecting `read` selects the two-syscall
+// stand-in and the atomicity goes unexercised. Everything below therefore uses the real bindings.
+//
+// What is pinned here is deterministic: a fifo, a directory and a symlink at the marker path are
+// each refused, and refused as IGNORED rather than as `unknown`. What is NOT pinned here is the
+// race itself — that a swap between vetting and reading cannot land — because staging it needs a
+// competing writer looping on the name, which is not a test this suite should own. It was
+// reproduced out of band against three revisions of this file and the result is recorded in the
+// comment above `openHolderEntry`; it is not measured by anything below.
+//
+// The fifo test also stands as the no-hang assertion, and it is the only kind available: a test
+// that returns at all is a test whose `open(2)` did not park. Before O_NONBLOCK there was no
+// assertion to write, only a suite that stopped.
+// ---------------------------------------------------------------------------
+
+// `mkfifo` is a POSIX utility with no Node binding and no Windows equivalent. Skipping there
+// loses nothing this platform can answer: the entry a Windows attacker plants without privilege
+// is a junction, which the directory case below covers.
+const NO_FIFO_ON_WIN32 = { skip: process.platform === 'win32' }
+
+test('a fifo planted at the marker path is refused without blocking', NO_FIFO_ON_WIN32, async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'tm-preview-fifo-'))
+  const preview = path.join(scratch, 'preview')
+  await mkdir(preview)
+  try {
+    // No writer will ever open the other end. Under a blocking open this call never returns.
+    execFileSync('mkfifo', [previewOwnerMarkerPath(preview)])
+    const live = await livePreviewPaths([preview])
+    assert.equal(live.has(preview), false, 'a fifo marker is IGNORED, not read and not unknown')
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
+test('a directory planted at the marker path is refused', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'tm-preview-dirmarker-'))
+  const preview = path.join(scratch, 'preview')
+  await mkdir(preview)
+  try {
+    await mkdir(previewOwnerMarkerPath(preview))
+    const live = await livePreviewPaths([preview])
+    assert.equal(live.has(preview), false)
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
+// O_NOFOLLOW rejects a symlink at open(2) with ELOOP (EMLINK on macOS and the BSDs), and that
+// rejection has to land as IGNORED. Mapping it to `unknown` would read as live and hand any local
+// user a way to make a preview unreapable forever by planting one symlink — so this test fails in
+// BOTH directions: it goes red if the symlink is followed (the bait names a live pid, so the
+// preview would be live for the wrong reason) and red if the refusal is miscategorised as unknown
+// (live again). The bait is owned by this process precisely so the uid half cannot be what
+// rejects it.
+test('a symlink planted at the marker path is ignored, not treated as unknown', NO_FILE_SYMLINKS_ON_WIN32, async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'tm-preview-linkmarker-'))
+  const preview = path.join(scratch, 'preview')
+  await mkdir(preview)
+  try {
+    const bait = path.join(scratch, 'bait')
+    await writeFile(bait, `${process.pid}\n`, 'utf8')
+    await symlink(bait, previewOwnerMarkerPath(preview))
+    const live = await livePreviewPaths([preview])
+    assert.equal(live.has(preview), false)
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
+// The same three shapes at a CLAIM path, because the claim read got the identical treatment and a
+// fix applied to one and not the other would go unnoticed: every claim test above uses doubles,
+// which never reach the fused open at all.
+test('a fifo planted at a claim path is refused without blocking', NO_FIFO_ON_WIN32, async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'tm-preview-claimfifo-'))
+  const preview = path.join(scratch, 'preview')
+  await mkdir(preview)
+  try {
+    await writeFile(previewOwnerMarkerPath(preview), `${deadPid()}\n`, 'utf8')
+    execFileSync('mkfifo', [previewClaimPath(preview, 4242)])
+    const live = await livePreviewPaths([preview])
+    assert.equal(live.has(preview), false, 'a fifo claim is IGNORED, not read and not unknown')
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
+// The happy path against the real bindings, so none of the refusals above can be satisfied by an
+// implementation that refuses everything: an ordinary marker this process owns, naming a live
+// pid, is still opened through the same descriptor and still holds the preview.
+test('a real regular-file marker naming a live pid is still read through the fused open', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'tm-preview-fused-ok-'))
+  const preview = path.join(scratch, 'preview')
+  await mkdir(preview)
+  try {
+    await writeFile(previewOwnerMarkerPath(preview), `${process.pid}\n`, 'utf8')
+    const live = await livePreviewPaths([preview])
+    assert.equal(live.has(preview), true)
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
 // The trailing dot in `previewClaimPrefix` is load-bearing (see scripts/merge-preview.mjs for
 // why): without it, one preview's prefix also matches a SIBLING preview's claim whenever one
 // directory's name is a literal prefix of the other's, e.g. "preview" and "preview2". Two

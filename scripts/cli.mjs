@@ -1,4 +1,5 @@
-import { readFile, writeFile, mkdir, rename, lstat, readdir, unlink } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, rename, lstat, readdir, unlink, open as openFile } from 'node:fs/promises'
+import { constants as fsConstants } from 'node:fs'
 import { livenessRows, renderLiveness, hasStall, hasUnknown, DEFAULT_STALE_MINUTES } from './liveness.mjs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -1429,9 +1430,15 @@ async function unlinkPreviewLinks(dir, depth = 0) {
 //     a no-op there: an unprivileged Windows user needs no privilege at all to plant a junction,
 //     which is exactly what that check rejects. Do not read this note as licence to drop
 //     `!info.isFile()` behind a platform branch.
-//   - TOCTOU on a world-writable parent without the sticky bit. Vetting a claim and reading it
-//     are two syscalls, not one; between them another local user could remove the file this
-//     `lstat` approved and put a different one at the same name. A STICKY parent narrows who may
+//   - TOCTOU on a world-writable parent without the sticky bit. This was the CONTENT race:
+//     vetting a candidate and reading it were two syscalls against a NAME, and between them
+//     another local user could remove the entry the `lstat` approved and put a different one at
+//     that name. `openHolderEntry` closed it by making the vetting and the read one descriptor,
+//     which is measured in the table above that function. What survives is narrower and is what
+//     the rest of this bullet is about: between the READDIR that discovers a claim name and the
+//     open that follows it, the entry at that name can still change — so what is opened may not
+//     be what was listed. It cannot be an entry that fails vetting, because vetting now happens
+//     on the object opened, but it can be a different vetted one. A STICKY parent narrows who may
 //     remove an entry inside it. Per unlink(2) and rename(2), a sticky directory only lets a
 //     removal through when the REMOVING process's euid equals the FILE's own owner, OR equals the
 //     DIRECTORY's owner, OR that process holds CAP_FOWNER — three ways through, not one.
@@ -1504,28 +1511,119 @@ async function unlinkPreviewLinks(dir, depth = 0) {
 //     written after that snapshot invisible for the remainder of it — including to previews the
 //     pass had not reached yet, since in production every preview is a direct child of the temp
 //     root and one readdir covered them all. That was unreachable while nothing wrote claims and
-//     is reachable now, which is why the memo is gone. What remains is the ordinary TOCTOU width
-//     of listing, vetting and reading as separate syscalls: a claim written after THIS preview's
-//     own listing is still unseen for THIS preview, and no later one.
+//     is reachable now, which is why the memo is gone. What remains is one readdir wide: a claim
+//     written after THIS preview's own listing is still unseen for THIS preview, and for no later
+//     one. Vetting and reading are no longer part of that width — they happen on a single
+//     descriptor now, per `openHolderEntry`.
 //
 // `read`, `list`, `stat` and `probe` are injectable because several of the branches above cannot
 // be staged end to end: EPERM needs a process owned by another user, EACCES needs a file this
-// user cannot read, and a foreign-uid or non-regular marker or claim needs a filesystem entry
-// `write` alone cannot fabricate. The fifo case is worse than merely unstageable — a real one
-// with no writer on the other end would park the staging test in open(2) for as long as the
-// suite was allowed to run — so it is pinned through these doubles rather than on disk. Exported
-// for the same reason `isMissingPreviewRoot` is — each branch is on the destructive path and has
-// to be pinned on its own.
+// user cannot read, and a foreign-uid marker or claim needs a filesystem entry `write` alone
+// cannot fabricate. The NON-REGULAR shapes are no longer in that list: a fifo used to be worse
+// than unstageable, since a real one with no writer would park the staging test in open(2) for as
+// long as the suite was allowed to run, and O_NONBLOCK is what makes it a test that can be
+// written at all — so the fifo, directory and symlink cases are now staged for real, against the
+// real bindings, rather than described through doubles. Exported for the same reason
+// `isMissingPreviewRoot` is — each branch is on the destructive path and has to be pinned on its
+// own.
+// Open a candidate holder — a marker or a claim — so that VETTING IT AND READING IT ARE THE SAME
+// OBJECT rather than the same path visited twice.
+//
+// `lstat` answers about a PATH. `readFile` resolves that path again, so between the two syscalls
+// another local user may unlink the entry the `lstat` approved and put a different one at the
+// name. Vetting a path and then reading a path therefore proves nothing about what was read.
+//
+// MEASURED, not reasoned. A swapper flipping the marker name between a regular file and a fifo
+// with rename(2), against a reader calling this function in a loop for twenty seconds, with the
+// preview directory absent so the uid half is waived:
+//
+//   marker read unvetted                        killed at the timeout, parked in open(2)
+//   vetted by path, uid half enforced           returned, ~99k calls, never opened anything
+//   vetted by path, uid half waived             killed at the timeout, parked in open(2)
+//   vetted and read through one descriptor      returned, ~70k calls, three runs out of three
+//
+// The third row is the one that matters: by-path vetting is not a defence against a swap, it only
+// narrows which entries are worth swapping in. `prune-run` parked there produces no plan and no
+// verdict, and `process.exit()` cannot interrupt a libuv thread already inside a blocking open(2);
+// only SIGINT recovers the shell.
+//
+//   - O_NOFOLLOW refuses a SYMLINK at the final component instead of following it.
+//   - O_NONBLOCK means a FIFO cannot park this call: open(2) returns immediately rather than
+//     waiting for a writer, which is the difference between a hung `prune-run` and a rejected
+//     entry.
+//   - `fstat` on the DESCRIPTOR, not `lstat` on the path, so `isFile()` and the uid describe the
+//     object now held open — and the read below comes from that same descriptor. A swap after
+//     this point renames the entry; it cannot reach through a descriptor that is already open.
+//
+// O_NOFOLLOW's refusal is ELOOP on Linux and EMLINK on macOS and the BSDs; the caller maps both
+// to IGNORED, because "this is a symlink" is the same answer `!isFile()` gave before and must not
+// become `unknown` — see the caller for why that direction matters.
+async function openHolderEntry(p) {
+  const handle = await openFile(p, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK | fsConstants.O_NOFOLLOW)
+  try {
+    return {
+      info: await handle.stat(),
+      read: () => handle.readFile('utf8'),
+      close: () => handle.close().catch(() => {}),
+    }
+  } catch (err) {
+    await handle.close().catch(() => {})
+    throw err
+  }
+}
+
 export async function livePreviewPaths(previewPaths, {
-  read = (p) => readFile(p, 'utf8'),
+  // Injected only by the tests below, and injecting it changes WHICH implementation vets a
+  // candidate, which is the one thing about this seam a reader has to know. A double cannot hand
+  // out a file descriptor, so supplying `read` selects a two-syscall stand-in — `stat` by path,
+  // then `read` by path — that reproduces the caller's ignored/missing/unknown bookkeeping
+  // faithfully and reproduces the ATOMICITY not at all. The fused `openHolderEntry` above is what
+  // production uses, and it is covered by the real-filesystem tests that inject nothing.
+  read = null,
   list = (dir) => readdir(dir),
   // lstat, not a symlink-following stat — see the vetting section above for why. `lstat` is
   // already imported for `unlinkPreviewLinks`, under a name distinct from this parameter, so
-  // there is no `stat = (p) => stat(p)` self-reference to fall into here.
+  // there is no `stat = (p) => stat(p)` self-reference to fall into here. This one is a genuine
+  // path question — "who owns the preview directory" — with no read attached, so it stays an
+  // lstat by path.
   stat = (p) => lstat(p),
   // Signal 0 sends nothing: it only asks whether the pid can be signalled at all.
   probe = (pid) => process.kill(pid, 0),
 } = {}) {
+  const openHolder = read === null
+    ? openHolderEntry
+    : async (p) => ({ info: await stat(p), read: () => read(p), close: () => {} })
+
+  // ONE candidate entry — a marker or a claim — resolved to exactly one of four answers. Naming
+  // them is the point: IGNORED and UNKNOWN are the two the rest of this function must never
+  // conflate, because a candidate that fails vetting contributes nothing at all while one that
+  // cannot be read contributes `unknown`, and `unknown` means live.
+  const holderAt = async (p, accept) => {
+    let handle
+    try {
+      handle = await openHolder(p)
+    } catch (err) {
+      // ENOENT is the one answer that positively means "not there".
+      if (err?.code === 'ENOENT') return 'missing'
+      // O_NOFOLLOW's refusal of a symlink: ELOOP on Linux, EMLINK on macOS and the BSDs. That is
+      // the entry failing to be a regular file, so it is IGNORED. Calling it `unknown` would let
+      // any local user make a preview permanently unreapable by planting one symlink — the
+      // denial-of-cleanup this vetting exists to prevent, arrived at from the other side.
+      if (err?.code === 'ELOOP' || err?.code === 'EMLINK') return 'ignored'
+      return 'unknown'
+    }
+    try {
+      if (!accept(handle.info)) return 'ignored'
+      return { text: await handle.read() }
+    } catch (err) {
+      // Released between the open and the read: ENOENT means what it says. Anything else — EACCES,
+      // EBUSY, EIO — leaves this holder unknown.
+      return err?.code === 'ENOENT' ? 'missing' : 'unknown'
+    } finally {
+      await handle.close()
+    }
+  }
+
   const live = new Set()
 
   for (const dir of previewPaths) {
@@ -1599,11 +1697,18 @@ export async function livePreviewPaths(previewPaths, {
     // junctions to follow, nothing the uid comparison protects and no referent for it to compare
     // against, and the marker is read on `isFile()` alone.
     //
-    // The REGULAR-FILE half is NOT relaxed with it, and that is the half that matters here: it is
-    // what keeps a planted fifo from parking `read` in open(2) and a junction from being followed,
-    // neither of which needs a preview directory to exist. The invariants hold either way — a
-    // marker that fails `isFile()` is still IGNORED, and one that cannot be READ for any reason
-    // but ENOENT is still UNKNOWN.
+    // The REGULAR-FILE half is NOT relaxed with it, and that is the half that matters here: a
+    // planted fifo or junction needs no preview directory to exist. The invariants hold either
+    // way — a marker that fails `isFile()` is still IGNORED, and one that cannot be READ for any
+    // reason but ENOENT is still UNKNOWN.
+    //
+    // An earlier version of this paragraph said that half was what kept a fifo out of open(2).
+    // That was false while the vetting was an `lstat` BY PATH: a regular file approved by the
+    // lstat could be swapped for a fifo before the read resolved the name again, which was
+    // measured and is tabulated above `openHolderEntry`. It is true now, and it is true because
+    // that function opens once with O_NONBLOCK and fstats the descriptor it holds — the
+    // `isFile()` here is asked of an object, not of a name. Waiving the uid half is safe only
+    // because of that; on the by-path shape this waiver was itself the hazard.
     //
     // Measured by driving this function's doubles with `stat(dir)` answering ENOENT, against the
     // base branch and against both revisions of this one. Marker a regular file naming a live
@@ -1619,25 +1724,18 @@ export async function livePreviewPaths(previewPaths, {
     // marker's own `rm` sits in an outer `finally` that always runs — so a removal that fails
     // leaves a still-REGISTERED preview whose marker is already gone and whose marker path, in a
     // temp root that outlives it, is free for anyone to plant at.
-    const markerPath = previewOwnerMarkerPath(dir)
-    let markerInfo
-    try {
-      markerInfo = await stat(markerPath)
-    } catch (err) {
-      // ENOENT is the only "no marker": a preview from before markers existed, or one whose
-      // owner has already released it. Every other failure leaves the owner unknown, matching
-      // the unreadable-marker rule.
-      if (err?.code !== 'ENOENT') unknown = true
-    }
-    if (markerInfo && markerInfo.isFile() && (ownerGone || markerInfo.uid === ownerUid)) {
-      try {
-        holders.push(await read(markerPath))
-      } catch (err) {
-        // A marker released between the lstat and this read is ENOENT and means exactly what it
-        // says. Every other failure leaves the owner unknown.
-        if (err?.code !== 'ENOENT') unknown = true
-      }
-    }
+    // `missing` is the only "no marker": a preview from before markers existed, or one whose owner
+    // has already released it. `ignored` is a marker that failed vetting and contributes nothing.
+    // `unknown` leaves the owner unresolved, which means live.
+    //
+    // `ownerGone` waives the UID half HERE AND NOWHERE ELSE — see the argument above, and the
+    // claim predicate below, which deliberately does not carry it.
+    const marker = await holderAt(
+      previewOwnerMarkerPath(dir),
+      (info) => info.isFile() && (ownerGone || info.uid === ownerUid),
+    )
+    if (marker === 'unknown') unknown = true
+    else if (typeof marker !== 'string') holders.push(marker.text)
     const parent = path.dirname(dir)
     // ONE LISTING PER PREVIEW, not one per sweep. The memo that used to stand here took each
     // parent directory's listing once and reused it for every candidate underneath, so a claim
@@ -1655,9 +1753,9 @@ export async function livePreviewPaths(previewPaths, {
     //
     // The cost is one readdir per preview instead of one per sweep. A sweep examines the previews
     // in one temp directory, so that is a small multiple of a cheap syscall against an
-    // irreversible removal. The window does not close — vetting and reading are still two
-    // syscalls, and the TOCTOU note above still applies — it narrows from one sweep wide to one
-    // readdir wide, which is the same bound the claim vetting already lives with.
+    // irreversible removal. The window does not close — a claim written after THIS preview's
+    // listing is still unseen for it, and the readdir-to-open note above still applies — it
+    // narrows from one sweep wide to one readdir wide.
     //
     // `null` records a listing that FAILED, which is not the same as an empty one.
     let names
@@ -1671,31 +1769,28 @@ export async function livePreviewPaths(previewPaths, {
       const prefix = previewClaimPrefix(dir)
       const claimNames = names.filter((name) => name.startsWith(prefix))
       if (claimNames.length > 0) {
-        // `ownerUid` was resolved once at the top of this iteration — the same value that vetted
-        // the marker vets every claim here, so the two cannot disagree about who owns this
-        // preview.
+        // A claim SHARES THE MARKER'S SHAPE EXACTLY — a sibling entry under a prefix any local
+        // user can guess, vetted and then read — so it gets the same fused open, and the same
+        // ELOOP/EMLINK-is-ignored mapping, for the same reasons.
+        //
+        // `ownerUid` was resolved once at the top of this iteration, so the value that vetted the
+        // marker vets every claim here and the two cannot disagree about who owns this preview.
+        //
+        // The predicate differs from the marker's in ONE term, and the omission is the whole
+        // point: `ownerGone` is NOT here. With the preview directory missing, `ownerUid` is
+        // `undefined`, no claim's uid can equal it, and every claim is IGNORED. That is the
+        // behaviour on the base branch, and it is what stops a claim any local user planted at a
+        // free name — which is what the prefix becomes once the directory is gone — from naming a
+        // live pid and forcing `live` on a preview nothing could then ever reap. The marker can
+        // afford the waiver because there is exactly one marker path per preview and it is the
+        // owner's own record; the claim prefix admits unboundedly many entries.
         for (const name of claimNames) {
-          const claimPath = path.join(parent, name)
-          let info
-          try {
-            info = await stat(claimPath)
-          } catch (err) {
-            // A claim released between the listing and this lstat is ENOENT and means exactly
-            // what it says: nothing to vet, nothing to read. Anything else leaves that holder
-            // unknown — the same rule as an unreadable marker.
-            if (err?.code !== 'ENOENT') unknown = true
-            continue
-          }
-          // Vetted or ignored, never "unknown": see the vetting section above this function for
-          // both conditions and the TOCTOU limit on the read that follows.
-          if (!info.isFile() || info.uid !== ownerUid) continue
-          try {
-            holders.push(await read(claimPath))
-          } catch (err) {
-            // A claim released between the lstat and this read is ENOENT and means exactly what
-            // it says. Anything else leaves that holder unknown.
-            if (err?.code !== 'ENOENT') unknown = true
-          }
+          const claim = await holderAt(
+            path.join(parent, name),
+            (info) => info.isFile() && info.uid === ownerUid,
+          )
+          if (claim === 'unknown') unknown = true
+          else if (typeof claim !== 'string') holders.push(claim.text)
         }
       }
     }
