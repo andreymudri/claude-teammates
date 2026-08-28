@@ -12886,12 +12886,12 @@ test('locate names a repointed worktree HEAD rather than calling it detached', a
 // under refs/heads/, so `classifyHeadRef` returns ok and the not-a-branch refusal never fires.
 // `generateReviewDispatch` splices the name bare into the reviewer's prompt, so an unwrapped
 // value puts a line break and a forged instruction in front of an agent this gate trusts.
-// Measured before the wrap: FOUR raw U+2028 per reviewer prompt — the name is spliced twice and
-// carries two separators — and EIGHT on stdout, because one prompt is emitted per lens and
-// `writeReviewManifest` declares two (`stdoutRaw=8 reviewers=2 perPrompt=4,4`). The per-prompt
-// figure is the invariant one; the stdout total scales with the lens count, so a manifest change
-// would move it without anything here being wrong. The assertions below count NO raw separators
-// at all, which is why they hold either way.
+// Measured before the wrap: FOUR raw U+2028 in a correctness prompt — the name is spliced twice,
+// two separators each — but EIGHT in a CLAIMS prompt, because review-gen.mjs:76 is the claims-only
+// method step and splices it twice more. Splices per lens: `correctness:2 security:2 tests:2
+// claims:4`. The total therefore depends on WHICH lenses are declared, not how many; under this
+// repo's four-lens manifest it is twenty separators, not sixteen. The assertions below count NO
+// raw separators at all, so they hold whatever the manifest declares.
 //
 // Every control character is an ESCAPE here: a literal U+2028 inside a REGEX literal is a line
 // terminator and breaks the parse (string and template literals have admitted it since ES2019,
@@ -12963,5 +12963,70 @@ test('gate refuses a HEAD whose branch name is itself a ref path', async () => {
     assert.notEqual(code, 0)
     assert.match(out, /is itself a ref path/)
     assert.doesNotMatch(out, /"verdict":\s*"PASS"/)
+  })
+})
+
+// ONE TAG BLINDS EVERY REVIEWER, and nothing touches HEAD. Git's DWIM order resolves
+// `refs/tags/<name>` BEFORE `refs/heads/<name>`, so `git tag run-branch <task tip>` -- creatable
+// by any teammate from its own worktree, no privilege -- redirects the two ref-resolving commands
+// the prompt orders every reviewer to run. Measured with a bare name: the prompt's own
+// `git merge-base run-branch <branch>` answered the TASK TIP, the diff against it was EMPTY, and
+// the blocking agent review would have passed over `export const backdoor = 1`.
+//
+// The mechanical checks are unaffected because they go through `qualifyBranch`, which is exactly
+// why nothing else in this suite catches it: the value here is handed to an AGENT as a git
+// argument, so it must be a full ref.
+test('review-dispatch orders reviewers to fully qualified refs a tag cannot shadow', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeReviewManifest(root)
+    g(['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'export const backdoor = 1\n', 'utf8')
+    g(['add', 'a.mjs'])
+    g(['commit', '--quiet', '-m', 'T1 work'])
+    const tip = g(['rev-parse', 'HEAD']).trim()
+    g(['checkout', '--quiet', 'run-branch'])
+    // THE PLANT: tags shadowing both the run branch and the task branch. HEAD is untouched.
+    g(['tag', 'run-branch', tip])
+    g(['tag', 'teammates/r1/T1', tip])
+    assert.equal(g(['symbolic-ref', '--quiet', 'HEAD']).trim(), 'refs/heads/run-branch', 'HEAD is untouched')
+    lines.length = 0
+    const code = await runCli(['review-dispatch', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 0, lines.join('\n'))
+    const spec = JSON.parse(lines.join('\n'))
+    const prompt = spec.reviewers[0].prompt
+    // Every ref the reviewer is told to resolve is fully qualified, so the tags cannot displace
+    // them. Asserted on the PROMPT, because that is the channel the agent actually obeys.
+    assert.match(prompt, /git merge-base refs\/heads\/run-branch <branch>/)
+    assert.doesNotMatch(prompt, /git merge-base run-branch <branch>/)
+    for (const b of spec.reviewers[0].branches || spec.branches || []) {
+      assert.match(b, /^refs\/heads\//, `branch ${b} must be fully qualified`)
+    }
+    // And the end the whole finding is about: following the prompt reaches the REAL fork point,
+    // so the diff under review is not empty.
+    const base = g(['merge-base', 'refs/heads/run-branch', 'refs/heads/teammates/r1/T1']).trim()
+    const diff = g(['diff', '--name-only', base, 'refs/heads/teammates/r1/T1']).trim()
+    assert.equal(diff, 'a.mjs', 'the reviewer sees the task diff rather than an empty one')
+  })
+})
+
+// The THIRD rejection through `doctor`, which builds its own sentence from `kind`. This ref IS a
+// branch -- `git status -sb` prints it as current and `git branch --list` shows it -- so the
+// sentence must not say "not a branch", which is what folding it in with the second kind produced
+// and what made this report contradict git in the same repository.
+test('doctor calls a ref-path branch name what it is rather than denying it is a branch', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    g(['branch', 'refs/heads/run-branch', 'run-branch'])
+    await writeFile(path.join(root, '.git', 'HEAD'), 'ref: refs/heads/refs/heads/run-branch\n', 'utf8')
+    assert.equal(g(['symbolic-ref', '--quiet', 'HEAD']).trim(), 'refs/heads/refs/heads/run-branch')
+    // git itself reports it as the current branch, which is the whole reason it needs its own kind.
+    assert.match(g(['status', '-sb']), /## refs\/heads\/run-branch/)
+    lines.length = 0
+    const code = await runCli(['doctor', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
+    const out = lines.join('\n')
+    assert.equal(code, 1, out)
+    assert.match(out, /a real branch whose NAME is itself a ref path/)
+    assert.doesNotMatch(out, /HEAD pointing at .*which is not a branch/)
   })
 })

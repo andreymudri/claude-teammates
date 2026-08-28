@@ -43,9 +43,14 @@ export async function collectDoctorReport({ git, runId, runBranch, baseBranch, t
   if (!head.ok) {
     const at = await git.headSha().catch(() => 'an unknown commit')
     const where = runBranch === null ? '(none recorded)' : runBranch
+    // One sentence per KIND. The third state is a real branch — git lists it, `git status -sb`
+    // prints it as current — so describing it the way the second one is described would have this
+    // report contradict git in the same repository.
     problems.push(head.kind === 'detached'
       ? `main worktree is detached at ${at}, not on the run branch ${where} — a detached HEAD belongs to no branch, so nothing here can be verified against the run branch, and a commit reachable only from HEAD disappears the moment anything else is checked out`
-      : `main worktree has HEAD pointing at ${head.ref}, which is not a branch, not at the run branch ${where} — git accepts any target inside refs/ for HEAD, and the gate refuses to run at all in this state, so nothing here has been verified against a run branch`)
+      : head.kind === 'ref-path-name'
+        ? `main worktree is on ${head.ref}, a real branch whose NAME is itself a ref path, not on the run branch ${where} — git resolves such a name inconsistently depending on which command re-qualifies it, so the gate refuses to run here; rename the branch`
+        : `main worktree has HEAD pointing at ${head.ref}, which is not a branch, not at the run branch ${where} — git accepts any target inside refs/ for HEAD, and the gate refuses to run at all in this state, so nothing here has been verified against a run branch`)
   } else if (mainBranch !== runBranch) {
     problems.push(`main worktree is on ${mainBranch}, not the run branch ${runBranch === null ? '(none recorded)' : runBranch} — a teammate or reviewer that ran git checkout here moved it, and the gate reads the current branch to decide what it is protecting`)
   }

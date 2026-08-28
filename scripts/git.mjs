@@ -97,9 +97,12 @@ export function defaultGitExec(args, cwd) {
 // `ok` with the short name and the full ref when HEAD is on a real branch, and otherwise `ok:
 // false` with `name: null` and a sentence naming the state.
 //
-// TWO REJECTED STATES, and they are rejected for the same underlying reason — HEAD does not
-// designate a branch — but they are reported separately because the remedies differ and because a
-// diagnostic that says "detached" for a repointed HEAD sends an operator to the wrong place.
+// THREE REJECTED STATES, each with its own `kind`. They are NOT all "HEAD does not designate a
+// branch" — the third one does — and they are kept apart because consumers build their own
+// sentence from `kind`, so a state folded in with another is a state some command will describe
+// wrongly. That has happened twice: a diagnostic saying "detached" for a repointed HEAD, and one
+// saying "not a branch" for a ref git itself lists as the current branch. Adding a state here
+// means adding a `kind` and visiting the consumers, not widening an existing one.
 //
 //   - DETACHED. `symbolic-ref --quiet` exits 1, so there is no target at all. The string a caller
 //     might invent for this state is the danger: `HEAD` was used once, and `refs/heads/HEAD` is a
@@ -110,9 +113,15 @@ export function defaultGitExec(args, cwd) {
 //     pseudo-ref guard sees. A `refs/heads/` strip is a no-op on such a ref, so the "branch name"
 //     becomes the whole ref string and prefixing `refs/heads/` back onto it lands on
 //     `refs/heads/refs/tags/x`, an ordinary ref any teammate can create.
+//   - A BRANCH WHOSE NAME IS ITSELF A REF PATH (`kind: 'ref-path-name'`). This one IS a real
+//     branch: `refs/heads/refs/heads/run-branch` lives under refs/heads/, `git status -sb` prints
+//     it as the current branch, `git branch --list` shows it and `git checkout` says "Already on".
+//     Nothing is wrong with HEAD — what is wrong is the NAME, because consumers re-qualify it
+//     inconsistently (see the comment on that return below). Describing it as "not a branch"
+//     contradicts git itself, which is why it does not share the kind above.
 //
 // Pure and exported so the rule can be tested without a repository, and so no caller has to
-// restate it. `name` is deliberately null on both rejections: a caller that ignores `ok` and reads
+// restate it. `name` is deliberately null on every rejection: a caller that ignores `ok` and reads
 // `name` gets an absence, never a hostile string.
 export function classifyHeadRef(ref) {
   if (ref === null || ref === undefined) {
@@ -156,7 +165,7 @@ export function classifyHeadRef(ref) {
   if (name.startsWith('refs/')) {
     return {
       ok: false,
-      kind: 'not-a-branch',
+      kind: 'ref-path-name',
       ref,
       name: null,
       reason: `HEAD points at ${printable(ref)}, whose branch name would be ${printable(name)} — a name that is itself a ref path, which consumers re-qualify inconsistently, so it is refused rather than resolved`,

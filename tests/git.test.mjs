@@ -1894,14 +1894,38 @@ test('currentBranchRef removes a CRLF terminator and leaves an ordinary name alo
 test('classifyHeadRef refuses a branch whose name is itself a ref path', () => {
   const r = classifyHeadRef('refs/heads/refs/heads/run-branch')
   assert.equal(r.ok, false)
-  assert.equal(r.kind, 'not-a-branch')
+  // Its OWN kind: this ref IS a branch — git lists it and `git status -sb` prints it as current —
+  // so folding it in with `not-a-branch` made two consumers contradict git in the same repository.
+  assert.equal(r.kind, 'ref-path-name')
   assert.equal(r.name, null, 'no name may escape, or a consumer will re-qualify it')
   assert.match(r.reason, /is itself a ref path/)
   // The ref is still reported, because an operator has to know which ref to go and fix.
   assert.equal(r.ref, 'refs/heads/refs/heads/run-branch')
   // Any refs/ prefix, not just the doubled-heads spelling.
   assert.equal(classifyHeadRef('refs/heads/refs/tags/v1').ok, false)
+  // NEUTRALISED HERE TOO. This return builds its own sentence, so the neutralisation test above
+  // does not reach it -- that one's input takes the FIRST not-a-branch return. Measured: swapping
+  // both `printable()` calls on this return for raw values left the whole suite green.
+  const forged = classifyHeadRef('refs/heads/refs/heads/x\u2028forged')
+  assert.doesNotMatch(forged.reason, /\u2028/)
+  assert.match(forged.reason, /<0x2028>/)
   // And an ordinary name containing slashes is still perfectly fine.
   assert.equal(classifyHeadRef('refs/heads/teammates/r1/T1').name, 'teammates/r1/T1')
   assert.equal(classifyHeadRef('refs/heads/feature/refs-cleanup').name, 'feature/refs-cleanup')
+})
+
+// `currentBranch` must stay DEFINED OVER the classifier rather than re-implementing its rule.
+// Re-inlining the older two-rejection form -- null when detached, otherwise strip `refs/heads/` --
+// left the whole suite green while being plainly observable: `doctor` then printed
+// `run branch refs/heads/run-branch` where it now prints `(none recorded)`. Every other test here
+// drives the classifier directly, so nothing noticed the wrapper drifting away from it.
+test('currentBranch answers null for every state the classifier rejects, not just detachment', async () => {
+  const at = (out) => createGit({ exec: async () => ({ code: 0, signal: null, stdout: out, stderr: '' }) })
+  // The state a re-inlined strip would get WRONG: a real branch whose name is itself a ref path.
+  assert.equal(await at('refs/heads/refs/heads/run-branch\n').currentBranch(), null)
+  // And the two it would get right, so the assertion above is the discriminating one.
+  assert.equal(await at('refs/tags/x\n').currentBranch(), null)
+  assert.equal(await at('refs/heads/run-branch\n').currentBranch(), 'run-branch')
+  const detached = createGit({ exec: async () => ({ code: 1, signal: null, stdout: '', stderr: '' }) })
+  assert.equal(await detached.currentBranch(), null)
 })
