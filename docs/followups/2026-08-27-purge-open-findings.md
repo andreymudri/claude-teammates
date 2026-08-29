@@ -8,10 +8,13 @@ tips**. Nothing is pushed; `origin/master` is still `922ac91`.
 **2026-08-28 — run `purgefix` closed most of this document.** It implemented
 `docs/plans/2026-08-27-purge-followups.md` across five phases and eleven tasks (Task 1 was
 absorbed into Task 7 mid-run), integrated on `run/purge-followups` at `eb22277`, 98 commits past
-`cb83c44`, `npm test` **2190 | 2187 pass | 0 fail | 3 skipped**. The three skips, enumerated from
-the TAP output on Linux rather than assumed: two win32-only location tests and one skipped for
-`no UNC target on this host resolves to a non-local path`. The Linux-only bind-mount boundary test
-below is **not** among them — it runs here. Every phase gated PASS, but not on a first pass:
+`cb83c44`, `npm test` **2190 | 2187 pass | 0 fail | 3 skipped**. The three skips, enumerated by
+name from the TAP output on Linux rather than assumed: `findTaskByWorktree on win32 matches across
+drive-letter case and separator style` (win32 only), `normaliseWorktree maps a Windows 8.3 short
+name onto its long spelling` (win32 only), and `writeLocation refuses a worktree whose resolved form
+the reader would reject` (`no UNC target on this host resolves to a non-local path`). The
+Linux-only bind-mount boundary test below is **not** among them — it runs here. Every phase gated
+PASS, but not on a first pass:
 
 | phase | tasks | gate | integrated |
 |---|---|---|---|
@@ -77,15 +80,50 @@ the run branch's **name** rather than `ctx.runBranchRef`.
 
 ### `scripts/cli.mjs:1458` — the owner marker is read unvetted (medium) — CLOSED by T6
 
-Now `scripts/cli.mjs:1878`, `THE MARKER IS VETTED THE SAME WAY A CLAIM IS`: `lstat`, `isFile()`,
-and uid equal to the preview directory's, hoisted so one owner uid serves both the marker and the
-claims. A candidate failing vetting is **ignored**, not `unknown`, so a forged entry cannot force
-`live` in either direction merely by existing. ENOENT still means "no marker"; any other `lstat`
+**The hazard, restored here because this document is the only record of it.** The sibling claim
+path got `lstat` + `isFile()` + a uid comparison; the marker got none. Any local user who can see
+the temp prefix can plant an entry at the marker's exact path, which is derived from the preview
+directory name and nothing secret. A **fifo** there makes the marker read block forever:
+`process.exit()` cannot interrupt it because the libuv thread is parked in `open(2)`, and only
+SIGINT recovers the shell. A junk file, a symlink or a directory makes the preview **unreapable
+forever**, because a marker that cannot be read is `unknown` and `unknown` means live. One detail
+of the original write-up does not survive checking and is corrected rather than repeated: the
+`await` does **not** precede every print — `prune-run` announces its command checks and runs the
+phases before it reaches `livePreviewPaths` — but it does precede the prune plan and every removal,
+so the command is stranded after that announcement with no plan, no verdict and nothing removed.
+
+That reproduction is prior and cannot be re-taken by the suite: staging a fifo whose read never
+returns would hang the suite that staged it, which is why `read` and `stat` are injectable and why
+the tests pin this branch through doubles instead. `scripts/cli.mjs:1882-1894` names **this
+document** as its record. An earlier revision of this file deleted that reproduction while
+rewriting the section, which left the only in-tree citation of this document pointing at nothing; a
+maintainer following it would reasonably read the hazard as retracted and the vetting block as
+deletable. It is restored for that reason.
+
+**The fix, and it is not the `lstat` an earlier revision of this section described.** Production
+vets the **descriptor**. `holderAt` (`scripts/cli.mjs:1830`) calls `openHolderEntry` (`:1741`),
+which opens once with `fusedHolderOpenFlags()` — `O_RDONLY|O_NONBLOCK|O_NOFOLLOW` — and `fstat`s
+the handle it holds, so `isFile()` is asked of an object rather than of a name. The code records
+the by-path shape as the **measured hazard**, not the fix, at `:1929-1935`: while the vetting was an
+`lstat` by path, a regular file approved by the lstat could be swapped for a fifo before the read
+resolved the name again. `lstat` survives only as `vetWithoutOpening` (`:1820-1828`), the fallback
+taken when the open fails for any reason but ENOENT, and it reads nothing, so it reopens no race.
+
+The predicate is `(info) => info.isFile() && (ownerGone || info.uid === ownerUid)` (`:1957-1959`),
+with the owner uid hoisted so one `stat(dir)` serves both the marker and the claims. The uid half is
+**not** unconditional: `ownerGone` is set when that `stat(dir)` answers ENOENT (`:1875`) and waives
+it, deliberately, to restore the base branch's answer rather than invent a third — argued at
+`:1934-1942`, including that on the by-path shape this waiver was itself the hazard. A candidate
+failing vetting is **ignored**, not `unknown`, so a forged entry cannot force `live` in either
+direction merely by existing. On the fallback path ENOENT still means "no marker" and any other
 error still leaves the preview unknown.
 
-Verified by reading the vetting block and its five-branch unknown rule at that line. Fixtures for
-each branch are in `tests/cli.test.mjs`, including the happy path, so the vetting cannot be
-satisfied by rejecting everything.
+Verified by reading the vetting block and its four-answer rule (`:1790-1793`) at that line, and by
+running the fixtures rather than trusting them: both arms are pinned separately in
+`tests/cli.test.mjs` — `a real regular-file marker naming a live pid is still read through the
+fused open` (`:11237`) and `a marker whose lstat fails for a reason other than ENOENT leaves the
+preview live` (`:10896`) — the happy path included, so the vetting cannot be satisfied by rejecting
+everything.
 
 ### `scripts/merge-preview.mjs:88` — `writeFile(marker, pid)` follows symlinks (medium) — CLOSED by T2
 
@@ -117,7 +155,7 @@ and makes the preview live, which is not the same as an empty listing.
 The reviewer's replacement wording was **deliberately not carried across**. It corrected a sentence
 about the old guard's residual value, and that residual no longer exists: the whole
 park-at-HEAD / symref / create-at-the-victim-tip analysis was deleted because it described a
-resolution this file no longer uses. What stands at `scripts/cli.mjs:2290-2301` says the round trip
+resolution this file no longer uses. What stands at `scripts/cli.mjs:2292-2302` says the round trip
 catches the honest two-subprocess race and nothing else, and adds the sentence that makes it
 un-relitigable: *"Reverting this to resolve `head.ref` directly changes nothing measurable, which is
 exactly why it must not be described as defence."*
@@ -131,7 +169,7 @@ what each left open, and it names its own remaining residual rather than declari
 
 ### `scripts/cli.mjs:3133` — the worktree-removal residual names the wrong side **(orchestrator)** (low) — CLOSED by T7
 
-Now `scripts/cli.mjs:3824-3844`. It says what two lenses measured: `runFilesetCheck` and
+Now `scripts/cli.mjs:3825-3843`. It says what two lenses measured: `runFilesetCheck` and
 `runOwnershipCheck` re-resolve `refs/heads/<task branch>` **live**, so a task branch moved mid-run
 is judged at its new sha (measured: the fileset check read the moved sha, flipped to `contributes
 no file changes past its fork point`, the phase failed, the worktree survived); what is snapshotted
@@ -156,7 +194,7 @@ Verified by reading the sentence in place. This sentence had been wrong three wa
 
 Not closed by adding the validity-window clause the reviewer suggested — that clause was for a
 world where the hazard stays open. The precondition was **deleted** and replaced with the
-resolution. The shipped sentence at `:100-104` is also **stronger than the text the plan
+resolution. The shipped sentence at `:100-105` is also **stronger than the text the plan
 prescribed**: the plan's replacement named only symbolic resolution, and the tree names the three
 refusals as well — *"That proof is against the ref `derive` takes directly off `git symbolic-ref
 --quiet HEAD`, not off an abbreviated name, and `derive` refuses to produce a run branch at all
@@ -164,8 +202,17 @@ when HEAD is detached, when HEAD points outside `refs/heads/`, or when the name 
 is itself a ref path — so nothing a teammate can plant under `refs/heads/` changes which ref this
 proof or the deletion it authorises runs against."*
 
-The same window applied at `skills/parallel-execution/SKILL.md:180` and is closed the same way
-there.
+The same window applied at `skills/parallel-execution/SKILL.md:180`, and the precondition is gone
+from there too: `abbrev-ref` appears in no skill on this branch, where `cb83c44` had it at
+`skills/parallel-execution/SKILL.md:181`. **But that document carries only the symbolic-resolution
+half**, at `:179-181` — *"the run branch it proves against is the ref HEAD symbolically points at,
+so no tag or same-named branch can redirect that proof"* — and none of the three refusals just
+quoted. Searching both files for `refuses to produce a
+run branch`, `itself a ref path` and `HEAD is detached` hits `finishing-a-development-branch` at
+`:102` and `:103`, and hits `parallel-execution` nowhere. An earlier revision of this bullet said
+the window "is closed the same way there", which reads, straight after the "stronger than the plan
+prescribed" contrast, as though both documents carry the stronger wording. Closed the same way;
+stated less fully.
 
 ### `skills/parallel-execution/SKILL.md:196` — an instruction with neither a check nor a remedy (low) — CLOSED by T9, with different commands
 
@@ -287,7 +334,12 @@ every teammate reads it.
   `scripts/cli.mjs:2141-2150`, including that
   an earlier claim ("namespaces are not something a local attacker will have") was asserted rather
   than attempted, and `unshare -Urm` returns 0 here. If a later change teaches the walk about
-  `/proc/self/mountinfo`, that test goes red and the right response is to rewrite it, not delete it.
+  `/proc/self/mountinfo`, that test goes red — and the tree's instruction, at
+  `tests/cli.test.mjs:1257-1261`, is to **delete it and narrow the residual in
+  `plantedReviewsLink`'s comment, not to restore the blindness**. An earlier revision of this bullet
+  said "rewrite it, not delete it", which names the one outcome that sentence exists to forbid: the
+  cheap rewrite available to a maintainer is to relax `assert.equal(answer.planted, null)`
+  (`tests/cli.test.mjs:1300`) and keep the test, and that is restoring the blindness in test form.
 
 ### Carried from phase 4 round 5 — non-blocking
 
@@ -312,13 +364,37 @@ phase passed and everything below was recorded and carried by decision. All four
   on the qualification.
 - **tests, low, `tests/skill-contracts.test.mjs:390` — the document-scoped inventory's real cost.**
   It is **not** over-tight for ordinary prose: 20 naturalistic sentences about other mechanisms, 0
-  false positives. What it does is make ten tokens (`stdout`, `captur*`, `redirect`, `pip*`,
-  `that/this path`, `results file`, …) reserved words across all 336 lines of
-  `skills/phase-gate/SKILL.md`, and `stdout`/`captur*` are exactly the vocabulary the untouched
-  `## Reporting rule` section is already written in. Two sentences were planted for real and each
-  produced exactly one failing test, under a name that does not describe the maintainer's edit. The
-  reviewer's own bound, kept: those 20 sentences are one author's guesses, not a sampled
+  false positives. What it does is make `PG_RESULTS_PATH_LEXICON`'s alternatives (`stdout`,
+  `captur*`, `redirect`, `pip*`, `that/this path`, `results file`, …) reserved words across all 336
+  lines of `skills/phase-gate/SKILL.md`, and `stdout`/`captur*` are exactly the vocabulary the
+  untouched `## Reporting rule` section is already written in. Two sentences were planted for real
+  and each produced exactly one failing test, under a name that does not describe the maintainer's
+  edit. The reviewer's own bound, kept: those 20 sentences are one author's guesses, not a sampled
   distribution of real future edits.
+
+  *How many* alternatives is a number **neither lens got right, and an earlier revision of this
+  document repeated both figures a few bullets apart without noticing they describe one regex.** The
+  tests lens said ten; the security lens said thirteen. Split on top-level `|`,
+  `tests/skill-contracts.test.mjs:373` has **twelve**; counting `\b(that|this) path\b` as the two
+  phrases it matches gets to thirteen, which is probably where that figure came from. Neither count
+  is load-bearing for either finding, and both are recorded here rather than silently corrected,
+  because the maintainer's real question — *what may I not say in this document* — is answered by
+  reading the regex and not by any of the three numbers.
+
+  **The stated cost is also narrower than the measured one, because a second lock covers the same
+  section and is not on the results path at all.** `tests/skill-contracts.test.mjs:873` carries a
+  **section-scoped** subject inventory `/\b(name|named|unnamed)\b/i` over
+  § `Finish the pending checks`. Reproduced here on a pristine copy: one ordinary paragraph planted
+  after `reported and ignored, never merged.` (`skills/phase-gate/SKILL.md:123`), worded *"When a
+  collection stops early, take the location it named on its last line and hand it straight to the
+  gate; the verdict it prints there is the one to record for the round."* — naming no lexicon
+  alternative — takes `tests/skill-contracts.test.mjs` to 58 | 57 pass | 1 fail, dying in
+  `phase-gate states reviewers are dispatched without a name and a named one loses its result` with
+  `unnamed reviewers: unreviewed statement(s) about /\b(name|named|unnamed)\b/i in
+  phase-gate/SKILL.md § Finish the pending checks`. Changing `it named` to `it printed` returns that
+  file to 58 | 58 | 0 with the paragraph still in place, and the plant was reverted from the
+  pristine copy afterwards. This is coverage the record **under**-states rather than over-states —
+  no live hole is retired — but the `:390` bullet is not the whole edit budget for that section.
 - **tests, low, `tests/skill-contracts.test.mjs:372` — the lexicon gap is two-thirds closed.**
   `PG_RESULTS_PATH_LEXICON` now names `stdout` and `pip(e|es|ing|ed)`, but not `>` as a redirect
   operator. Reproduced inside the locked section itself: *"Send the collected bytes to a file with
@@ -374,9 +450,19 @@ phase passed and everything below was recorded and carried by decision. All four
   alternatives, is likewise green.
 
   **Decision: carry both, do not fix.** The security lens's own closing judgement is what decided
-  it: *"Neither misleads a reader today — the prose two paragraphs up says the opposite. What is
-  missing is the lock that keeps it that way."* The prose route is structurally unclosable — any
-  lexicon is evadable by synonym — and closing the code-block route needs new machinery whose
+  it. Its **actual** words, read out of `.teammates/purgefix/reviews/4-security.json` rather than
+  out of the dispatch that handed them to me inside quotation marks, are attached to the `:388`
+  residual **alone** — the code-block route, (a) above: *"the residual is named honestly at
+  tests/skill-contracts.test.mjs:368-371 and the prose immediately above it
+  (skills/phase-gate/SKILL.md:105-107) tells the operator the opposite, so a reader of the document
+  is not misled today; what is missing is the lock that would
+  keep it that way."* The `:372` residual is graded in that file on a different reason —
+  *"Inherent to a lexicon lock and stated as such in the comment"* — and says nothing about a reader
+  being misled. An earlier revision of this bullet printed a **paraphrase** in quotation marks and
+  attached it to both lows; the paraphrase came from my own dispatch, which is why it is corrected
+  here and recorded under the orchestrator finding below rather than absorbed. The prose route is
+  structurally unclosable — any lexicon is evadable by synonym — and closing the code-block route
+  needs new machinery whose
   over-tightness risk nobody has assessed. That a residual was **named with a measured reproduction
   before review**, and then confirmed real and honestly stated by an adversarial lens, is a good
   outcome and not a failure.
@@ -413,9 +499,17 @@ phase passed and everything below was recorded and carried by decision. All four
     between "caught inside one commit" and "survived a review round", which is the point the
     paragraph is making.
   - `tests/cli.test.mjs:888` cites a test name in emphasis caps — "the run id AND THE PLAN BYTES in
-    the unreadable-plan refusal …" — which matches no test. Verified here: the caps form returns 0
-    occurrences, the lowercase form 2 (the same record cites it correctly lowercase at `:917`). The
-    kill list itself is right; only the transcription is not. A maintainer pasting the cited name
+    the unreadable-plan refusal …" — which matches no test. Verified here, and the count an earlier
+    revision of this bullet gave was wrong: `command grep -ac 'the run id AND THE PLAN BYTES'`
+    returns **1** — line 888's own citation, the only occurrence of the caps form in that file —
+    while the lowercase form returns **2**, the correct citation at `:917` and the real table row at
+    `:2609`. What matches no test is the *name*, not the string, and that is the half worth
+    executing: `node --test --test-name-pattern='the run id AND THE PLAN BYTES in the
+    unreadable-plan refusal' tests/cli.test.mjs` reports `tests 1 | pass 1` — the file, with no
+    named test selected — and exits 0, while the lowercase pattern runs `cli.mjs collect-reviews —
+    the run id and the plan bytes in the unreadable-plan refusal cannot be made to draw a forged
+    terminal write`. The kill list itself is right; only the transcription is not. A maintainer
+    pasting the cited name
     into `--test-name-pattern` matches nothing, node exits 0 with everything skipped, and the row
     reads as verified — which the record's own header (*"a name is only self-checking if something
     re-runs it"*) forbids.
@@ -428,9 +522,10 @@ in-tree partial answer that the question should be read against.
 - **Should `derive`'s round-trip cross-check survive at all once the name is resolved symbolically,
   or is a race detector that can only fire on a concurrent integration merge worth its own refusal
   path?** The tree's current answer is *keep it, and describe it as nothing more*
-  (`scripts/cli.mjs:2290-2301`, `:3799`). The argument against removing it is not that it defends
-  anything: it is that reverting to resolve `head.ref` directly *changes nothing measurable*, which
-  is precisely why the comment forbids describing it as defence. The question of whether a detector
+  (`scripts/cli.mjs:2292-2302`, `:3799-3800`). The argument against removing it is not that it
+  defends anything: it is that reverting to resolve `head.ref` directly *changes nothing
+  measurable*, which is precisely why the comment forbids describing it as defence. The question of
+  whether a detector
   that can only fire on an honest race earns a refusal path is unanswered.
 - **Does the compare-and-swap deletion (`git update-ref -d <ref> <proved sha>`) belong in
   `scripts/git.mjs` now, or does the symbolic resolution shrink that residual far enough to leave it
@@ -452,7 +547,7 @@ in-tree partial answer that the question should be read against.
   write is `wx` to a pid-and-microsecond temp name then renamed; a write failure exits **4**, not 0,
   with the complete results still on stdout above the error.
   - **The plan's own compatibility promise was broken by the implementation.**
-    `docs/plans/2026-08-27-purge-followups.md:691` explicitly promised that "an existing `>
+    `docs/plans/2026-08-27-purge-followups.md:694-695` explicitly promised that "an existing `>
     results.json` redirect still produces the same file it always did". Measured across the fork
     point by two lenses: the fork-point gate exits 0 on such a file, the T8 gate exits 2 on
     `--results must be a readable JSON file`, because a plain redirect now also captures the
@@ -501,10 +596,14 @@ The most transferable output of this run. These are properties of *how* to revie
 repository, and they are why the round counts were worth their cost.
 
 - **A text-matched mutation can land on the wrong site, and it fails in both directions.**
-  `scripts/cli.mjs` holds byte-identical three-clause guards 1,300 lines apart (`assertContained`
-  at `:695`, `plantedReviewsLink` at `:2033`). Unanchored, one mutation produced a **false green**
-  (the target ran untouched and the reviewer reported "the test did not catch it"); the same edit
-  anchored produced a **false red credited to the wrong test** — a reviewer's own words: *"Same
+  `scripts/cli.mjs` holds byte-identical three-clause guards roughly **1,470** lines apart
+  (`assertContained` at `:695`, `plantedReviewsLink` — which opens at `:2163` — at `:2166`; those
+  are the only two hits in the file). An earlier revision of this bullet cited `:2033`, a one-clause
+  `ESRCH` guard inside `livePreviewPaths` 130 lines above the function it names, and derived
+  "1,300" from it — the bullet teaching this rule had landed its own pointer on the wrong function.
+  Unanchored, one mutation produced a **false green** (the target ran untouched and the reviewer
+  reported "the test did not catch it"); the same edit anchored produced a **false red credited to
+  the wrong test** — a reviewer's own words: *"Same
   edit, opposite conclusion."* A third instance was a 25-test misfire when a `replace` landed on
   the wrong `phaseName` first. Every claims and tests lens in this plugin mutates by text match.
   **Anchor every mutation inside the intended function and verify it landed**; better still,
@@ -519,7 +618,12 @@ repository, and they are why the round counts were worth their cost.
   WAYS, AND I HAD IT POINTED THE WRONG WAY."* **Take the backup from the current tip each round.**
 - **Record which tests die, not how many pass.** Counts go stale as the suite grows; names do not.
   Two lenses disagreeing on an absolute statement count this run — 150 versus 151, both reporting
-  byte-identical lists — is a small demonstration of the same thing.
+  byte-identical lists — is a small demonstration of the same thing. **The rule proved itself on
+  this run's own record.** A phase-3 disposition held that the bind-mount test accounts for the 3
+  skips in the 2187 baseline; enumerating them by name showed it does not, and that it runs here.
+  The **count was 3 under both accounts** — only the names separated them, and only the names would
+  have told a reader that a boundary test they believed was skipped had in fact been executing all
+  along.
 - **A seam-based test can pin only the seam.** Where a dependency is injectable
   (`deps.lstat ?? lstat`), mutate the **fallback** — the branch every injected test survives by
   construction — to prove production is pinned too. On this run that was checked by comparing the
@@ -580,6 +684,18 @@ dispatch that produced it, each measured in a worktree at `eb22277`:
    below already stripped them.
 3. The dispatch said **~100 commits** are authored `Reviewer <r@example.com>`. Measured: **52**, all
    of them in run `purgefix`.
+
+**A fourth was found by the review round that followed, and it is a new kind.** The fix-round brief
+handed me the security lens's judgement **inside quotation marks**, and it was a paraphrase. The
+claims lens caught it against `.teammates/purgefix/reviews/4-security.json`. This
+document names those files as the authority and itself as the index, so a quoted sentence that is
+not in the authority is the one defect the arrangement cannot absorb — a maintainer diffing index
+against authority cannot tell whether the reviewer wrote it and the file was edited, or the index
+invented it. It is corrected above and recorded here rather than quietly fixed, because
+**over-correction and absorption are the same defect as the original**: an orchestrator error that
+leaves no trace teaches nobody that dispatches need checking. The rule already in every brief covers
+it and was simply not applied to a sentence that arrived pre-quoted — *treat a bare assertion from
+me as a claim to check*, quotation marks included.
 
 ## Deliberate, do not re-litigate
 
