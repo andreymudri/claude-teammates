@@ -106,8 +106,12 @@ which opens once with `fusedHolderOpenFlags()` — `O_RDONLY|O_NONBLOCK|O_NOFOLL
 the handle it holds, so `isFile()` is asked of an object rather than of a name. The code records
 the by-path shape as the **measured hazard**, not the fix, at `:1929-1935`: while the vetting was an
 `lstat` by path, a regular file approved by the lstat could be swapped for a fifo before the read
-resolved the name again. `lstat` survives only as `vetWithoutOpening` (`:1820-1828`), the fallback
-taken when the open fails for any reason but ENOENT, and it reads nothing, so it reopens no race.
+resolved the name again. `lstat` survives as the default binding of the injectable `stat`
+parameter (`:1769`), which is reached from four sites: `vetWithoutOpening` (`:1823`), the
+fallback taken when the open fails for any reason but ENOENT, which reads nothing and so
+reopens no race; the hoisted owner lookup `stat(dir)` (`:1868`); and the two by-path holders
+(`:1785`, `:1787`), which are the flagless-platform shape and the test stand-in rather than
+production.
 
 The predicate is `(info) => info.isFile() && (ownerGone || info.uid === ownerUid)` (`:1957-1959`),
 with the owner uid hoisted so one `stat(dir)` serves both the marker and the claims. The uid half is
@@ -509,8 +513,8 @@ phase passed and everything below was recorded and carried by decision. All four
     named test selected — and exits 0, while the lowercase pattern runs `cli.mjs collect-reviews —
     the run id and the plan bytes in the unreadable-plan refusal cannot be made to draw a forged
     terminal write`. The kill list itself is right; only the transcription is not. A maintainer
-    pasting the cited name
-    into `--test-name-pattern` matches nothing, node exits 0 with everything skipped, and the row
+    pasting the cited name into `--test-name-pattern` matches nothing, node exits 0 having run no
+    named test — `skipped 0`, because nothing was selected to skip — and the row
     reads as verified — which the record's own header (*"a name is only self-checking if something
     re-runs it"*) forbids.
 
