@@ -3755,13 +3755,27 @@ const driverSource = () => [
   '}',
 ].join('\n')
 
+// `exit` is emitted ONCE and is not replayed to a listener that arrives later, so every caller
+// gets this promise rather than attaching its own after the fact. See `startDriver`.
+const waitForChild = (child) => new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal })))
+
 // Returns once the grandchild pid is on disk, or after a bounded wait — a driver that never got
 // that far fails the setup assertion rather than hanging the suite.
+//
+// `exited` IS ARMED BEFORE THE POLL BELOW, AND THAT ORDERING IS THE TEST'S CORRECTNESS, not a
+// tidiness. The `exit` driver decides to exit on ITS OWN 20ms poll of the very file this one
+// polls, so the two race: whenever the driver's timer lands first, the process is gone and node
+// has emitted `exit` before this function returns. A caller that attached its listener afterward
+// would wait for an event already fired and hang until the test's timeout — measured on linux by
+// inserting a 200ms delay between this returning and the attach: the exact 30 000ms timeout and
+// `1 cancelled` that macos produced on runs 33255281167 and 33257095536, where the loaded runner
+// lost that race on its own. Armed here, before the first `await`, nothing can be missed.
 const startDriver = async (dir, mode = 'wait') => {
   const pidFile = path.join(dir, 'kid.pid')
   const script = path.join(dir, 'driver.mjs')
   await writeFile(script, driverSource())
   const child = spawn(process.execPath, [script, pidFile, mode], { stdio: ['ignore', 'pipe', 'pipe'] })
+  const exited = waitForChild(child)
   let stderr = ''
   child.stderr.on('data', (d) => { stderr += d })
   const until = Date.now() + 15_000
@@ -3770,10 +3784,8 @@ const startDriver = async (dir, mode = 'wait') => {
     try { kid = (await readFile(pidFile, 'utf8')).trim() } catch { kid = '' }
     if (!/^\d+$/.test(kid)) await new Promise((r) => setTimeout(r, 20))
   }
-  return { child, kid, stderr: () => stderr }
+  return { child, kid, exited, stderr: () => stderr }
 }
-
-const waitForChild = (child) => new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal })))
 
 for (const [signal, expected] of [['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129], ['SIGQUIT', 131]]) {
   test(`a ${signal} to a running gate sweeps the check's process group and exits ${expected}`, { skip: POSIX_ONLY, timeout: 30_000 }, async () => {
@@ -3788,7 +3800,7 @@ for (const [signal, expected] of [['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 
       driver = await startDriver(dir)
       assert.match(driver.kid, /^\d+$/, `setup: the gate never reported a grandchild pid: ${driver.stderr()}`)
       assert.ok(alivePid(driver.kid), 'setup: the check must still be running when the signal arrives')
-      const exited = waitForChild(driver.child)
+      const exited = driver.exited
       process.kill(driver.child.pid, signal)
       const seen = await exited
       assert.equal(seen.signal, null, `the gate took ${signal}'s default disposition instead of handling it, so no sweep ran: ${JSON.stringify(seen)}`)
@@ -3812,7 +3824,7 @@ test('a gate that exits of its own accord sweeps the check group on the way out'
   try {
     driver = await startDriver(dir, 'exit')
     assert.match(driver.kid, /^\d+$/, `setup: the gate never reported a grandchild pid: ${driver.stderr()}`)
-    const seen = await waitForChild(driver.child)
+    const seen = await driver.exited
     assert.equal(seen.code, 7, `setup: the driver must reach its own exit: ${JSON.stringify(seen)}`)
     assert.equal(await waitForExit(driver.kid, 5_000), true, 'the gate exited leaving its check running, so an ordinary early return orphans a suite')
   } finally {
