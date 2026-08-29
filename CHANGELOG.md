@@ -1,5 +1,41 @@
 # Changelog
 
+## v1.2.1
+
+The macos and windows legs of the matrix, red since v1.2.0 on two tests whose subject behaved
+correctly on both. `npm test` 2190 | 2187 pass | 0 fail | 3 skipped, green on all three
+platforms.
+
+### Fixed
+
+- **Two tests asserted linux's errnos as though they were every platform's.**
+  `collect-reviews refuses when the previous results file can be neither removed nor emptied`
+  matched `unlink failed (EISDIR` and the same for the truncate fallback. Only linux answers
+  that pair: `unlink` on a directory answers `EISDIR` on linux and `EPERM` on darwin and win32,
+  and the fallback opens and answers `EISDIR` on linux and darwin while win32, having no
+  `O_NOFOLLOW` to open safely with, refuses before trying. The CLI printed the right refusal and
+  exited 4 on all three throughout. The assertions are per-platform now and still require both
+  attempts and both failures, which is the diagnosis that pair carries.
+- **The flag-word guard was asserted to be unreachable on the platform that reaches it.**
+  `the fused open refuses to build a flag word from constants it does not have` closed on
+  `typeof fusedHolderOpenFlags() === 'number'`. On win32 `O_NOFOLLOW` is absent, so the guard
+  does exactly what it exists for and returns `null`. That leg asserts `null` there now, and is
+  the first thing in the suite to observe the missing constant **on-platform** rather than
+  disclaim it.
+
+### Notes
+
+Both defects rest on one premise: a comment saying no leg of this suite runs on win32. It was
+not stale — it was **false when written**. The three-platform matrix landed on 2026-08-07 in
+`1f76b15`, released in v0.1.1; the comments asserting its absence were written on 2026-08-27, in
+`9a45812` and `04a74d0`, twenty days later. It appears three times in `scripts/cli.mjs`, one of
+which calls the win32 by-path preview branch unreachable on this suite's platforms when it is
+the branch win32 always takes. All three are corrected.
+
+Not closed, and not diagnosed: `a gate that exits of its own accord sweeps the check group on
+the way out` timed out at 30s on macos once and passed in two later runs of the same code. One
+occurrence in three, root cause unknown, left alone rather than guessed at.
+
 ## v1.2.0
 
 Two runs' worth of work, closing the purge/teardown gaps and then closing what reviewing them
