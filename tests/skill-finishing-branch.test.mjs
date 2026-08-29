@@ -143,7 +143,7 @@ test('routes worktree removal through the recomputed phase gate and branch delet
     // naming the three is also tighter than the range, which held nine tests in all.
     then: /^That proof is against the ref derive takes directly off git symbolic-ref --quiet HEAD, not off an abbreviated name, and derive refuses to produce a run branch at all when HEAD is detached, when HEAD points outside refs\/heads\/, or when the name that ref strips to is itself a ref path — so nothing a teammate can plant under refs\/heads\/ changes which ref this proof or the deletion it authorises runs against\.$/,
     // The third alternative names a phrase that appears NOWHERE in the document, and that is
-    // deliberate: it is the wording a6a65d2 deleted as wrong, not the wording it wrote. A
+    // deliberate: it is the wording e9891ff deleted as wrong, not the wording it wrote. A
     // sentence is only finished being removed once its return is pinned, and the lock that
     // pins it must keep naming the phrasing that was removed — the replacement phrasing
     // cannot, since a reinstated sentence does not use it. This inverts the `allow` rule in
@@ -154,7 +154,7 @@ test('routes worktree removal through the recomputed phase gate and branch delet
     // abbrev-ref pre-flight sentence appended to the paragraph this claim opens passed at
     // 14 pass / 0 fail with the whole suite green; with this alternative added the same
     // sentence fails this test as an unreviewed statement, and the clean tree stays at
-    // 14 pass / 0 fail. The verbatim sentence a6a65d2 removed fails twice over, here and
+    // 14 pass / 0 fail. The verbatim sentence e9891ff removed fails twice over, here and
     // in the --yes inventory above, because it also names the flag.
     subject: /merge-base --is-ancestor|symbolic-ref --quiet HEAD|rev-parse --abbrev-ref HEAD/i,
   })

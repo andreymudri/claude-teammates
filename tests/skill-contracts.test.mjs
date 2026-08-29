@@ -1088,7 +1088,7 @@ test('parallel-execution makes prune-run the only supported cleanup', async () =
     1,
     `the cleanup section must contain exactly one code block, found ${cleanup.code.length}`,
   )
-  // `allow` GRANTS PERMISSION AND NEVER IMPOSES EXISTENCE. Measured on ed12b30, this task's prose
+  // `allow` GRANTS PERMISSION AND NEVER IMPOSES EXISTENCE. Measured on dadb385, this task's prose
   // commit, with these three calls not yet written: rewording any of the three sentences below
   // was red, because the anchored allow regex stopped matching and the sentence became a stray —
   // but DELETING any
@@ -1151,7 +1151,7 @@ test('parallel-execution makes prune-run the only supported cleanup', async () =
     // `currentBranchRef` to `symbolic-ref`.
     //
     // This comment previously asserted the OPPOSITE, and outlived the sentence it justifies by a
-    // long way: the prose was corrected in ed12b30 while these lines were left over from a800266,
+    // long way: the prose was corrected in dadb385 while these lines were left over from a800266,
     // fifteen commits earlier counting first-parent (91 counting every ancestor), still describing
     // an operator pre-flight that § 5 no longer carries. Both of its citations had gone stale too
     // — `scripts/git.mjs:147` is the name-slice inside `classifyHeadRef`, and

@@ -7,7 +7,7 @@ tips**. Nothing is pushed; `origin/master` is still `922ac91`.
 
 **2026-08-28 — run `purgefix` closed most of this document.** It implemented
 `docs/plans/2026-08-27-purge-followups.md` across five phases and eleven tasks (Task 1 was
-absorbed into Task 7 mid-run), integrated on `run/purge-followups` at `eb22277`, 98 commits past
+absorbed into Task 7 mid-run), integrated on `run/purge-followups` at `f99483e`, 98 commits past
 `cb83c44`, `npm test` **2190 | 2187 pass | 0 fail | 3 skipped**. The three skips, enumerated by
 name from the TAP output on Linux rather than assumed: `findTaskByWorktree on win32 matches across
 drive-letter case and separator style` (win32 only), `normaliseWorktree maps a Windows 8.3 short
@@ -18,10 +18,10 @@ PASS, but not on a first pass:
 
 | phase | tasks | gate | integrated |
 |---|---|---|---|
-| 1 | T2–T6 | PASS | `cc0945f` |
-| 2 | T7 | PASS | `30e20e9` |
-| 3 | T8, T10 | PASS after **nine review rounds** | `ccf8583`, `dd0a13a` |
-| 4 | T9 | PASS after **five review rounds** | `eb22277` |
+| 1 | T2–T6 | PASS | `5053758` |
+| 2 | T7 | PASS | `aaafaae` |
+| 3 | T8, T10 | PASS after **nine review rounds** | `935cd5a`, `b0c46c2` |
+| 4 | T9 | PASS after **five review rounds** | `f99483e` |
 | 5 | T11 | this document | — |
 
 Nine rounds and five rounds are a fact about the run's shape, not a footnote. Several findings
@@ -36,7 +36,7 @@ reviewer's own reproduction — those live in `.teammates/purge/reviews/` and
 reviewers' own, after refutation. Items marked **(orchestrator)** exist because of an instruction
 I gave a teammate, not because a teammate erred.
 
-**Line numbers in the closure sections are as at `eb22277`**, re-read in a worktree at that tip
+**Line numbers in the closure sections are as at `f99483e`**, re-read in a worktree at that tip
 rather than carried from the plan. Where a fix landed somewhere other than the line the original
 finding named, both numbers are given.
 
@@ -310,7 +310,7 @@ every teammate reads it.
   inference and got the explanation wrong twice.
 - **The `printable` census header is stale by more than 2×.** `tests/cli.test.mjs:2267` states the
   census "came to 48 lines: 32 in `cli.mjs`, 6 in `reviews.mjs`, 6 in `digest.mjs`, 4 in
-  `finish.mjs`". Re-derived in a worktree at `eb22277` from the header's own stated grep
+  `finish.mjs`". Re-derived in a worktree at `f99483e` from the header's own stated grep
   (`printable(Block)?\b` over those four files, minus comment-only lines, imports and the
   definitions): **103 — 85 / 6 / 6 / 6**. The header's own rule is that the count is a checkpoint,
   not a fact the file maintains, and that a differing number means the census gained or lost a
@@ -421,7 +421,7 @@ phase passed and everything below was recorded and carried by decision. All four
 - **claims, medium, `tests/skill-contracts.test.mjs:1165` — a corrected citation set containing one
   wrong pointer.** It cites "the sibling lock at `:813`", which **this diff's own line growth**
   moved to `:1029`; `:813` is now the `then:` of an unrelated claim about anchored plan reads,
-  containing no remove/delete vocabulary at all. Commit `585ea04` re-resolved **seven** cross-file
+  containing no remove/delete vocabulary at all. Commit `dc1216d` re-resolved **seven** cross-file
   citations in that same comment block and left the only one this diff itself had moved. The other
   nineteen citations in the block all re-resolve exactly, which is what makes the one wrong pointer
   worth a medium: a maintainer has no way to tell whether it describes a lock that moved or one
@@ -492,14 +492,14 @@ phase passed and everything below was recorded and carried by decision. All four
   So the **documentation is closed and the code limitation is not** — and the pin on that sentence
   is one of the four unanchored ones the phase-4 medium above is about.
 - **Three claims lows, all record hygiene, none behavioural** — all three re-verified as still
-  present at `eb22277`:
+  present at `f99483e`:
   - `scripts/cli.mjs:1688` says the plan "is read through `nonBlockingReadFlags` **below**", but
-    after `c840867` relocated the block that function is **above** it (`nonBlockingReadFlags` at
+    after `692617d` relocated the block that function is **above** it (`nonBlockingReadFlags` at
     `:1665`, the comment at `:1688`). The directional word is exactly the staleness the paragraph
     three lines down warns about. Fix: `above`, or drop the direction word.
   - `scripts/cli.mjs:1691` says "so for one commit it sat on `readRunPlan`". Measured by walking
-    every commit in `30e20e9..teammates/purgefix/T8`: it sat there for **three** (`91edba7`,
-    `cc976d2`, `927ad44`), including the tip a reviewer read and flagged. That is the difference
+    every commit in `aaafaae..teammates/purgefix/T8`: it sat there for **three** (`3779c62`,
+    `f17c16c`, `963bb9d`), including the tip a reviewer read and flagged. That is the difference
     between "caught inside one commit" and "survived a review round", which is the point the
     paragraph is making.
   - `tests/cli.test.mjs:888` cites a test name in emphasis caps — "the run id AND THE PLAN BYTES in
@@ -679,12 +679,12 @@ they came from me.
   carried that sentence. It is now in `agents/tm-implementer.md` and in every brief, via T4 and T5.
 
 **This document was written under that rule, and it caught three things.** Corrections to the
-dispatch that produced it, each measured in a worktree at `eb22277`:
+dispatch that produced it, each measured in a worktree at `f99483e`:
 
 1. The dispatch said the census header is at `tests/cli.test.mjs:898` claiming 48 lines. The claim
    is right; the location is `:2267`.
 2. The dispatch said **9 commits on the unpushed range carry `Co-Authored-By:` trailers**. Measured
-   `922ac91..eb22277`: **zero**. Those nine were run `purge`'s, and the 2026-08-27 rewrite recorded
+   `922ac91..f99483e`: **zero**. Those nine were run `purge`'s, and the 2026-08-27 rewrite recorded
    below already stripped them.
 3. The dispatch said **~100 commits** are authored `Reviewer <r@example.com>`. Measured: **52**, all
    of them in run `purgefix`.
@@ -738,19 +738,19 @@ required overwriting — it is not from this run and was preserved rather than d
 ### Added by run `purgefix`, 2026-08-28
 
 **The authorship problem came back, in a new spelling, and the sentence above did not hold for this
-run.** Measured at `eb22277` in a worktree:
+run.** Measured at `f99483e` in a worktree:
 
 - `922ac91..cb83c44` (run `purge`, 51 commits): **51 authored and committed `Andrey Mudri
   <andreybeckert@gmail.com>`**. The 2026-08-27 rewrite held.
-- `cb83c44..eb22277` (run `purgefix`, 98 commits): **46 `Andrey Mudri <andreybeckert@gmail.com>`
+- `cb83c44..f99483e` (run `purgefix`, 98 commits): **46 `Andrey Mudri <andreybeckert@gmail.com>`
   and 52 `Reviewer <r@example.com>`**, author *and* committer, from a repo-local
   `user.name`/`user.email` override shadowing the global identity.
-- The boundary is `039f656` (2026-08-28 07:52). The last mis-authored commit is `199a657` (07:12);
-  everything from `039f656` onward, on every branch, is correct. The override was unset mid-run:
+- The boundary is `7054594` (2026-08-28 07:52). The last mis-authored commit is `dba9d0f` (07:12);
+  everything from `7054594` onward, on every branch, is correct. The override was unset mid-run:
   `git config --local --get user.name` now exits 1 and the effective identity is `Andrey Mudri
   <andreybeckert@gmail.com>`.
 
-**Tool-authorship trailers: none on the unpushed range.** `git log 922ac91..eb22277 --grep` for
+**Tool-authorship trailers: none on the unpushed range.** `git log 922ac91..f99483e --grep` for
 `Co-Authored-By`, `Claude-Session` and `Generated with` returns **0** for each. The corresponding
 claim in the dispatch that produced this document was stale — it described run `purge`'s nine, which
 rewrite 1 above already stripped. **77 commits at or before `922ac91` do carry them** (`4753dd6`
@@ -759,7 +759,7 @@ line). Those are on `origin`; the same shared-history reasoning that left `r <r@
 them, and they are recorded here so a future reader does not mistake their existence for a fresh
 regression.
 
-**So one rewrite remains, not two**: authorship over `cb83c44..eb22277`, 52 commits. Nothing is
+**So one rewrite remains, not two**: authorship over `cb83c44..f99483e`, 52 commits. Nothing is
 pushed, so it is still unpushed work. **This document does not perform it** — it records that it is
 outstanding, and that a rewrite over that range must be verified the same way the 2026-08-27 pair
 was: every ref's tree byte-identical to its pre-rewrite backup, dates preserved to the second, and
