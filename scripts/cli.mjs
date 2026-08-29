@@ -1,4 +1,5 @@
-import { readFile, writeFile, mkdir, rename, lstat, readdir, unlink } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, rename, lstat, readdir, unlink, open as openFile } from 'node:fs/promises'
+import { constants as fsConstants } from 'node:fs'
 import { livenessRows, renderLiveness, hasStall, hasUnknown, DEFAULT_STALE_MINUTES } from './liveness.mjs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -22,7 +23,7 @@ import { decideFix } from './fix-loop.mjs'
 import { runChecks, aggregateVerdict } from './gate-runner.mjs'
 import { renderDigest } from './digest.mjs'
 import { collectDoctorReport, renderDoctor } from './doctor.mjs'
-import { collectReviewResults, printable, printableBlock, reviewFileName, reviewStamp } from './reviews.mjs'
+import { collectReviewResults, isUnsafePathComponent, printable, printableBlock, reviewFileName, reviewStamp } from './reviews.mjs'
 import { generateReviewDispatch } from './review-gen.mjs'
 import { resolveTaskBranch, taskBranchName } from './enforce.mjs'
 import { tmpdir } from 'node:os'
@@ -32,7 +33,7 @@ import { validateLinkPaths } from './preview-links.mjs'
 import { planDrift, renderDrift } from './plan-drift.mjs'
 import { summarizeRun, renderRunSummary, renderPlanNotes, suppliedForPhase, validateSuppliedPhases } from './finish.mjs'
 import { selectPrunableWorktrees, renderPrunePlan, leakedPreviews } from './prune.mjs'
-import { previewOwnerMarkerPath } from './merge-preview.mjs'
+import { previewOwnerMarkerPath, previewClaimPrefix } from './merge-preview.mjs'
 import { rebuildRunState } from './rebuild.mjs'
 import { generatePhaseWorkflow } from './workflow-gen.mjs'
 import { createGit, GitError, defaultGitExec } from './git.mjs'
@@ -202,7 +203,10 @@ export const REQUIRED = {
   doctor: ['run', 'plan'],
   liveness: ['run', 'plan'],
   // `--phase` is the manifest phase key, not a plan phase number, so it stays out of
-  // NUMERIC_PHASE_COMMANDS and defaults to `default` exactly as `gate`'s does.
+  // NUMERIC_PHASE_COMMANDS and defaults to `default` exactly as `gate`'s does. Not required here
+  // even so, because whether that default is ambiguous depends on the RUN rather than on the argv
+  // this table is checked against: `ambiguousPhaseRefusal` refuses the omission on a plan with
+  // more than one phase, and lets it stand on a plan with one.
   'collect-reviews': ['run'],
   'review-dispatch': ['run'],
   // No required flags: it reads the manifest and the working tree, and belongs to no run.
@@ -919,9 +923,20 @@ async function planAtAnchor(root, planPath, flags, io) {
   const git = createGit({ cwd: root })
   let anchorSha
   try {
-    const runBranch = await git.currentBranch()
+    // THE SHARED CLASSIFIER, for the same reason `derive` uses it: this reads the plan every
+    // teammate is briefed from, and it does not go through `derive`, so it inherits none of that
+    // command's refusals. It guarded only the detached case for one round, and that was a genuine
+    // regression against the tree before this task — with `ref: refs/mine/rb` written straight
+    // into `.git/HEAD` (a plain file write, which no pseudo-ref guard sees), `brief` and
+    // `workflow` exited 0 and emitted dispatches whose `## Global Constraints` came from an anchor
+    // of the planter's choosing, with a real constraint silently absent. Measured: the merge base
+    // exits 2 in the identical state, so this had to refuse it too.
+    const head = await git.headBranch()
+    if (!head.ok) {
+      throw new GitError(`${head.reason} — there is no run branch to read the plan from; check out the run branch and re-run`)
+    }
     const baseBranch = await resolveBaseBranch(git, flags.base)
-    const runSha = await git.resolveRef(`refs/heads/${runBranch}`)
+    const runSha = await git.resolveRef(head.ref)
     const baseSha = await git.resolveRef(`refs/heads/${baseBranch}`)
     anchorSha = await git.mergeBase(baseSha, runSha)
     // `git show <sha>:<path>` takes a repo-relative path and rejects an absolute one, but
@@ -1353,9 +1368,9 @@ async function unlinkPreviewLinks(dir, depth = 0) {
   return removed
 }
 
-// Which of these previews an owner is still HOLDING.
+// Which of these previews a HOLDER is still holding — either kind.
 //
-// scripts/merge-preview.mjs writes a marker BESIDE the preview directory before it calls
+// scripts/merge-preview.mjs writes an OWNER MARKER beside the preview directory before it calls
 // `git worktree add`, and releases it only after `removeWorktree` has deregistered the worktree.
 // Git registers a worktree at the START of the add and deregisters it at the end of the removal,
 // so the span over which the marker is held contains the span over which the preview is
@@ -1363,47 +1378,660 @@ async function unlinkPreviewLinks(dir, depth = 0) {
 // age. Those are sampled by the reaper and only narrow the window; this is held by the owner, so
 // there is no instant at which a living owner reads as absent.
 //
-// THREE FAIL-SAFE BRANCHES, all deliberate, all saying the same thing: an owner that cannot be
-// RULED OUT is an owner.
+// A second kind of holder, the CLAIM, exists because the marker does not survive its own
+// creator's death: a SIGKILLed gate runs no `finally`, so its marker survives naming a pid
+// nobody is at, while the suite it spawned is still writing to the tree. Every sibling file
+// matching `previewClaimPrefix(dir)` is a CANDIDATE claim, VETTED below before it is trusted.
 //
-//   1. A marker that cannot be READ for any reason other than ENOENT — EACCES, EBUSY, EIO. The
-//      file is there and could not be opened, so its pid is unknown.
-//   2. A marker that will not PARSE as a positive integer.
+// The MARKER is a candidate too, and is vetted by the same triple before it is read. It sits at
+// a path derived from the preview directory's name and nothing secret, in the same directory as
+// the claims, so anyone who can plant a claim can plant a marker; reading it unvetted, which this
+// function used to do, trusted an entry the claim path would have rejected.
+//
+// The two part company in ONE case, argued where the code makes the choice: a preview directory
+// that is GONE leaves the uid half of the marker's vetting with no referent, so the marker is
+// read on `isFile()` alone rather than reaped out of hand, while claims stay ignored as they
+// always were.
+//
+// FAIL-SAFE BRANCHES, all deliberate, all saying the same thing: a holder that cannot be RULED
+// OUT is a holder.
+//
+//   1. A marker or a vetted claim that cannot be READ for any reason other than ENOENT —
+//      EACCES, EBUSY, EIO. The file is there and could not be opened, so its pid is unknown.
+//   2. A marker or claim that will not PARSE as a positive integer.
 //   3. A probe that fails with anything other than ESRCH — EPERM means the pid exists and
 //      belongs to another OS user, which is a gate this process may not signal, not one that
 //      is gone.
+//   4. A directory listing that fails for any reason: whether a claim exists at all becomes
+//      unknown, which is exactly as unresolved as a marker that cannot be read.
+//   5. The preview directory itself failing to `lstat` for any reason other than ENOENT: without
+//      it there is no owner to vet a candidate claim against, so nothing under this prefix is
+//      verifiable and the whole preview is unknown.
 //
 // An unreaped preview costs the operator a directory; a followed junction costs them their
 // repository's build inputs. Only ENOENT and ESRCH — the two answers that positively mean "no
 // owner" — let a preview through.
 //
-// `read` and `probe` are injectable because two of those three branches cannot be staged end to
-// end: EPERM needs a process owned by another user, and EACCES needs a file this user cannot
-// read. Exported for the same reason `isMissingPreviewRoot` is — each branch is on the
-// destructive path and has to be pinned on its own.
+// VETTING a candidate — the marker and every claim alike — is a DIFFERENT move from the five
+// branches above: a candidate that fails vetting is not "unknown", it is IGNORED — dropped from
+// the vote entirely, contributing neither a holder nor an `unknown`. That distinction is the
+// whole point: any local user can see this prefix and `touch` a file under it, so a candidate has
+// to prove it is a genuine holder before its content is trusted at all, and a forged one must
+// never be able to force `live` in EITHER direction merely by existing.
+//
+// THAT LAST SENTENCE IS A CLAIM ABOUT A MECHANISM, so here is the mechanism, because a version of
+// this function held the sentence while an errno could get round it. Every candidate is vetted
+// EXACTLY ONCE, on one of two paths, and neither can be skipped by planting a particular shape:
+// `openHolderEntry` opens the entry and vets the DESCRIPTOR, and if the open fails for any reason
+// but ENOENT the caller vets the PATH with the same predicate and reads nothing. An entry nobody
+// can open — a socket, a mode-000 file — is therefore still judged, and judged by what it IS
+// rather than by which errno it produced. The one thing an unopenable entry can still buy its
+// planter is `unknown`, and only when it PASSES vetting, which means being a regular file owned
+// by the preview directory's own owner: the shape a legitimate holder has.
+//
+//   - It must be a REGULAR FILE. A directory, a symlink, a fifo, a socket, a device — none of
+//     those is ever READ. WHICH syscall rejects it varies by shape, and that matters to anyone
+//     tempted to simplify this, so it is measured rather than assumed. Opening each shape with
+//     this function's own flag word:
+//
+//       regular    open OK      isFile=true                 -> vetted, read
+//       directory  open OK      isDirectory=true            -> rejected by the fstat
+//       fifo       open OK      isFIFO=true                 -> rejected by the fstat
+//       symlink    open FAILS   ELOOP                       -> rejected by the fallback lstat
+//       mode 000   open FAILS   EACCES                      -> judged by the fallback lstat
+//       socket     open FAILS   ENXIO                       -> rejected by the fallback lstat
+//
+//     Two consequences worth spelling out. A directory and a fifo reach `fstat` alive, which is
+//     why the open must carry O_NONBLOCK: without it the fifo's open never returns and
+//     `prune-run` stops dead with no output. And the three that fail to open are judged anyway,
+//     by the fallback — which is the only reason "none of those is ever read" is a statement
+//     about every shape rather than only about the openable ones.
+//   - It must be owned by the SAME uid as the PREVIEW DIRECTORY, never by whoever is running
+//     this reaper. `sudo prune-run` is the one caller whose removal can actually succeed, and
+//     under it the reaper runs as uid 0 while the gate that legitimately holds the preview does
+//     not — comparing a claim against the READER's own uid, which an earlier version of this
+//     check did, discarded every genuine claim under sudo and reaped previews still in use. uid
+//     0 is an ordinary value here, not a sentinel for "unset": a preview a root-run gate created
+//     is legitimately claimed by uid 0 too, and the strict `!==` below honours that.
+//
+// Neither check ever uses a symlink-following `stat`: the ENTRY itself, not whatever it might
+// point at, is what a planted file can control. On the default path that is `fstat` on an
+// O_NOFOLLOW descriptor; where the open failed, and wherever a test injects `read`, it is the
+// injectable `stat` below, which defaults to `lstat`.
+//
+// The two are not interchangeable in one respect, and getting that backwards is how a hole got
+// in here. `lstat` needs no read permission on the entry, only search permission on the directory
+// containing it — so it answers about entries an `open` cannot touch at all. That was written as
+// a note about symlink safety while it was really the load-bearing reason the fallback above can
+// exist: an unreadable entry can still be judged, so an attacker cannot escape vetting by making
+// the thing unopenable.
+//
+// TWO LIMITS to the guarantee above, stated rather than left implicit:
+//   - Windows-void, and only the UID half of it. Node's fs reports uid 0 for every path on that
+//     platform, so the ownership comparison can never tell one local account from another there;
+//     a claim reads as "owned" unconditionally and that half gives no protection on Windows.
+//     Nothing here calls `process.getuid` at all — the comparison is between two `lstat` results,
+//     never against the reader's own identity — so there is no platform branch to skip, only a
+//     check that is silently a no-op on that platform. The REGULAR-FILE half is emphatically not
+//     a no-op there: an unprivileged Windows user needs no privilege at all to plant a junction,
+//     which is exactly what that check rejects. Do not read this note as licence to drop
+//     `!info.isFile()` behind a platform branch.
+//   - TOCTOU on a world-writable parent without the sticky bit. This was the CONTENT race:
+//     vetting a candidate and reading it were two syscalls against a NAME, and between them
+//     another local user could remove the entry the `lstat` approved and put a different one at
+//     that name. `openHolderEntry` closed it by making the vetting and the read one descriptor,
+//     which is measured in the table above that function. What survives is narrower and is what
+//     the rest of this bullet is about: between the READDIR that discovers a claim name and the
+//     open that follows it, the entry at that name can still change — so what is opened may not
+//     be what was listed. It cannot be an entry that fails vetting, because vetting now happens
+//     on the object opened, but it can be a different vetted one. A STICKY parent narrows who may
+//     remove an entry inside it. Per unlink(2) and rename(2), a sticky directory only lets a
+//     removal through when the REMOVING process's euid equals the FILE's own owner, OR equals the
+//     DIRECTORY's owner, OR that process holds CAP_FOWNER — three ways through, not one.
+//
+//     Those three are measured against the ATTACKER, not against this reader: the euid unlink(2)
+//     tests is the REMOVING process's, so who runs `prune-run` does not enter into it at all.
+//     What closes the race is the vetting above, which forces the claim's uid to equal the
+//     PREVIEW DIRECTORY's uid. Against a root-owned sticky temp root, another local user
+//     attacking a claim is none of the three: not the file's owner (that is the preview's owner),
+//     not the directory's owner (that is root), and not privileged. `sudo prune-run` changes
+//     nothing here — the sudo'd reaper is not the removing process in this scenario, it is the
+//     one being deceived — so citing root's CAP_FOWNER as a reason the race is closed had it
+//     backwards: that capability is a way THROUGH the check, held by nobody the check must stop.
+//
+//     That reasoning is about POSIX sticky semantics, and the temp root is not sticky everywhere.
+//     Linux is the case reasoned about above: the shared, world-writable `drwxrwxrwt`. macOS is
+//     strictly STRONGER — `os.tmpdir()` there is the per-user `/var/folders/.../T`, `drwx------`
+//     and not sticky at all, which no other unprivileged user can even traverse — so what holds
+//     under sticky holds a fortiori under it.
+//
+//     Windows reaches the same place by a mechanism with no sticky bit in it, so state the
+//     mechanism rather than the mode string. `os.tmpdir()` there is %TEMP%/%TMP%, which for an
+//     interactive account is the per-user `C:\Users\<user>\AppData\Local\Temp` — in practice
+//     the macOS case: private to one account. A service account with TEMP and TMP unset falls
+//     back to `%SystemRoot%\Temp`, which IS shared, and that is the case worth spelling out:
+//     deleting a file on NTFS requires DELETE on the file or FILE_DELETE_CHILD on the directory,
+//     and the stock ACL there is SYSTEM/Administrators (OI)(CI)(F) with
+//     `BUILTIN\Users:(CI)(S,WD,AD,X)` — container-inherit create and traverse, and NO
+//     delete-child — while new files inherit CREATOR OWNER (F). So another unprivileged user can
+//     plant a NEW name but cannot unlink the gate user's vetted claim: exactly the set sticky
+//     reaches, by a different mechanism. What is NOT reached is the uid half, which is void on
+//     that platform for the reason stated above.
+//
+//     No leg of this suite runs on win32, so nothing here will fail if those ACL claims are
+//     wrong; they are held true by reading, not by a test. This is the fifth revision of this
+//     paragraph — the first three overstated the guarantee, the fourth overstated the hazard by
+//     reading "no sticky bit" as "no protection" — which is the reason it is written as a
+//     mechanism that can be checked against `icacls %SystemRoot%\Temp` rather than as a verdict.
+//
+//     The limit for the POSIX cases, stated in the same breath: the argument rests entirely on
+//     the parent being sticky (or otherwise not writable by the attacker). Point the preview root
+//     at a plain world-writable directory with no sticky bit and the race reopens in full — any
+//     local user may then unlink the vetted claim and re-plant at that name.
+//
+//     What is NOT closed: the directory-owner exception. If the PARENT directory itself — not
+//     the vetted file — is owned by someone other than the claim's writer, that owner may still
+//     unlink the vetted claim and re-plant a file at the same name between the lstat and the
+//     read, despite owning neither the claim nor its preview. Reachable in principle:
+//     `os.tmpdir()` honours `TMPDIR`, and scripts/merge-preview.mjs mkdtemps a preview wherever
+//     that points, so an environment pointing it at a sticky directory owned by someone else
+//     hands that owner exactly this window. Closed under this repository's deployed default of a
+//     root-owned system temp directory, which is the only reason this is a comment and not a
+//     blocking finding.
+//
+//     A second, narrower gap in the same spirit: sticky blocks another user's REMOVAL of a claim
+//     that is still there, but not its RE-CREATION once the legitimate holder releases its own.
+//     That window is LIVE, not hypothetical: `runCommandCheck` in scripts/gate-runner.mjs writes
+//     claims. It takes a `previewDir`, and its `onSpawn` writes `previewClaimPath(previewDir,
+//     pid)` synchronously with `{ encoding: 'utf8', flag: 'wx' }` for each pid it spawns, then
+//     releases every claim it created in a `finally`. So there IS a releaser, and the instant
+//     between its release and the next legitimate claim is one another local user may take at
+//     that name. Two properties bound the exposure and neither closes it: a claim is held only
+//     on the clean-merge path, since a conflicted phase gets `previewDir: null` and writes
+//     nothing at all; and EEXIST is tolerated and never unlinked, so a claim that writer did not
+//     create is never released by it.
+//
+//     Stated in the same breath, because the same writer bounds how wide that window is: this
+//     function takes each preview's parent listing FRESH, inside the loop, for every preview it
+//     examines. It used to memoise one listing per parent for the whole pass, which made a claim
+//     written after that snapshot invisible for the remainder of it — including to previews the
+//     pass had not reached yet, since in production every preview is a direct child of the temp
+//     root and one readdir covered them all. That was unreachable while nothing wrote claims and
+//     is reachable now, which is why the memo is gone. What remains is one readdir wide: a claim
+//     written after THIS preview's own listing is still unseen for THIS preview, and for no later
+//     one. Vetting and reading are no longer part of that width — they happen on a single
+//     descriptor now, per `openHolderEntry`.
+//
+// `read`, `list`, `stat` and `probe` are injectable because several of the branches above cannot
+// be staged end to end: EPERM needs a process owned by another user, EACCES needs a file this
+// user cannot read, and a foreign-uid marker or claim needs a filesystem entry `write` alone
+// cannot fabricate. The NON-REGULAR shapes are no longer in that list: a fifo used to be worse
+// than unstageable, since a real one with no writer would park the staging test in open(2) for as
+// long as the suite was allowed to run, and O_NONBLOCK is what makes it a test that can be
+// written at all — so the fifo, directory and symlink cases are now staged for real, against the
+// real bindings, rather than described through doubles. Exported for the same reason
+// `isMissingPreviewRoot` is — each branch is on the destructive path and has to be pinned on its
+// own.
+// Open a candidate holder — a marker or a claim — so that VETTING IT AND READING IT ARE THE SAME
+// OBJECT rather than the same path visited twice.
+//
+// `lstat` answers about a PATH. `readFile` resolves that path again, so between the two syscalls
+// another local user may unlink the entry the `lstat` approved and put a different one at the
+// name. Vetting a path and then reading a path therefore proves nothing about what was read.
+//
+// MEASURED, not reasoned. A swapper flipping the marker name between a regular file and a fifo
+// with rename(2), against a reader calling this function in a loop for twenty seconds, with the
+// preview directory absent so the uid half is waived:
+//
+//   marker read unvetted                        killed at the timeout, parked in open(2)
+//   vetted by path, uid half enforced           returned, ~99k calls, never opened anything
+//   vetted by path, uid half waived             killed at the timeout, parked in open(2)
+//   vetted and read through one descriptor      returned, ~70k calls, three runs out of three
+//
+// The third row is the one that matters: by-path vetting is not a defence against a swap, it only
+// narrows which entries are worth swapping in. `prune-run` parked there produces no plan and no
+// verdict, and `process.exit()` cannot interrupt a libuv thread already inside a blocking open(2);
+// only SIGINT recovers the shell.
+//
+//   - O_NOFOLLOW refuses a SYMLINK at the final component instead of following it.
+//   - O_NONBLOCK means a FIFO cannot park this call: open(2) returns immediately rather than
+//     waiting for a writer, which is the difference between a hung `prune-run` and a rejected
+//     entry.
+//   - `fstat` on the DESCRIPTOR, not `lstat` on the path, so `isFile()` and the uid describe the
+//     object now held open — and the read below comes from that same descriptor. A swap after
+//     this point renames the entry; it cannot reach through a descriptor that is already open.
+//
+// This function REFUSES rather than classifies. Every failure it can produce — O_NOFOLLOW's
+// refusal of a symlink (ELOOP on Linux, EMLINK on macOS and the BSDs), EACCES, ENXIO, a
+// descriptor limit — is handed to the caller as a throw, and the caller vets the path instead of
+// reading the errno. That division is deliberate: an errno says why THIS process could not open
+// the entry, never what the entry IS, and only the second question decides between ignoring a
+// candidate and calling it unknown.
+// The flag word for that open, or `null` when this platform's `fs.constants` does not carry both
+// flags — which is the whole point of computing it in one place rather than inlining the OR.
+//
+// `fs.constants` is platform-conditional, which is checkable here and is checked: `O_SYMLINK` is
+// `undefined` on Linux, so the object plainly does not carry every name on every platform. A
+// missing name is `undefined`, and `undefined | undefined` is `0` — so an inlined OR of two
+// absent flags does not fail, it silently opens with O_RDONLY alone: symlinks followed again,
+// no non-blocking guarantee, and vetting that has gone blind without saying so.
+//
+// UNVERIFIED, and stated as such: that the two names are specifically the ones missing on win32.
+// No leg of this suite runs on that platform, so nothing here proves it. The guard does not
+// depend on the claim being true — it triggers on the constants actually present at runtime,
+// wherever that happens to be — and its consequence is stated at the call site.
+export function fusedHolderOpenFlags(c = fsConstants) {
+  if (typeof c.O_NOFOLLOW !== 'number' || typeof c.O_NONBLOCK !== 'number') return null
+  return c.O_RDONLY | c.O_NONBLOCK | c.O_NOFOLLOW
+}
+
+// The run's plan, read through the same descriptor discipline as a findings file, or null when
+// there is none.
+//
+// THE THIRD DOOR of the class closed at the other two: `readState` opens by path,
+// so a FIFO at `.teammates/<run>/plan.json` parks the open forever. Measured — `master` hangs on it
+// too (SIGKILL at 15s, empty stdout), so the door is inherited rather than opened here; what IS
+// new is the reach. The ambiguity check above reads the plan BEFORE the manifest is resolved, so a
+// run with no manifest — which `master` answers in milliseconds without ever touching `plan.json`
+// — now arrives at that open. An inherited door that this branch newly walks through is this
+// branch's to close.
+//
+// The filename is spelled here rather than reached out of `scripts/state.mjs`, which owns the
+// layout and keeps `statePath` private. That duplication is real and is why it is called out: if
+// the two ever disagree, every fixture in this suite that runs `init-run` and then
+// `collect-reviews` fails at once, because the plan those fixtures write is the plan this reads.
+async function readRunPlan(root, runId) {
+  const file = path.join(runDir(root, runId), 'plan.json')
+  try {
+    return JSON.parse(await readEntryText(file, nonBlockingReadFlags()))
+  } catch (err) {
+    if (err.code === 'ENOENT') return null
+    throw err
+  }
+}
+
+// O_RDONLY|O_NONBLOCK, and deliberately WITHOUT O_NOFOLLOW, or null where this platform cannot
+// spell it. The property this read needs is that it cannot park; refusing a link is a different
+// property that came along for the ride when the plan borrowed the findings reader, and it made
+// these two commands the only ones in the CLI that refuse a symlinked `.teammates/<run>/plan.json`.
+// Measured across three trees: a symlinked plan read fine on `master` and at the fork point and
+// failed here with ELOOP — one cell of "used to proceed, now refuses" that nothing asked for.
+//
+// Every other reader of that same file goes through `readState`, which follows the link. A
+// hardening that only two of eleven commands apply is a trap for the next reader rather than a
+// defence; if state files should refuse links, that belongs in `scripts/state.mjs` where every
+// reader gets it. Parking is still impossible: O_NONBLOCK returns at once on a FIFO whether it was
+// reached directly or through a link, and the `isFile` check below refuses it either way.
+function nonBlockingReadFlags(c = fsConstants) {
+  if (typeof c.O_RDONLY !== 'number' || typeof c.O_NONBLOCK !== 'number') return null
+  return c.O_RDONLY | c.O_NONBLOCK
+}
+
+// A findings file read through a DESCRIPTOR that cannot park, or by path where this platform
+// cannot express that. `readFile` on a path opens blocking, and a FIFO planted at
+// `<phase>-<lens>.json` parks that open forever: measured on this branch, `collect-reviews` never
+// returned — killed at 20s, empty stdout, no exit code. This is the easier of the two FIFO doors,
+// with no permission precondition at all, because the reviews directory is where reviewers are
+// told to write and this loop opens whatever it finds under the manifest's lens names. It is the
+// one defect here that is not new: `git show master:scripts/cli.mjs` carries the same path-based
+// `readFile` at this site, so this is a fix rather than a regression introduced beside it.
+//
+// `fusedHolderOpenFlags` is exactly the right word — O_RDONLY|O_NONBLOCK|O_NOFOLLOW — and this is
+// the third caller of the rule it encodes. `stat` on the descriptor, not the path, so what is read
+// is what was vetted; anything that is not a regular file is refused, and the caller records it as
+// unreadable, which is the outcome a FIFO or a directory deserves and is never "no findings".
+//
+// A symlinked findings file is now refused rather than followed. That is a deliberate narrowing,
+// and it is scoped to FINDINGS: nothing this project writes creates one, and the class this
+// command distrusts is exactly the entries it did not create itself — files a reviewer was told to
+// drop in a directory anyone can write. The run's own `plan.json` is not in that class, is read
+// through `nonBlockingReadFlags` below, and still follows a link as the rest of the CLI does.
+//
+// DOCUMENTATION DOES NOT FOLLOW CODE THAT MOVES OUT FROM UNDER IT. This block stayed where it was
+// when the two readers were split, so for one commit it sat on `readRunPlan` and described that
+// function as refusing symlinked findings files — false of the function it named, and leaving this
+// one undocumented, while every claim in it stayed true of the code it was written for. Editing a
+// comment gets scrutiny; relocating the code beneath one does not, and the second is the easier
+// mistake to ship.
+async function readFindingsFile(file) {
+  return readEntryText(file, fusedHolderOpenFlags())
+}
+
+// The shared body: open with the caller's flag word, vet the DESCRIPTOR, read from that same
+// descriptor. Which hazards are refused is the caller's choice of flags and nothing else.
+async function readEntryText(file, flags) {
+  // No such flag word on this platform: the historical path-based read, stated rather than hidden,
+  // for the reason `livePreviewPaths` gives at its own fallback.
+  if (flags === null) return readFile(file, 'utf8')
+  const handle = await openFile(file, flags)
+  try {
+    const info = await handle.stat()
+    if (!info.isFile()) {
+      throw Object.assign(new Error(`${file} is not a regular file`), { code: 'ENOTREGULAR' })
+    }
+    return await handle.readFile('utf8')
+  } finally {
+    await handle.close().catch(() => {})
+  }
+}
+
+// The flag word for emptying a results file in place, or `null` when this platform's
+// `fs.constants` does not carry BOTH names — the same shape, and the same two reasons, as
+// `fusedHolderOpenFlags` above: a missing name is `undefined`, `O_WRONLY | undefined` is
+// `O_WRONLY`, and an inlined OR would quietly open through a symlink while looking like it
+// refused one. The caller treats `null` as "cannot empty safely" and refuses, rather than
+// emptying blind.
+//
+// O_NONBLOCK IS NOT OPTIONAL HERE, and leaving it out is how this function first shipped — citing
+// the precedent above while dropping the flag that precedent exists for, whose own header calls it
+// "the difference between a hung `prune-run` and a rejected entry". Measured on this branch: with
+// a FIFO at the results path and the `0555` directory this fallback is reached through,
+// `collect-reviews` never returned — killed at 20s with an empty stdout and no exit code, where
+// the same fixture with a regular file answers 4 in milliseconds. Isolated to the one flag:
+// `O_WRONLY|O_NOFOLLOW` on a FIFO stayed blocked past 5s, and adding O_NONBLOCK returns ENXIO at
+// once, which the caller already reports as a reason it could not empty the file.
+//
+// A FIFO is the only shape that parks the call: a directory and a socket refuse promptly, and
+// O_NOFOLLOW refuses a symlink to a device node before it can open one.
+export function emptyResultsOpenFlags(c = fsConstants) {
+  if (typeof c.O_NOFOLLOW !== 'number' || typeof c.O_NONBLOCK !== 'number') return null
+  return c.O_WRONLY | c.O_NONBLOCK | c.O_NOFOLLOW
+}
+
+async function openHolderEntry(p) {
+  const handle = await openFile(p, fusedHolderOpenFlags())
+  try {
+    return {
+      info: await handle.stat(),
+      read: () => handle.readFile('utf8'),
+      close: () => handle.close().catch(() => {}),
+    }
+  } catch (err) {
+    await handle.close().catch(() => {})
+    throw err
+  }
+}
+
 export async function livePreviewPaths(previewPaths, {
-  read = (p) => readFile(p, 'utf8'),
+  // Injected only by the tests below, and injecting it changes WHICH implementation vets a
+  // candidate, which is the one thing about this seam a reader has to know. A double cannot hand
+  // out a file descriptor, so supplying `read` selects a two-syscall stand-in — `stat` by path,
+  // then `read` by path — that reproduces the caller's ignored/missing/unknown bookkeeping
+  // faithfully and reproduces the ATOMICITY not at all. The fused `openHolderEntry` above is what
+  // production uses, and it is covered by the real-filesystem tests that inject nothing.
+  read = null,
+  list = (dir) => readdir(dir),
+  // lstat, not a symlink-following stat — see the vetting section above for why. `lstat` is
+  // already imported for `unlinkPreviewLinks`, under a name distinct from this parameter, so
+  // there is no `stat = (p) => stat(p)` self-reference to fall into here. This one is a genuine
+  // path question — "who owns the preview directory" — with no read attached, so it stays an
+  // lstat by path.
+  stat = (p) => lstat(p),
   // Signal 0 sends nothing: it only asks whether the pid can be signalled at all.
   probe = (pid) => process.kill(pid, 0),
 } = {}) {
-  const live = new Set()
-  for (const dir of previewPaths) {
-    let raw
+  // Three implementations, and which one is in play is the one thing a reader has to know.
+  //
+  //   - The fused open, which is production on any platform whose `fs.constants` carries both
+  //     flags.
+  //   - By path — `lstat`, then `readFile` — on a platform whose constants do not, because the
+  //     alternative is refusing to open anything there and never reaping a preview at all. That
+  //     loses the atomicity, which that platform cannot offer in the first place, and keeps the
+  //     behaviour the fork point had. Unreachable on this suite's platforms.
+  //   - The stand-in a test selects by injecting `read`, which is by path for the same reason a
+  //     double cannot hand out a file descriptor. It reproduces the bookkeeping below faithfully
+  //     and the atomicity not at all, so anything about OPEN FAILURE has to be pinned against the
+  //     fused default with nothing injected.
+  const byPathHolder = async (p) => ({ info: await stat(p), read: () => readFile(p, 'utf8'), close: () => {} })
+  const openHolder = read !== null
+    ? async (p) => ({ info: await stat(p), read: () => read(p), close: () => {} })
+    : (fusedHolderOpenFlags() === null ? byPathHolder : openHolderEntry)
+
+  // ONE candidate entry — a marker or a claim — resolved to exactly one of four answers. Naming
+  // them is the point: IGNORED and UNKNOWN are the two the rest of this function must never
+  // conflate, because a candidate that fails vetting contributes nothing at all while one that
+  // cannot be read contributes `unknown`, and `unknown` means live.
+  // AN ENTRY THAT COULD NOT BE OPENED IS STILL VETTED, on the path, with the SAME predicate.
+  //
+  // Fusing the vetting into the open put the vetting behind something an attacker controls: an
+  // entry this process cannot open is an entry it never vetted, and calling that `unknown` makes
+  // it live. Measured against the fork point, two entries any local user can plant in a 1777 temp
+  // root went from ignored to live that way — a unix socket at a claim name, which open(2) refuses
+  // with ENXIO, and a claim-named regular file chmod 000, which it refuses with EACCES. Either one
+  // makes a preview unreapable forever, which is precisely the denial-of-cleanup the vetting
+  // exists to prevent, reached through the adjacent door.
+  //
+  // Mapping those errnos to `ignored` instead would be worse than the hole. This process's OWN
+  // marker, mode 000, is also EACCES — a legitimate holder's record that cannot be read — and
+  // ignoring it would reap a preview whose owner is alive. The errno cannot decide this; only the
+  // predicate can. So: fall back to `lstat`, which succeeds on entries that cannot be opened, and
+  // ask the same question.
+  //
+  //   predicate REJECTS                  -> ignored   (wrong type or wrong owner, as before)
+  //   predicate ACCEPTS, open failed      -> unknown   (a real holder we cannot read; stay live)
+  //   the lstat is ENOENT                 -> missing
+  //   the lstat fails any other way       -> unknown
+  //
+  // The fallback READS NOTHING, so it reopens no race: a successful open is still vetted on the
+  // descriptor, and this path only decides between ignoring an entry and admitting it is
+  // unreadable. There is no ELOOP or EMLINK arm any more, and none is wanted — a symlink lands
+  // here, its `lstat` says it is not a regular file, and it is ignored by the same rule as
+  // everything else rather than by a second one that could drift from it.
+  const vetWithoutOpening = async (p, accept) => {
+    let info
     try {
-      raw = await read(previewOwnerMarkerPath(dir))
+      info = await stat(p)
     } catch (err) {
-      // ENOENT is the only "no marker": a preview from before markers existed, or one whose
-      // owner has already released it. Every other failure leaves the owner unknown.
-      if (err?.code !== 'ENOENT') live.add(dir)
-      continue
+      return err?.code === 'ENOENT' ? 'missing' : 'unknown'
     }
-    const pid = Number.parseInt(String(raw).trim(), 10)
-    if (!Number.isInteger(pid) || pid <= 0) { live.add(dir); continue }
+    return accept(info) ? 'unknown' : 'ignored'
+  }
+
+  const holderAt = async (p, accept) => {
+    let handle
     try {
-      probe(pid)
-      live.add(dir)
+      handle = await openHolder(p)
     } catch (err) {
-      if (err?.code !== 'ESRCH') live.add(dir)
+      // ENOENT is the one answer that positively means "not there".
+      if (err?.code === 'ENOENT') return 'missing'
+      return vetWithoutOpening(p, accept)
+    }
+    try {
+      if (!accept(handle.info)) return 'ignored'
+      return { text: await handle.read() }
+    } catch (err) {
+      // Released between the open and the read: ENOENT means what it says. Anything else — EACCES,
+      // EBUSY, EIO — leaves this holder unknown.
+      return err?.code === 'ENOENT' ? 'missing' : 'unknown'
+    } finally {
+      await handle.close()
+    }
+  }
+
+  const live = new Set()
+
+  for (const dir of previewPaths) {
+    // Every holder's marker contents, and whether anything about them is UNKNOWN. The rule the
+    // whole reaper rests on is unchanged and now applies to both kinds: only ENOENT and ESRCH —
+    // the two answers that positively mean "no owner" — let a preview through.
+    const holders = []
+    let unknown = false
+    // ONE owner uid per preview, resolved before anything under this prefix is trusted, and used
+    // to vet the marker and every candidate claim alike. Who a candidate has to be owned by: see
+    // the vetting section above this function.
+    let ownerUid
+    // Distinguished from `ownerUid === undefined`, which an `lstat` that failed for some OTHER
+    // reason also produces. Only the ENOENT case means the referent is absent rather than
+    // unreadable, and only that case relaxes anything below.
+    let ownerGone = false
+    try {
+      ownerUid = (await stat(dir)).uid
+    } catch (err) {
+      // The preview directory is gone (ENOENT). Every CLAIM below is then UNVERIFIABLE rather
+      // than unknown — it falls through the uid comparison and is ignored, exactly like a
+      // foreign-owned one. That is the behaviour on the base branch, it is not changed here, and
+      // it is deliberately left alone. Anything else leaves the whole preview unknown, same as an
+      // unreadable marker.
+      if (err?.code === 'ENOENT') ownerGone = true
+      else unknown = true
+    }
+    // THE MARKER IS VETTED THE SAME WAY A CLAIM IS. It was not, and the asymmetry had teeth: any
+    // local user who can see this prefix can plant an entry at the marker's exact path, which is
+    // derived from the preview directory name and nothing secret.
+    //
+    // A FIFO there makes `read` block forever, and `process.exit()` cannot interrupt it because
+    // the libuv thread is parked in open(2), so only SIGINT recovers the shell. That is a PRIOR
+    // reproduction, recorded in docs/followups/2026-08-27-purge-open-findings.md, NOT a
+    // measurement taken here: staging a fifo whose read never returns would hang the suite that
+    // staged it, which is why `read` and `stat` are injectable and why the tests pin this branch
+    // through the doubles instead.
+    //
+    // One detail of that write-up does not survive checking, and is corrected rather than
+    // repeated: the await does NOT precede every print. `prune-run` announces its command checks
+    // and runs the phases before it reaches `livePreviewPaths(previewCandidates)`. What is true
+    // is that the await precedes the prune plan and every removal, so a marker read that never
+    // returns strands the command after that announcement with no plan, no verdict and nothing
+    // removed.
+    //
+    // A junk file, a symlink or a directory makes the preview unreapable forever, because a
+    // marker that cannot be read is `unknown` and `unknown` means live.
+    //
+    // A candidate that fails vetting is IGNORED, not `unknown` — the same distinction the claim
+    // path makes, and for the same reason: a forged entry must not be able to force `live` in
+    // either direction merely by existing. Only a marker that is a regular file owned by the
+    // preview directory's own uid is read at all.
+    //
+    // NOT ON THE SAME FOOTING AS CLAIMS, and the difference is worth stating rather than
+    // implying. Ignoring an unverifiable CLAIM is pre-existing behaviour, unchanged here. Vetting
+    // the MARKER is a change this branch makes, so its edge cases are this branch's to answer,
+    // and one of them bites: when `stat(dir)` answers ENOENT there is no uid to compare against,
+    // and a strict `markerInfo.uid === ownerUid` is then false for EVERY marker — including a
+    // regular file, owned by the right user, positively naming a LIVE pid. Vetting turned into
+    // reaping a preview whose owner was demonstrably alive, which contradicts the rule the rest of
+    // this function restates three times: only ENOENT and ESRCH may let a preview through.
+    //
+    // `ownerGone` skips the UID half in that one case, and only that one. The reasoning, since
+    // the alternative is defensible and was rejected on a concrete consequence rather than on
+    // taste: treating a missing preview directory as UNKNOWN would also honour the rule, but
+    // `unknown` means live, so a registration whose directory is already gone could never be
+    // reaped again — and that state is reachable by the very path documented above, where
+    // merge-preview.mjs's `removeWorktree(...).catch(() => {})` swallows a failure and the
+    // following `rm` deletes the directory anyway. Making it permanent would disable exactly the
+    // cleanup this command exists to perform. So: with no directory there is no tree and no
+    // junctions to follow, nothing the uid comparison protects and no referent for it to compare
+    // against, and the marker is read on `isFile()` alone.
+    //
+    // The REGULAR-FILE half is NOT relaxed with it, and that is the half that matters here: a
+    // planted fifo or junction needs no preview directory to exist. The invariants hold either
+    // way — a marker that fails `isFile()` is still IGNORED, and one that cannot be READ for any
+    // reason but ENOENT is still UNKNOWN.
+    //
+    // An earlier version of this paragraph said that half was what kept a fifo out of open(2).
+    // That was false while the vetting was an `lstat` BY PATH: a regular file approved by the
+    // lstat could be swapped for a fifo before the read resolved the name again, which was
+    // measured and is tabulated above `openHolderEntry`. It is true now, and it is true because
+    // that function opens once with O_NONBLOCK and fstats the descriptor it holds — the
+    // `isFile()` here is asked of an object, not of a name. Waiving the uid half is safe only
+    // because of that; on the by-path shape this waiver was itself the hazard.
+    //
+    // Measured by driving this function's doubles with `stat(dir)` answering ENOENT, against the
+    // base branch and against both revisions of this one. Marker a regular file naming a live
+    // pid: live before the vetting landed, NOT live with the strict comparison, live again now —
+    // so this restores the base answer rather than inventing a third. Marker not a regular file:
+    // live on the base branch, not live here — the one place this is deliberately stricter than
+    // what it replaced.
+    //
+    // PRE-EXISTING, not introduced by the claim work. `git log -S` on the unvetted read puts it
+    // in e6e1a6e, the commit that introduced the marker; the claim work is 4797c98, eighteen days
+    // later. The window is not theoretical either: merge-preview.mjs releases the marker LAST in
+    // its `finally`, and its `removeWorktree(dir).catch(() => {})` swallows a rejection while the
+    // marker's own `rm` sits in an outer `finally` that always runs — so a removal that fails
+    // leaves a still-REGISTERED preview whose marker is already gone and whose marker path, in a
+    // temp root that outlives it, is free for anyone to plant at.
+    // `missing` is the only "no marker": a preview from before markers existed, or one whose owner
+    // has already released it. `ignored` is a marker that failed vetting and contributes nothing.
+    // `unknown` leaves the owner unresolved, which means live.
+    //
+    // `ownerGone` waives the UID half HERE AND NOWHERE ELSE — see the argument above, and the
+    // claim predicate below, which deliberately does not carry it.
+    const marker = await holderAt(
+      previewOwnerMarkerPath(dir),
+      (info) => info.isFile() && (ownerGone || info.uid === ownerUid),
+    )
+    if (marker === 'unknown') unknown = true
+    else if (typeof marker !== 'string') holders.push(marker.text)
+    const parent = path.dirname(dir)
+    // ONE LISTING PER PREVIEW, not one per sweep. The memo that used to stand here took each
+    // parent directory's listing once and reused it for every candidate underneath, so a claim
+    // written after that snapshot was invisible for the remainder of the pass — including to
+    // previews the pass had not reached yet. In production every preview is a direct child of the
+    // temp root, so that was a single readdir of the temp directory covering every preview in the
+    // run.
+    //
+    // It was unreachable while nothing wrote claims. `runCommandCheck` in scripts/gate-runner.mjs
+    // writes one per spawned pid, so it is reachable now, and it fails in the destructive
+    // direction: listing taken, gate spawns a check and writes its claim, gate is SIGKILLed so its
+    // `finally` never releases anything, the loop reaches that preview, the marker probes ESRCH,
+    // the cached listing shows no claim — and `git worktree remove --force` follows the preview's
+    // junctions into the repository's real node_modules with the child still writing to that tree.
+    //
+    // The cost is one readdir per preview instead of one per sweep. A sweep examines the previews
+    // in one temp directory, so that is a small multiple of a cheap syscall against an
+    // irreversible removal. The window does not close — a claim written after THIS preview's
+    // listing is still unseen for it, and the readdir-to-open note above still applies — it
+    // narrows from one sweep wide to one readdir wide.
+    //
+    // `null` records a listing that FAILED, which is not the same as an empty one.
+    let names
+    try { names = await list(parent) } catch { names = null }
+    if (names === null) {
+      // The directory could not be listed, so whether a claim exists is unknown, so the preview
+      // is live. An unreaped preview costs a directory; a followed junction costs the
+      // repository's build inputs.
+      unknown = true
+    } else {
+      const prefix = previewClaimPrefix(dir)
+      const claimNames = names.filter((name) => name.startsWith(prefix))
+      if (claimNames.length > 0) {
+        // A claim SHARES THE MARKER'S SHAPE EXACTLY — a sibling entry under a prefix any local
+        // user can guess, vetted and then read — so it goes through the same `holderAt`, with the
+        // same fused open and the same vet-the-path-when-the-open-failed fallback, for the same
+        // reasons. The claim side is where that fallback was measured: a socket and a mode-000
+        // file, both planted at claim names, were the two entries that went from ignored to live
+        // without it.
+        //
+        // `ownerUid` was resolved once at the top of this iteration, so the value that vetted the
+        // marker vets every claim here and the two cannot disagree about who owns this preview.
+        //
+        // The predicate differs from the marker's in ONE term, and the omission is the whole
+        // point: `ownerGone` is NOT here. With the preview directory missing, `ownerUid` is
+        // `undefined`, no claim's uid can equal it, and every claim is IGNORED. That is the
+        // behaviour on the base branch, and it is what stops a claim any local user planted at a
+        // free name — which is what the prefix becomes once the directory is gone — from naming a
+        // live pid and forcing `live` on a preview nothing could then ever reap. The marker can
+        // afford the waiver because there is exactly one marker path per preview and it is the
+        // owner's own record; the claim prefix admits unboundedly many entries.
+        for (const name of claimNames) {
+          const claim = await holderAt(
+            path.join(parent, name),
+            (info) => info.isFile() && info.uid === ownerUid,
+          )
+          if (claim === 'unknown') unknown = true
+          else if (typeof claim !== 'string') holders.push(claim.text)
+        }
+      }
+    }
+    if (unknown) { live.add(dir); continue }
+    for (const raw of holders) {
+      const pid = Number.parseInt(String(raw).trim(), 10)
+      if (!Number.isInteger(pid) || pid <= 0) { live.add(dir); break }
+      try {
+        probe(pid)
+        live.add(dir)
+        break
+      } catch (err) {
+        if (err?.code !== 'ESRCH') { live.add(dir); break }
+      }
     }
   }
   return live
@@ -1449,9 +2077,173 @@ function tasksOfPhase(plan, phaseName) {
   // the branches narrow to that phase; when it is not, every task branch of the run is in scope,
   // which is the honest reading of "this manifest phase's diff".
   const phaseNumber = Number(phaseName)
+  // `tasks` is whatever the plan file holds, and `?? []` only covers the one shape where it is
+  // absent: a `tasks` of `7` or `{}` reached `.filter` and threw, exiting 1 with an empty stdout on
+  // `master`, on the fork point and here alike. Narrowed to the shape this function can actually
+  // walk — the same treatment `ambiguousPhaseRefusal` gives the same field — so a malformed plan
+  // is a run with no task branches, which every caller already reports.
+  const tasks = Array.isArray(plan?.tasks) ? plan.tasks : []
   return Number.isInteger(phaseNumber)
-    ? (plan.tasks ?? []).filter((t) => t.phase === phaseNumber)
-    : (plan.tasks ?? [])
+    ? tasks.filter((t) => t?.phase === phaseNumber)
+    : tasks
+}
+
+// The component of the run's reviews path that is a symlink, or null when every one of them that
+// exists is a real entry. `lstat` reports only the FINAL component of a path, so asking it about
+// the reviews directory alone answers nothing about the directories above it: with
+// `.teammates/<run>` planted as a link to a directory the caller chose, `lstat(dir)` is a plain
+// directory, `mkdir` recursive builds `reviews/` inside the link's target, and every path built
+// from `dir` resolves through it — measured on this branch, the command exited 0 printing an
+// in-repo path while the bytes landed at `<root>/outside-the-run/reviews/results-1.json`.
+//
+// EVERY component from `root` down, accumulated over `path.relative`, and NOT a fixed list. A
+// fixed list of three — `<root>/.teammates`, the run directory, `reviews` — is right only for a
+// single-segment run id, because `path.dirname` climbs exactly one level. Run ids nest by design
+// (`scripts/state.mjs` names `--run 2026/substop`, and `idRefusal` caps bytes rather than depth),
+// and at depth two `<root>/.teammates` itself went unchecked. Measured on this branch, through a
+// real `init-run`: with `--run a/b` and `.teammates` symlinked out, the command exited 0 printing
+// `.teammates/a/b/reviews/results-default.json` while the bytes landed under the planted target;
+// with `--run 2026/substop` the same plant put the clear inside a victim tree; and at `--run
+// a/b/c` a plant at `.teammates/a` did the same. The control that settles it: the identical plant
+// with a FLAT run id was refused by the fixed list. The rule was right and its reach was wrong.
+//
+// Top down, so the refusal names the OUTERMOST planted component — the one an operator has to go
+// and look at. A component that does not exist yet is nothing to plant through: whatever creates
+// it creates a real directory, since its parent has just been vetted.
+//
+// A `dir` that is not under `root` is refused rather than walked. `assertContained` makes that
+// unreachable through the CLI today, which is exactly why it would sit unpinned: without it, the
+// accumulation would climb ABOVE the root this function promises never to look above, one `lstat`
+// per `..`. Exported for that reason — it is the only way to reach that arm, and the depth cases
+// above are cheaper to state here than to stage end to end.
+//
+// The depth property is pinned by COUNTING rather than by planting, and the difference matters: a
+// fixture plants at one depth, so it can only ever rule out climbs shorter than itself. A fixed
+// climb of twelve passed every fixture in this project's test file when that was all there was —
+// it now reddens the two counting tests, one of which exists because of that measurement. What is
+// asserted is that the number of components examined equals the number of components in the path,
+// at a range of depths, which no fixed climb satisfies at more than one of them.
+//
+// Deliberately the same three clauses `assertContained` uses, spelled the same way, because it is
+// the same question about the same kind of value. Worth knowing when changing either: they are
+// byte-identical, so a search-and-replace across this file hits the other one first — which is
+// exactly what a mutation run here did, silently mutating `assertContained` and leaving this
+// function's test green.
+//
+// Nothing AT OR ABOVE `root` is checked, `root` included. That is the same assumption every other
+// path in this CLI makes: the operator names the root, and a link on the way to it is theirs.
+//
+// A CHECK, NOT A LOCK, and narrower than it looks. It is not atomic, and no Node API makes it so:
+// there is no way to write relative to an opened directory descriptor here, so a link planted
+// between the last check and the `rename` is still a window, and so is one planted between this
+// check and the descriptor the clear opens.
+//
+// It sees LINKS only, and a BIND MOUNT is not a link. Staged in this worktree under `unshare -Urm`
+// and confirmed: `mount --bind` over the reviews directory left `lstat` reporting
+// `isSymbolicLink=false isDirectory=true`, this function answered null, and the write landed in
+// the victim tree. `realpath` does not help either — a bind mount resolves to the path it is
+// mounted at, not to its source — so closing this would mean reading `/proc/self/mountinfo`, which
+// exists on one platform of the three this suite targets. Left open, pinned by the test that
+// stages it, and stated as the boundary of what this walk promises.
+//
+// An earlier version of this paragraph said staging one "needs a privilege this worktree does not
+// have". That was asserted, not attempted: `unshare -Urm` returns 0 here. The rule that produced
+// the error is worth more than the correction — an environment wall is a measurement like any
+// other, and claiming one without running the command is the same defect as any other unbacked
+// claim.
+//
+// What it closes is every stationary symlink, and it is re-run immediately before the write so
+// that window is a few syscalls rather than a whole collection.
+// `deps.lstat` is a TEST SEAM and nothing else — every production caller passes two arguments.
+// It exists because the property this function is FOR cannot be pinned by a fixture: "every
+// component, however deep" is a claim about all depths, and a test can only plant at one. Planting
+// one level deeper than the last guess is what the fixtures below used to do, and it proves only
+// that the walk beats THAT climb — a fixed climb of twelve passed the entire suite. Counting the
+// components examined turns the claim into an equality that holds at every depth at once.
+export async function plantedReviewsLink(root, dir, deps = {}) {
+  const statLink = deps.lstat ?? lstat
+  const rel = path.relative(root, dir)
+  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new Error(`${printable(dir)} is not inside ${printable(root)}, so its components cannot be vetted`)
+  }
+  let component = root
+  for (const segment of rel.split(path.sep)) {
+    component = path.join(component, segment)
+    let info = null
+    try {
+      info = await statLink(component)
+    } catch (err) {
+      // ENOENT is a component that is not there yet; anything else is a component this process
+      // cannot see, and refusing to guess about it is the whole job. Swallowing these instead
+      // leaves the suite green, and a reviewer measured why: with a regular file at
+      // `.teammates/<run>`, the throw refuses with `cannot vet the run's reviews directory …
+      // ENOTDIR` and swallowing refuses with `could not clear the previous results file … unlink
+      // failed (ENOTDIR)` — a different sentence, the same exit, nothing removed either way. No
+      // wrong RESULT is reachable through this arm, because every operation that follows it acts
+      // on the same path and fails the same way. It is kept for the sentence, which names the
+      // component, and it is stated here as unpinned rather than left to look pinned.
+      if (err.code !== 'ENOENT') throw err
+    }
+    if (info?.isSymbolicLink()) return component
+  }
+  return null
+}
+
+// Whether an omitted `--phase` is ambiguous for this run, and the refusal to print when it is.
+// Returns null when the flag was given, when the plan cannot be read, or when the plan has at most
+// one phase; a string otherwise.
+//
+// `--phase` defaults to the manifest key `default`, and `tasksOfPhase` reads a non-integer name as
+// EVERY task branch of the run — the honest reading of "this manifest phase's diff" when the
+// manifest has one phase, and a silent widening when the plan has several: a phase-3 review then
+// judges phase 1 and 2 branches that were integrated rounds ago. Refused rather than warned,
+// because the widening produces a review that reads as complete.
+// A single-phase plan is unaffected: there is nothing for the flag to disambiguate.
+//
+// Reading the plan may fail — a run with no `plan.json` — and that falls through to the old
+// behaviour rather than becoming a second refusal: what the caller omitted is unambiguous exactly
+// when nothing says otherwise, and both commands already have their own say about a missing plan.
+//
+// The phases come from `plan.tasks[].phase`, the same field `tasksOfPhase` filters on, so the set
+// named is the set the flag chooses between. Non-integers are dropped: `tasksOfPhase` compares
+// `t.phase === phaseNumber` against an integer, so a phase that is not one is not selectable — and
+// dropping them is also what keeps this sentence free of any byte a hand-edited `plan.json` chose.
+async function ambiguousPhaseRefusal(root, runId, flags, command) {
+  if (flags.phase !== undefined && flags.phase !== true) return null
+  // CANNOT BE READ means exactly that, and `readState` answers null only for ENOENT — it rethrows
+  // a parse error, a mode-000 file, a directory at that path. The comment above promised a
+  // fall-through and delivered a crash: measured on this branch, a `plan.json` of `not json at
+  // all` with no manifest present exited 1 with an unhandled SyntaxError and an EMPTY stdout,
+  // where the fork point printed `no gate manifest` and exited 4. Exit 1 is not a code these
+  // commands otherwise return, and a refusal that prints nothing is the one shape this command's
+  // whole design refuses to produce.
+  //
+  // Swallowed rather than reported because of what this function IS: it decides whether an omitted
+  // flag is ambiguous, and an unreadable plan cannot say that it is. Every caller reads the plan
+  // again downstream and has its own answer for a plan it cannot use.
+  let plan = null
+  try {
+    plan = await readRunPlan(root, runId)
+  } catch {
+    return null
+  }
+  if (!plan) return null
+  // THE TRAVERSAL IS PART OF THE READ, and guarding only the read left this crashing on a plan it
+  // had just successfully parsed. `{"tasks":[null]}` reached `t.phase` on null and `{"tasks":"abc"}`
+  // reached `.map` on a string: both exited 1 with an EMPTY stdout, where `master` and the fork
+  // point printed a 70-byte refusal and exited 4 — the two properties the comment above condemns,
+  // reintroduced two lines below it. A plan is agent-written, so `tasks` is whatever is in the
+  // file, and neither `??` nor a property access says otherwise.
+  //
+  // `{"tasks":{…}}` and `{"tasks":7}` still crash further downstream, in `tasksOfPhase`, and that
+  // is fixed there rather than worked around here.
+  const tasks = Array.isArray(plan.tasks) ? plan.tasks : []
+  const phases = [...new Set(tasks.map((t) => t?.phase))]
+    .filter((p) => Number.isInteger(p))
+    .sort((a, b) => a - b)
+  if (phases.length < 2) return null
+  return `${command} needs --phase: the plan for this run has ${phases.length} phases (${phases.join(', ')}), `
+    + 'and an omitted --phase reviews every task branch of the run — including branches integrated in earlier phases'
 }
 
 async function resolveBranchShas(git, tasks, runId) {
@@ -1465,9 +2257,53 @@ async function resolveBranchShas(git, tasks, runId) {
   return branchShas
 }
 
-async function derive(root, runId, flags) {
-  const git = createGit({ cwd: root })
-  const runBranch = await git.currentBranch()
+// `deps.git` is a TEST SEAM and nothing else — every production caller passes three arguments and
+// gets a git built here. It exists because the round-trip refusal below could not otherwise be
+// pinned at its CALL SITE: with the run branch resolved from HEAD's own ref, the two shas can
+// disagree only if the branch moves between two subprocesses, which no in-process fixture can
+// stage, so `if (disagreement) throw` could be deleted with the whole suite green. The helper's
+// arms were pinned as a pure function; the wiring was not. Injecting git is the smallest seam that
+// covers both, and it is exported for the same reason.
+export async function derive(root, runId, flags, deps = {}) {
+  const git = deps.git ?? createGit({ cwd: root })
+  // THE REF, NOT THE NAME, is what everything destructive downstream is given. `currentBranchRef`
+  // is `git symbolic-ref --quiet HEAD` (scripts/git.mjs), so this is the ref HEAD literally points
+  // at, never a name abbreviated toward it: no tag, no `heads/<name>` branch and no
+  // `refs/heads/refs/heads/<name>` changes what it resolves. `runBranch` below is derived FROM it
+  // for display and for the ordinary name comparisons, and `ctx.runBranchRef` is what
+  // `prune-run` resolves at the `git branch -D`.
+  // THE SHARED CLASSIFIER, not a conditional of this function's own. `headBranch` is the single
+  // place that decides what HEAD has to be (scripts/git.mjs); every other run-branch consumer asks
+  // the same question through the same call, which is what keeps them from drifting apart the way
+  // they did for three rounds. What is local to `derive` is only the CONSEQUENCE: a throw, because
+  // everything downstream of here verifies or removes something.
+  const head = await git.headBranch()
+  if (!head.ok) {
+    throw new Error(
+      `${head.reason}${head.kind === 'detached' ? ` (HEAD is ${await git.headSha()})` : ''}.`
+      + ' Check out the run branch and re-run. Nothing is verified or removed against a HEAD that'
+      + ' does not name a branch: the name such a state yields is either invented or the whole ref'
+      + ' string, and prefixing refs/heads/ onto either lands on a ref anyone with a worktree can'
+      + ' create and point at a commit of their choosing.',
+    )
+  }
+  const runBranchRef = head.ref
+  const runBranch = head.name
+  // The two-subprocess race, and ONLY that. `headSha` and `resolveRef` are separate git
+  // invocations, so a commit or merge landing on the run branch between them shows up here as a
+  // disagreement; that is an honest race and the message says so.
+  //
+  // It is NOT what closes the repointed-HEAD hazard, and an earlier revision of this comment
+  // claimed it was. `refs/heads/${runBranch}` is rebuilt from a name that was itself taken off
+  // `head.ref`, so it reconstructs that ref character for character — the comparison cannot
+  // disagree about WHICH ref is the run branch, only about what that one ref held a moment
+  // earlier. The guard above is the whole of that closure. Reverting this to resolve `head.ref`
+  // directly changes nothing measurable, which is exactly why it must not be described as
+  // defence.
+  const headSha = await git.headSha()
+  const namedSha = await git.resolveRef(`refs/heads/${runBranch}`).catch(() => null)
+  const disagreement = runBranchDisagreement({ resolvedRef: `refs/heads/${runBranch}`, headSha, namedSha })
+  if (disagreement) throw new Error(disagreement)
   const baseBranch = await resolveBaseBranch(git, flags.base)
   // Every other failure path here fails closed; a plain operator mistake — running the
   // gate while checked out on the base branch itself — must not be the one that fails
@@ -1482,7 +2318,10 @@ async function derive(root, runId, flags) {
     )
   }
   try {
-    return await deriveContext({ git, runId, runBranch, baseBranch, planPath: flags.plan })
+    // `runBranchRef` rides along so the destructive path never has to rebuild `refs/heads/` from
+    // a name. `deriveContext` is given the name, as it always was — by this point the name came
+    // off `symbolic-ref` and the round trip above has been checked, so the two agree.
+    return { ...await deriveContext({ git, runId, runBranch, baseBranch, planPath: flags.plan }), runBranchRef }
   } catch (err) {
     // deriveContext reads the plan via `git show <anchorSha>:<planPath>`, which fails with
     // raw git stderr ("fatal: bad revision ..."). That is often an adopting project's
@@ -1492,7 +2331,7 @@ async function derive(root, runId, flags) {
       let anchorSha = 'unknown'
       try {
         const baseSha = await git.resolveRef(`refs/heads/${baseBranch}`)
-        const runSha = await git.resolveRef(`refs/heads/${runBranch}`)
+        const runSha = await git.resolveRef(runBranchRef)
         anchorSha = await git.mergeBase(baseSha, runSha)
       } catch { /* best-effort context for the message only */ }
       throw new Error(
@@ -1501,6 +2340,39 @@ async function derive(root, runId, flags) {
     }
     throw err
   }
+}
+
+// The run-branch round-trip decision, as a pure function of three values: null when the ref holds
+// the commit HEAD is on, and the operator-facing refusal otherwise.
+//
+// `resolvedRef` is the ref the CALLER resolved — `refs/heads/<run branch>`, the same string
+// `deriveContext` builds — and not HEAD's own symbolic target. Those are the same ref in every
+// honest run, and a revision that compared HEAD's sha against HEAD's own target instead was
+// trivially true and vetted nothing; the parameter is named for what it must be so that mistake
+// cannot be re-made silently.
+//
+// SEPARATED FROM `derive` SO BOTH ARMS CAN BE PINNED. The two shas can only disagree if the ref
+// moves between `headSha` and `resolveRef` — two subprocesses with no seam a fixture can open,
+// since `derive` builds its own git. In-process that arm was therefore unreachable, and it was
+// left with no coverage at all: mutating the comparison to `namedSha === null` kept the whole
+// suite green while removing the only check standing between a moved run branch and a
+// `git branch -D`. Exported for the tests, not for callers — `derive` is the only caller.
+export function runBranchDisagreement({ resolvedRef, headSha, namedSha }) {
+  if (namedSha === headSha) return null
+  return (
+    `HEAD is ${headSha}, but ${printable(resolvedRef)} — the ref this run resolves the run branch through —`
+    + ` is ${namedSha === null ? 'not a ref at all' : namedSha}.`
+    // ONE reachable cause now, and it is an honest one. `headSha` and `resolveRef` are two
+    // subprocesses: a commit or merge landing on the run branch between them produces exactly
+    // this disagreement. The detached case is refused earlier with its own message, and the
+    // shadowing case is gone — the ref comes from `symbolic-ref` rather than from abbreviation,
+    // so no tag and no `heads/…` branch can produce it, and telling an operator to hunt for one
+    // would send them after a ref that is not there.
+    + ' Either something moved the branch while this was reading it — an integrator merging'
+    + ' concurrently — in which case settle the repository and re-run; or the ref was deleted'
+    + ' underneath this command. Nothing is verified or removed against a run branch whose ref'
+    + ' does not hold the commit HEAD is on.'
+  )
 }
 
 // Everything this CLI can say about a failed config operation, or null for an error that is
@@ -1961,11 +2833,23 @@ export async function runCli(argv, io = { out: console.log }) {
     // either. It was simply never said out loud, which is what made the consequence invisible.
     let runBranch = null
     let baseHere = null
+    // WHY there is no run branch, not just that there is none. The note below used to infer the
+    // cause from `baseHere` alone, which reads the base branch's EXISTENCE as evidence that it is
+    // checked out — `resolveBaseBranch` answers from `branchExists` and never looks at HEAD. On a
+    // detached HEAD that printed `because main is checked out and that is the base branch` while
+    // main was not checked out at all (measured), sending an operator to fix the wrong thing.
+    // The KIND, from the shared classifier, not a null test. There are two ways to be on no
+    // branch and they need different sentences: a null test collapses them, so a HEAD repointed
+    // to `refs/mine/rb` was reported as detached while `git status` in the same repository said
+    // `## refs/mine/rb` (measured). That is the same failure this comment already describes —
+    // naming a cause the operator cannot act on — one spelling further along.
+    let headKind = null
     try {
       const git = createGit({ cwd: root })
-      const head = await git.currentBranch()
+      const head = await git.headBranch()
+      headKind = head.kind
       baseHere = await resolveBaseBranch(git, flags.base)
-      runBranch = head === baseHere ? null : head
+      runBranch = head.name === baseHere ? null : head.name
     } catch {
       runBranch = null
     }
@@ -1987,7 +2871,13 @@ export async function runCli(argv, io = { out: console.log }) {
     if (recorded.runBranch === null) {
       io.out(
         `note: run ${printable(runId)} recorded no run branch`
-        + (baseHere ? `, because ${printable(baseHere)} is checked out and that is the base branch` : '')
+        + (headKind === 'detached'
+          ? ', because HEAD is detached and a detached HEAD is on no branch'
+          : headKind === 'not-a-branch'
+            ? ', because HEAD points at a ref that is not a branch, and only a branch can be a run branch'
+            : headKind === 'ref-path-name'
+              ? ', because the checked-out branch has a name that is itself a ref path, which git resolves inconsistently depending on the command'
+              : (baseHere ? `, because ${printable(baseHere)} is checked out and that is the base branch` : ''))
         + '. Check out this run\'s branch before gating — `gate` refuses to run from the base branch,'
         + ' and until some command derives a context from the run branch, stop-time enforcement'
         + ' cannot confirm the checkout and will allow every stop rather than risk blocking on the wrong ref.',
@@ -2147,9 +3037,29 @@ export async function runCli(argv, io = { out: console.log }) {
       // task branch legitimately records that. The store constrains only the type and length —
       // what a branch name MEANS is the hook's to decide, and "not the expected branch" is the
       // case it exists to catch.
-      const branch = typeof flags.branch === 'string' ? flags.branch : await git.currentBranch()
+      // What is STORED is null on every rejection: the store accepts it (`writeLocation` bounds
+      // the field's type and length only) and a reader asking which branch this worktree is on
+      // then gets "none" rather than a name. The value it used to record in that state was the
+      // string `HEAD`, which names a ref anyone can create — so the record asserted a branch that
+      // a third party, not the teammate, controlled.
+      // The KIND again, for the label only — what is STORED is unchanged. Labelling by a null
+      // test called a worktree whose HEAD pointed at `refs/mine/wb` "detached" while `git status`
+      // there said `## refs/mine/wb`.
+      const head = typeof flags.branch === 'string' ? null : await git.headBranch()
+      const branch = typeof flags.branch === 'string' ? flags.branch : head.name
       await writeLocation(mainRoot, runId, flags.task, { worktree, branch })
-      io.out(`recorded ${printable(flags.task)} at ${printable(worktree)} on ${printable(branch)}`)
+      // One arm per kind, and the third is not the second: a ref-path name IS a branch, one
+      // `git branch --list` marks with `*`, so the not-a-branch wording contradicts git in the
+      // same worktree. This is the third consumer of `kind`; `doctor` and `init-run` are the
+      // others, and all three have to be visited whenever a state is added.
+      const label = branch !== null
+        ? printable(branch)
+        : head.kind === 'detached'
+          ? '(detached HEAD)'
+          : head.kind === 'ref-path-name'
+            ? `(branch ${printable(head.ref)}, whose name is itself a ref path)`
+            : `(no branch: HEAD points at ${printable(head.ref)})`
+      io.out(`recorded ${printable(flags.task)} at ${printable(worktree)} on ${label}`)
       return 0
     } catch (err) {
       // Never swallowed. A `locate` that exits 0 having written nothing leaves the teammate
@@ -2324,6 +3234,14 @@ export async function runCli(argv, io = { out: console.log }) {
     // main worktree was moved off the run branch: in that state `currentBranch` reports the
     // wrong branch, and every task diff computed from it would be nonsense. Default to the
     // current branch, which is right whenever nothing moved it.
+    //
+    // NULL IS PASSED THROUGH DELIBERATELY, not defaulted to a name. `currentBranch` answers null
+    // on a detached HEAD, and that is one of the states this report exists to describe — refusing
+    // here, the way `derive` does, would silence the diagnosis at the moment it is most wanted.
+    // `collectDoctorReport` raises it as a problem instead. It must not be turned back into a
+    // string here: the string that state used to produce was `HEAD`, and `refs/heads/HEAD` is a
+    // creatable ref, so a detached repository compared equal to a run branch named `HEAD` and the
+    // report said `no problems found`.
     const runBranch = typeof flags['run-branch'] === 'string' && flags['run-branch'] !== ''
       ? flags['run-branch']
       : await git.currentBranch()
@@ -2791,7 +3709,7 @@ export async function runCli(argv, io = { out: console.log }) {
     // happen. `--yes` is the caller stating the intent, in the same spelling every other
     // valueless flag in this CLI uses.
     if (flags.yes !== true) {
-      io.out('dry run: nothing was removed. Re-run with --yes to remove the worktrees listed as prunable.')
+      io.out('dry run: nothing was removed. Re-run with --yes to remove the worktrees listed as prunable and delete each one\'s branch where it is already an ancestor of the run branch.')
       return 0
     }
 
@@ -2804,6 +3722,142 @@ export async function runCli(argv, io = { out: console.log }) {
         if (!(err instanceof GitError)) throw err
         failed += 1
         io.out(`could not remove ${w.path}: ${err.message}`)
+        // Its branch is still checked out in a worktree git still knows about, so the deletion
+        // below could not succeed anyway — `git branch -D` refuses a branch a registered
+        // worktree holds. And a branch whose worktree survived is one an operator may still be
+        // looking at. Falling through would turn one reported failure into two.
+        continue
+      }
+      // The worktree is gone; its branch is scratch, but only once that is PROVED. A task branch
+      // that is not an ancestor of the run branch carries commits that are in no other ref, and
+      // `-D` — which is what `deleteBranch` runs, deliberately, because `-d` measures "merged"
+      // against the caller's HEAD or upstream rather than against the run branch — would be the
+      // last thing that ever saw them. The proof is the caller's job precisely because the
+      // helper does not do it. The refusal is reported by name, like every other refusal this
+      // command makes, so an operator who wanted the branch gone learns why it is still there.
+      //
+      // BOTH SIDES ARE SHAS, RESOLVED HERE, and that is the whole safety of it.
+      //
+      // QUALIFIED, because the proof and the deletion have to be about the SAME ref. Git resolves
+      // a bare name through refs/tags/ BEFORE refs/heads/, warns on stderr only and exits 0
+      // (`isAncestor` reads no stderr), while `git branch -D` resolves refs/heads only — so an
+      // ancestry question asked on the bare name `w.branch` is answerable by a TAG while the
+      // thing deleted is the branch. One ordinary `git tag teammates/r1/T1 <any commit the run
+      // branch contains>`, which a teammate can create inside its own worktree, then turns this
+      // guard into a rubber stamp: verified end to end, the unmerged branch was deleted and
+      // `deleted …` printed. It also fires by accident wherever a release tag and a branch share
+      // a name. This is the invariant scripts/git.mjs states as "every name that reaches a
+      // ref-consuming git command goes through here first".
+      //
+      // FRESH, because `ctx.runSha` is a SNAPSHOT. `ctx` is built once by `derive` before any of
+      // this command's phases run their checks, and each of those checks is an arbitrary shell
+      // command bounded at fifteen minutes by default — this command announces them as the slow
+      // part. Nothing re-resolves the run branch in between. Reproduced with a check that runs
+      // `git update-ref refs/heads/<run branch> <pre-merge sha>` (note `git branch -f` is refused
+      // for a checked-out branch and `update-ref` is not): against the snapshot the branch was
+      // deleted and reported as contained, while `merge-base --is-ancestor` against the run
+      // branch afterwards said it was not. So the run branch is resolved per iteration, at the
+      // moment its answer is used, and the sha that is printed is the one that was proved
+      // against. A snapshot is exactly as good as the assumption that nothing moved, and the
+      // thing being decided is irreversible.
+      //
+      // WHAT REMAINS OPEN. This list is meant to be read as complete, so it leads with the item
+      // that used to defeat the paragraph above — now closed, and kept precisely so a reader can
+      // tell "closed" from "never considered" — and follows it with the ones that merely bound
+      // it. Nothing below the first bullet is closed by anything in this file.
+      //
+      //   - WHICH REF IS THE RUN BRANCH. Closed at `derive`, by REFUSAL rather than by resolution,
+      //     and recorded here because this list is read as complete. It took three attempts and
+      //     each earlier one was reported as closed, so the wording below is deliberately about
+      //     what is refused rather than about what is resolved.
+      //
+      //     Attempt one resolved HEAD symbolically, which killed the tag / `heads/<name>` /
+      //     `refs/heads/refs/heads/<name>` plant but left `currentBranch` returning the string
+      //     `HEAD` on a detached HEAD — and `refs/heads/HEAD` is a ref `git update-ref` creates
+      //     without complaint. Attempt two returned null there instead, but still trusted
+      //     `symbolic-ref`'s target to be a branch: `git symbolic-ref HEAD refs/tags/x` is
+      //     accepted (git refuses only targets outside `refs/`), the `refs/heads/` strip is a
+      //     no-op on such a ref, and `refs/heads/refs/tags/x` is creatable — so `deriveContext`
+      //     read the planter's commit as the run branch. Measured on that revision, with HEAD at
+      //     the real run tip and the tree clean, `ownership` went from FAIL naming a rogue commit
+      //     to PASS.
+      //
+      //     Attempt three refused both of those, and was still permissive, because the round trip
+      //     it added proves less than it appears to: `refs/heads/${runBranch}` reconstructs HEAD's
+      //     own ref BYTE FOR BYTE, so it can only catch the branch moving between two
+      //     subprocesses — never a disagreement about WHICH ref is meant. The divergence was at a
+      //     CONSUMER: `derive` hands `deriveContext` the NAME, gate-runner.mjs:1703 passes that
+      //     name on as the merge-preview base, and `qualifyBranch` returns any `refs/`-prefixed
+      //     string unchanged. So HEAD at `refs/heads/refs/heads/run-branch` stripped to
+      //     `refs/heads/run-branch`, which re-qualified to the REAL branch while `ctx.runBranchRef`
+      //     stayed the planted one. Measured: `gate --phase 1` exited 0, verdict PASS, merge=pass,
+      //     on a tree where merging the task branch into `ctx.runBranchRef` conflicts.
+      //
+      //     What closes it is `derive` refusing three states outright — HEAD detached, HEAD
+      //     pointing anywhere but under `refs/heads/`, and a stripped name that is ITSELF a ref
+      //     path — all three in `classifyHeadRef`, so a consumer cannot be handed a name two
+      //     qualification rules disagree about. The round trip is kept for the honest
+      //     two-subprocess race and is described as that and nothing more.
+      //
+      //     STILL OPEN, and named because this list claims to be complete: gate-runner.mjs:1703
+      //     takes the NAME rather than `ctx.runBranchRef`. Nothing reaches it with a hostile value
+      //     now — every path goes through the classifier first — but the structural fix is to pass
+      //     the REF there, and that file is outside this task's declared set. Until then the
+      //     guarantee rests on the refusal above rather than on the consumer being unable to
+      //     misread what it is given.
+      //
+      //     WHAT IS NOT THIS CODE'S DOING: under the `refs/tags/x` plant the `git branch -D`
+      //     below fails on its own, with `fatal: HEAD not found below refs/heads!`, exit 128
+      //     (measured). That is git declining to run `branch -D` at all in that state, not a
+      //     guarantee anything here provides — `git worktree list` works fine in the same
+      //     repository, which is why the force-removal a few lines up WAS reached. Do not read
+      //     the surviving branch as evidence that this path was safe.
+      //   - Proof-to-delete. The sha is proved and then deleted BY NAME, so a write to
+      //     refs/heads/<branch> in between is deleted unproved. Closing it needs a
+      //     compare-and-swap (`git update-ref -d <ref> <proved sha>`), which needs a helper
+      //     scripts/git.mjs does not have. There is no tracking issue for that helper: this
+      //     comment is the record.
+      //   - The run branch can still move between this resolve and the `-D` on the same
+      //     iteration, and between one iteration and the next. Per-iteration shrinks that window
+      //     to two git commands; it does not remove it. What is left is the honest race alone:
+      //     the redirected-name case the first bullet used to pair this with is closed, so a move
+      //     inside this window is now something that moved the real run branch.
+      //   - The WORKTREE REMOVAL a few lines up is authorised by a verdict computed over
+      //     SNAPSHOT ENDPOINTS. Not by a stale verdict: `passedPhases` is built by actually
+      //     running this command's checks above, and the worktree list is re-read after them — a
+      //     check that exits non-zero makes the phase FAIL and its worktree is not removed at
+      //     all. What is snapshotted is the RANGE those checks measure, and it is the run-branch
+      //     side, not the task-branch side. `runFilesetCheck` and `runOwnershipCheck` re-resolve
+      //     `refs/heads/<task branch>` at check time, so a task branch that moved since `derive`
+      //     is judged at its NEW sha — measured, by moving one mid-run: the fileset check read
+      //     the moved sha, flipped from pass to `contributes no file changes past its fork
+      //     point`, and the phase failed, so that worktree is not removed at all. `ctx.anchorSha`
+      //     and `ctx.runSha` are the derive-time values, so a commit added to the RUN BRANCH
+      //     mid-run is never examined by ownership — measured on the same repository: the branch
+      //     advanced, `ctx.runSha` did not, and ownership passed without ever naming the new
+      //     commit — and `mergedParentFiles` walks that same stale range. The existing fixture at
+      //     tests/cli.test.mjs already demonstrates the consequence, by moving the run branch
+      //     backward past the integration merge and watching the phase still pass and the
+      //     worktree still go. `git worktree remove --force` discards whatever is uncommitted in
+      //     that worktree regardless. Irreversible, and not re-proved the way the deletion below
+      //     now is.
+      try {
+        const runSha = await git.resolveRef(ctx.runBranchRef)
+        const branchSha = await git.resolveRef(`refs/heads/${w.branch}`)
+        if (await git.isAncestor(branchSha, runSha)) {
+          await git.deleteBranch(w.branch)
+          // Both shas are named because they are what was actually proved. `-D` discards the
+          // branch reflog and `deleteBranch` swallows git's own "Deleted branch … (was <abbrev>)",
+          // and the worktree — whose own reflog is the other copy — was force-removed a few lines
+          // up, so this line is the ONLY surviving handle for `git branch <name> <sha>`.
+          io.out(`deleted ${w.branch} (${branchSha}), which ${printable(ctx.runBranch)} (${runSha}) contains`)
+        } else {
+          io.out(`left ${w.branch} in place: refs/heads/${w.branch} (${branchSha}) is not an ancestor of ${printable(ctx.runBranch)} (${runSha}), so deleting it would drop commits that are in no other branch`)
+        }
+      } catch (err) {
+        if (!(err instanceof GitError)) throw err
+        failed += 1
+        io.out(`could not delete ${w.branch}: ${err.message}`)
       }
     }
 
@@ -2822,12 +3876,20 @@ export async function runCli(argv, io = { out: console.log }) {
     // owner is DEAD — the links it finds are the ones a killed gate's `finally` never tore down,
     // and they are gone before anything is removed. For a LIVE preview the sweep alone could
     // never close it, because a junction the owner creates in the window BETWEEN this sweep and
-    // the removal below would still be followed. What closes that window is that a live preview
-    // does not reach this loop at all: `livePreviewPaths` above found the marker its owner holds
-    // from before `git worktree add` registers the preview until after `removeWorktree`
-    // deregisters it, and the preview is excluded from `plan.previews` and reported as owned
-    // instead. The teardown is inside that span, not after it: a preview mid-teardown still
-    // holds its junctions, and reading it as unowned there would follow them.
+    // the removal below would still be followed. What closes that window for a preview held by
+    // its OWNER MARKER is that such a preview does not reach this loop at all: `livePreviewPaths`
+    // above found the marker its owner holds from before `git worktree add` registers the preview
+    // until after `removeWorktree` deregisters it, and the preview is excluded from
+    // `plan.previews` and reported as owned instead. The teardown is inside that span, not after
+    // it: a preview mid-teardown still holds its junctions, and reading it as unowned there would
+    // follow them.
+    //
+    // "Live" is NOT synonymous with "marker held", and the sentence above must not be read that
+    // way. `livePreviewPaths` counts a vetted CLAIM as a holder exactly as it counts the marker,
+    // and a claim is written per spawned pid long after the add — see the bullet below on the
+    // listing window. A preview whose only holder is a claim written during the pass can
+    // therefore reach this loop with a spawned check still inside it, and for that one the
+    // junction argument above does not hold: the sweep is all there is, and it is not enough.
     //
     // THE RESIDUALS, stated as what is true rather than as what would be convenient.
     //
@@ -2838,12 +3900,21 @@ export async function runCli(argv, io = { out: console.log }) {
     //     reaped as leaked. That is the pre-existing hazard, unchanged and no worse.
     //   - The worktree list and the markers are read once, above, and acted on here. A preview
     //     that appears in between is not in the list at all, so it cannot be reaped; a preview
-    //     already in the list cannot acquire an owner, because its owner would have had to write
-    //     the marker before the add that put it there.
+    //     already in the list cannot acquire an OWNER MARKER, because its owner would have had to
+    //     write that marker before the add that put it there.
+    //   - It CAN acquire a CLAIM, and that is a real window, not a hypothetical one. A claim is
+    //     written per spawned pid while a check runs, long after the add — and `livePreviewPaths`
+    //     lists, vets and reads as separate syscalls, so a claim written after THAT preview's own
+    //     listing is invisible to it and the preview reads as unowned and is reaped here. The
+    //     window is one readdir wide per preview, not one sweep wide: the per-parent listing memo
+    //     that made a mid-pass claim invisible to every later preview too is gone. See the
+    //     vetting comment above `livePreviewPaths` for the same limit stated at the reading end.
     //
-    // The destructive direction — a live preview read as dead — is closed by construction rather
-    // than narrowed, because the marker is HELD across a span that contains the whole span over
-    // which the preview is observable, instead of being sampled at one instant.
+    // So the destructive direction — a live preview read as dead — is closed by construction for
+    // the OWNER MARKER, because that marker is HELD across a span containing the whole span over
+    // which the preview is observable, instead of being sampled at one instant. It is only
+    // NARROWED for claims, by the bullet above. The two are not interchangeable, and this comment
+    // said "closed by construction" of both before claims had a writer.
     //
     // WHAT THE PATTERN MATCHES, since the reaper is force-removing directories nobody named:
     // every detached, branchless worktree registered in this repository whose path lies under
@@ -3301,6 +4372,13 @@ export async function runCli(argv, io = { out: console.log }) {
   }
 
   if (command === 'review-dispatch') {
+    // Before the manifest is even read: an invocation this command cannot act on unambiguously is
+    // rejected on its own terms, the way a missing argument is, rather than after the environment
+    // has had its say. 2 is what this CLI returns for a rejected invocation; 4 would say the
+    // command tried and could not verify, which is not what happened.
+    const ambiguous = await ambiguousPhaseRefusal(root, runId, flags, command)
+    if (ambiguous) { io.out(ambiguous); return 2 }
+
     // The TRACKED manifest, not the resolved config: the reviewer grades the diff, so letting
     // the gitignored local layer choose its tier would let the party being judged pick its own
     // judge. `config.mjs` already refuses `agents.reviewer` in the local layer; reading the
@@ -3320,8 +4398,17 @@ export async function runCli(argv, io = { out: console.log }) {
     const tierModels = parseTierModels(flags, io)
     if (tierModels === TIER_MODELS_REJECTED) return 2
 
-    const plan = await readState(root, runId, 'plan')
-    if (!plan) { io.out(`no plan for run ${runId}`); return 4 }
+    // Through the same non-parking reader as `collect-reviews`, for the same inherited FIFO door:
+    // these two commands read the same file for the same reason, and a hang in one is a hang in
+    // the other.
+    let plan = null
+    try {
+      plan = await readRunPlan(root, runId)
+    } catch (err) {
+      io.out(`the plan for run ${printable(runId)} cannot be read: ${printable(err.message)}`)
+      return 4
+    }
+    if (!plan) { io.out(`no plan for run ${printable(runId)}`); return 4 }
 
     const git = createGit({ cwd: root })
     // Resolved to shas as well as names: the stamp each reviewer carries back names the tips it
@@ -3383,6 +4470,27 @@ export async function runCli(argv, io = { out: console.log }) {
     // that normalisation is a second net rather than the one that catches it.
     const linkPaths = previewLinks(config)
 
+    // THE SHARED CLASSIFIER again, before a dispatch is built. This command does not go through
+    // `derive` either, and the value below is what every reviewer is told to diff the phase
+    // against — so a HEAD that names no branch would have a whole review round computed against a
+    // tree of the planter's choosing and reported as fact. The consequence here is an exit code
+    // rather than a throw, because `review-dispatch` reports its refusals that way.
+    const head = await git.headBranch()
+    if (!head.ok) {
+      io.out(`${head.reason} — there is no run branch to review against; check out the run branch and re-run`)
+      return 4
+    }
+    // THE REF, not the name, because this value is handed to an AGENT as a git argument rather
+    // than to `qualifyBranch`. Git's DWIM order resolves `refs/tags/<name>` BEFORE
+    // `refs/heads/<name>`, so a bare name is redirected by one `git tag run-branch <task tip>` —
+    // creatable by any teammate from its own worktree, with no HEAD write and no privilege.
+    // Measured: the prompt's own `git merge-base run-branch <branch>` then answered the T1 TIP,
+    // the diff against it was EMPTY, and every reviewer honestly returned zero findings while
+    // `export const backdoor = 1` sat in the phase. The agent review BLOCKS, so that is a pass
+    // issued over an unreviewed diff. The mechanical checks never saw it precisely because they
+    // go through `qualifyBranch`, which is what made this invisible to everything else.
+    const reviewRunBranch = head.ref
+
     let spec
     try {
       spec = generateReviewDispatch({
@@ -3395,8 +4503,32 @@ export async function runCli(argv, io = { out: console.log }) {
         tier: config.agents?.reviewer?.tier ?? 'capable',
         effort: config.agents?.reviewer?.effort ?? '',
         tierModels,
-        runBranch: await git.currentBranch(),
-        branches,
+        // WRAPPED HERE, AND THIS IS A COMPROMISE — say so rather than reading it as the clean fix.
+        // `generateReviewDispatch` splices this value bare into the reviewer's PROMPT, and a
+        // branch name is chosen by whoever created the branch. A name legitimately under
+        // refs/heads/ — so `classifyHeadRef` returns ok and the refusal above never fires — can
+        // carry control characters that render as line breaks, and the payload after one reads as
+        // its own instruction to an agent this gate trusts. Measured splices per lens:
+        // `correctness:2 security:2 tests:2 claims:4` — claims is not uniform with the others,
+        // because review-gen.mjs:76 is a claims-only method step that splices the name again.
+        // How many characters that yields is the attacker's to choose, so no total is recorded
+        // here; the fixture is the same information under test.
+        //
+        // Bounded, and not a regression: the line this replaced passed the identical string, and
+        // `[` and `:` are refname-illegal, so a bracketed verdict cannot be spelled and the JSON
+        // still parses.
+        //
+        // THE STRUCTURAL FIX IS AT THE SPLICE SITES in review-gen.mjs, which is outside this
+        // task's declared file set. So this is a caller-side wrap: exactly the per-site shape that
+        // let the HEAD rule drift across four sites for three review rounds. It closes THIS
+        // caller and no other — `review-gen.mjs` still splices `runBranch` bare from every other
+        // one, and that is recorded as a separate followups item rather than fixed here.
+        runBranch: printable(reviewRunBranch),
+        // Fully qualified for the same reason, and this is the same channel: these names are
+        // spliced into the reviewer's `git worktree add` / `git merge-base` / `git diff` lines,
+        // so a tag named like a task branch redirects them exactly as one named like the run
+        // branch did. `resolveBranchShas` already proved each exists under refs/heads/.
+        branches: branches.map((b) => (b.startsWith('refs/') ? b : `refs/heads/${b}`)),
         findingsDir: `.teammates/${runId}/reviews`,
         scratchRoot: tmpdir(),
         testCommand,
@@ -3422,6 +4554,206 @@ export async function runCli(argv, io = { out: console.log }) {
   }
 
   if (command === 'collect-reviews') {
+    // `--phase` names the manifest key and comes off argv alone, so it is resolved here rather
+    // than after the manifest: everything below needs it, starting with the clear.
+    const phaseName = flags.phase ?? 'default'
+
+    const dir = path.join(runDir(root, runId), 'reviews')
+
+    // THE PREVIOUS ROUND'S RESULTS FILE IS REMOVED BEFORE THIS ROUND READS ANYTHING, and that is
+    // what keeps a deterministic, phase-scoped filename safe to advertise.
+    //
+    // The file is written only on success, so before it existed this command was fail-closed:
+    // there was no artefact unless the operator made one, and a `>` redirect truncates on the
+    // failing run. Writing it turned that fail-open. Measured on this branch before this removal:
+    // a clean round wrote `results-default.json` saying `"status": "pass"` and printed that path;
+    // a fix-round commit then made the round-2 collection refuse with exit 4 (`stale findings for
+    // lens correctness`), the round-1 file survived untouched still saying `"pass"`, and `gate
+    // --results` on exactly the path round 1 advertised exited 0 with verdict PASS — a pass over
+    // a tree no reviewer judged.
+    //
+    // REMOVAL rather than a stamp inside the document. A stamp is only worth what its reader
+    // checks, and `gate --results` does not check one: it `JSON.parse`s the file and trusts
+    // `results`, which is how the stale document above passed. Teaching the gate to verify a
+    // stamp would put that check on every run's gate path and still leave the document trusted by
+    // anything else that reads it, whereas removing it makes its EXISTENCE the claim — a results
+    // file is present only when the round that wrote it succeeded.
+    //
+    // Removed HERE — before the manifest is resolved, before the phase is matched to a check,
+    // before the findings are read — rather than on each failing exit. "Before the findings are
+    // read" was too weak, and the gap it left was measured: a round that refused at the empty-lens
+    // check, or at the agent-check count, returned 4 with the previous round's `"status": "pass"`
+    // still on disk, and `gate --results` on that file exited 0 with verdict PASS over a tree that
+    // round had refused to judge. Five refusals sat above it.
+    //
+    // The property is positional, so it is stated positionally, and it is checkable by reading
+    // rather than by counting: NO `return` in this command sits above this block, and the only
+    // three inside it are the guards below that decide whether the removal may happen at all —
+    // they cannot be moved after the thing they guard. Every other exit, all fifteen of them, is
+    // downstream. A count of the paths downstream was true and useless, which is what the earlier
+    // version of this sentence was: what mattered was the paths UPSTREAM. Clearing here also
+    // covers the exits no `return` can: a crash, a kill, a timeout mid-collection.
+    //
+    // `unlink` removes the LINK, never what it points at, so a symlink an earlier round (or
+    // another teammate) left AT THE RESULTS PATH is cleared without touching the file on the other
+    // end of it. That is true of a link at that path and false of a link at the DIRECTORY above
+    // it, which is why the directory is vetted first: through a planted `reviews` link this
+    // removal deleted the victim directory's own `results-1.json` — measured on this branch,
+    // before the vet was moved ahead of it. The destructive half must not be the unguarded one:
+    // a refused write costs a round, a deletion costs the file.
+    //
+    // The name is `results-<phase>.json`, beside the findings files this round reads, and the
+    // phase goes through `isUnsafePathComponent` — the predicate `reviewFileName` applies to each
+    // of its own components — so a phase name that is not a safe filename is refused rather than
+    // escaping the directory. Vetted HERE rather than beside the write, because this removal
+    // builds a path from the same value: unvetted, it is a delete-anything primitive as readily as
+    // the write was a write-anything one. Measured, with this block moved below the unlink and a
+    // real file planted at `.teammates/pwned.json`: the command still exited 4 with this same
+    // sentence, and the file was gone. The refusal is not what the ordering buys — the ordering is
+    // what stops the deletion happening on the way to it. Refused with the 4 the `reviewFileName`
+    // failure below returns, rather than a second code for the same flag on the same command.
+    //
+    // NOT redundant with the per-lens `reviewFileName` failure, which is the reading the lens loop
+    // invites. That loop runs AFTER this, and after the removal below: by the time it could refuse
+    // the phase, this code has already built a path from it and deleted whatever was there. The
+    // two refusals also read differently on purpose — this one names the results file — because
+    // they otherwise printed the same sentence, and a fixture could not tell which had fired.
+    // Measured on this branch, with this guard forced to false and the manifest declaring a phase
+    // key of `a/../../../pwned`: the results file was written to `.teammates/pwned.json`, two
+    // directories above the run's own reviews directory, and the command printed that path and
+    // exited 0; with the guard merely MOVED below the removal, a real file planted at that same
+    // path was deleted while the command still exited 4 with this very sentence.
+    //
+    // Coerced with `String` first for the same reason `reviewFileName` does it: the value that
+    // gets checked has to be the value that gets joined, or the two can differ.
+    const resultsName = String(phaseName)
+    if (isUnsafePathComponent(resultsName)) {
+      io.out(`the results file cannot be named: a phase must be a non-empty name with no path separators, got ${JSON.stringify(printable(resultsName))}`)
+      return 4
+    }
+    const resultsPath = path.join(dir, `results-${resultsName}.json`)
+
+    // The directory is resolved BEFORE the removal, not beside the write, because the removal is
+    // the half that cannot be undone.
+    let planted = null
+    try {
+      planted = await plantedReviewsLink(root, dir)
+    } catch (err) {
+      io.out(`cannot vet the run's reviews directory at ${printable(dir)}: ${printable(err.message)}`)
+      return 4
+    }
+    if (planted) {
+      io.out(`${printable(planted)} is a symlink, and every component of ${printable(dir)} must be a real directory — refusing before anything is removed or written`)
+      return 4
+    }
+
+    try {
+      await unlink(resultsPath)
+    } catch (err) {
+      // ENOENT is the ordinary case — no earlier round, or one that failed. Anything else is a
+      // document this command cannot account for, and leaving it in place would let it be read as
+      // this round's answer.
+      if (err.code !== 'ENOENT') {
+        // EMPTIED WHERE IT CANNOT BE REMOVED, which is a real case and not a defensive one: in a
+        // `0555` reviews directory `unlink` fails EACCES while `truncate` succeeds, because
+        // removing an entry needs write permission on the DIRECTORY and emptying a file needs it
+        // on the FILE. Measured on this branch: without this fallback that round exited 4 with the
+        // superseded document still on disk saying `"status": "pass"`, and `gate --results` on
+        // it exited 0 with verdict PASS over a tree no reviewer had judged — the exact failure the
+        // up-front clear exists to prevent. A zero-byte file is fail-closed: the gate refuses it
+        // with `--results must be a readable JSON file`, measured in the same run.
+        //
+        // THROUGH A DESCRIPTOR, never by path, and the property required is not the one that
+        // reads most naturally. "only a regular file is emptied" describes the CHECK; what the
+        // fallback actually needs is that the bytes it destroys BELONG TO THIS COMMAND, and
+        // `isFile()` does not say that. A hard link is a regular file: `unlink` on one is
+        // harmless because it removes a NAME, which is why such a plant is inert on the normal
+        // path, but `truncate` destroys the shared inode. Measured on this branch with the
+        // path-based check: `link('<outside>/secret.txt', '<reviews>/results-1.json')` in a `0555`
+        // directory — the very condition this fallback exists for — left that file outside the
+        // project at zero bytes, with nothing in the output naming it. `st_nlink` was never
+        // consulted.
+        //
+        // So: open with the O_WRONLY|O_NONBLOCK|O_NOFOLLOW word above, `fstat` the DESCRIPTOR,
+        // require a regular file with exactly one link, and `ftruncate` that same descriptor. This
+        // is the pattern `openHolderEntry` uses, against the same class of plant; there was no
+        // reason this site did not reach for it first.
+        //
+        // WHAT IT ACTUALLY BUYS, measured by substituting the old `lstat`-then-`truncate` body
+        // back in — which reddens 'the empty-instead-of-remove fallback does not destroy an inode
+        // with another name' and 'collect-reviews refuses when the previous results file can be
+        // neither removed nor emptied', and nothing else: exactly one hazard changes hands — the HARD LINK, which
+        // `isFile()` cannot see. The symlink and the directory were already refused by the old
+        // body: `lstat` reports the link, so `isFile()` is false and `truncate` was never called,
+        // and a directory fails the same test. The symlink fixture stays green under the old body,
+        // and the directory case still refuses with the same exit and the same sentence except for
+        // one parenthetical — the old body records no reason, because it decides on `lstat` and
+        // never opens, where this one records the EISDIR its open returns. That is what the second
+        // failing test above is: a wording difference, not a hazard. An earlier version of this
+        // comment claimed four hazards, counting two the check it replaced already covered.
+        //
+        // O_NONBLOCK IS NOT ONE OF THEM EITHER, and the claim that it "comes with the descriptor"
+        // was doubly wrong. It is PINNED — reverting the flag word reddens the FIFO-at-the-results-
+        // path fixture (SIGKILL at 20 000 ms) and the flag-word unit test, which are exactly the
+        // two kills the mutation record in the test file names for that substitution. And the hang
+        // it prevents is one THIS REWRITE INTRODUCED: the old body never opened a FIFO at all, so
+        // it refused one in milliseconds. Opening is what created the hazard; O_NONBLOCK is what
+        // closes it again. Measured in isolation: `O_WRONLY|O_NOFOLLOW` on a FIFO stayed blocked
+        // past 5s, and adding O_NONBLOCK returns ENXIO at once.
+        //
+        // One property really is unpinned, and it is the one left: the check and the destruction
+        // are now one object rather than two syscalls on a path, so nothing can be swapped in
+        // between. No test here holds that — staging the swap needs a scheduler this suite does
+        // not have.
+        let emptied = false
+        let emptyErr = null
+        const flags = emptyResultsOpenFlags()
+        if (flags === null) {
+          emptyErr = new Error('this platform has no O_NOFOLLOW, so the entry cannot be opened without risking following a link')
+        } else {
+          let handle = null
+          try {
+            handle = await openFile(resultsPath, flags)
+            const info = await handle.stat()
+            if (info.isFile() && info.nlink === 1) {
+              await handle.truncate(0)
+              emptied = true
+            } else {
+              emptyErr = new Error(`the entry there is not a single-linked regular file (nlink ${info.nlink}), so emptying it could destroy bytes this command does not own`)
+            }
+          } catch (err) {
+            emptyErr = err
+          } finally {
+            if (handle) await handle.close().catch(() => {})
+          }
+        }
+        if (!emptied) {
+          // ONLY WHAT WAS OBSERVED, which is narrower than "report the outcome" and is the rule
+          // this sentence has now broken twice. The first version asserted a norm ("must not
+          // survive this one"). The second asserted a state nobody had looked at — that the
+          // document is still on disk carrying a verdict `gate --results` would read as this
+          // round's — and that is false on three reachable paths, all measured on this branch: a
+          // DIRECTORY at the path (the state one of this command's own tests builds) makes the
+          // gate exit 2, not read a verdict, and `rm` without `-r` refuses the advice; the
+          // reviews entry replaced by a regular file fails ENOTDIR, so the file named as "still
+          // on disk" does not exist; and a `0666` reviews directory fails EACCES on both the
+          // unlink and the open, so nothing observed the entry at all.
+          //
+          // What IS observed is two attempts and two failures, so that is what is printed —
+          // together with the one consequence this code does control, which is that the round is
+          // refused before anything is read. Naming both errors is the whole of the diagnosis: an
+          // EACCES pair says the directory, an EISDIR says the entry.
+          io.out(`could not clear the previous results file at ${printable(resultsPath)}: unlink failed (${printable(err.message)}), and emptying it in place failed too (${printable(emptyErr?.message ?? 'no reason recorded')}) — this round is refused before reading any findings, so nothing here is its answer; inspect that path before re-running`)
+          return 4
+        }
+      }
+    }
+
+    // Refused before the manifest, for the reason given at the same call in `review-dispatch`:
+    // collecting under the widened default records a pass over branches this phase never reviewed.
+    const ambiguous = await ambiguousPhaseRefusal(root, runId, flags, command)
+    if (ambiguous) { io.out(ambiguous); return 2 }
+
     const config = await resolveGateConfig(root, io)
     if (config === GATE_CONFIG_REJECTED) return 2
     // 4, matching `complete`: this cannot verify what it was asked about. Inferring a manifest
@@ -3429,7 +4761,6 @@ export async function runCli(argv, io = { out: console.log }) {
     // the lens list is what decides whether a review is complete.
     if (!config) { io.out('no gate manifest — cannot tell which lenses were dispatched'); return 4 }
 
-    const phaseName = flags.phase ?? 'default'
     const checks = checksForPhase(config, phaseName)
     const agentChecks = checks.filter((c) => kindOf(c) === 'agent')
     if (agentChecks.length !== 1) {
@@ -3438,7 +4769,28 @@ export async function runCli(argv, io = { out: console.log }) {
     }
     const check = agentChecks[0]
 
-    const dir = path.join(runDir(root, runId), 'reviews')
+    // AN AGENT CHECK WITH NO LENS COLLECTS NOTHING, and a pass over nothing is the outcome this
+    // whole command exists to refuse. `checksForPhase` substitutes the manifest's lens list only
+    // for a check that OMITS one; an explicit `"lens": []` is kept, the read loop below runs zero
+    // times, and `collectReviewResults` reports a clean pass because no lens is missing. Measured
+    // on this branch before this refusal: exit 0, `0 finding(s), none blocking, recovered from the
+    // reviewers' findings files`, with no findings file opened at all — and the results file was
+    // written and advertised, so `gate --results` on it returned verdict PASS over a tree no
+    // reviewer had judged.
+    //
+    // The pass COMPUTATION is not new — `git show master:scripts/cli.mjs` prints the same document
+    // on stdout for the same manifest — but persisting it is what makes it reusable, and it
+    // contradicts this command's own contract that a results file exists only where a round
+    // succeeded. Refused at the COLLECTION
+    // rather than at the write, because the document is wrong wherever it goes: a reader of that
+    // stdout is as misled as a reader of the file. 4, matching every other "this cannot be
+    // verified" answer here.
+    if (Array.isArray(check.lens) && check.lens.length === 0) {
+      io.out(`the agent check ${printable(check.name ?? 'review')} declares an empty lens list, so no review was dispatched for this phase and there is nothing to collect — a pass over zero lenses is not a review`)
+      return 4
+    }
+
+
     const files = []
     const unreadable = []
     for (const lens of check.lens) {
@@ -3450,7 +4802,7 @@ export async function runCli(argv, io = { out: console.log }) {
         return 4
       }
       try {
-        const parsed = JSON.parse(await readFile(path.join(dir, name), 'utf8'))
+        const parsed = JSON.parse(await readFindingsFile(path.join(dir, name)))
         // A reviewer returns an array of findings; the file it writes may carry that array
         // directly or wrap it. Both are accepted, and anything else is unreadable rather than
         // an empty review — the distinction this whole command exists to preserve.
@@ -3484,9 +4836,43 @@ export async function runCli(argv, io = { out: console.log }) {
     // round moves a branch, and findings about the old tree are not findings about this one —
     // during run `codemap` that was worked around three times by deleting the files by hand
     // between rounds.
-    const plan = await readState(root, runId, 'plan')
+    // The same rethrow one command down, and PRE-EXISTING: `master` crashes identically on a
+    // `plan.json` that is not JSON — measured, exit 1 with an empty stdout on both, where this
+    // branch's only contribution is that the clear has already run by then.
+    // Folded into the refusal below rather than left to throw, because "no plan" and "a plan this
+    // cannot read" put the operator in the same position: nothing here says which tips were
+    // judged.
+    //
+    // `${runId}` goes through `printable` like every other value in this command's output, and the
+    // reason is precise: WHAT VALIDATES THIS ID IS CONTAINMENT, AND NOTHING VALIDATES ITS BYTES.
+    // `assertContained` runs before dispatch for every command — measured here, `--run ../../pwned`
+    // and `--run a/../../out` both exit 2 on `escapes the run directory` — so the path this block
+    // builds from `runId`, and deletes and renames files under, cannot leave the run directory.
+    // That guarantee is real and this comment must not talk a reader out of it.
+    //
+    // What no one checks is the CHARACTERS. `idRefusal` would refuse every payload below — it is
+    // an allowlist, and calling it directly with an ESC, a C1 CSI, a bare CR and a NUL refuses all
+    // four — but both of its call sites are inside `init-run`, so nothing on this path consults it
+    // and a control byte travels intact to this sentence. Measured: `--run $'r1\e[2K\rreview:
+    // PASS'` reached it raw and drew a forged verdict line under it. For those bytes the wrapper
+    // is not a second line of defence; it is the only one.
+    //
+    // Twice this sentence has been written from an inference about which validator applies, and
+    // twice the mechanism was wrong while the conclusion happened to hold. Both times one call —
+    // `idRefusal(…)` directly, `--run ../../pwned` through the CLI — settled it in seconds.
+    let plan = null
+    try {
+      plan = await readRunPlan(root, runId)
+    } catch (err) {
+      io.out(`the plan for run ${printable(runId)} cannot be read: ${printable(err.message)} — nothing says which branch tips this phase is at, and a findings file that cannot be vouched for is not a review`)
+      return 4
+    }
     if (!plan) {
-      io.out(`no plan for run ${runId} — nothing says which branch tips this phase is at, and a findings file that cannot be vouched for is not a review`)
+      // Wrapped for the reason above, and STRICTLY EASIER TO REACH than the sentence it sits under:
+      // that one needs a `plan.json` this cannot parse, this one needs no plan file at all.
+      // Measured before this wrap: a C1 CSI in `--run` reached the terminal raw here while the
+      // neighbouring line, already wrapped, tokenised the same bytes.
+      io.out(`no plan for run ${printable(runId)} — nothing says which branch tips this phase is at, and a findings file that cannot be vouched for is not a review`)
       return 4
     }
     let branchShas
@@ -3551,7 +4937,84 @@ export async function runCli(argv, io = { out: console.log }) {
       io.out(`no findings file for lens(es): ${lost.map(printable).join(', ')} — those reviews are lost, not empty; respawn them rather than recording a pass`)
     }
     if (lost.length > 0 || explained.size > 0) return 4
-    io.out(JSON.stringify({ results: collected.results }, null, 2))
+
+    // PRINTED AND PERSISTED, because printing alone is a trap this run fell into. `gate --results
+    // <path>` needs a FILE, and this command's only output was stdout — so an operator who ran it
+    // without redirecting had the review check sit `pending` forever while the gate reported FAIL
+    // with an empty `failed: []`, naming nothing to fix. Writing the file makes the next command's
+    // argument something that exists rather than something the operator had to know to create.
+    //
+    // The JSON goes out FIRST, before anything is written, and the path after it. Two reasons,
+    // and the ordering serves both. Nothing is prepended to what a caller already parses; and a
+    // collection that succeeded is never lost to a filesystem that refused it — with the results
+    // file made unwritable (an earlier round under another uid, or a read-only `.teammates`) the
+    // write-first version exited 1 with a raw Node stack and ZERO bytes on stdout, discarding a
+    // review it had already computed, and 1 is not a code this command otherwise returns.
+    //
+    // A `> results.json` redirect is NOT preserved by that ordering — it captures the path line
+    // too, and `gate --results` JSON.parses the whole file, so the redirect yields `--results must
+    // be a readable JSON file` (measured on this branch). The file written below is the path to
+    // pass instead, which is what makes the redirect unnecessary.
+    const document = JSON.stringify({ results: collected.results }, null, 2)
+    io.out(document)
+
+    // TEMP-THEN-RENAME, matching `writeState` in `scripts/state.mjs`, because a plain `writeFile`
+    // FOLLOWS A SYMLINK sitting at the target. `'w'` is `O_CREAT|O_WRONLY|O_TRUNC`, and the guard
+    // above vets the phase STRING while nothing vets the ENTRY already at the safe path — which
+    // any teammate can plant, since `.teammates/<run>/reviews/` is where reviewers are told to
+    // write and the filename is derivable from the phase in their own dispatch prompt. Measured on
+    // this branch before this change, each with the printed path still naming the innocuous
+    // in-repo location and the command exiting 0: a symlink to `teammates.gate.json` had the
+    // TRACKED MANIFEST overwritten with this document (`git status` reported it modified); a
+    // symlink to a file outside the project root had that file overwritten; and a DANGLING symlink
+    // to `hooks-new-file.mjs` CREATED that file. `rename` replaces a link rather than following
+    // it, so all three now end with the plant gone and the document at the real path.
+    //
+    // `'wx'` on the temp for the same reason `writeOwnerMarker` uses it (see
+    // scripts/merge-preview.mjs) — an entry already at the scratch name is refused, not followed.
+    // `'wx'` is wrong for the DESTINATION, and NOT for the reason that reads most naturally.
+    // "an exclusive create would refuse every round after the first" is false for this code: the
+    // unconditional clear above guarantees the destination is absent by the time the write runs,
+    // and a fixture collecting twice against the same run returned 0 both times with `'wx'`
+    // substituted at the destination — measured on this branch. What it would really break is the
+    // window this whole block exists for: a plant landing between the clear and the write turns
+    // `'wx'` into EEXIST, which fails a round whose collection had already succeeded. `rename`
+    // replaces that plant instead, which is the outcome the operator needs.
+    //
+    // Stated as UNCOVERED rather than as safe: no test here pins that `'wx'`, and removing it
+    // alone leaves the suite green — measured. The scratch name carries this pid and a
+    // microsecond clock reading, so no fixture can pre-plant the entry it would refuse, which is
+    // the same property that makes a plant there implausible in the first place. It stays because
+    // a `'w'` on a scratch path that did happen to be occupied would follow it, and it costs
+    // nothing; do not read a green suite as evidence for it.
+    let tmp = null
+    try {
+      // The shape neither `rename` nor `'wx'` reaches: a symlink anywhere on the way to the
+      // directory, where `mkdir` recursive is a no-op on the link and every path built from `dir`
+      // resolves through it, so the document lands wherever it points while the printed path still
+      // says in-repo. Re-checked here rather than trusted from the vet before the clear: that one
+      // ran before the whole collection, and this one runs immediately before the write, which is
+      // as close as this can be brought without an API for writing relative to an open directory.
+      // Checked BEFORE `mkdir`, so a planted chain has nothing created inside it.
+      const replanted = await plantedReviewsLink(root, dir)
+      if (replanted) {
+        throw new Error(`${printable(replanted)} is a symlink, and every component of ${printable(dir)} must be a real directory`)
+      }
+      await mkdir(dir, { recursive: true })
+      tmp = `${resultsPath}.${process.pid}.${Math.floor(performance.now() * 1000)}.tmp`
+      await writeFile(tmp, `${document}\n`, { encoding: 'utf8', flag: 'wx' })
+      await rename(tmp, resultsPath)
+    } catch (err) {
+      if (tmp) await unlink(tmp).catch(() => {})
+      // Reported, not thrown: the results are already on stdout above. 4 rather than 0 because
+      // this command's answer is now a FILE and there is not one — a caller told 0 would go
+      // looking for a path that does not exist. Wrapped for the reason `configFailureMessage`'s
+      // syscall branch is: a Node fs error quotes the path this CLI built, and nothing that
+      // reaches a terminal should carry bytes unfiltered.
+      io.out(`cannot write the results file at ${printable(resultsPath)}: ${printable(err.message)} — the results above are complete; redirect them to a file and pass that to gate --results`)
+      return 4
+    }
+    io.out(`results written to ${printable(resultsPath)} — pass that path to gate --results`)
     return 0
   }
 

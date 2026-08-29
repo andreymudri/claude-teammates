@@ -136,12 +136,46 @@ const locateStep = (task, runId) => (runId ? [
 // conflated a rejection with a cannot-verify and only the text could separate them; 3 separates
 // them programmatically, which is what the hook needed and what makes this table simple enough
 // for a teammate to act on.
-const verifyStep = (task, runId, planPath) => (runId && planPath ? [
+// `--base` carries the SAME value `checkoutSteps` branched from, not a second guess at it. The
+// contract this rests on: `baseBranch` names the run's base branch, and under `checkoutSteps`'
+// own wording ("Your worktree does not start on this run's base") that is also the commit the
+// teammate's own branch forks from — one value, not two that happen to agree.
+//
+// `complete` derives a base itself when none is given — `main` or `master` — and anchors the
+// plan lookup there; on a run whose base is neither, that derived anchor holds no plan at all.
+// The plan-not-found failure DOES name a base — `${baseBranch}` is interpolated verbatim into
+// "confirm the plan is committed on <base>" in scripts/cli.mjs — so what misled three teammates
+// in run `purge` was not an absent base in the message, it was the WRONG one: `master`, the
+// derived default, standing in for `run/purge`, the run's actual base. Passing the checkout's
+// own base closes that: the anchor `complete` derives is now the ref the teammate's branch
+// actually forked from, and the base a failure names is the real one.
+//
+// NOT closed by this in every topology: docs/plans/2026-08-09-gaps-followups.md's Task 2
+// ("diff each task branch from its own fork point, not from the run anchor") reproduction
+// stages a run where task branches fork straight off the RUN branch itself (`git checkout -B
+// teammates/r/T5 run/r`, no separate base ahead of it). There `baseBranch` and the run branch
+// are the same name, so this line's `--base` sets the gate's base equal to its own run branch,
+// and `complete` refuses with "the run branch and the base branch are both '<name>'" — one
+// exit-4 non-verdict traded for another. `composeBrief` is pure and receives only `baseBranch`,
+// with nothing that distinguishes the two topologies, so it cannot detect the collision itself
+// — that message is named in the exit 4 guidance below, so a teammate who hits it reads a
+// dispatch error rather than something in its own worktree to fix.
+//
+// Omitted when no base branch was supplied — the same case `checkoutSteps` already refuses to
+// name a starting commit for. Inventing one here would assert a base the checkout step itself
+// would not commit to.
+const verifyStep = (task, runId, planPath, baseBranch) => (runId && planPath ? [
   'BEFORE YOU RETURN "done". Run the task gate on your own work, in the FOREGROUND:',
   '',
   '    ROOT=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")',
   '    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" complete \\',
-  '      --run ' + runId + ' --task ' + task.id + ' --plan ' + planPath + ' --root "$ROOT"',
+  '      --run ' + runId + ' --task ' + task.id + ' --plan ' + planPath
+    + (baseBranch ? ' --base ' + baseBranch : '') + ' --root "$ROOT"',
+  '',
+  'If your shell refuses that invocation — some sandboxes reject a multi-line command or a',
+  'string containing an absolute path they did not authorise — write the two lines to a file',
+  'and run that file. The refusal is your shell\'s, not the gate\'s, and working around it',
+  'that way is expected; reporting "blocked" over it is not.',
   '',
   'ROOT must be the MAIN worktree, which is what that command computes — run from inside your',
   'own worktree the CLI would resolve the run branch to your task branch and answer the wrong',
@@ -165,6 +199,20 @@ const verifyStep = (task, runId, planPath) => (runId && planPath ? [
   '             "could not run:" — a check whose kind this CLI has no runner for, such as an',
   '                "agent" review check, or a mistyped kind in the manifest. It never executed.',
   '                Nothing on your branch can change it, so do not try to make it pass.',
+  // Thrown when the base this invocation resolves to collides with the run branch — see the
+  // comment above verifyStep. Worded to hold whether that base arrived as an explicit --base
+  // above or was left to complete's own derived default: `cli.mjs brief` renders no --base at
+  // all when none was passed to it — grep scripts/cli.mjs's `brief` command for the literal
+  // `flags.base === true ? '' : (flags.base ?? '')`, no resolveBaseBranch fallback beside it —
+  // so a row that presupposed the flag would be false exactly there. No line number: that file
+  // is under active edit elsewhere in this run, so a number written today is wrong tomorrow.
+  // Named here so a teammate reads it as a dispatch error, not something wrong in its own
+  // worktree that checking out a different branch would fix.
+  '             "the run branch and the base branch are both" — the base this run resolved to',
+  '                (an explicit --base above, or complete\'s own derived default when none is',
+  '                shown) is the same as your own run branch. That is a dispatch error: the',
+  '                collision existed before this brief was ever composed. Report it and',
+  '                proceed; nothing in your worktree produced it.',
   // Each quoted marker stays whole on its own line. Wrapped mid-phrase, the very string a
   // teammate would search its own output for does not appear in the brief that told it to.
   '             "no gate manifest", "cannot verify completion",',
@@ -191,6 +239,58 @@ const verifyStep = (task, runId, planPath) => (runId && planPath ? [
   '',
 ] : [])
 
+// THE THREE WALLS, stated before the work rather than discovered during it. Each one cost
+// a teammate in run `purge` a long stretch of retrying, and each is a property of the
+// harness rather than of the task: a subagent has no terminal, so nothing it runs can
+// prompt, and a command that waits for a prompt waits forever rather than failing.
+//
+// Named as a REPORT, not as a prohibition alone: "do not run sudo" without "report blocked
+// naming the command" leaves a teammate that genuinely needs privilege with no move.
+const environmentRules = () => [
+  'ENVIRONMENT. Your shell cannot prompt: there is no terminal attached to it and no human',
+  'watching it. Three consequences, and none of them is worth retrying:',
+  '1. Do not run sudo, pkexec, doas, or anything else that asks for a password. They do not',
+  '   fail fast — they wait for input that can never arrive.',
+  '2. Do not start an interactive login, a device-code flow, or any 2FA prompt. A CLI that',
+  '   opens a browser or waits for a code is the same wall in a different shape.',
+  '3. Do not run a command that pages, opens an editor, or waits on a confirmation. Pass the',
+  '   non-interactive flag the tool provides, or do not run it.',
+  'If the task genuinely needs any of those, report status "blocked" and name the exact',
+  'command and what it asked for. That is a finished answer, not a failure.',
+  '',
+]
+
+// WHY THIS IS IN THE BRIEF AND NOT ONLY IN THE AGENT DEFINITION: the defect it addresses
+// was not a teammate ignoring a rule, it was a teammate writing a sentence about code it
+// had not run and no step asking it to. In run `purge` one residual bullet was rewritten
+// wrongly three times in a row, each version reproduced-and-refuted a round later, because
+// the claim read plausibly and nothing in the dispatch bound it to an execution.
+const claimRules = () => [
+  'CLAIMS. Every sentence you write into a code comment, a skill, a test comment or your',
+  'summary that says what the code DOES must be backed by a command you actually ran in',
+  'this task, in this worktree. Not by reading, not by inference from a nearby comment.',
+  'If you could not run it, write what you did verify and say the rest is unverified —',
+  'an unverified sentence marked as such costs a reader nothing; one stated as fact costs',
+  'a review round.',
+  'Correcting an existing comment is the case that goes wrong most: reproduce the old claim',
+  'FAILING before you write the new one, so you know which half was wrong.',
+  '',
+]
+
+// The FILES line says which paths may change. This says what may not be INFERRED, which is
+// a different failure: a teammate that decides a project is dormant, a file is dead, or a
+// record is stale, and acts on it. Nothing in the file set stops that, because archiving
+// or deleting inside your own declared paths is inside the set.
+const scopeRules = () => [
+  'SCOPE. Do not delete, archive, rename, or empty anything on the strength of what you',
+  'inferred about it. Being inside your declared file set is permission to edit those',
+  'paths for THIS task, not a judgement that whatever they contain is stale.',
+  'If the plan and the tree disagree — a step that describes code that is not there, a file',
+  'the plan says is unused — report status "blocked" quoting both. Do not reconcile them by',
+  'guessing which one is out of date.',
+  '',
+]
+
 const full = ({ task, runId, planPath, baseBranch, constraints }) => [
   'You are tm-implementer for task ' + task.id + ': ' + task.title + '.',
   '',
@@ -213,10 +313,13 @@ const full = ({ task, runId, planPath, baseBranch, constraints }) => [
   'Touching any other file fails the phase gate.',
   '',
   ...blastRadius(task),
+  ...scopeRules(),
+  ...environmentRules(),
+  ...claimRules(),
   constraints.length ? 'GLOBAL CONSTRAINTS:' : '',
   ...constraints.map((c) => '- ' + c),
   '',
-  ...verifyStep(task, runId, planPath),
+  ...verifyStep(task, runId, planPath, baseBranch),
   'Commit your work on ' + task.branch + ' and return the structured result.',
 ].filter((line) => line !== '').join('\n')
 
@@ -246,10 +349,13 @@ const terse = ({ task, runId, planPath, baseBranch, constraints, caveman }) => [
   'Touching any other file fails the phase gate.',
   '',
   ...blastRadius(task),
+  ...scopeRules(),
+  ...environmentRules(),
+  ...claimRules(),
   constraints.length ? 'GLOBAL CONSTRAINTS:' : '',
   ...constraints.map((c) => '- ' + c),
   '',
-  ...verifyStep(task, runId, planPath),
+  ...verifyStep(task, runId, planPath, baseBranch),
   'STYLE. Write summary and blockers caveman-terse: drop articles and filler, keep every',
   'technical term, file path and error string exact. If skill caveman:caveman is available,',
   'use it at level ' + caveman + '. If not available, apply the style directly — its absence',

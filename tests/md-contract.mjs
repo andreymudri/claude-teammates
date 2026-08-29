@@ -413,6 +413,30 @@ export function assertClaim(scope, spec) {
   const where = label ? `${label}: ` : ''
 
   const hit = assertStatement(scope, claim, `${where}claim not stated in one sentence`)
+
+  // A CLAIM MUST BE UNIQUE IN ITS SECTION. `findStatement` returns the FIRST statement matching,
+  // and the stray inventory below exempts by TEXT EQUALITY (`s.text !== hit.text`), so a verbatim
+  // duplicate of a chain link planted earlier in the same section steals the binding: `then:` is
+  // satisfied against the decoy, the REAL occurrence is free to be followed by a sentence that
+  // annuls it, and both copies are exempt from the inventory because they compare equal to the
+  // hit. Verified in this worktree, on the run branch's merged tree: with a duplicated pair
+  // planted ahead of the real one in both skills/parallel-execution/SKILL.md § 5 and the
+  // finishing skill's cleanup section, `npm test` stayed green at 2047 tests, 2044 pass, 0 fail.
+  //
+  // Requiring exactly one match closes it for every claim in every document at once, and it costs
+  // nothing legitimate: a document that states the same sentence twice in one section has a prose
+  // defect of its own. Measured against the tree before this landed — 2047 tests, 2044 pass,
+  // 0 fail — so no existing claim relied on being the first of several.
+  const matches = scope.statements.filter((s) => claim.test(s.text))
+  assert.equal(
+    matches.length,
+    1,
+    `${where}the claim pattern ${claim} matches ${matches.length} statements in ${scope.label}, ` +
+      'so which one it binds to is decided by position rather than by the pattern.' + show(matches) +
+      '\n  A duplicate lets an inserted sentence annul the real occurrence while every ' +
+      'anchored regex stays green. Make the claim unique, or narrow the pattern.',
+  )
+
   let consequence = null
 
   if (then) {

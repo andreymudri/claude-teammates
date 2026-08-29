@@ -16,6 +16,12 @@ reviewer owns it.
   reserve it for defects that break correctness, security, or the build.
 - Cite `file:line` for every finding.
 - No findings is a valid and common result. Do not invent one to look useful.
+- A finding is a reproduction, not a reading. Before you report one, run the thing that makes
+  it fail and paste what you ran and what came back into `failureScenario`, the field the
+  return shape below already carries for it — this schema names no separate reproduction key.
+  A finding you could not reproduce is reported as unreproduced, with what you tried — it is
+  still worth reporting, and mislabelling it as reproduced is what turns one review round
+  into three.
 
 ## Boundaries
 

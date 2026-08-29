@@ -1,10 +1,17 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
-import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { withMergePreview, conflictPairs, previewOwnerMarkerPath } from '../scripts/merge-preview.mjs'
+import {
+  withMergePreview,
+  conflictPairs,
+  previewOwnerMarkerPath,
+  previewClaimPath,
+  previewClaimPrefix,
+  writeOwnerMarker,
+} from '../scripts/merge-preview.mjs'
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..')
 
@@ -554,4 +561,97 @@ test('a conflicting merge still marks the preview it created', async () => {
   // span over which this preview is observable.
   assert.deepEqual(seen, [true, true, true])
   assert.equal(existsSync(markerPath), false)
+})
+
+test('a claim path is the owner marker plus the pid, and the prefix excludes the marker', () => {
+  const dir = path.join(tmpdir(), 'tm-preview-abc123')
+  const owner = previewOwnerMarkerPath(dir)
+  assert.equal(previewClaimPath(dir, 4242), `${owner}.4242`)
+  const prefix = previewClaimPrefix(dir)
+  assert.ok(path.basename(previewClaimPath(dir, 4242)).startsWith(prefix))
+  assert.equal(path.basename(owner).startsWith(prefix), false)
+})
+
+// ---------------------------------------------------------------------------
+// writeOwnerMarker, tested directly against a real filesystem entry rather than asserted from
+// source text — 'wx' is a flag the exec fakes above cannot exercise, since they never touch a
+// real file.
+// ---------------------------------------------------------------------------
+
+test('writeOwnerMarker refuses a path that already exists rather than truncating it', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-marker-'))
+  const marker = path.join(dir, 'marker')
+  await writeFile(marker, 'pre-existing\n', 'utf8')
+  await assert.rejects(() => writeOwnerMarker(marker, 4242), (err) => err.code === 'EEXIST')
+  assert.equal(await readFile(marker, 'utf8'), 'pre-existing\n')
+  await rm(dir, { recursive: true, force: true })
+})
+
+test('writeOwnerMarker does not follow a symlink planted at the marker path', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-marker-'))
+  const victim = path.join(dir, 'victim')
+  const marker = path.join(dir, 'marker')
+  await writeFile(victim, 'do not truncate me\n', 'utf8')
+  await symlink(victim, marker)
+  await assert.rejects(() => writeOwnerMarker(marker, 4242), (err) => err.code === 'EEXIST')
+  assert.equal(await readFile(victim, 'utf8'), 'do not truncate me\n')
+  await rm(dir, { recursive: true, force: true })
+})
+
+test('withMergePreview writes the owner marker naming its own pid', async () => {
+  const git = fakeGit()
+  let contents = null
+  let readWhileDirExisted = false
+  await withMergePreview({
+    git, base: 'main', branches: ['T1'],
+    run: async ({ path: dir }) => {
+      contents = await readFile(previewOwnerMarkerPath(dir), 'utf8')
+      readWhileDirExisted = existsSync(dir)
+    },
+  })
+  assert.equal(contents, `${process.pid}\n`)
+  assert.equal(readWhileDirExisted, true, 'the marker must be readable while the preview directory still exists')
+})
+
+// The write is placed on the first line INSIDE withMergePreview's `try`, specifically so a
+// refused write still reaches the `finally` that removes the preview directory. Nothing above
+// drives that placement through withMergePreview itself — the writeOwnerMarker tests exercise
+// the helper in isolation. `makeTempDir` lets this test hand withMergePreview a directory that
+// already has a marker collision planted at it, deterministically, without monkey-patching
+// node:fs/promises or racing the real mkdtemp.
+//
+// The release in the `finally` is guarded on `markerHeld`, so an EEXIST from `writeOwnerMarker`
+// must leave the planted entry untouched rather than unlinking it — the same rule the
+// claim-vetting comment above `livePreviewPaths` in scripts/cli.mjs states for the sibling claim
+// path (cited by section, not by line number, because that file has its own fix rounds in
+// flight): "EEXIST is tolerated and never unlinked, so a claim that writer did not create is
+// never released by it." That is why this plant needs no foreign uid, no user namespace and no
+// sticky bit to be meaningful: the invariant now belongs to the `markerHeld` guard rather than to
+// the filesystem, so an ordinary same-uid `writeFile` is enough to make it fail if the guard
+// regresses.
+test('a marker write that fails still removes the preview directory the seam handed it, and never unlinks the marker it did not write', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-preview-'))
+  const marker = previewOwnerMarkerPath(dir)
+  // Planted before withMergePreview ever runs, at the exact path it will try to write.
+  await writeFile(marker, 'planted-before-withMergePreview\n', 'utf8')
+  const git = fakeGit()
+  await assert.rejects(
+    () => withMergePreview({
+      git, base: 'main', branches: ['T1'],
+      makeTempDir: async () => dir,
+      run: async () => {},
+    }),
+    (err) => err.code === 'EEXIST',
+  )
+  assert.equal(
+    existsSync(dir), false,
+    'the preview directory the seam handed in must not be stranded when the marker write fails',
+  )
+  assert.equal(
+    await readFile(marker, 'utf8'), 'planted-before-withMergePreview\n',
+    'a marker this process never wrote must survive the finally untouched',
+  )
+  // Left behind on purpose: unlike every other test here, this run never wrote the marker, so
+  // withMergePreview correctly leaves it for its actual owner rather than releasing it.
+  await rm(marker, { force: true })
 })

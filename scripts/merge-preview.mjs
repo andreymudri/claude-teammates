@@ -35,11 +35,75 @@ export function previewOwnerMarkerPath(dir) {
   return path.join(path.dirname(dir), `${PREVIEW_OWNER_MARKER}-${path.basename(dir)}`)
 }
 
+// A CLAIM is the second kind of holder a preview can have, and it exists because the first
+// kind does not survive its own death.
+//
+// The owner marker answers "which gate created this". A claim answers "is anything still
+// RUNNING in it" — and those come apart exactly when it matters: a SIGKILLed gate runs no
+// `finally`, so its marker survives naming a pid nobody is at, while the suite it spawned
+// is still writing to the tree. Reading the marker alone, the reaper sees an abandoned
+// preview and force-removes it under a live process.
+//
+// ONE FILE PER HOLDER, never one file listing them. A shared file would need
+// read-modify-write to release a holder, and two holders releasing at once is a lost
+// update — the outcome of which is a claim that outlives every process it names, i.e. a
+// preview nothing will ever reap.
+//
+// Named off the owner marker so a claim sorts next to what it claims, and so the reaper
+// derives both from the one thing the two sides share: the preview path git reports.
+export function previewClaimPath(dir, pid) {
+  return `${previewOwnerMarkerPath(dir)}.${pid}`
+}
+
+// What a directory listing has to start with to be a claim on `dir`. The trailing dot is
+// load-bearing: without it this prefix also matches the owner marker itself, and a preview
+// whose owner is dead would be read as holding a live claim by that same dead pid.
+export function previewClaimPrefix(dir) {
+  return `${path.basename(previewOwnerMarkerPath(dir))}.`
+}
+
+// `'wx'` is `O_CREAT|O_EXCL|O_WRONLY`: it refuses an entry that already exists instead of
+// opening it. Plain `'w'` is `O_CREAT|O_WRONLY|O_TRUNC` and FOLLOWS a symlink — verified in this
+// task with a throwaway symlink pointing at a sibling file: a plain `'w'` write through the link
+// truncated the target to the new contents, and the same write with `'wx'` instead rejected with
+// `EEXIST` and left the target untouched. The window between `mkdtemp` and this write is tight —
+// measured in this task at a median of 0.116 ms and a maximum of 0.926 ms over 200 samples, with
+// a six-character suffix nothing can guess (an earlier reviewer's run of the same measurement
+// reported a median of 0.138 ms and a maximum of 1.127 ms; both runs agree it is sub-millisecond)
+// — so it needs an inotify watcher on the temp root, but it is retryable forever at no cost to
+// whoever holds the watcher, and the same remedy was already applied to the CLAIM write in
+// scripts/gate-runner.mjs — the marker was simply never covered.
+//
+// Impact is bounded to files this user can already write, so nothing here is a privilege gain.
+// What it prevents is this process destroying one of its own files on a path it did not choose.
+//
+// EEXIST here is not a race to retry: the marker's parent is the world-writable system temp
+// root, not the 0700 preview directory (see `:22-28` above — the marker is a SIBLING, precisely
+// so it can be written before `git worktree add` creates that directory at all). Verified in
+// this task: `mkdtemp('/tmp/tm-preview-…')` made a directory mode 700, but `previewOwnerMarkerPath`
+// resolves to a sibling of it under `/tmp` itself, mode 1777. What makes a collision improbable
+// is `mkdtemp`'s unguessable six-character suffix, not directory permissions, so an entry already
+// sitting at that path may well be one another local user planted on purpose — and that is
+// exactly why it must be refused rather than unlinked and retried. It is raised INSIDE
+// withMergePreview's `try`, so the `finally` still cleans the directory up.
+export async function writeOwnerMarker(marker, pid) {
+  await writeFile(marker, `${pid}\n`, { encoding: 'utf8', flag: 'wx' })
+}
+
 // The worktree lives under the system temp directory, never inside the repository. An
 // in-repo worktree is untracked, so `git status --porcelain` reports it and the ownership
 // check reads the main worktree as dirty for the whole run — the deadlock that cost run
 // `fixloop` an entire phase gate.
-export async function withMergePreview({ git, base, branches = [], link = [], repoRoot, run }) {
+export async function withMergePreview({
+  git, base, branches = [], link = [], repoRoot, run,
+  // Injectable so a test can hand withMergePreview a directory it already controls — with a
+  // marker collision already planted at previewOwnerMarkerPath(dir) — without monkey-patching
+  // node:fs/promises or racing the real mkdtemp. The same seam livePreviewPaths in
+  // scripts/cli.mjs already takes for read/list/stat/probe, and for the same reason: some
+  // branches cannot be staged end to end without one. Production never passes this; the default
+  // is the only path it takes.
+  makeTempDir = () => mkdtemp(path.join(tmpdir(), 'tm-preview-')),
+}) {
   // Validated before the worktree exists, so a bad manifest costs nothing.
   const invalid = validateLinkPaths(link)
   if (invalid) throw new Error(invalid)
@@ -51,14 +115,19 @@ export async function withMergePreview({ git, base, branches = [], link = [], re
     throw new Error('merge preview cannot resolve preview.link entries: no repoRoot was given')
   }
   if (branches.length === 0) return run({ path: null, merged: [] })
-  const dir = await mkdtemp(path.join(tmpdir(), 'tm-preview-'))
+  const dir = await makeTempDir()
   // Claimed BEFORE the worktree is added, because git registers the worktree at the start of the
   // add and not at its end (see previewOwnerMarkerPath). Inside the `try`, so a write that fails
   // still reaches the `finally` that cleans the directory up.
   const marker = previewOwnerMarkerPath(dir)
   let teardownLinks = null
+  // Only set once writeOwnerMarker actually wrote the marker. EEXIST means it did not, and
+  // the finally below must not unlink an entry this process never created — see the guard
+  // there for why.
+  let markerHeld = false
   try {
-    await writeFile(marker, `${process.pid}\n`, 'utf8')
+    await writeOwnerMarker(marker, process.pid)
+    markerHeld = true
     await git.addWorktreeDetached(dir, base)
     const conflict = await git.mergeInto(dir, branches)
     if (conflict) {
@@ -121,7 +190,15 @@ export async function withMergePreview({ git, base, branches = [], link = [], re
       // Its own `finally`, so release-last never becomes release-never: `teardownLinks()`
       // propagates its failures on purpose, and a marker stranded by one would claim an owner
       // forever for a preview nothing will clear.
-      await rm(marker, { force: true }).catch(() => {})
+      //
+      // Guarded on `markerHeld`, not unconditional: an EEXIST from `writeOwnerMarker` means
+      // this process never wrote the entry at `marker`, so releasing it anyway would unlink
+      // whatever is actually there — including a marker another local process is holding.
+      // Named by section rather than by line number, because that file has its own fix rounds
+      // in flight: see the claim-vetting comment above `livePreviewPaths` in scripts/cli.mjs,
+      // which states the same rule for the sibling claim path — "EEXIST is tolerated and never
+      // unlinked, so a claim that writer did not create is never released by it."
+      if (markerHeld) await rm(marker, { force: true }).catch(() => {})
     }
   }
 }

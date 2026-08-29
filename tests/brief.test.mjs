@@ -72,6 +72,54 @@ test('the complete command carries run, task and plan and sits after the constra
     'self-verification must precede the final commit instruction')
 })
 
+// `complete` derives a base itself when none is passed — `main` or `master` — and anchors the
+// plan lookup there. On a run whose base is neither (this repository's own run `purge`, based
+// on `run/purge`), that derived anchor holds no plan at all, and the failure names the plan
+// rather than the base. The fix is not "pass some base": it has to be the SAME value the
+// checkout step branched from, or the gate's anchor and the teammate's actual fork point can
+// still disagree — so this asserts they are the one value, not two literals that happen to match.
+//
+// FULL.baseBranch is 'master', which is exactly the value `complete` derives on its own with no
+// `--base` at all — so a mutant that hardcodes `--base master` passes against that fixture alone.
+// The second case uses a base that is neither `main` nor `master` (`run/purge`, this run's own
+// base), so the value has to travel from the checkout step rather than coincide with a guess.
+// Verified by mutation: replacing `' --base ' + baseBranch` with the literal `' --base master'`
+// turned this test red on the run/purge case while leaving the master case green.
+test('the complete invocation carries the same base branch the checkout step used', () => {
+  for (const opts of [FULL, { ...FULL, baseBranch: 'run/purge' }]) {
+    for (const brief of [composeBrief(opts), composeBrief({ ...opts, caveman: 'full' })]) {
+      const checkoutLine = brief.split('\n').find((l) => l.includes('git checkout -B'))
+      assert.ok(checkoutLine, 'no checkout line found')
+      assert.ok(checkoutLine.endsWith(opts.baseBranch),
+        `the checkout line does not end with the base branch: ${checkoutLine}`)
+      const completeLine = brief.split('\n').find((l) => l.includes('--plan ' + opts.planPath))
+      assert.ok(completeLine, 'no complete invocation line found')
+      assert.ok(completeLine.includes('--base ' + opts.baseBranch),
+        `the complete invocation does not carry --base ${opts.baseBranch}: ${completeLine}`)
+      assert.ok(at(brief, '--plan ' + opts.planPath) < at(brief, '--base ' + opts.baseBranch),
+        '--base must follow --plan in the invocation')
+      assert.ok(at(brief, '--base ' + opts.baseBranch) < at(brief, '--root "$ROOT"'),
+        '--base must precede --root in the invocation')
+    }
+  }
+})
+
+// Scoped to the invocation line itself, not the whole brief: the exit-4 guidance below
+// legitimately mentions the literal substring `--base` in prose (the run-branch-collision row),
+// regardless of whether this particular invocation carries the flag, so a whole-brief
+// `!includes('--base')` would fail on that prose rather than on a real regression.
+test('the complete invocation carries no --base when no base branch was supplied', () => {
+  for (const brief of [
+    composeBrief({ ...FULL, baseBranch: '' }),
+    composeBrief({ ...FULL, baseBranch: '', caveman: 'full' }),
+  ]) {
+    assert.ok(brief.includes('cli.mjs" complete'), 'the verify section should still render: run id and plan path are both present')
+    const completeLine = brief.split('\n').find((l) => l.includes('--plan ' + FULL.planPath))
+    assert.ok(completeLine, 'no complete invocation line found')
+    assert.ok(!completeLine.includes('--base'), 'a --base flag was emitted with no base branch supplied')
+  }
+})
+
 // Read out of `complete` in scripts/cli.mjs. The rejection is its OWN code now — the printed
 // first line no longer has to carry that distinction, because `COMPLETE_REJECTED` does — but the
 // guidance attached to each code is unchanged in kind, and it is what this test is about: a brief
@@ -219,6 +267,153 @@ test('an empty neighbours array renders no blast radius header', () => {
   assert.ok(!brief.includes('They have changed together'))
   assert.ok(brief.includes('Touching any other file fails the phase gate.'),
     'the section around the blast radius is still rendered')
+})
+
+// Anchored to line starts, not matched anywhere in the brief: whole-string assert.match
+// survives a wall being DELETED (a mutant that removed wall 3 outright left the unanchored
+// assertions green, because /device-code flow/ still matched wall 2) or REWRITTEN to say the
+// opposite ("You may freely start an interactive login...", "You may freely run a command that
+// pages...") — a substring like /device-code flow/ matches permissive prose just as well as a
+// prohibition. Anchoring each wall to its own line start requires that EXACT sentence to open
+// that line.
+test('the brief states the three environment walls in both variants', () => {
+  for (const brief of [composeBrief(FULL), composeBrief({ ...FULL, caveman: 'full' })]) {
+    assert.match(brief, /^ENVIRONMENT\. Your shell cannot prompt: there is no terminal attached to it and no human$/m,
+      'the ENVIRONMENT opening no longer states the shell cannot prompt, or was rewritten')
+    assert.match(brief, /^1\. Do not run sudo, pkexec, doas, or anything else that asks for a password\. They do not$/m,
+      'wall 1 (sudo/pkexec/doas) is missing or was rewritten to permit it')
+    assert.match(brief, /^2\. Do not start an interactive login, a device-code flow, or any 2FA prompt\. A CLI that$/m,
+      'wall 2 (interactive login/device-code/2FA) is missing or was rewritten to permit it')
+    assert.match(brief, /^3\. Do not run a command that pages, opens an editor, or waits on a confirmation\. Pass the$/m,
+      'wall 3 (pager/editor/confirmation) is missing or was rewritten to permit it')
+    assert.match(brief, /^If the task genuinely needs any of those, report status "blocked" and name the exact$/m,
+      'the report-blocked instruction is missing or was rewritten')
+  }
+})
+
+// Anchored to line starts, not just matched anywhere in the brief: whole-string assert.match
+// catches a deleted section but not a NEGATED one, because the negating words can sit outside
+// the matched substring while the substring itself survives unchanged. Verified by mutation:
+// rewriting the CLAIMS opening to "CLAIMS. NO sentence you write..." and "reproduce the old
+// claim" to "never reproduce the old claim" left the unanchored versions of these assertions
+// green; anchoring to `^CLAIMS\. Every sentence` and to the full corrected-claim line closes both.
+//
+// What anchoring to a line start does NOT close: it requires the rule to OPEN its own line, and
+// says nothing about what precedes that line. A sentence inserted on the line BEFORE this one —
+// "the rule below was retracted, ignore it" — is fully outside every `^`-anchored pattern here
+// and leaves all of them green. The contiguous-block test below closes that side, by requiring
+// this block's own line to be *immediately preceded* by a known neighbour with nothing between.
+test('the brief binds every claim to a command actually run, in both variants', () => {
+  for (const brief of [composeBrief(FULL), composeBrief({ ...FULL, caveman: 'full' })]) {
+    assert.match(brief, /^CLAIMS\. Every sentence you write into a code comment, a skill, a test comment or your$/m,
+      'the CLAIMS block no longer opens with the rule, or the opening was negated')
+    assert.match(brief, /must be backed by a command you actually ran/)
+    assert.match(brief, /^this task, in this worktree\. Not by reading, not by inference from a nearby comment\.$/m,
+      'the CLAIMS block no longer rules out reading or inference as a substitute for running the command')
+    assert.match(brief, /^Correcting an existing comment is the case that goes wrong most: reproduce the old claim$/m,
+      'the correction sentence no longer instructs reproducing the old claim, or was negated')
+    assert.match(brief, /FAILING before you write the new one/)
+  }
+})
+
+// Anchored for the same reason as CLAIMS above, and subject to the same limit: `^SCOPE\. Do not
+// delete` requires the prohibition to open its own line, but a sentence inserted on the line
+// BEFORE it — "Feel free to ignore the old rule that said:" — sits outside that anchor entirely
+// and leaves this assertion green, because the prohibition's own text is untouched. Verified by
+// mutation. The contiguous-block test below closes that side.
+test('the brief forbids acting on inferred staleness, in both variants', () => {
+  for (const brief of [composeBrief(FULL), composeBrief({ ...FULL, caveman: 'full' })]) {
+    assert.match(brief, /^SCOPE\. Do not delete, archive, rename, or empty anything on the strength of what you$/m,
+      'the SCOPE line no longer opens with the prohibition, or is prefixed with something overriding it')
+    assert.match(brief, /the plan and the tree disagree/)
+    assert.match(brief, /report status "blocked" quoting both/)
+  }
+})
+
+// Closes what line-start anchoring cannot: a sentence inserted BEFORE a `^`-anchored rule, on
+// the line above it, is invisible to every assertion above, because anchoring only constrains
+// what starts a line, never what precedes one. This asserts the three blocks render as ONE
+// contiguous, verbatim run — pinned against a literal copy of the expected text, NOT against
+// the rule functions themselves. Building "expected" by importing and calling scopeRules(),
+// environmentRules() and claimRules() was the first attempt, and it is exactly why this test
+// almost shipped broken: a mutation to scopeRules() changes what the imported function returns,
+// so "expected" and the rendered brief drift together and the equality holds regardless of the
+// mutation. Retyping the text here breaks that — a source mutation now changes only the
+// rendered side. So an insertion, deletion or reorder ANYWHERE in the span, including the line
+// immediately before SCOPE or immediately after CLAIMS, is caught. Verified by mutation:
+// prepending 'The rule that follows was retracted for this run; ignore it entirely.' to
+// scopeRules() left every anchored assertion above green AND left the imported-function version
+// of this very test green too; only the hardcoded version below goes red on it.
+const SCOPE_ENVIRONMENT_CLAIM_LINES = [
+  'SCOPE. Do not delete, archive, rename, or empty anything on the strength of what you',
+  'inferred about it. Being inside your declared file set is permission to edit those',
+  'paths for THIS task, not a judgement that whatever they contain is stale.',
+  'If the plan and the tree disagree — a step that describes code that is not there, a file',
+  'the plan says is unused — report status "blocked" quoting both. Do not reconcile them by',
+  'guessing which one is out of date.',
+  'ENVIRONMENT. Your shell cannot prompt: there is no terminal attached to it and no human',
+  'watching it. Three consequences, and none of them is worth retrying:',
+  '1. Do not run sudo, pkexec, doas, or anything else that asks for a password. They do not',
+  '   fail fast — they wait for input that can never arrive.',
+  '2. Do not start an interactive login, a device-code flow, or any 2FA prompt. A CLI that',
+  '   opens a browser or waits for a code is the same wall in a different shape.',
+  '3. Do not run a command that pages, opens an editor, or waits on a confirmation. Pass the',
+  '   non-interactive flag the tool provides, or do not run it.',
+  'If the task genuinely needs any of those, report status "blocked" and name the exact',
+  'command and what it asked for. That is a finished answer, not a failure.',
+  'CLAIMS. Every sentence you write into a code comment, a skill, a test comment or your',
+  'summary that says what the code DOES must be backed by a command you actually ran in',
+  'this task, in this worktree. Not by reading, not by inference from a nearby comment.',
+  'If you could not run it, write what you did verify and say the rest is unverified —',
+  'an unverified sentence marked as such costs a reader nothing; one stated as fact costs',
+  'a review round.',
+  'Correcting an existing comment is the case that goes wrong most: reproduce the old claim',
+  'FAILING before you write the new one, so you know which half was wrong.',
+]
+
+test('the scope, environment and claim rules render as one uninterrupted, verbatim block', () => {
+  const expected = SCOPE_ENVIRONMENT_CLAIM_LINES.join('\n')
+  for (const brief of [composeBrief(FULL), composeBrief({ ...FULL, caveman: 'full' })]) {
+    const marker = 'Touching any other file fails the phase gate.\n'
+    const markerAt = brief.indexOf(marker)
+    assert.notEqual(markerAt, -1, 'the FILES section marker was not found')
+    const start = markerAt + marker.length
+    const end = brief.indexOf('GLOBAL CONSTRAINTS:')
+    assert.notEqual(end, -1, 'GLOBAL CONSTRAINTS: was not found')
+    assert.equal(
+      brief.slice(start, end),
+      expected + '\n',
+      'a line was inserted, removed or reordered somewhere in the scope/environment/claim block',
+    )
+  }
+})
+
+// The substring-plus-ordering assertions above pin that a fallback exists and where it sits,
+// but not the INSTRUCTION itself — the clause telling a teammate the workaround is expected and
+// a "blocked" report over it is not. That clause was entirely unasserted, so inverting it stayed
+// green. Reproduced by mutation: rewording 'that way is expected; reporting "blocked" over it is
+// not.' to 'that way is NOT expected; report status "blocked" over it instead of running the
+// gate.' left the whole suite passing while telling every implementer the opposite of what the
+// sentence exists to say. Line-anchored rather than folded into the SCOPE/ENVIRONMENT/CLAIMS
+// block-equality test below: that block is one contiguous span of fully static text, while this
+// clause sits inside verifyStep among lines that interpolate runId, task.id, planPath and
+// baseBranch — hardcoding that whole span would duplicate the fixture's dynamic values a second
+// time in this file for one clause, which is more surface to drift than the single anchor below.
+test('the brief names the script-file fallback for a shell that refuses the complete invocation', () => {
+  for (const brief of [composeBrief(FULL), composeBrief({ ...FULL, caveman: 'full' })]) {
+    const fallback = 'write the two lines to a file'
+    assert.ok(brief.includes(fallback), 'the fallback sentence is missing')
+    assert.ok(at(brief, 'cli.mjs" complete') < at(brief, fallback),
+      'the fallback must sit after the complete invocation')
+    assert.ok(at(brief, fallback) < at(brief, 'ROOT must be the MAIN worktree'),
+      'the fallback must sit before the ROOT must be the MAIN worktree line')
+    assert.match(brief, /^that way is expected; reporting "blocked" over it is not\.$/m,
+      'the fallback no longer says working around the refusal is expected, or the instruction was inverted')
+    for (const inverted of ['is NOT expected', 'instead of running the gate']) {
+      assert.ok(!brief.includes(inverted),
+        `the fallback instruction reads as inverted — found the phrase "${inverted}"`)
+    }
+  }
 })
 
 test('the caveman variant keeps every load-bearing instruction', () => {
@@ -584,6 +779,85 @@ test('the brief quotes the could-not-run marker that scripts/cli.mjs actually pr
   // And it belongs to that row alone: quoted under the rejection row it would tell a teammate to
   // fix a check that never ran.
   assert.ok(!rows.get(cliExitCode(cli, 'COMPLETE_REJECTED')).includes(marker))
+})
+
+// Same shape as the could-not-run pin above: the message this row tells a teammate to search
+// for is read out of scripts/cli.mjs's own template literal, not restated by hand, so the two
+// cannot silently drift apart. This is the message a --base collision with the run branch
+// produces (see the comment above verifyStep in scripts/brief.mjs) — reproduced in
+// docs/plans/2026-08-09-gaps-followups.md's Task 2 ("diff each task branch from its own fork
+// point, not from the run anchor") topology, where task branches fork straight off the run
+// branch and this brief's own --base then equals it.
+test('the brief quotes the run-branch/base-branch collision marker scripts/cli.mjs actually prints, and calls it a dispatch error', async () => {
+  const cli = await readFile(new URL('../scripts/cli.mjs', import.meta.url), 'utf8')
+  const emitted = /`(the run branch and the base branch are both )'\$\{runBranch\}'/.exec(cli)
+  assert.ok(emitted, 'scripts/cli.mjs no longer emits this collision message — this pin is stale')
+  const marker = emitted[1].trimEnd()
+
+  const rows = exitRows(composeBrief(FULL))
+  const cannotVerify = cliExitCode(cli, 'COMPLETE_CANNOT_VERIFY')
+  assert.ok(
+    rows.get(cannotVerify).includes(`"${marker}"`),
+    `the brief does not quote the run-branch/base-branch collision marker (${JSON.stringify(marker)})`,
+  )
+  // Told as a dispatch error, not the teammate's own worktree to fix — the same distinction the
+  // "ownership" bullet already draws for a different run-wide cause.
+  assert.match(rows.get(cannotVerify), /dispatch error/)
+  assert.match(rows.get(cannotVerify), /nothing in your worktree produced it/)
+  assert.ok(!rows.get(cliExitCode(cli, 'COMPLETE_REJECTED')).includes(marker))
+
+  // The row must hold whether or not THIS invocation carries --base at all: scripts/cli.mjs's
+  // own `brief` command reads `flags.base === true ? '' : (flags.base ?? '')` with no
+  // resolveBaseBranch fallback beside it — grep-able by that literal expression rather than by a
+  // line number, since scripts/cli.mjs is under active edit elsewhere in this run — so
+  // `cli.mjs brief` with no --base renders a complete line that omits the flag entirely, while
+  // the collision this row describes is still reachable through complete's own derived default.
+  //
+  // A round-3 fix here ruled out one presupposing phrasing by excluding the literal substring
+  // 'the --base value in this'. That pins a WORDING, not the row: rewording lines 208-212 to a
+  // DIFFERENT presupposing form — "the --base flag shown in the command above names your own
+  // run branch" — still passed, because it contains neither the excluded substring nor any word
+  // the earlier assertions require absent, while being just as false in the no-flag rendering.
+  // Verbatim-pinning the row closes the class instead of one phrasing, the same instrument this
+  // file already uses for SCOPE_ENVIRONMENT_CLAIM_LINES and for the identical reason.
+  //
+  // Lines 208-212 are fully static — no interpolation of task.id, runId, planPath or baseBranch,
+  // unlike the fallback clause pinned by line-anchor last round, which sits among lines that DO
+  // interpolate those and so could not be pinned whole. Checked here, not assumed: read straight
+  // off scripts/brief.mjs, there is no `+` concatenation or `${...}` anywhere in these five
+  // lines. That is what makes a full verbatim pin possible rather than another anchor.
+  //
+  // The literal below is retyped by hand, not derived by calling anything in scripts/brief.mjs.
+  // Deriving "expected" from the code under test is the tautology round 2 caught on this exact
+  // task, and a verbatim pin is precisely where the temptation returns.
+  const COLLISION_ROW_LINES = [
+    '             "the run branch and the base branch are both" — the base this run resolved to',
+    '                (an explicit --base above, or complete\'s own derived default when none is',
+    '                shown) is the same as your own run branch. That is a dispatch error: the',
+    '                collision existed before this brief was ever composed. Report it and',
+    '                proceed; nothing in your worktree produced it.',
+  ]
+  const expectedCollisionRow = COLLISION_ROW_LINES.join('\n')
+  const rowStartMarker = 'Nothing on your branch can change it, so do not try to make it pass.\n'
+  const rowEndMarker = '\n             "no gate manifest"'
+
+  // Checked on both a with-base and a no-base brief, because the row's own text is unconditional
+  // prose that must read the same in either — the round-3 defect was reachable only in the
+  // no-base rendering, where the with-base check alone would have stayed green.
+  for (const brief of [composeBrief(FULL), composeBrief({ ...FULL, baseBranch: '' })]) {
+    const noBaseRows = exitRows(brief)
+    const row = noBaseRows.get(cannotVerify)
+    const startAt = row.indexOf(rowStartMarker)
+    assert.notEqual(startAt, -1, 'the "could not run:" bullet that precedes the collision row was not found')
+    const start = startAt + rowStartMarker.length
+    const end = row.indexOf(rowEndMarker)
+    assert.notEqual(end, -1, 'the "no gate manifest" bullet that follows the collision row was not found')
+    assert.equal(
+      row.slice(start, end),
+      expectedCollisionRow,
+      'the collision row no longer matches the expected text verbatim — a wording change, however phrased, must fail here',
+    )
+  }
 })
 
 // The specific regression, stated as itself: no row may describe a gate rejection as the code

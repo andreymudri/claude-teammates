@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { createGit, GitError, defaultGitExec, teammateRef, COMMIT_MARKER } from '../scripts/git.mjs'
+import { createGit, GitError, defaultGitExec, teammateRef, COMMIT_MARKER, classifyHeadRef } from '../scripts/git.mjs'
 
 const recorder = (result = { code: 0, stdout: '', stderr: '' }) => {
   const calls = []
@@ -151,10 +151,141 @@ test('isDirty does not exempt a lookalike path', async () => {
   assert.equal(await createGit({ exec }).isDirty(), true)
 })
 
-test('currentBranch trims the abbreviated ref', async () => {
-  const { calls, exec } = recorder({ code: 0, stdout: 'master\n', stderr: '' })
-  assert.equal(await createGit({ exec }).currentBranch(), 'master')
-  assert.deepEqual(calls[0], ['rev-parse', '--abbrev-ref', 'HEAD'])
+test('currentBranchRef returns the ref HEAD symbolically points at', async () => {
+  const calls = []
+  const exec = async (args) => {
+    calls.push(args)
+    return { code: 0, stdout: 'refs/heads/run-branch\n', stderr: '' }
+  }
+  assert.equal(await createGit({ exec }).currentBranchRef(), 'refs/heads/run-branch')
+  assert.deepEqual(calls[0], ['symbolic-ref', '--quiet', 'HEAD'])
+})
+
+// Verified against the real git installed here (2.55.0): on a detached HEAD, `symbolic-ref
+// --quiet HEAD` exits 1 with empty stdout AND empty stderr, while the bare form exits 128
+// printing a diagnostic. The empty stderr is what makes detachment distinguishable from a
+// failure without parsing any message.
+test('currentBranchRef answers null on a detached HEAD rather than throwing', async () => {
+  const exec = async () => ({ code: 1, stdout: '', stderr: '' })
+  assert.equal(await createGit({ exec }).currentBranchRef(), null)
+})
+
+// The stderr here is the real one: running the same command outside a repository was measured
+// on that git as exit 128 with `fatal: not a git repository` on stderr.
+test('currentBranchRef throws when symbolic-ref fails for a reason that is not detachment', async () => {
+  const exec = async () => ({ code: 128, stdout: '', stderr: 'fatal: not a git repository\n' })
+  await assert.rejects(() => createGit({ exec }).currentBranchRef(), GitError)
+})
+
+// NULL, and specifically not the string `HEAD`. The sentinel this used to assert was a hole:
+// `refs/heads/HEAD` is a ref `git update-ref` creates happily, so every caller that prefixed
+// `refs/heads/` onto the sentinel resolved a ref an unprivileged teammate can point anywhere.
+// The `git branch HEAD` refusal below is what makes the name look reserved when it is not — it
+// is `git branch`'s own name check, not a constraint on the ref namespace.
+test('currentBranch answers null on a detached HEAD and never a name', async () => {
+  const named = async () => ({ code: 0, stdout: 'refs/heads/run-branch\n', stderr: '' })
+  assert.equal(await createGit({ exec: named }).currentBranch(), 'run-branch')
+  const detached = async () => ({ code: 1, stdout: '', stderr: '' })
+  assert.equal(await createGit({ exec: detached }).currentBranch(), null)
+})
+
+// The precondition behind that null, measured against real git rather than assumed: the name the
+// old sentinel produced denotes a ref that can be CREATED. If this ever starts failing because
+// git began rejecting the ref write, the sentinel would still be wrong for the reason above.
+test('refs/heads/HEAD is a creatable ref even though git branch refuses the name', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-'))
+  const sh = (args) => defaultGitExec(args, root)
+  try {
+    await sh(['init', '--initial-branch=main'])
+    await sh(['config', 'user.email', 'test@example.com'])
+    await sh(['config', 'user.name', 'test'])
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    const sha = (await sh(['rev-parse', 'HEAD'])).stdout.trim()
+    // `git branch` refuses it, which is the whole reason the name reads as safe.
+    assert.notEqual((await sh(['branch', 'HEAD', sha])).code, 0)
+    // `update-ref` does not, which is the whole reason it is not.
+    assert.equal((await sh(['update-ref', 'refs/heads/HEAD', sha])).code, 0)
+    assert.equal((await sh(['rev-parse', '--verify', 'refs/heads/HEAD'])).stdout.trim(), sha)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+// A killed process and a detached HEAD are the same three fields once `code` has been defaulted:
+// `{code: 1, stdout: '', stderr: ''}`. Measured on this platform, a SIGKILLed child reports
+// `code: null, signal: 'SIGKILL'`, so the signal is the only thing that still separates them.
+test('currentBranchRef throws rather than reporting detachment when the process was killed', async () => {
+  const exec = async () => ({ code: 1, signal: 'SIGKILL', stdout: '', stderr: '' })
+  await assert.rejects(() => createGit({ exec }).currentBranchRef(), GitError)
+})
+
+// The same collapse in the other reader, and this one is worse: the fallback hands the BARE name
+// onward, which git resolves through refs/tags/ before refs/heads/ — reopening the exact
+// tag-shadowing hazard qualifyBranch exists to close, for every caller at once.
+test('qualifyBranch throws rather than falling back to the bare name when the process was killed', async () => {
+  const exec = async (args) => (args[0] === 'rev-parse'
+    ? { code: 1, signal: 'SIGKILL', stdout: '', stderr: '' }
+    : { code: 0, signal: null, stdout: '', stderr: '' })
+  await assert.rejects(
+    () => createGit({ exec }).addWorktreeDetached('/tmp/whatever', 'run-branch'),
+    GitError,
+  )
+})
+
+// The third reader of the same collapsed shape. `branchExists` reads exit 1 as "no such ref",
+// so a killed probe answers a confident false — and callers branch on that to decide a task
+// contributed nothing, or to skip a branch entirely.
+test('branchExists throws rather than answering false when the process was killed', async () => {
+  const exec = async () => ({ code: 1, signal: 'SIGKILL', stdout: '', stderr: '' })
+  await assert.rejects(() => createGit({ exec }).branchExists('run-branch'), GitError)
+})
+
+// The exact plant from the followups document: three ordinary ref writes, each of which an
+// unprivileged teammate can make in its own worktree. Under `--abbrev-ref` they made HEAD's
+// name answer `refs/heads/run-branch`, so `refs/heads/` + that name landed on the planted ref
+// — the assertions below measure that hijack against the real git rather than assuming it.
+// `symbolic-ref` reads HEAD itself, so all three are inert.
+test('a tag, a heads/<name> branch and refs/heads/refs/heads/<name> do not redirect the resolved name', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-'))
+  const git = createGit({ cwd: root })
+  const sh = (args) => defaultGitExec(args, root)
+  const out = async (args) => (await sh(args)).stdout.trim()
+  try {
+    await sh(['init', '--initial-branch=run-branch'])
+    await sh(['config', 'user.email', 'test@example.com'])
+    await sh(['config', 'user.name', 'test'])
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    const real = await out(['rev-parse', 'HEAD'])
+    // A second commit, then rewound: it gives the plant a sha to redirect the run branch to
+    // that is not the sha HEAD actually points at.
+    await writeFile(path.join(root, 'other.txt'), 'other\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'other'])
+    const planted = await out(['rev-parse', 'HEAD'])
+    await sh(['reset', '--hard', real])
+    assert.notEqual(planted, real)
+
+    await sh(['tag', 'run-branch', real])
+    await sh(['branch', 'heads/run-branch', real])
+    await sh(['update-ref', 'refs/heads/refs/heads/run-branch', planted])
+
+    // The plant works against the OLD resolution: abbreviation gives back a name that, once a
+    // caller prefixes `refs/heads/`, resolves to the sha the planter chose rather than HEAD's.
+    const abbreviated = await out(['rev-parse', '--abbrev-ref', 'HEAD'])
+    assert.equal(abbreviated, 'refs/heads/run-branch')
+    assert.equal(await out(['rev-parse', `refs/heads/${abbreviated}`]), planted)
+
+    // Symbolic resolution is unmoved by all three, and its name round-trips back to HEAD.
+    assert.equal(await git.currentBranchRef(), 'refs/heads/run-branch')
+    assert.equal(await git.currentBranch(), 'run-branch')
+    assert.equal(await out(['rev-parse', `refs/heads/${await git.currentBranch()}`]), real)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('against a real repository, changedFiles reports the branch-only change', async () => {
@@ -758,6 +889,107 @@ test('removeWorktree rejects an empty dir with GitError', async () => {
   const { calls, exec } = recorder()
   await assert.rejects(() => createGit({ exec }).removeWorktree(''), GitError)
   assert.deepEqual(calls, [])
+})
+
+// --- deleteBranch --------------------------------------------------------------------------
+
+test('deleteBranch removes a branch and reports a name that is not there', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-delbranch-'))
+  const git = createGit({ cwd: root })
+  const sh = (args) => defaultGitExec(args, root)
+  try {
+    await sh(['init', '--initial-branch=main'])
+    await sh(['config', 'user.email', 'test@example.com'])
+    await sh(['config', 'user.name', 'test'])
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['branch', 'scratch'])
+
+    await git.deleteBranch('scratch')
+    assert.equal(await git.branchExists('scratch'), false)
+    await assert.rejects(() => git.deleteBranch('scratch'), (err) => err instanceof GitError)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('deleteBranch refuses an empty name without asking git', async () => {
+  const git = createGit({ cwd: '.', exec: async () => { throw new Error('git must not be called') } })
+  await assert.rejects(() => git.deleteBranch(''), (err) => err instanceof GitError)
+})
+
+// The case the -D exists for, which the test above cannot see: `task` is merged into the run
+// branch and `isAncestor` says so — that is the entire authorisation the caller has — but HEAD
+// is parked on `main`, which does not contain it. `git branch -d task` answers "not fully
+// merged" there (asserted below, not assumed), so a `-d` here would refuse every branch
+// prune-run just proved merged whenever the operator stands anywhere but the run branch.
+test('deleteBranch deletes a branch merged into the run branch while HEAD sits on another', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-delbranch-force-'))
+  const git = createGit({ cwd: root })
+  const sh = (args) => defaultGitExec(args, root)
+  try {
+    await sh(['init', '--initial-branch=main'])
+    await sh(['config', 'user.email', 'test@example.com'])
+    await sh(['config', 'user.name', 'test'])
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'runbr'])
+    await sh(['checkout', '-b', 'task'])
+    await writeFile(path.join(root, 'task.txt'), 'task\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'task work'])
+    await sh(['checkout', 'runbr'])
+    await sh(['merge', '--no-ff', '-m', 'merge task', 'task'])
+    // HEAD ends up anywhere but the run branch — the operator's own checkout, which prune-run
+    // does not control.
+    await sh(['checkout', 'main'])
+
+    // The caller's proof holds: task IS merged into the run branch.
+    assert.equal(await git.isAncestor('task', 'runbr'), true)
+    // And `-d` refuses it anyway, measuring against HEAD instead. Without this the assertion
+    // below proves nothing about the flag.
+    const refused = await sh(['branch', '-d', '--end-of-options', 'task'])
+    assert.notEqual(refused.code, 0)
+    assert.equal(await git.branchExists('task'), true)
+
+    // Bare names only, the cost of skipping qualifyBranch: the argument reaches `git branch -D`
+    // as written, and an already-qualified ref is simply not found.
+    await assert.rejects(() => git.deleteBranch('refs/heads/task'), (err) => err instanceof GitError)
+    assert.equal(await git.branchExists('task'), true)
+
+    assert.equal(await git.deleteBranch('task'), true)
+    assert.equal(await git.branchExists('task'), false)
+    // -D deletes the ref, not the work: the merge commit on runbr still carries it.
+    assert.equal(await git.branchExists('runbr'), true)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+// The limit of that force, pinned so the comment cannot outgrow it: -D is not omnipotent. A
+// branch still checked out in a worktree is refused by git itself, and deleteBranch surfaces
+// that as a GitError rather than reporting a deletion that did not happen.
+test('deleteBranch still fails on a branch checked out in another worktree', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-delbranch-wt-'))
+  const git = createGit({ cwd: root })
+  const sh = (args) => defaultGitExec(args, root)
+  try {
+    await sh(['init', '--initial-branch=main'])
+    await sh(['config', 'user.email', 'test@example.com'])
+    await sh(['config', 'user.name', 'test'])
+    await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['branch', 'parked'])
+    await sh(['worktree', 'add', path.join(root, 'wt'), 'parked'])
+
+    await assert.rejects(() => git.deleteBranch('parked'), (err) => err instanceof GitError)
+    assert.equal(await git.branchExists('parked'), true)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 // --- mergeInto -----------------------------------------------------------------------------
@@ -1436,4 +1668,264 @@ test('commitFileSets defaults to 500 commits when no limit is given', async () =
   const { calls, exec } = recorder({ code: 0, stdout: '', stderr: '' })
   await createGit({ exec }).commitFileSets()
   assert.ok(calls[0].includes('--max-count=500'), `expected --max-count=500 in ${JSON.stringify(calls[0])}`)
+})
+
+// THE LAYER ALL THE SIGNAL GUARDS STAND ON, asserted on a REAL git call rather than through a
+// double. Every other signal test hands the guard `signal: 'SIGKILL'` itself, so all of them stay
+// green if `defaultGitExec` quietly stops surfacing the field — measured: reverting the close
+// handler to `resolve({ code: code ?? 1, stdout, stderr })` left the entire suite passing while
+// making all five guards dead code in production. This is the one test that notices.
+test('defaultGitExec surfaces a signal field on an ordinary successful call', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-'))
+  try {
+    await defaultGitExec(['init', '--initial-branch=main'], root)
+    await defaultGitExec(['config', 'user.email', 'test@example.com'], root)
+    await defaultGitExec(['config', 'user.name', 'test'], root)
+    await writeFile(path.join(root, 'f.txt'), 'x\n', 'utf8')
+    await defaultGitExec(['add', '.'], root)
+    await defaultGitExec(['commit', '-m', 'one'], root)
+    const result = await defaultGitExec(['rev-parse', 'HEAD'], root)
+    assert.equal(result.code, 0)
+    // Present, and null rather than absent: the guards test `if (signal)`, so an `undefined`
+    // would behave the same here and differ nowhere except in what a reader can rely on.
+    assert.ok('signal' in result, 'defaultGitExec must surface `signal`; every signal guard reads it')
+    assert.equal(result.signal, null)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+// A killed `ls-files --error-unmatch` must not read as "untracked": `preview-check` treats false
+// as permission to link the path into a preview worktree.
+test('tracks throws rather than answering false when the process was killed', async () => {
+  const exec = async () => ({ code: 1, signal: 'SIGKILL', stdout: '', stderr: '' })
+  await assert.rejects(() => createGit({ exec }).tracks('some/path'), GitError)
+})
+
+// A killed `merge-base --is-ancestor` must not read as "not an ancestor": that is the permissive
+// answer in the side-door check and in prune-run's containment proof alike.
+test('isAncestor throws rather than answering false when the process was killed', async () => {
+  const exec = async () => ({ code: 1, signal: 'SIGKILL', stdout: '', stderr: '' })
+  await assert.rejects(() => createGit({ exec }).isAncestor('aaa', 'bbb'), GitError)
+})
+
+// `branchExists` interpolated its argument with no type guard, so a null asked git about
+// `refs/heads/null` — false in an ordinary repository, and TRUE in one carrying a branch of that
+// name. Both measured against real git before the guard was added.
+test('branchExists refuses a non-string instead of asking git about refs/heads/null', async () => {
+  const git = createGit({ exec: async () => ({ code: 0, signal: null, stdout: 'sha\n', stderr: '' }) })
+  await assert.rejects(() => git.branchExists(null), GitError)
+  await assert.rejects(() => git.branchExists(undefined), GitError)
+  await assert.rejects(() => git.branchExists(''), GitError)
+})
+
+// The consequence that made the missing guard worth a test rather than a comment: a repository
+// really can carry a branch named `null`, and there the un-guarded form answered TRUE.
+test('a repository can hold a branch named null, which is why branchExists must not interpolate', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-'))
+  const sh = (args) => defaultGitExec(args, root)
+  try {
+    await sh(['init', '--initial-branch=main'])
+    await sh(['config', 'user.email', 'test@example.com'])
+    await sh(['config', 'user.name', 'test'])
+    await writeFile(path.join(root, 'f.txt'), 'x\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'one'])
+    assert.equal((await sh(['branch', 'null'])).code, 0, 'git really does accept a branch named null')
+    const git = createGit({ cwd: root })
+    assert.equal(await git.branchExists('null'), true, 'the string is a real branch here')
+    // The null itself is refused rather than colliding with it.
+    await assert.rejects(() => git.branchExists(null), GitError)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+// THE SHARED RULE, tested once because it is now stated once. Four call sites used to carry their
+// own conditional and three of them only ever tested for null, which is how each review round
+// closed one site and left the next.
+test('classifyHeadRef accepts a branch and reports both spellings of it', () => {
+  const r = classifyHeadRef('refs/heads/run-branch')
+  assert.equal(r.ok, true)
+  assert.equal(r.kind, 'branch')
+  assert.equal(r.name, 'run-branch')
+  assert.equal(r.ref, 'refs/heads/run-branch')
+  // A branch name may itself contain slashes; only the first `refs/heads/` is the prefix.
+  assert.equal(classifyHeadRef('refs/heads/teammates/r1/T1').name, 'teammates/r1/T1')
+})
+
+test('classifyHeadRef reports a detached HEAD as on no branch, with no name', () => {
+  for (const v of [null, undefined]) {
+    const r = classifyHeadRef(v)
+    assert.equal(r.ok, false)
+    assert.equal(r.kind, 'detached')
+    assert.equal(r.name, null)
+    assert.match(r.reason, /detached/)
+  }
+})
+
+// The case three call sites missed. `git symbolic-ref HEAD refs/tags/x` exits 0, and a
+// `refs/heads/` strip is a no-op on the result — so a classifier that only tested for null handed
+// back the whole ref string as though it were a branch name.
+test('classifyHeadRef rejects a HEAD pointing outside refs/heads/ and yields no name', () => {
+  for (const ref of ['refs/tags/x', 'refs/mine/run-branch', 'refs/remotes/origin/main', 'refs/heads/']) {
+    const r = classifyHeadRef(ref)
+    assert.equal(r.ok, false, `${ref} must not be accepted`)
+    assert.equal(r.kind, 'not-a-branch')
+    // The name is null rather than the ref string: a caller that ignores `ok` gets an absence,
+    // never something it could prefix `refs/heads/` onto.
+    assert.equal(r.name, null, `${ref} must not yield a name`)
+    assert.match(r.reason, /not a branch/)
+  }
+})
+
+// `currentBranch` is now defined over the classifier, so the same rejection reaches every legacy
+// caller as a null rather than as a hostile string.
+test('currentBranch answers null for a HEAD pointing outside refs/heads/', async () => {
+  const exec = async () => ({ code: 0, signal: null, stdout: 'refs/tags/x\n', stderr: '' })
+  const git = createGit({ exec })
+  assert.equal(await git.currentBranch(), null)
+  const classified = await git.headBranch()
+  assert.equal(classified.ok, false)
+  assert.equal(classified.ref, 'refs/tags/x')
+})
+
+// The refname is chosen by whoever wrote HEAD, and this sentence is printed verbatim by nine
+// commands. git accepts U+2028, U+0085 and the C1 range in a refname (measured on 2.55.0), and
+// U+2028 is a hard line break (UAX#14 class BK) in the `pre` block a transcript is rendered in --
+// so an unwrapped ref forges a whole line under the CLI's own name with no escape sequence at all.
+// Every control character below is written as an ESCAPE on purpose, and there are TWO reasons,
+// measured on node v26.7.0 one construct at a time.
+//
+//   - A REGEX literal REJECTS it: `SyntaxError: Invalid regular expression: missing /`. This file
+//     asserts through regex literals, so that alone would force the escapes.
+//   - A `//` COMMENT is TERMINATED by it, which is worse than rejection. U+2028 is a
+//     LineTerminator for comments, so everything after it on the source line is parsed as CODE.
+//     Whether the file still compiles then depends entirely on the tail: `// note<U+2028>note2`
+//     parses, `// note<U+2028>it's fine` throws `SyntaxError: Invalid or unexpected token`, and
+//     an earlier revision of THIS comment threw `SyntaxError: Unexpected identifier 'subsumed'`.
+//     And when the tail does parse, it RUNS —
+//     `vm.runInNewContext('// harmless note<U+2028>globalThis.hit = true')` sets `hit` (measured).
+//     Prose silently becomes code.
+//
+// STRING and TEMPLATE literals do admit it, since ES2019 subsumed JSON, and `engines.node` here
+// is >=24.2.0 — but that change deliberately left U+2028/U+2029 as LineTerminators for comments,
+// so it does not rescue the case above. A previous version of this note claimed comments parse
+// it; that was measured with a benign tail and is false in general.
+test('classifyHeadRef neutralises control characters in the ref it quotes', () => {
+  const forged = 'refs/mine/x\u2028gate\u00a0phase\u00a0default\u00a0PASS\u2028z'
+  const r = classifyHeadRef(forged)
+  assert.equal(r.ok, false)
+  // The raw break is gone and the visible token stands in its place.
+  assert.doesNotMatch(r.reason, /\u2028/)
+  assert.match(r.reason, /<0x2028>/)
+  // `ref` keeps the value exactly as git reported it: callers that compare or store it must see
+  // the truth, and only the human-facing sentence is wrapped.
+  assert.equal(r.ref, forged)
+  // The C1 range goes the same way, because a terminal in an 8-bit mode reads 0x9B as a control
+  // sequence introducer directly, with no ESC in front of it.
+  const c1 = classifyHeadRef('refs/mine/\u009bx')
+  assert.doesNotMatch(c1.reason, /\u009b/)
+  assert.match(c1.reason, /<0x9B>/)
+  // A well-behaved ref is not mangled on the way through.
+  assert.match(classifyHeadRef('refs/tags/v1.0').reason, /refs\/tags\/v1\.0/)
+})
+
+// A git that really dies BY SIGNAL, which is the only thing that distinguishes surfacing the
+// field from hard-coding it. The test above asserts `signal` is present and null on a SUCCESSFUL
+// call — and on a successful call null is the CORRECT value, so `signal: null` written as a
+// constant satisfies it too. Measured: that falsification passed the whole suite at 2127 while
+// making all five signal guards dead code again, which is the round-3 regression returning under
+// a different spelling. Here the expected value is derived from the close event rather than from
+// a constant, so only an implementation that actually reads it can pass.
+//
+// `!kill -9 $PPID` is a git alias run through a shell, and the shell git spawns is its own parent
+// — so the child this exec is waiting on is the process that dies. It reproduces the exact
+// collapsed shape the guards care about: exit 1 with empty stdout AND empty stderr, which is also
+// what `symbolic-ref --quiet` reports for a detached HEAD.
+const POSIX_ONLY = process.platform === 'win32' && 'git aliases beginning with ! need a POSIX shell'
+
+test('defaultGitExec reports the real signal when git is killed', { skip: POSIX_ONLY }, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-'))
+  try {
+    await defaultGitExec(['init', '--initial-branch=main'], root)
+    const result = await defaultGitExec(['-c', 'alias.selfkill=!kill -9 $PPID', 'selfkill'], root)
+    assert.equal(result.signal, 'SIGKILL')
+    // And the shape that makes the field necessary: this is byte for byte how git reports two
+    // ordinary negative answers, so `code`/`stdout`/`stderr` cannot tell the two apart.
+    assert.equal(result.code, 1)
+    assert.equal(result.stdout, '')
+    assert.equal(result.stderr, '')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+// Git's refname rules and JavaScript's whitespace set are DIFFERENT SETS, and a JS `trim()` on
+// git's output silently converts one real ref into another. `refs/heads/run-branch<NBSP>` and
+// `refs/heads/run-branch` are two distinct refs that can hold different commits; trimming made
+// the first answer the name of the second, so `doctor` reported the main worktree as being on a
+// branch it was not on. Only the trailing newline git appends may be stripped.
+test('currentBranchRef strips git\'s newline without trimming whitespace git allows in a refname', async () => {
+  const exec = async () => ({ code: 0, signal: null, stdout: 'refs/heads/run-branch\u00a0\n', stderr: '' })
+  const git = createGit({ exec })
+  assert.equal(await git.currentBranchRef(), 'refs/heads/run-branch\u00a0')
+  // And the name carried forward keeps it, so it cannot be mistaken for the neighbouring ref.
+  const head = await git.headBranch()
+  assert.equal(head.ok, true)
+  assert.equal(head.name, 'run-branch\u00a0')
+  assert.notEqual(head.name, 'run-branch')
+})
+
+// A CRLF platform still gets the newline removed, and a name with no trailing whitespace is
+// unchanged -- so the narrower strip does not become a no-op.
+test('currentBranchRef removes a CRLF terminator and leaves an ordinary name alone', async () => {
+  const crlf = async () => ({ code: 0, signal: null, stdout: 'refs/heads/run-branch\r\n', stderr: '' })
+  assert.equal(await createGit({ exec: crlf }).currentBranchRef(), 'refs/heads/run-branch')
+  const plain = async () => ({ code: 0, signal: null, stdout: 'refs/heads/run-branch\n', stderr: '' })
+  assert.equal(await createGit({ exec: plain }).currentBranchRef(), 'refs/heads/run-branch')
+})
+
+// The name a consumer would re-qualify differently. `qualifyBranch` returns any `refs/`-prefixed
+// string unchanged, so a name that is itself a ref path resolves to a DIFFERENT ref than the one
+// HEAD points at -- while `refs/heads/${name}` still reconstructs HEAD's ref byte for byte, which
+// is why the round trip cannot see it. Refused here, at the single point, rather than at each
+// consumer.
+test('classifyHeadRef refuses a branch whose name is itself a ref path', () => {
+  const r = classifyHeadRef('refs/heads/refs/heads/run-branch')
+  assert.equal(r.ok, false)
+  // Its OWN kind: this ref IS a branch — git lists it and `git status -sb` prints it as current —
+  // so folding it in with `not-a-branch` made two consumers contradict git in the same repository.
+  assert.equal(r.kind, 'ref-path-name')
+  assert.equal(r.name, null, 'no name may escape, or a consumer will re-qualify it')
+  assert.match(r.reason, /is itself a ref path/)
+  // The ref is still reported, because an operator has to know which ref to go and fix.
+  assert.equal(r.ref, 'refs/heads/refs/heads/run-branch')
+  // Any refs/ prefix, not just the doubled-heads spelling.
+  assert.equal(classifyHeadRef('refs/heads/refs/tags/v1').ok, false)
+  // NEUTRALISED HERE TOO. This return builds its own sentence, so the neutralisation test above
+  // does not reach it -- that one's input takes the FIRST not-a-branch return. Measured: swapping
+  // both `printable()` calls on this return for raw values left the whole suite green.
+  const forged = classifyHeadRef('refs/heads/refs/heads/x\u2028forged')
+  assert.doesNotMatch(forged.reason, /\u2028/)
+  assert.match(forged.reason, /<0x2028>/)
+  // And an ordinary name containing slashes is still perfectly fine.
+  assert.equal(classifyHeadRef('refs/heads/teammates/r1/T1').name, 'teammates/r1/T1')
+  assert.equal(classifyHeadRef('refs/heads/feature/refs-cleanup').name, 'feature/refs-cleanup')
+})
+
+// `currentBranch` must stay DEFINED OVER the classifier rather than re-implementing its rule.
+// Re-inlining the older two-rejection form -- null when detached, otherwise strip `refs/heads/` --
+// left the whole suite green while being plainly observable: `doctor` then printed
+// `run branch refs/heads/run-branch` where it now prints `(none recorded)`. Every other test here
+// drives the classifier directly, so nothing noticed the wrapper drifting away from it.
+test('currentBranch answers null for every state the classifier rejects, not just detachment', async () => {
+  const at = (out) => createGit({ exec: async () => ({ code: 0, signal: null, stdout: out, stderr: '' }) })
+  // The state a re-inlined strip would get WRONG: a real branch whose name is itself a ref path.
+  assert.equal(await at('refs/heads/refs/heads/run-branch\n').currentBranch(), null)
+  // And the two it would get right, so the assertion above is the discriminating one.
+  assert.equal(await at('refs/tags/x\n').currentBranch(), null)
+  assert.equal(await at('refs/heads/run-branch\n').currentBranch(), 'run-branch')
+  const detached = createGit({ exec: async () => ({ code: 1, signal: null, stdout: '', stderr: '' }) })
+  assert.equal(await detached.currentBranch(), null)
 })

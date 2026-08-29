@@ -1,4 +1,9 @@
 import { spawn } from 'node:child_process'
+// `printable` only. scripts/reviews.mjs imports NOTHING — it is a leaf — so this cannot cycle back
+// through git.mjs and drags no other module in with it. Wrapping at this single point rather than
+// at each print site is deliberate: the ref below reaches nine commands' stdout, and a per-site
+// wrap is the same per-site drift that took three review rounds to close for the HEAD rule itself.
+import { printable } from './reviews.mjs'
 
 export class GitError extends Error {}
 
@@ -73,8 +78,100 @@ export function defaultGitExec(args, cwd) {
     // wrappers) must not see a plain Error here — spawn failure (git missing from PATH,
     // cwd absent) has to read as a gate FAIL with a message, not an uncaught crash.
     child.on('error', (err) => reject(new GitError(err.message)))
-    child.on('close', (code) => resolve({ code: code ?? 1, stdout, stderr }))
+    // SIGNAL SURFACED SEPARATELY, because `code ?? 1` is lossy in a way FIVE readers below
+    // cannot recover from. A killed child reports `code: null, signal: 'SIGKILL'` (measured),
+    // so collapsing it to 1 produces `{code: 1, stdout: '', stderr: ''}` — byte for byte the
+    // shape git uses for ORDINARY answers from `symbolic-ref --quiet` (detached HEAD),
+    // `rev-parse --verify --quiet` (not a branch), `ls-files --error-unmatch` (untracked) and
+    // `merge-base --is-ancestor` (not an ancestor). In every one of them exit 1 is the
+    // PERMISSIVE answer, so a process that never ran to completion would read as a definite
+    // negative and open the thing the check exists to close. `signal` is the only field that
+    // still tells them apart once `code` has been defaulted, which is why the field is asserted
+    // on a REAL call in tests/git.test.mjs rather than only through a fake exec: a double that
+    // supplies `signal` itself cannot notice this layer no longer producing it.
+    child.on('close', (code, signal) => resolve({ code: code ?? 1, signal: signal ?? null, stdout, stderr }))
   })
+}
+
+// What HEAD is, as a value rather than as a convention. Returns `{ ok, name, ref, reason }`:
+// `ok` with the short name and the full ref when HEAD is on a real branch, and otherwise `ok:
+// false` with `name: null` and a sentence naming the state.
+//
+// THREE REJECTED STATES, each with its own `kind`. They are NOT all "HEAD does not designate a
+// branch" — the third one does — and they are kept apart because consumers build their own
+// sentence from `kind`, so a state folded in with another is a state some command will describe
+// wrongly. That has happened twice: a diagnostic saying "detached" for a repointed HEAD, and one
+// saying "not a branch" for a ref git itself lists as the current branch. Adding a state here
+// means adding a `kind` and visiting the consumers, not widening an existing one.
+//
+//   - DETACHED. `symbolic-ref --quiet` exits 1, so there is no target at all. The string a caller
+//     might invent for this state is the danger: `HEAD` was used once, and `refs/heads/HEAD` is a
+//     ref `git update-ref` creates without complaint.
+//   - POINTING OUTSIDE refs/heads/. `git symbolic-ref HEAD refs/tags/x` exits 0 — git refuses only
+//     targets outside `refs/` entirely (`fatal: Refusing to point HEAD outside of refs/`), and the
+//     same state is reachable by writing `ref: refs/mine/rb` straight into `.git/HEAD`, which no
+//     pseudo-ref guard sees. A `refs/heads/` strip is a no-op on such a ref, so the "branch name"
+//     becomes the whole ref string and prefixing `refs/heads/` back onto it lands on
+//     `refs/heads/refs/tags/x`, an ordinary ref any teammate can create.
+//   - A BRANCH WHOSE NAME IS ITSELF A REF PATH (`kind: 'ref-path-name'`). This one IS a real
+//     branch: `refs/heads/refs/heads/run-branch` lives under refs/heads/, `git status -sb` prints
+//     it as the current branch, `git branch --list` shows it and `git checkout` says "Already on".
+//     Nothing is wrong with HEAD — what is wrong is the NAME, because consumers re-qualify it
+//     inconsistently (see the comment on that return below). Describing it as "not a branch"
+//     contradicts git itself, which is why it does not share the kind above.
+//
+// Pure and exported so the rule can be tested without a repository, and so no caller has to
+// restate it. `name` is deliberately null on every rejection: a caller that ignores `ok` and reads
+// `name` gets an absence, never a hostile string.
+export function classifyHeadRef(ref) {
+  if (ref === null || ref === undefined) {
+    return { ok: false, kind: 'detached', ref: null, name: null, reason: 'HEAD is detached, so it is on no branch' }
+  }
+  if (typeof ref !== 'string' || !ref.startsWith('refs/heads/') || ref === 'refs/heads/') {
+    return {
+      ok: false,
+      kind: 'not-a-branch',
+      ref: typeof ref === 'string' ? ref : null,
+      name: null,
+      // NEUTRALISED, because this sentence is printed verbatim by nine commands and the value in
+      // it is chosen by whoever wrote HEAD. git accepts U+2028, U+0085 and the C1 range in a
+      // refname (measured on 2.55.0), and U+2028 is UAX#14 class BK inside the `pre` block a
+      // transcript is rendered in — so a ref named
+      // `refs/mine/x<U+2028>gate<NBSP>phase<NBSP>default<NBSP>PASS<U+2028>z` drew a whole forged
+      // verdict line under this CLI's own name, needing no escape sequence at all. Reproduced
+      // across nine commands before this wrap: sixteen raw U+2028 emitted, four neutralised.
+      // `printable` already covers exactly this class, and `reviews.mjs:33-40` records why.
+      reason: `HEAD points at ${typeof ref === 'string' ? printable(ref) : JSON.stringify(ref)}, which is not a branch — a run branch must be a ref under refs/heads/`,
+    }
+  }
+  const name = ref.slice('refs/heads/'.length)
+  // THE NAME MUST NOT ITSELF LOOK LIKE A REF, and this is the one rejection that is about a
+  // CONSUMER rather than about HEAD. `derive` hands `deriveContext` the NAME, and a consumer is
+  // free to re-qualify it differently from the way this module does: `qualifyBranch` returns any
+  // `refs/`-prefixed string UNCHANGED, and gate-runner.mjs:1703 passes the name straight through
+  // as the merge-preview base. So HEAD symref'd at `refs/heads/refs/heads/run-branch` — the third
+  // ref of this project's own documented plant, plus one main-worktree HEAD write — strips to
+  // `refs/heads/run-branch`, which resolves to the REAL branch, while `ctx.runBranchRef` is the
+  // planted one. Measured: `gate --phase 1` exited 0 with verdict PASS and merge=pass, on a tree
+  // where merging the task branch into `ctx.runBranchRef` actually CONFLICTS; the tree before
+  // this task exits 1 and fails `derive`, so it was a regression to permissive.
+  //
+  // Worth being precise about why the round-trip proof did not cover it, because the lesson
+  // generalises: `refs/heads/${name}` really does reconstruct `ref` byte for byte, so that
+  // reasoning held for the path it described. The divergence is downstream, at a consumer that
+  // takes the name and qualifies it by a different rule. Rejecting here closes it at the single
+  // point instead of at one more consumer — and a branch literally named `refs/heads/x` is
+  // creatable but pathological, so refusing it costs nothing real.
+  if (name.startsWith('refs/')) {
+    return {
+      ok: false,
+      kind: 'ref-path-name',
+      ref,
+      name: null,
+      reason: `HEAD points at ${printable(ref)}, whose branch name would be ${printable(name)} — a name that is itself a ref path, which consumers re-qualify inconsistently, so it is refused rather than resolved`,
+    }
+  }
+  return { ok: true, kind: 'branch', ref, name, reason: null }
 }
 
 export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
@@ -103,10 +200,18 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
       throw new GitError(`a branch name must be a non-empty string, got ${JSON.stringify(name)}`)
     }
     if (name.startsWith('refs/')) return name
-    const { code, stdout } = await exec(
+    const { code, stdout, signal } = await exec(
       [...prefix, 'rev-parse', '--verify', '--quiet', '--end-of-options', `refs/heads/${name}`, '--'],
       cwd,
     )
+    // A KILLED probe is not an answer. The fallback below hands the BARE name onward, and a bare
+    // name is exactly what this function exists to stop git resolving through refs/tags/ first —
+    // so reading a signal death as "no such branch" reopens the tag-shadowing hazard at the worst
+    // possible moment, silently and for every caller at once. Fail instead: a name that could not
+    // be checked is not a name that was checked and found absent.
+    if (signal) {
+      throw new GitError(`git rev-parse --verify refs/heads/${name} was killed by ${signal} — the branch could not be resolved, and continuing would pass an unqualified name to git`)
+    }
     // Exit 1 with no output is git's "no such branch"; only a resolved sha displaces the name.
     if (code === 0 && stdout.trim() !== '') return stdout.trim()
     return name
@@ -143,8 +248,87 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
     async headSha() {
       return (await run(['rev-parse', 'HEAD'])).trim()
     },
+    // HEAD RESOLVED SYMBOLICALLY, never through git's abbreviation rules. `git rev-parse
+    // --abbrev-ref HEAD` shortens only as far as stays UNAMBIGUOUS: plant a tag named like
+    // the run branch and it answers `heads/<name>`; add a branch literally named
+    // `heads/<name>` on top and it answers `refs/heads/<name>`. Every caller then prefixes
+    // `refs/heads/`, so that last one resolves `refs/heads/refs/heads/<name>` — an ordinary
+    // ref an unprivileged teammate can create in its own worktree, and thereby choose the sha
+    // a whole run treats as the run branch. `symbolic-ref` reads the ref HEAD literally
+    // points at and abbreviates nothing, so no ref any third party can create changes its
+    // answer. All four resolutions confirmed against real git (2.55.0) by running that exact
+    // three-ref plant; it is the regression test in tests/git.test.mjs.
+    //
+    // `--quiet` is what makes a detached HEAD a value: it exits 1 with EMPTY stdout and EMPTY
+    // stderr rather than writing a diagnostic, so an empty stderr on a non-zero exit that was
+    // NOT a signal death is detachment, and anything else is a real failure that still throws.
+    // Confirmed on the same git: detached, `--quiet` exits 1 silently while the bare form exits
+    // 128 printing `fatal: ref HEAD is not a symbolic ref`; outside a repository it exits 128
+    // with `fatal: not a git repository` on stderr, which this therefore raises rather than
+    // mistaking for detachment. The signal test below is what keeps a killed process out of the
+    // detachment arm, since a kill produces that same empty-and-non-zero shape.
+    async currentBranchRef() {
+      const { code, stdout, stderr, signal } = await runRaw(['symbolic-ref', '--quiet', 'HEAD'])
+      // ONLY THE TRAILING NEWLINE git appends, never JS `trim()`. Git's refname rules and
+      // JavaScript's whitespace set are different sets, and that mismatch is the whole defect:
+      // git accepts U+00A0 and other non-ASCII whitespace in a refname, `trim()` removes them, so
+      // HEAD on `refs/heads/run-branch<NBSP>` answered the name `run-branch` — a DIFFERENT ref
+      // that also exists. Measured: `doctor` then printed `main worktree on run-branch` while HEAD
+      // sat on the decoy at a commit the real branch did not hold. Bounded to the diagnosis,
+      // because `derive`'s round trip still compares SHAS and refuses when they differ, but a
+      // report that names the wrong branch is exactly what this one exists not to do.
+      if (code === 0) return stdout.replace(/\r?\n$/, '')
+      // Before the empty-stderr test, because a killed process produces an EMPTY stderr and a
+      // defaulted exit 1 — indistinguishable from `--quiet`'s detached-HEAD answer by the two
+      // fields that test reads. Measured: SIGKILL yields `{code: null, signal: 'SIGKILL'}`, which
+      // the exec layer defaults to code 1. Reporting that as "detached" would be inventing a
+      // repository state out of a scheduling accident.
+      if (signal) {
+        throw new GitError(`git symbolic-ref --quiet HEAD was killed by ${signal} — whether HEAD is detached is unknown, and it must not be guessed`)
+      }
+      if (stderr.trim() === '') return null
+      throw new GitError(describeGitFailure(['symbolic-ref', '--quiet', 'HEAD'], code, stderr))
+    },
+    // The short name, taken off the SYMBOLIC ref rather than from abbreviation — see
+    // `currentBranchRef`. The name and `refs/heads/<name>` therefore round-trip by
+    // construction: the prefix every caller adds lands back on the ref HEAD actually points
+    // at, whatever else exists in the ref namespace.
+    //
+    // `null` ON A DETACHED HEAD, AND NEVER THE STRING `'HEAD'`. An earlier revision of this
+    // function returned that string, on the reasoning that it preserved the old `--abbrev-ref`
+    // contract. It did — and it was a hole, because `refs/heads/HEAD` is a ref git will happily
+    // CREATE: `git update-ref refs/heads/HEAD <sha>` exits 0 (only `git branch HEAD` refuses the
+    // name, with `fatal: 'HEAD' is not a valid branch name`). So every caller that prefixed
+    // `refs/heads/` onto this value resolved an ordinary ref that any teammate can write, and the
+    // abbreviation hazard this function was written to close came straight back under a different
+    // spelling. Executed end to end against that revision: with the main worktree detached at a
+    // merge commit reachable from no branch and `refs/heads/HEAD` pointed at it, `prune-run --yes`
+    // exited 0 and deleted an UNMERGED task branch whose tip was then reachable from the planted
+    // ref alone. The same plant against the tree before this task exits 4 and deletes nothing, so
+    // the sentinel was a regression, not an inherited defect.
+    //
+    // Returning null makes the detached case unrepresentable as a branch name rather than
+    // representable as a hostile one. Callers must format it for display themselves — there is no
+    // string this could return that is both readable and incapable of naming a ref.
+    //
+    // NULL ALSO FOR A HEAD THAT POINTS OUTSIDE refs/heads/, via the shared classifier: `git
+    // symbolic-ref HEAD refs/tags/x` is accepted, and the old `replace(/^refs\/heads\//, '')`
+    // was a NO-OP on such a ref, so this used to hand back the whole string `refs/tags/x` as
+    // though it were a branch name. Every caller that stored or printed it then recorded a
+    // non-branch as a branch. "Not on a branch" is the honest answer for that state, and it is
+    // the same answer detachment gets, because for a caller that only wants a NAME the two are
+    // the same fact. A caller that needs to tell them apart asks `headBranch` instead.
     async currentBranch() {
-      return (await run(['rev-parse', '--abbrev-ref', 'HEAD'])).trim()
+      return (await this.headBranch()).name
+    },
+    // THE ONE PLACE THAT DECIDES WHAT HEAD HAS TO BE, so that four call sites cannot drift apart
+    // by each carrying their own conditional. They did: three successive rounds of review each
+    // closed the site a reviewer happened to reproduce and left the other three trusting HEAD's
+    // target, which is why each round found the next one. Everything that needs the run branch
+    // goes through here now, and what differs between callers is only what they DO with a
+    // rejection — throw, exit non-zero, or report it as a diagnosis.
+    async headBranch() {
+      return classifyHeadRef(await this.currentBranchRef())
     },
     // `--porcelain` reports untracked paths, and the harness stores each teammate's worktree
     // under `.claude/` inside the repo. Those directories exist for the whole run, so counting
@@ -202,8 +386,15 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
         throw new GitError(`tracks requires a non-empty pathspec, got ${JSON.stringify(pathspec)}`)
       }
       const args = ['ls-files', '--error-unmatch', '-z', '--', pathspec]
-      const { code, stderr } = await runRaw(args)
+      const { code, stderr, signal } = await runRaw(args)
       if (code === 0) return true
+      // A killed probe is not "untracked". `preview-check` reads a false here as permission to
+      // link a path into a preview worktree, and prints `preview.link is usable` and exits 0 —
+      // so a signal death would clear a path that IS tracked, which is the one answer this
+      // question exists to prevent.
+      if (signal) {
+        throw new GitError(`git ${args.join(' ')} was killed by ${signal} — whether the path is tracked is unknown`)
+      }
       if (code === 1) return false
       throw new GitError(`git ${args.join(' ')} failed: ${stderr.trim() || `exit ${code}`}`)
     },
@@ -307,9 +498,24 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
       return seconds * 1000
     },
     async branchExists(name) {
+      // The same type guard `resolveRef` and `mergeBase` carry, and it was missing here while
+      // every other reader had it. Without it the name is INTERPOLATED: `branchExists(null)`
+      // asks git about `refs/heads/null`, which answers false in most repositories and TRUE in
+      // one that happens to have a branch named `null` (both measured). A caller that reached
+      // this with a null had already lost track of which branch it meant, and the honest answer
+      // is a failure rather than a verdict about whatever ref that spelling collided with.
+      if (!isNonEmptyString(name)) {
+        throw new GitError(`branchExists requires a non-empty branch name, got ${JSON.stringify(name)}`)
+      }
       const args = ['rev-parse', '--verify', '--quiet', `refs/heads/${name}`]
-      const { code, stderr } = await runRaw(args)
+      const { code, stderr, signal } = await runRaw(args)
       if (code === 0) return true
+      // A killed probe is not an absence. `code ?? 1` in the exec layer turns a signal death into
+      // the same exit 1 git uses for "no such ref", and callers act on a false here by skipping a
+      // branch or judging that a task contributed nothing.
+      if (signal) {
+        throw new GitError(`git ${args.join(' ')} was killed by ${signal} — whether the branch exists is unknown`)
+      }
       // Exit 1 is git's answer for "no such ref" — a real absence, not a failure.
       // Any other non-zero (e.g. 128 outside a repository) is a failure carrying stderr.
       if (code === 1) return false
@@ -329,8 +535,15 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
         throw new GitError(`isAncestor requires non-empty refs, got ancestor=${JSON.stringify(ancestor)} descendant=${JSON.stringify(descendant)}`)
       }
       const args = ['merge-base', '--is-ancestor', '--end-of-options', ancestor, descendant]
-      const { code, stderr } = await runRaw(args)
+      const { code, stderr, signal } = await runRaw(args)
       if (code === 0) return true
+      // A killed probe is not "no". This is the predicate behind the side-door check in
+      // gate-runner.mjs and behind `prune-run`'s containment proof, and in both a false is the
+      // permissive answer: a signal death would make ownership report no violation for a branch
+      // that really was landed into the base.
+      if (signal) {
+        throw new GitError(`git ${args.join(' ')} was killed by ${signal} — the ancestry question was not answered`)
+      }
       // Exit 1 is git's answer for "not an ancestor". Anything else (128 for a bad ref,
       // for instance) is a failure and must not read as a clean "no".
       if (code === 1) return false
@@ -462,6 +675,29 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
         throw new GitError(`removeWorktree requires a non-empty dir, got ${JSON.stringify(dir)}`)
       }
       await run(['worktree', 'remove', '--force', '--end-of-options', dir])
+      return true
+    },
+    // -D, not -d. `-d` measures "merged" against the branch's configured upstream, or against
+    // HEAD when it has no upstream (both verified on git 2.55.0) — never against the run
+    // branch. So it refuses branches that ARE merged into the run branch, whenever the
+    // operator's worktree happens to sit on any other branch, and accepts branches that are
+    // NOT, whenever some upstream contains them. Either way its answer is a fact about where
+    // the caller stands, not about the run. The proof belongs to the caller (`isAncestor`
+    // against the run branch) and this deletes what the caller proved.
+    //
+    // The force ends there, and the limit is the one prune-run will meet: -D still refuses a
+    // branch checked out in a worktree. That arrives here as a GitError, never as a deletion
+    // that did not happen, so removing the worktree has to come first.
+    //
+    // No `qualifyBranch` here, deliberately: `git branch -D` resolves its argument in
+    // refs/heads only, so the tag-precedence hazard that helper exists for cannot apply. The
+    // cost of that: bare branch names only — `git branch -D refs/heads/x` answers "branch
+    // 'refs/heads/x' not found".
+    async deleteBranch(name) {
+      if (!isNonEmptyString(name)) {
+        throw new GitError(`deleteBranch requires a non-empty branch name, got ${JSON.stringify(name)}`)
+      }
+      await run(['branch', '-D', '--end-of-options', name])
       return true
     },
     // Returns null when every branch merged, or the conflicted paths when one did not.

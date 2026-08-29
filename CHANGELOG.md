@@ -1,5 +1,57 @@
 # Changelog
 
+## v1.2.0
+
+Two runs' worth of work, closing the purge/teardown gaps and then closing what reviewing them
+found. 152 commits, every phase gated PASS, `npm test` 2190 | 2187 pass | 0 fail | 3 skipped.
+
+### Breaking
+
+- **`collect-reviews` writes its results to a file, and `> results.json` no longer round-trips.**
+  The command now writes `.teammates/<runId>/reviews/results-<phase>.json` and prints that path
+  last, so the `gate --results <path>` that follows names a file that exists. The trailing path
+  line is inside the captured bytes, so a plain redirect produces something `gate --results`
+  refuses with exit 2, while the file the same command wrote exits 0 with verdict PASS. Pass the
+  written path. Run without a redirect and without the file, and the review check sat `pending`
+  forever while the gate reported FAIL with an empty `failed: []`, naming nothing to fix — which
+  is what this replaces.
+- **`--phase` is refused on a plan carrying more than one phase.** Omitting it used to resolve
+  silently to the `default` manifest key and review every task branch in the run under one stamp.
+  The refusal counts integer phases only, so a plan mixing `1` with `"2"` or `2.5` still escapes
+  the fence; that limitation is documented where the guard is taught.
+
+### Closed hazards
+
+- **The run branch is resolved symbolically.** `currentBranch()` is reimplemented over
+  `git symbolic-ref --quiet HEAD`, so the name never passes through git's abbreviation rules. A
+  teammate that planted `refs/heads/refs/heads/<run branch>` — three ordinary `update-ref` writes
+  from its own worktree — owned `ctx.runSha`, and `prune-run --yes` then deleted an unmerged task
+  branch **reporting it as contained, exit 0**, with both reflogs already gone. `derive` now
+  refuses a detached HEAD, a HEAD outside `refs/heads/`, and a name that is itself a ref path.
+- **The merge-preview owner marker is vetted on the descriptor it read.** The marker is opened
+  once with `O_RDONLY|O_NONBLOCK|O_NOFOLLOW` and `fstat`ed, so `isFile()` is asked of an object
+  rather than of a name. While the vetting was an `lstat` by path, a regular file approved by the
+  lstat could be swapped for a fifo before the read resolved the name again — and a fifo there
+  made the read block forever, uninterruptible by `process.exit()` because the libuv thread parks
+  in `open(2)`.
+
+### Added
+
+- Per-check `timeoutMs` in the gate manifest, with a command check bounded by a process-group kill.
+- `prune-run` deletes a pruned task branch once the run branch **provably** contains it, proved by
+  sha so a same-named tag cannot redirect the proof.
+- A preview holds a claim file per holder for the duration of a command check.
+- Every teammate brief and both agent definitions now state the environment walls, the claim
+  discipline — *every claim written into a comment, a skill sentence or a test comment must be
+  backed by a command you actually ran* — and the scope rules.
+
+### Notes
+
+What these runs did **not** close is recorded with each finding's own reproduction in
+`docs/followups/2026-08-27-purge-open-findings.md`, including four pre-existing defects no task
+owned, a bind-mount boundary pinned rather than closed, and the review-methodology findings that
+nine and five review rounds bought.
+
 ## v1.1.6
 
 Two review passes over code that had shipped without any.
