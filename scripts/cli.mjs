@@ -1518,8 +1518,9 @@ async function unlinkPreviewLinks(dir, depth = 0) {
 //     reaches, by a different mechanism. What is NOT reached is the uid half, which is void on
 //     that platform for the reason stated above.
 //
-//     No leg of this suite runs on win32, so nothing here will fail if those ACL claims are
-//     wrong; they are held true by reading, not by a test. This is the fifth revision of this
+//     Nothing in this suite asserts an NTFS ACL — its win32 leg exercises the code paths, not
+//     the permission model — so nothing here will fail if those ACL claims are wrong; they are
+//     held true by reading, not by a test. This is the fifth revision of this
 //     paragraph — the first three overstated the guarantee, the fourth overstated the hazard by
 //     reading "no sticky bit" as "no protection" — which is the reason it is written as a
 //     mechanism that can be checked against `icacls %SystemRoot%\Temp` rather than as a verdict.
@@ -1616,10 +1617,11 @@ async function unlinkPreviewLinks(dir, depth = 0) {
 // absent flags does not fail, it silently opens with O_RDONLY alone: symlinks followed again,
 // no non-blocking guarantee, and vetting that has gone blind without saying so.
 //
-// UNVERIFIED, and stated as such: that the two names are specifically the ones missing on win32.
-// No leg of this suite runs on that platform, so nothing here proves it. The guard does not
-// depend on the claim being true — it triggers on the constants actually present at runtime,
-// wherever that happens to be — and its consequence is stated at the call site.
+// VERIFIED ON-PLATFORM, since the suite gained a win32 leg: O_NOFOLLOW is one of the names
+// missing there, and the flag-word unit test asserts this returns null on that platform rather
+// than assuming it. The guard never depended on the claim — it triggers on the constants
+// actually present at runtime, wherever that happens to be — and its consequence is stated at
+// the call site.
 export function fusedHolderOpenFlags(c = fsConstants) {
   if (typeof c.O_NOFOLLOW !== 'number' || typeof c.O_NONBLOCK !== 'number') return null
   return c.O_RDONLY | c.O_NONBLOCK | c.O_NOFOLLOW
@@ -1777,7 +1779,8 @@ export async function livePreviewPaths(previewPaths, {
   //   - By path — `lstat`, then `readFile` — on a platform whose constants do not, because the
   //     alternative is refusing to open anything there and never reaping a preview at all. That
   //     loses the atomicity, which that platform cannot offer in the first place, and keeps the
-  //     behaviour the fork point had. Unreachable on this suite's platforms.
+  //     behaviour the fork point had. This is the branch win32 takes: it has no O_NOFOLLOW, so
+  //     every preview-reaping test in the suite's win32 leg runs through here, not the fused open.
   //   - The stand-in a test selects by injecting `read`, which is by path for the same reason a
   //     double cannot hand out a file descriptor. It reproduces the bookkeeping below faithfully
   //     and the atomicity not at all, so anything about OPEN FAILURE has to be pinned against the

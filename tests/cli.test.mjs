@@ -1559,10 +1559,16 @@ test('collect-reviews refuses when the previous results file can be neither remo
     assert.equal(code, 4, lines.join('\n'))
     const out = lines.join('\n')
     assert.match(out, /could not clear the previous results file/)
-    // Both attempts and both failures, because the pair is the diagnosis: EISDIR on each says the
-    // entry is a directory, where an EACCES pair would say the directory above it.
-    assert.match(out, /unlink failed \(EISDIR/)
-    assert.match(out, /emptying it in place failed too \(EISDIR/)
+    // Both attempts and both failures, because the pair is the diagnosis: it names the ENTRY,
+    // where an EACCES pair would name the directory above it. WHICH reason carries that is
+    // platform-specific, and each of the three below is what CI actually observed rather than
+    // what POSIX permits: `unlink` on a directory answers EISDIR on linux and EPERM on darwin
+    // and win32, and the truncate fallback opens and answers EISDIR on linux and darwin while
+    // win32 refuses to open at all, having no O_NOFOLLOW to open safely with.
+    assert.match(out, process.platform === 'linux' ? /unlink failed \(EISDIR/ : /unlink failed \(EPERM/)
+    assert.match(out, process.platform === 'win32'
+      ? /emptying it in place failed too \(this platform has no O_NOFOLLOW/
+      : /emptying it in place failed too \(EISDIR/)
     // And NOTHING it did not observe. This exact fixture makes each of these false: `gate
     // --results` on a directory exits 2 rather than reading a verdict, and `rm` without `-r`
     // refuses, so advice to remove it by hand is wrong here.
@@ -11386,11 +11392,10 @@ test('an entry that disappears between the failed open and the fallback lstat is
 // undefined` is 0, so an inlined OR of two absent flags opens with O_RDONLY alone — following
 // symlinks, with no non-blocking guarantee — and the vetting goes blind without failing.
 //
-// Pinned against synthetic constants objects, because this platform's real one carries both flags
-// and cannot exercise the guard. That `fs.constants` is platform-conditional at all is checkable
-// here and is checked below. Which names are missing on win32 specifically is NOT verified by
-// anything in this suite, which runs on no such platform; the guard does not rest on that, since
-// it tests the constants actually present at runtime.
+// Pinned against synthetic constants objects, because a platform carrying both flags cannot
+// exercise the guard from its own `fs.constants`. That `fs.constants` is platform-conditional at
+// all is checkable here and is checked below — and on win32, where O_NOFOLLOW is one of the
+// absent names, the guard is exercised for real by the last assertion rather than by a stand-in.
 test('the fused open refuses to build a flag word from constants it does not have', () => {
   const full = { O_RDONLY: 0, O_NONBLOCK: 2048, O_NOFOLLOW: 131072 }
   assert.equal(fusedHolderOpenFlags(full), 0 | 2048 | 131072)
@@ -11403,8 +11408,13 @@ test('the fused open refuses to build a flag word from constants it does not hav
   // `fs.constants` really does vary by platform, so a guard on presence is not theoretical:
   // O_SYMLINK is a macOS flag and is absent here.
   assert.equal(typeof fsConstants.O_SYMLINK, process.platform === 'darwin' ? 'number' : 'undefined')
-  // And this platform does carry both, so the fused open is what the tests above exercised.
-  assert.equal(typeof fusedHolderOpenFlags(), 'number')
+  // And what THIS platform carries decides which door the vetting takes. On posix both names are
+  // present, so the fused open is what the tests above exercised. On win32 O_NOFOLLOW is absent,
+  // the guard refuses rather than collapsing to a bare O_RDONLY, and `livePreviewPaths` reads by
+  // path instead — the branch at `openHolder`. This is the one leg of the suite that observes the
+  // missing name on-platform rather than assuming it.
+  if (process.platform === 'win32') assert.equal(fusedHolderOpenFlags(), null)
+  else assert.equal(typeof fusedHolderOpenFlags(), 'number')
 })
 
 // The trailing dot in `previewClaimPrefix` is load-bearing (see scripts/merge-preview.mjs for
