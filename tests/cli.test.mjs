@@ -4257,6 +4257,63 @@ test('finish does not recommend --enforcement-only on a manifest it would refuse
   })
 })
 
+// `--base` is spliced into `refs/heads/<value>`, so a value that is not a LOCAL branch name
+// reaches git as a ref that cannot exist. Measured on run `purgefix`:
+// `--base origin/fix/pass6-findings` exited 4 with git's own
+// `fatal: Needed a single revision`, which names neither the flag nor the shape it wanted — an
+// operator reaching for a remote-tracking ref or a sha gets a plumbing error and no way forward.
+// Both spellings are checked because they are the two an operator actually reaches for.
+for (const [label, base] of [['a remote-tracking ref', 'origin/main'], ['a raw sha', 'HEAD~0']]) {
+  test(`prune-run refuses ${label} as --base by naming the shape it takes`, async () => {
+    await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      // A manifest, or the missing-gate refusal fires first and this measures that instead.
+      await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+        phases: { default: { checks: [{ name: 'test', kind: 'command', run: 'node -e ""' }] } },
+      }), 'utf8')
+      g(['add', 'teammates.gate.json'])
+      g(['commit', '--quiet', '-m', 'manifest'])
+      lines.length = 0
+      const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', base, '--root', root], io)
+      const out = lines.join('\n')
+      assert.notEqual(code, 0, out)
+      assert.doesNotMatch(out, /Needed a single revision/, 'git’s plumbing error reached the operator unexplained')
+      assert.match(out, /--base/, out)
+      assert.match(out, /local branch/i, out)
+    })
+  })
+}
+
+// The refusal an operator meets after the run is INTEGRATED, which is exactly when they reach
+// for `prune-run`. The run branch is derived from HEAD, so once the run is merged and the
+// operator is back on `master` there is nothing left to derive and both names come out the same.
+// Measured on runs `purge` and `purgefix`.
+//
+// What the message used to do with that: say "before running the gate" — naming a command the
+// operator did not run — and offer `--base`, which cannot help, because the problem is the RUN
+// branch and not the base. Neither half told them the run was simply past the point where this
+// command can decide anything.
+test('the same-branch refusal names the integrated case and not the gate', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'test', kind: 'command', run: 'node -e ""' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    // `withRepo` leaves HEAD on `run-branch`, so naming that as the base is the shape an
+    // integrated run presents — the run branch and the base resolving to one name — without
+    // needing a merge to stage it.
+    const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'run-branch', '--root', root], io)
+    const out = lines.join('\n')
+    assert.notEqual(code, 0, out)
+    assert.doesNotMatch(out, /running the gate/, 'the refusal names a command the operator did not run')
+    assert.match(out, /integrated/i, 'the refusal does not name the state that most often produces it')
+    assert.match(out, /derived from HEAD/i, 'the refusal does not say where the run branch name came from')
+  })
+})
+
 test('prune-run does not recommend --enforcement-only on a manifest it would refuse', async () => {
   await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)

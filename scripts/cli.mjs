@@ -1154,7 +1154,22 @@ export function completeExitCode(results, verdict) {
 // run tip, and every downstream diff and commit range becomes vacuous. When both exist and
 // the caller did not disambiguate, refuse rather than guess.
 async function resolveBaseBranch(git, flag) {
-  if (flag) return flag
+  if (flag) {
+    // Checked HERE because every consumer splices the answer into `refs/heads/<name>`: a value
+    // that is not a local branch becomes a ref that cannot exist, and git answers with
+    // `fatal: Needed a single revision`, which names neither the flag nor the shape it wanted.
+    // Measured on run `purgefix`: `--base origin/fix/pass6-findings` exited 4 on that plumbing
+    // error with nothing telling the operator what to pass instead. A remote-tracking ref and a
+    // raw sha are the two spellings an operator actually reaches for, so the refusal names both.
+    if (!await git.branchExists(flag)) {
+      throw new Error(
+        `--base ${flag} is not a local branch — this flag takes a local branch NAME, which is `
+        + 'spliced into refs/heads/<name>. A remote-tracking ref (origin/main) or a raw commit '
+        + 'does not resolve there: create or check out a local branch at that commit first.',
+      )
+    }
+    return flag
+  }
   const present = []
   for (const candidate of ['main', 'master']) {
     if (await git.branchExists(candidate)) present.push(candidate)
@@ -2322,7 +2337,15 @@ export async function derive(root, runId, flags, deps = {}) {
   // state is legitimate and is not what this guards against.
   if (runBranch === baseBranch) {
     throw new Error(
-      `the run branch and the base branch are both '${runBranch}' — check out the run branch before running the gate, or pass --base to name a different base`,
+      `the run branch and the base branch are both '${runBranch}'. The run branch is derived from `
+      + 'HEAD, so these agree in two situations and they want opposite answers. If you are on the '
+      + 'BASE by mistake, check out the run branch and re-run. If the run is already INTEGRATED — '
+      + 'its branch merged, and possibly deleted — then there is no run branch left to derive and '
+      + 'no phase left to recompute: nothing here can decide what is prunable, and the run\'s '
+      + 'scaffolding has to be removed by hand. Prove each ref is redundant first with '
+      + '`git cherry <base> <ref>` (no line starting with + means every commit is already in the '
+      + 'base by patch-id, which survives a history rewrite), and delete with '
+      + '`git update-ref -d <ref> <proved sha>` so a concurrent write is not deleted unproved.',
     )
   }
   try {
