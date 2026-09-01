@@ -3242,7 +3242,130 @@ const waitForRetirement = (pid, ms) => waitUntil(() => !liveGroupPids().includes
 // causes and can then observe, never intervals it hopes will line up. Its stdio is redirected on
 // purpose: what it must hold open is the process GROUP, never our end of the pipes, or `close`
 // would wait on it and the test would be measuring the pipe rather than the group.
-const heldMember = (goFile) => `sh -c 'while [ ! -f "${goFile}" ]; do sleep 0.02; done' >/dev/null 2>&1 &`
+// One POSIX shell word, whatever the string holds. Single quotes suspend every expansion the
+// shell does, and the only character they cannot carry is `'` itself, which is closed, escaped
+// and reopened. Use it for ANY value that reaches a `shell: true` command from outside this file
+// — `defaultExec` spawns with `shell: true`, so an unquoted interpolation is the shell's input,
+// not an argument.
+const shq = (s) => `'${String(s).replaceAll("'", `'\\''`)}'`
+
+// The escaped-grandchild command, shared by the three tests that need one: exec into a node that
+// spawns a DETACHED grandchild holding the pipes, records its pid, and exits. `escFile` is under
+// `tmpdir()`, so it is TMPDIR-derived and carries whatever characters the environment put there.
+const escapeeExec = (escFile) => `exec ${process.execPath} -e ${shq(
+  "const{spawn}=require('node:child_process');const fs=require('node:fs');"
+  + "const c=spawn('sh',['-c','sleep 10'],{detached:true,stdio:'inherit'});c.unref();"
+  + `fs.writeFileSync(${JSON.stringify(escFile)},String(c.pid));console.log('ESCAPED='+c.pid)`,
+)}`
+
+// TMPDIR is the environment's, not this suite's, and every temp path below is derived from it. A
+// command built by interpolation therefore carries whatever characters the environment put in that
+// name across two levels at once: `escapeeExec` writes the path into a SINGLE-QUOTED JS string
+// literal, which is itself inside a DOUBLE-QUOTED shell word. A `'` closes the first and `$(…)` is
+// expanded inside the second, so one hostile directory name reaches both. Measured before the fix:
+// a whole-file run under such a TMPDIR executed the injected command 17 times and turned 13 tests
+// red.
+//
+// Both halves of this assertion carry weight. The marker proves nothing was executed; reading the
+// pid back out of the hostile path proves the command still WORKS there, so quoting that merely
+// broke the command could not pass this.
+test('a temp path carrying shell metacharacters cannot inject a command through the held member', { skip: POSIX_ONLY, timeout: 30_000 }, async () => {
+  // Same class as the test below it, second shape: `heldMember` puts the path inside a
+  // double-quoted word that is itself inside the single-quoted argument of `sh -c`, so a `'` in
+  // the name closes the `sh -c` script and `$(…)` expands inside the double quotes.
+  //
+  // Releasing the member at the end is the half that proves the quoting did not merely break the
+  // command: it exits only if it was really polling the hostile path.
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-inject-held-'))
+  const marker = path.join(dir, 'INJECTED')
+  const goFile = path.join(dir, "h'$(touch INJECTED)'go")
+  let spawned = null
+  try {
+    const { code, output } = await defaultExec(`${heldMember(goFile)} echo started`, dir, {
+      timeoutMs: 10_000,
+      onSpawn: (pid) => { spawned = pid },
+    })
+    assert.equal(code, 0, output)
+    assert.equal(
+      existsSync(marker),
+      false,
+      'the command substitution in the temp path was executed by the shell, so a directory name chose what this suite runs',
+    )
+    assert.match(output, /started/)
+    assert.equal(groupEmpty(spawned), false, 'the member is not waiting at all, so the quoting broke the command instead of neutralising it')
+    await releaseMember(goFile)
+    assert.notEqual(
+      await waitForGroupEmpty(spawned, 5_000),
+      null,
+      'the member never exited after its file appeared, so it was polling some path other than the one it was given',
+    )
+  } finally {
+    await releaseMember(goFile).catch(() => {})
+    if (spawned) { try { process.kill(-spawned, 'SIGKILL') } catch { /* already gone */ } }
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a temp path carrying shell metacharacters cannot inject a command through the recorded pid', { skip: POSIX_ONLY, timeout: 30_000 }, async () => {
+  // Third shape: a single-quoted redirection target, where a `'` in the name closes the quote and
+  // everything after it is read as shell source. Reading the pid back out of the hostile path is
+  // what proves the redirection still lands where it was told to.
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-inject-pid-'))
+  const marker = path.join(dir, 'INJECTED')
+  const pidFile = path.join(dir, "h'$(touch INJECTED)'pid")
+  let kid = null
+  try {
+    const { code, output } = await defaultExec(`sleep 5 >/dev/null 2>&1 & ${recordPid(pidFile)}`, dir, { timeoutMs: 10_000 })
+    assert.equal(code, 0, output)
+    assert.equal(
+      existsSync(marker),
+      false,
+      'the command substitution in the temp path was executed by the shell, so a directory name chose what this suite runs',
+    )
+    assert.equal(existsSync(pidFile), true, 'the redirection did not reach the hostile path, so the quoting broke the command instead of neutralising it')
+    kid = (await readFile(pidFile, 'utf8')).trim()
+    assert.match(kid, /^\d+$/, `the command did not record its child pid: ${JSON.stringify(kid)}`)
+  } finally {
+    if (kid) killPid(kid)
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a temp path carrying shell metacharacters cannot inject a command', { skip: POSIX_ONLY, timeout: 30_000 }, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-inject-'))
+  const marker = path.join(dir, 'INJECTED')
+  // The injected command is RELATIVE and the command runs with `dir` as its cwd, so the marker
+  // needs no `/` — a directory name cannot contain one, and an absolute marker would have made
+  // this an unmakeable path rather than a hostile one.
+  const hostile = path.join(dir, "h'$(touch INJECTED)'x")
+  await mkdir(hostile)
+  const escFile = path.join(hostile, 'escapee.pid')
+  let kid = null
+  let p = null
+  try {
+    p = defaultExec(escapeeExec(escFile), dir, { timeoutMs: 8_000, graceMs: 100 })
+    const until = Date.now() + 6_000
+    while (Date.now() < until && !existsSync(escFile)) await new Promise((r) => setTimeout(r, 25))
+    assert.equal(
+      existsSync(marker),
+      false,
+      'the command substitution in the temp path was executed by the shell, so a directory name chose what this suite runs',
+    )
+    assert.equal(existsSync(escFile), true, 'the escapee never wrote its pid to the hostile path, so the quoting broke the command instead of neutralising it')
+    kid = (await readFile(escFile, 'utf8')).trim()
+    assert.match(kid, /^\d+$/, `the escapee did not record its grandchild: ${JSON.stringify(kid)}`)
+  } finally {
+    if (kid) killPid(kid)
+    if (p) await p.catch(() => {})
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+// The pid of the job just backgrounded, recorded where the test can read it. `pidFile` is under
+// `tmpdir()`, so it is TMPDIR-derived like every other path here.
+const recordPid = (pidFile) => `echo $! > ${shq(pidFile)}`
+
+const heldMember = (goFile) => `sh -c ${shq(`while [ ! -f ${shq(goFile)} ]; do sleep 0.02; done`)} >/dev/null 2>&1 &`
 const releaseMember = (goFile) => writeFile(goFile, 'go')
 
 // Retirement is generous by TEN reap intervals here — 2_500 against a REAP_INTERVAL_MS of 250,
@@ -3365,7 +3488,7 @@ test('a check that ignores SIGTERM is SIGKILLed when the grace expires', { skip:
   try {
     const pidFile = path.join(dir, 'kid.pid')
     const { code, output } = await defaultExec(
-      `trap '' TERM; sleep 20 & echo $! > '${pidFile}'; wait`,
+      `trap '' TERM; sleep 20 & ${recordPid(pidFile)}; wait`,
       process.cwd(),
       // `graceMs` is shortened from its 5-second default for the wall clock only; the path it
       // drives is the production one.
@@ -3737,12 +3860,25 @@ test('a pid whose group empties with no event left to announce it is retired wit
 // The driver: one real `defaultExec` whose command records a grandchild pid and then waits. The
 // grandchild's stdio is redirected on purpose, so nothing the test observes can be a pipe
 // closing rather than the sweep.
+// The one line both drivers need: a command that backgrounds a member and records its pid where
+// the test can read it. Shared so that the quoting below is pinned once for both of them.
+// `pidFile` arrives as `process.argv[2]` at runtime, so it is the driver's own source that has to
+// carry the path safely into a `shell: true` command.
+const runLineSource = (secs, tail) => [
+  // The path reaches the shell as a PARAMETER rather than as source text. A double-quoted
+  // expansion is not re-parsed, so no character in the name can be read as syntax — which is the
+  // whole point here, because the name is TMPDIR-derived and this source is built at runtime out
+  // of `process.argv`, where a build-time quoting helper cannot reach it.
+  'process.env.TM_PIDFILE = pidFile',
+  'const run = ' + JSON.stringify(`sleep ${secs} >/dev/null 2>&1 & echo $! > "$TM_PIDFILE"; ${tail}`),
+]
+
 const driverSource = () => [
   `import { defaultExec } from ${JSON.stringify(new URL('../scripts/gate-runner.mjs', import.meta.url).href)}`,
   'import { readFileSync } from "node:fs"',
   'const pidFile = process.argv[2]',
   'const exitWhenRunning = process.argv[3] === "exit"',
-  'const run = "sleep 60 >/dev/null 2>&1 & echo $! > \'" + pidFile + "\'; wait"',
+  ...runLineSource(60, 'wait'),
   'defaultExec(run, process.cwd(), { timeoutMs: 60_000 }).catch(() => {})',
   // The normal-exit variant waits for the grandchild to be on disk before exiting, so the `exit`
   // sweep is always reached with a group that is certainly running.
@@ -3770,11 +3906,10 @@ const waitForChild = (child) => new Promise((resolve) => child.once('exit', (cod
 // inserting a 200ms delay between this returning and the attach: the exact 30 000ms timeout and
 // `1 cancelled` that macos produced on runs 33255281167 and 33257095536, where the loaded runner
 // lost that race on its own. Armed here, before the first `await`, nothing can be missed.
-const startDriver = async (dir, mode = 'wait') => {
-  const pidFile = path.join(dir, 'kid.pid')
+const startDriver = async (dir, mode = 'wait', { cwd = undefined, pidFile = path.join(dir, 'kid.pid') } = {}) => {
   const script = path.join(dir, 'driver.mjs')
   await writeFile(script, driverSource())
-  const child = spawn(process.execPath, [script, pidFile, mode], { stdio: ['ignore', 'pipe', 'pipe'] })
+  const child = spawn(process.execPath, [script, pidFile, mode], { cwd, stdio: ['ignore', 'pipe', 'pipe'] })
   const exited = waitForChild(child)
   let stderr = ''
   child.stderr.on('data', (d) => { stderr += d })
@@ -3786,6 +3921,38 @@ const startDriver = async (dir, mode = 'wait') => {
   }
   return { child, kid, exited, stderr: () => stderr }
 }
+
+test('a temp path carrying shell metacharacters cannot inject a command through the driver', { skip: POSIX_ONLY, timeout: 40_000 }, async () => {
+  // Fourth shape, and the one the other three cannot cover: the driver builds its command in a
+  // CHILD process at runtime, out of a path it took from `process.argv`, so the quoting that has
+  // to hold is in generated source rather than in this file's own template. `cwd` is set so a
+  // relative marker lands where this test can see and clean it.
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-inject-drv-'))
+  const marker = path.join(dir, 'INJECTED')
+  const hostile = path.join(dir, "h'$(touch INJECTED)'d")
+  await mkdir(hostile)
+  let driver = null
+  try {
+    driver = await startDriver(dir, 'wait', { cwd: dir, pidFile: path.join(hostile, 'kid.pid') })
+    assert.equal(
+      existsSync(marker),
+      false,
+      'the command substitution in the temp path was executed by the shell, so a directory name chose what a spawned gate runs',
+    )
+    assert.match(
+      driver.kid,
+      /^\d+$/,
+      `the driver never recorded its member pid at the hostile path, so the quoting broke the command instead of neutralising it: ${JSON.stringify(driver.stderr())}`,
+    )
+  } finally {
+    if (driver) {
+      driver.child.kill('SIGKILL')
+      if (driver.kid) killPid(driver.kid)
+      await driver.exited
+    }
+    await rm(dir, { recursive: true, force: true })
+  }
+})
 
 for (const [signal, expected] of [['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129], ['SIGQUIT', 131]]) {
   test(`a ${signal} to a running gate sweeps the check's process group and exits ${expected}`, { skip: POSIX_ONLY, timeout: 30_000 }, async () => {
@@ -3848,7 +4015,7 @@ const reaperDriverSource = () => [
   // Redirected stdio on the member, as everywhere else in this file: what it must hold open is
   // the process GROUP, never our end of the pipes, or `close` would wait on it and the exit
   // being measured would be the pipes rather than the timer.
-  'const run = "sleep 25 >/dev/null 2>&1 & echo $! > \'" + pidFile + "\'; exit 0"',
+  ...runLineSource(25, 'exit 0'),
   'const res = await defaultExec(run, process.cwd(), { timeoutMs: 60_000 })',
   // Reported by the driver rather than inferred by the parent, so the parent's stopwatch starts
   // at the VERDICT and never at the spawn — node's own startup is then not in the measurement,
@@ -3942,12 +4109,11 @@ test('a check whose process group empties early is retired while the promise is 
   // the structural claim, rather than that it happens inside some number of milliseconds.
   const dir = await mkdtemp(path.join(tmpdir(), 'tm-escaped-'))
   const escFile = path.join(dir, 'escapee.pid')
-  const escapee = "const{spawn}=require('node:child_process');const fs=require('node:fs');const c=spawn('sh',['-c','sleep 10'],{detached:true,stdio:'inherit'});c.unref();fs.writeFileSync('" + escFile + "',String(c.pid));console.log('ESCAPED='+c.pid)"
   let spawned = null
   let settled = false
   let escaped = null
   try {
-    const p = defaultExec(`exec ${process.execPath} -e "${escapee}"`, process.cwd(), {
+    const p = defaultExec(escapeeExec(escFile), process.cwd(), {
       timeoutMs: 20_000,
       graceMs: 200,
       onSpawn: (pid) => { spawned = pid },
@@ -4125,7 +4291,7 @@ test('the per-call retirement latch withholds nothing from a group that is still
     // `ARMED` is printed only once the trap is set and the member is backgrounded, so its
     // presence in the output is the SETUP PREDICATE — see the ordering note below.
     const { code, output } = await defaultExec(
-      `trap '' TERM; sleep 20 & echo $! > '${pidFile}'; echo ARMED; wait`,
+      `trap '' TERM; sleep 20 & ${recordPid(pidFile)}; echo ARMED; wait`,
       process.cwd(),
       { timeoutMs: 200, graceMs: 200, onSpawn: (pid) => { spawned = pid } },
     )
@@ -4185,13 +4351,12 @@ test('a retired pid is never signalled again, even when the probe says something
   // `killGroup` for why both are kept.
   const dir = await mkdtemp(path.join(tmpdir(), 'tm-terminal-'))
   const escFile = path.join(dir, 'escapee.pid')
-  const escapee = "const{spawn}=require('node:child_process');const fs=require('node:fs');const c=spawn('sh',['-c','sleep 10'],{detached:true,stdio:'inherit'});c.unref();fs.writeFileSync('" + escFile + "',String(c.pid));console.log('ESCAPED='+c.pid)"
   const realKill = process.kill.bind(process)
   const signalledAfterRetirement = []
   let spawned = null
   let escaped = null
   try {
-    const p = defaultExec(`exec ${process.execPath} -e "${escapee}"`, process.cwd(), {
+    const p = defaultExec(escapeeExec(escFile), process.cwd(), {
       timeoutMs: 700,
       graceMs: 100,
       onSpawn: (pid) => { spawned = pid },
@@ -4243,7 +4408,7 @@ test('a group whose leader has exited but whose members are still running is kil
     const pidFile = path.join(dir, 'kid.pid')
     let spawned = null
     const p = defaultExec(
-      `sleep 6 & echo $! > '${pidFile}'; exec true`,
+      `sleep 6 & ${recordPid(pidFile)}; exec true`,
       process.cwd(),
       { timeoutMs: 600, graceMs: 300, onSpawn: (pid) => { spawned = pid } },
     )
@@ -4286,7 +4451,6 @@ test('a group that empties after its leader is retired without ever being signal
   const dir = await mkdtemp(path.join(tmpdir(), 'tm-late-empty-'))
   const goFile = path.join(dir, 'go')
   const escFile = path.join(dir, 'escapee.pid')
-  const escapee = "const{spawn}=require('node:child_process');const fs=require('node:fs');const c=spawn('sh',['-c','sleep 10'],{detached:true,stdio:'inherit'});c.unref();fs.writeFileSync('" + escFile + "',String(c.pid));console.log('ESCAPED='+c.pid)"
   // A DELEGATING SPY, not a fake: every call still reaches the real `process.kill`, and all this
   // adds is a record of which ones were made and whether the pid was still ours at the time. It
   // is the only way to see the defect, because what separates probing from not probing is
@@ -4327,7 +4491,7 @@ test('a group that empties after its leader is retired without ever being signal
     // than misleading. It costs 1.3s of wall clock against the old window and that is the price
     // of the honesty; a shorter escapee would be worth more, but leaving the process group needs
     // setsid, and nothing portable in `sh` does it.
-    const p = defaultExec(`${heldMember(goFile)} exec ${process.execPath} -e "${escapee}"`, process.cwd(), {
+    const p = defaultExec(`${heldMember(goFile)} ${escapeeExec(escFile)}`, process.cwd(), {
       timeoutMs: 2_500,
       graceMs: 100,
       onSpawn: (id) => { spawned = id },
