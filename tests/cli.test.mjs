@@ -3126,6 +3126,19 @@ const SANITISED_SITES = [
     },
   },
   {
+    site: 'cli.mjs assertContained — the run id in the containment refusal',
+    exit: 2,
+    // The ONLY gate on the run id on the `collect-reviews` / `review-dispatch` route is
+    // `assertContained`, which validates containment and not characters — `idRefusal` is reached
+    // from `init-run` alone. So the value this refusal quotes is attacker-shaped by construction,
+    // and the refusal is a line worth forging: `ESC [ 2K` `CR` erases what this CLI already wrote
+    // and leaves the operator reading a sentence the run id chose. Pre-existing rather than
+    // introduced — `git show 922ac91:scripts/cli.mjs` carries the same unwrapped interpolation.
+    async setup() {
+      return ['collect-reviews', '--run', `${CLI_ESC_FORGERY}/../../pwned`, '--phase', '1']
+    },
+  },
+  {
     site: 'digest.mjs describeTerse — a blockedBy value in caveman mode',
     exit: 0,
     async setup({ root, planPath, io }) {

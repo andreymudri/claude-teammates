@@ -693,7 +693,12 @@ function assertContained(baseDir, segment, flagName) {
   const resolvedTarget = path.resolve(path.join(baseDir, String(segment)))
   const rel = path.relative(resolvedBase, resolvedTarget)
   if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
-    throw new Error(`${flagName} ${segment} escapes the run directory`)
+    // `printable` because this is a PRINT SITE for a value nothing upstream has validated for
+    // characters: on the `collect-reviews` / `review-dispatch` route `assertContained` is the only
+    // gate the run id passes, and it answers containment, not characters. `collect-reviews` hands
+    // `err.message` straight to the operator unwrapped, so the wrap has to be here, where the
+    // sentence is built.
+    throw new Error(`${flagName} ${printable(segment)} escapes the run directory`)
   }
 }
 
@@ -2722,6 +2727,14 @@ export async function runCli(argv, io = { out: console.log }) {
     // Before the plan is even read: an id the location record cannot hold must never reach
     // dispatch, because the failure it causes surfaces one agent later, in every teammate at
     // once, as enforcement that is simply off.
+    //
+    // Deliberately NOT hoisted to run for every command, and the reason is a measurement rather
+    // than a preference: a run directory is a directory anyone with write access can create, so
+    // refusing the id at the door would not stop `digest` or `collect-reviews` from being handed
+    // one — it would only remove the route the SANITISED_SITES rows use to prove those commands
+    // escape what they are handed. Tried, and it turned six of those rows red while closing no
+    // hazard; see `tests/cli.test.mjs`, the `renderDigest` header row, for the same argument in
+    // the place it was first written.
     const runRefusal = idRefusal('--run', runId, { nested: true, maxBytes: MAX_RUN_ID_BYTES })
     if (runRefusal) { io.out(runRefusal); return 2 }
 
