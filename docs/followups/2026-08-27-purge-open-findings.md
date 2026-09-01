@@ -284,6 +284,14 @@ every teammate reads it.
 
 ## Still open
 
+> **2026-09-01 — every item in this section is now closed.** Worked inline, one RED/GREEN cycle
+> each, six commits from `e4df0de` to `e580e29`. What each one turned into is recorded against
+> the item itself below; the two design questions further down are untouched and still questions.
+> Suite at the end: **2202 | 2199 pass | 0 fail | 3 skipped**.
+>
+> One of the five closed with NO code change, deliberately — see the `idRefusal` item — and the
+> reasoning is recorded there so the next reader does not spend the afternoon re-deriving it.
+
 ### Pre-existing, owned by no task in this plan
 
 - **`tests/gate-runner.test.mjs:3933, :4176, :4277` — two levels of quoting, neither applied.** A
@@ -294,6 +302,19 @@ every teammate reads it.
   reported rather than touched. The non-finding was confirmed in the same sweep: everything else
   spawning in `tests/cli.test.mjs` interpolates into JS via `JSON.stringify`, which is correct for
   that context and passes under the same hostile `TMPDIR`.
+
+  **CLOSED 2026-09-01 by `e4df0de`, and it was four shapes rather than three lines.** Measured
+  first: with `TMPDIR` set to a directory named `h'$(echo X >> log)'x`, the injected command ran
+  **17 times** and **13 of the file's 171 tests went red** — the document named one. The shapes:
+  a path in a single-quoted JS literal inside a double-quoted shell word (`escapeeExec`); a
+  double-quoted word inside `sh -c '…'` (`heldMember`); a single-quoted redirection target
+  (`recordPid`); and a command built in a CHILD process at runtime out of `process.argv`, where
+  no build-time helper can reach it (`runLineSource`, now passing the path as `$TM_PIDFILE` and
+  reading it inside double quotes, where an expansion is not re-parsed). Each shape is behind a
+  helper with an injection test that asserts BOTH that the marker was not created and that the
+  command still works at the hostile path, so quoting that merely broke the command cannot pass.
+  A fifth site outside this file — the preview sentinel in `tests/cli.test.mjs` — closed in
+  `e580e29`. Whole suite under a hostile TMPDIR: **0 injections, fully green**.
 - **`assertContained`'s refusal is a print site for an unvalidated run id.** `scripts/cli.mjs:696`
   builds `${flagName} ${segment} escapes the run directory` with a bare `${segment}`, and
   `scripts/cli.mjs:2714` prints it **unwrapped**. Measured: `collect-reviews --run
@@ -302,12 +323,28 @@ every teammate reads it.
   point and on `922ac91` (`git show 922ac91:scripts/cli.mjs` has the same line, at `:692`). Every
   other run-id sink in the two commands the diff touched was verified neutralised in the same run.
   Fix would be `printable(segment)` at `:696`.
+
+  **CLOSED 2026-09-01 by `c266b40`.** `printable(segment)` where the sentence is BUILT, not at
+  the print site, because `collect-reviews` is not that message's only caller. Driven by a new
+  `SANITISED_SITES` row, this table's existing mechanism for the class.
 - **`idRefusal` is never reached on the review paths.** Its only two call sites are inside
   `init-run` (`scripts/cli.mjs:2722`, `:2759`). On the `collect-reviews` / `review-dispatch` route
   the only gate on the run id is `assertContained`, which validates **containment, not characters**
   — and that guarantee is real: `--run ../../pwned` and `--run a/../../out` both exit 2. Recorded
   in-tree at `scripts/cli.mjs:4846-4862`, including the note that this mechanism was written from
   inference and got the explanation wrong twice.
+
+  **CLOSED 2026-09-01 WITH NO CODE CHANGE, and this is the one not to re-litigate.** Hoisting
+  `idRefusal` from `init-run` to the pre-dispatch block that already runs `assertContained` was
+  written, and measured: it turns **six `SANITISED_SITES` rows red** and closes nothing. The
+  reason is stated in the tree already, at the `renderDigest` header row — *a run directory is a
+  directory anyone with write access can create*. So a hostile id does not need `init-run` to
+  exist on disk, the CLI must escape whatever it is handed regardless, and refusing the id at the
+  door only removes the route those rows use to prove it does. The premise the hoist rested on —
+  "an id that exists has already passed `init-run`" — is false. The residual this item names is
+  therefore real and is answered by the wrapper rather than by a validator; the one wrapper that
+  was missing is the item above, now fixed. Recorded in `scripts/cli.mjs` beside the surviving
+  `init-run` call.
 - **The `printable` census header is stale by more than 2×.** `tests/cli.test.mjs:2267` states the
   census "came to 48 lines: 32 in `cli.mjs`, 6 in `reviews.mjs`, 6 in `digest.mjs`, 4 in
   `finish.mjs`". Re-derived in a worktree at `f99483e` from the header's own stated grep
@@ -317,12 +354,29 @@ every teammate reads it.
   site; this is that. Note also that the finding originally named `tests/cli.test.mjs:898` and the
   header is now at `:2267` — this diff's own growth moved it, which is the same drift the header
   spends a paragraph warning about.
+
+  **CLOSED 2026-09-01 by `8f6de5d`, and converted from a number into a test.** Re-derived
+  independently with the header's own grep: **104 — 86 / 6 / 6 / 6** against a recorded 48 —
+  32 / 6 / 6 / 4. (The document's 103 / 85 was correct at `f99483e`; the extra one is the
+  wrapper `c266b40` had just added.) Correcting the number would have left it free to rot again,
+  so the derivation now runs as a test on every suite run and goes red when the census moves. It
+  is a tripwire, not a budget: a new wrapper is supposed to turn it red, at which point the site
+  gets named in the header's groups and the number moves with it. Two other stale claims in the
+  same header were corrected while re-deriving — `finish.mjs` holds six lines, not four.
 - **`gate-runner.mjs:1703` takes the run branch's name, not `ctx.runBranchRef`.** Declared by T7 in
   its own comment at `scripts/cli.mjs:3802-3807` before any reviewer went looking. Nothing reaches
   it with a hostile value now — every path goes through `classifyHeadRef` first — but the guarantee
   rests on the refusal rather than on the consumer being unable to misread what it is given. The
   structural fix is to pass the ref; `scripts/gate-runner.mjs` was outside T7's declared file set.
 
+
+  **CLOSED 2026-09-01 by `7578691`.** `base: ctx.runBranchRef ?? ctx.runBranch`. The fallback
+  keeps every caller that never resolved HEAD — a `--run-branch` named on the command line — on
+  exactly the behaviour it had. Pinned by a unit test on `runChecks` rather than end to end,
+  and deliberately so: `classifyHeadRef` refuses that HEAD state, so no CLI path can reach the
+  consumer with such a name any more, and the disagreement has to be built directly to be
+  observed at all. The test hands `runChecks` a context whose name and ref qualify differently
+  and asserts which one reaches `addWorktreeDetached`.
 ### Boundary — pinned rather than closed
 
 - **A bind mount over the reviews directory is not seen by the containment walk.** `lstat` and
@@ -578,6 +632,17 @@ in-tree partial answer that the question should be read against.
   fixed**. Compounding it: a fresh isolation worktree cannot check out a branch that a dead
   worktree still holds, so the naive retry is blocked-then-destructive. Wants a `--fix-round` flag
   that emits the same brief without the reset.
+
+  **CLOSED 2026-09-01 by `585fda7`.** `brief --fix-round` emits the same brief with a first step
+  that checks the branch out as it stands, plus two refusals in place of the reset: report
+  `blocked` if the log shows the base (the branch has already been reset and the work is gone),
+  and report `blocked` rather than free a branch another worktree holds, because the guard in the
+  bullet below stops a teammate from touching another worktree at all. The flag is valueless like
+  `--no-fleet`, so `--fix-round yes` is refused with the spelling that works.
+  `skills/parallel-execution/SKILL.md` names it where it tells the orchestrator to respawn — a
+  flag nothing tells the caller to pass is a flag that does not exist — and its contract test
+  asserts both that the flag is named and that the consequence of using the ordinary brief
+  instead is stated beside it.
 - **The `SubagentStop` / worktree guard blocks a teammate from inspecting or removing another
   worktree**, so freeing a branch held by a reaped agent is necessarily the orchestrator's job.
 - **`npm install` generates an untracked `package-lock.json`** — the project has no dependencies —
@@ -593,6 +658,33 @@ in-tree partial answer that the question should be read against.
   override), **but the class survives the fix and is the part worth recording**: a missing
   interpreter and a genuinely red suite land in the same cell, and only reading the check's own
   `output` by hand told them apart.
+
+## Found on 2026-09-01, while closing the section above
+
+- **The unix-socket owner marker cannot survive a long `TMPDIR`, and it has nothing to do with
+  quoting.** Under a hostile TMPDIR long enough to matter, four tests fail on
+  `listen EINVAL` — the merge-preview owner socket exceeds the ~108-byte `sun_path` limit. A
+  **benign** 77-byte TMPDIR reproduces it with no hostile character in it at all, which is what
+  separates it from the injection class it was found inside. Not fixed, and recorded here so the
+  next hostile-TMPDIR sweep does not chase it: at a 20-byte hostile TMPDIR the whole suite is
+  green with zero injections.
+
+- **`prune-run` cannot clean a run whose branch has already been merged** — which is exactly when
+  an operator wants to. With `HEAD` on `master` and the run integrated it exits on *"the run
+  branch and the base branch are both 'master'"*, because it derives the run branch from `HEAD`
+  and after integration there is no distinct branch left to derive. `--base` is spliced into
+  `refs/heads/<value>`, so a remote-tracking ref or a raw sha is refused by git's own
+  `fatal: Needed a single revision` rather than by a refusal that names the shape it wants.
+  Found while pruning this run's own scaffolding, which was done by hand instead: prove
+  redundancy per ref with `git cherry master <ref>`, bundle the doomed refs, then delete with
+  `git update-ref -d <ref> <sha>` so a concurrent write is not deleted unproved.
+
+- **The test suite has no injection-shape guard outside the two files that now carry one.** The
+  four helpers in `tests/gate-runner.test.mjs` and the sentinel in `tests/cli.test.mjs` are each
+  pinned, but nothing stops a NEW site elsewhere from interpolating a TMPDIR-derived path into a
+  `shell: true` command. The measurement that found all five — run the suite under a TMPDIR named
+  `h'$(echo X >> log)'x`, short enough to stay inside `sun_path`, and count the log lines — is
+  cheap and is not automated.
 
 ## Review methodology — what nine rounds and five rounds bought
 
