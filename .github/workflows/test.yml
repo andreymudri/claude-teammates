@@ -28,3 +28,11 @@ jobs:
           git config --global user.email "test@example.com"
           git config --global user.name "CI"
       - run: npm test
+      # The hostile-TMPDIR sweep, which the normal suite deliberately does not carry: it runs the
+      # whole suite a second time, and what it measures is the environment crossed with the code.
+      # Not on Windows — TMPDIR is not how it chooses a temp directory and cmd.exe expands no
+      # `$( )`, so the leg would report a clean run it never measured. The script refuses there
+      # too; this condition keeps the wasted minutes out of CI as well.
+      - name: Hostile-TMPDIR sweep
+        if: runner.os != 'Windows'
+        run: npm run test:hostile-tmpdir
