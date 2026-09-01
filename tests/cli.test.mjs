@@ -12554,6 +12554,37 @@ test('locate --worktree with no value is refused, and brief refuses a flag it do
   })
 })
 
+// `brief` could not be used verbatim for a fix round: its MANDATORY FIRST STEP is
+// `git checkout -B <branch> <base>`, which resets the task branch to the base — and on a fix
+// round the base is not where the work is, so the brief destroyed exactly what the round was
+// convened to repair. The flag emits the same brief with a checkout that does not reset.
+test('brief --fix-round emits a checkout that does not reset the task branch', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const code = await runCli(['brief', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--base', 'main', '--fix-round', '--root', root], io)
+    assert.equal(code, 0, lines.join('\n'))
+    const out = lines.join('\n')
+    assert.doesNotMatch(out, /^[ \t]*git[ \t]+checkout[ \t]+-B/m, out)
+    assert.match(out, /git checkout teammates\/r1\/T1/)
+    assert.match(out, /FIX ROUND/)
+    // Everything else the ordinary brief carries is still there: the flag changes the first
+    // step, not the specification.
+    assert.match(out, /cli\.mjs" complete \\/)
+    assert.match(out, /ONLY these files: a\.mjs/)
+  })
+})
+
+test('brief --fix-round takes no value', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const code = await runCli(['brief', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--fix-round', 'yes', '--root', root], io)
+    assert.equal(code, 2, lines.join('\n'))
+    assert.match(lines.join('\n'), /--fix-round` takes no value/)
+  })
+})
+
 test('brief prints the checkout, the locate and complete commands, the plan path and the file set', async () => {
   await withRepo(async ({ root, planPath, io, lines }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)

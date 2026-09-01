@@ -30,7 +30,30 @@
 // from: emitting `git checkout -B <branch>` with a missing operand would silently create the
 // branch at the stale worktree HEAD while the brief claimed the base was verified, so the
 // no-base variant states the gap and refuses to name a starting commit.
-const checkoutSteps = (task, baseBranch) => (baseBranch ? [
+//
+// A FIX ROUND takes neither of those. The work being fixed is already ON the task branch, so a
+// reset to the base destroys exactly what the round exists to repair — and the naive retry is
+// worse than useless: a fresh isolation worktree cannot check out a branch a dead worktree still
+// holds, so the teammate is refused first and destroys the work second. It is told to check the
+// branch out as it stands, and that freeing a branch another worktree holds is not its job — the
+// worktree guard blocks a teammate from inspecting or removing another worktree at all.
+const fixRoundSteps = (task) => [
+  'MANDATORY FIRST STEP. This is a FIX ROUND. The work you are fixing is ALREADY on',
+  task.branch + ', and resetting that branch would destroy it. Do NOT run "git checkout -B".',
+  'Run exactly:',
+  '',
+  '    git checkout ' + task.branch,
+  '    git log --oneline -1',
+  '',
+  'The log must show the commit your round is fixing. If it shows the base instead, the branch',
+  'has already been reset and the work is gone: STOP and report status "blocked".',
+  'If git refuses the checkout because another worktree still holds ' + task.branch + ', STOP and',
+  'report status "blocked" — freeing a branch a dead worktree holds is the orchestrator\'s job,',
+  'and you are blocked from inspecting or removing another worktree in any case.',
+  'Every file you read before this command has stale content and must be re-read after it.',
+]
+
+const checkoutSteps = (task, baseBranch, fixRound = false) => (fixRound ? fixRoundSteps(task) : baseBranch ? [
   'MANDATORY FIRST STEP. Your worktree does not start on this run\'s base. Run exactly:',
   '',
   '    git checkout -B ' + task.branch + ' ' + baseBranch,
@@ -291,10 +314,10 @@ const scopeRules = () => [
   '',
 ]
 
-const full = ({ task, runId, planPath, baseBranch, constraints }) => [
+const full = ({ task, runId, planPath, baseBranch, constraints, fixRound }) => [
   'You are tm-implementer for task ' + task.id + ': ' + task.title + '.',
   '',
-  ...checkoutSteps(task, baseBranch),
+  ...checkoutSteps(task, baseBranch, fixRound),
   '',
   ...locateStep(task, runId),
   'BASELINE. Then bootstrap the worktree, before writing anything, in this order:',
@@ -328,10 +351,10 @@ const full = ({ task, runId, planPath, baseBranch, constraints }) => [
 // commands, the BASELINE steps, the FILES list and the constraints all survive unchanged: a
 // brief is the task specification, and compressing a specification drops the wording the gate
 // then enforces. A command line is not connective prose.
-const terse = ({ task, runId, planPath, baseBranch, constraints, caveman }) => [
+const terse = ({ task, runId, planPath, baseBranch, constraints, caveman, fixRound }) => [
   'You are tm-implementer. Task ' + task.id + ': ' + task.title + '.',
   '',
-  ...checkoutSteps(task, baseBranch),
+  ...checkoutSteps(task, baseBranch, fixRound),
   '',
   ...locateStep(task, runId),
   'BASELINE. Before writing anything, in order:',
@@ -364,12 +387,12 @@ const terse = ({ task, runId, planPath, baseBranch, constraints, caveman }) => [
   'Commit your work on ' + task.branch + ' and return the structured result.',
 ].filter((line) => line !== '').join('\n')
 
-export function composeBrief({ task, runId = '', planPath = '', baseBranch = '', constraints = [], caveman = false }) {
+export function composeBrief({ task, runId = '', planPath = '', baseBranch = '', constraints = [], caveman = false, fixRound = false }) {
   if (!task || typeof task.id !== 'string') throw new Error('composeBrief: task.id is required')
   if (!Array.isArray(task.files)) throw new Error(`composeBrief: task ${task.id} has no files array`)
   if (typeof task.branch !== 'string' || task.branch === '') {
     throw new Error(`composeBrief: task ${task.id} has no branch`)
   }
-  const options = { task, runId, planPath, baseBranch, constraints, caveman }
+  const options = { task, runId, planPath, baseBranch, constraints, caveman, fixRound }
   return caveman ? terse(options) : full(options)
 }

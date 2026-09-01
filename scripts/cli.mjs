@@ -91,7 +91,7 @@ const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclai
   claim    --run <id> --task <id> --by <teammate> [--root <path>]
   unclaim  --run <id> --task <id> [--root <path>]
   locate   --run <id> --task <id> [--worktree <path>] [--branch <name>] [--root <path>]
-  brief    --run <id> --task <id> --plan <path> [--base <branch>] [--root <path>]
+  brief    --run <id> --task <id> --plan <path> [--base <branch>] [--fix-round] [--root <path>]
   workflow --run <id> --phase <n> [--root <path>] [--models <json>] [--plan <path>] [--base <branch>]
   complete --run <id> --task <id> --plan <path> [--base <branch>] [--root <path>] [--enforcement-only]
   fix      --run <id> --phase <n> --verdict <path> [--root <path>]
@@ -109,7 +109,7 @@ const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclai
 // presence is the whole signal, so any value written after one is a spelling this CLI cannot
 // act on — see the refusal in parseFlags. Kept as a named set so the advice printed for a
 // rejected spelling can name a form that actually works, per flag.
-const VALUELESS_FLAGS = new Set(['no-fleet', 'local', 'yes', 'force', 'enforcement-only'])
+const VALUELESS_FLAGS = new Set(['no-fleet', 'local', 'yes', 'force', 'enforcement-only', 'fix-round'])
 
 // What to tell a caller who wrote a spelling this CLI does not take. It must never name a form
 // that fails — and for `--no-fleet` it must never name one that does the OPPOSITE of what the
@@ -257,7 +257,7 @@ export const KNOWN_FLAGS = {
   claim: ['run', 'task', 'by'],
   unclaim: ['run', 'task'],
   locate: ['run', 'task', 'worktree', 'branch'],
-  brief: ['run', 'task', 'plan', 'base'],
+  brief: ['run', 'task', 'plan', 'base', 'fix-round'],
   complete: ['run', 'task', 'plan', 'base', 'phase', 'enforcement-only'],
   workflow: ['run', 'phase', 'models', 'plan', 'base'],
   fix: ['run', 'phase', 'verdict'],
@@ -3114,6 +3114,10 @@ export async function runCli(argv, io = { out: console.log }) {
       baseBranch,
       constraints: parseConstraints(planMarkdown),
       caveman: resolved.caveman,
+      // A fix round's work is already ON the task branch, so the ordinary first step — a
+      // `checkout -B` back to the base — would destroy what the round exists to repair. The
+      // orchestrator knows which rounds are fix rounds; the brief cannot tell on its own.
+      fixRound: flags['fix-round'] === true,
     }))
     return 0
   }
