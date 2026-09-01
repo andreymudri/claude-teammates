@@ -74,6 +74,21 @@ test('parallel-execution documents all three model tiers and the --models flag',
   assert.match(doc.text, /--models/)
 })
 
+// A respawn on a fix round needs a brief, and the ORDINARY brief opens with
+// `git checkout -B <branch> <base>` — which resets the task branch to the base and destroys the
+// work the round was convened to repair. The flag that suppresses that reset is useless if
+// nothing tells the orchestrator to pass it, so the skill has to name it where it tells the
+// orchestrator to respawn.
+test('parallel-execution tells a fix-round respawn to brief with --fix-round', async () => {
+  const { doc } = await skill('parallel-execution')
+  assert.match(doc.text, /--fix-round/, 'the skill never names the flag a fix-round respawn needs')
+  assert.match(
+    doc.text,
+    /checkout -B[\s\S]{0,200}destroy|destroy[\s\S]{0,200}checkout -B/,
+    'the skill names the flag without saying what passing the ordinary brief instead would do',
+  )
+})
+
 test('phase-gate documents the fix decision and the cost-bound framing', async () => {
   const { doc } = await skill('phase-gate')
   const onFail = doc.section('On FAIL')

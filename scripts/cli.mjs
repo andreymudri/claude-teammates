@@ -91,7 +91,7 @@ const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclai
   claim    --run <id> --task <id> --by <teammate> [--root <path>]
   unclaim  --run <id> --task <id> [--root <path>]
   locate   --run <id> --task <id> [--worktree <path>] [--branch <name>] [--root <path>]
-  brief    --run <id> --task <id> --plan <path> [--base <branch>] [--root <path>]
+  brief    --run <id> --task <id> --plan <path> [--base <branch>] [--fix-round] [--root <path>]
   workflow --run <id> --phase <n> [--root <path>] [--models <json>] [--plan <path>] [--base <branch>]
   complete --run <id> --task <id> --plan <path> [--base <branch>] [--root <path>] [--enforcement-only]
   fix      --run <id> --phase <n> --verdict <path> [--root <path>]
@@ -109,7 +109,7 @@ const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclai
 // presence is the whole signal, so any value written after one is a spelling this CLI cannot
 // act on — see the refusal in parseFlags. Kept as a named set so the advice printed for a
 // rejected spelling can name a form that actually works, per flag.
-const VALUELESS_FLAGS = new Set(['no-fleet', 'local', 'yes', 'force', 'enforcement-only'])
+const VALUELESS_FLAGS = new Set(['no-fleet', 'local', 'yes', 'force', 'enforcement-only', 'fix-round'])
 
 // What to tell a caller who wrote a spelling this CLI does not take. It must never name a form
 // that fails — and for `--no-fleet` it must never name one that does the OPPOSITE of what the
@@ -257,7 +257,7 @@ export const KNOWN_FLAGS = {
   claim: ['run', 'task', 'by'],
   unclaim: ['run', 'task'],
   locate: ['run', 'task', 'worktree', 'branch'],
-  brief: ['run', 'task', 'plan', 'base'],
+  brief: ['run', 'task', 'plan', 'base', 'fix-round'],
   complete: ['run', 'task', 'plan', 'base', 'phase', 'enforcement-only'],
   workflow: ['run', 'phase', 'models', 'plan', 'base'],
   fix: ['run', 'phase', 'verdict'],
@@ -693,7 +693,12 @@ function assertContained(baseDir, segment, flagName) {
   const resolvedTarget = path.resolve(path.join(baseDir, String(segment)))
   const rel = path.relative(resolvedBase, resolvedTarget)
   if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
-    throw new Error(`${flagName} ${segment} escapes the run directory`)
+    // `printable` because this is a PRINT SITE for a value nothing upstream has validated for
+    // characters: on the `collect-reviews` / `review-dispatch` route `assertContained` is the only
+    // gate the run id passes, and it answers containment, not characters. `collect-reviews` hands
+    // `err.message` straight to the operator unwrapped, so the wrap has to be here, where the
+    // sentence is built.
+    throw new Error(`${flagName} ${printable(segment)} escapes the run directory`)
   }
 }
 
@@ -2722,6 +2727,14 @@ export async function runCli(argv, io = { out: console.log }) {
     // Before the plan is even read: an id the location record cannot hold must never reach
     // dispatch, because the failure it causes surfaces one agent later, in every teammate at
     // once, as enforcement that is simply off.
+    //
+    // Deliberately NOT hoisted to run for every command, and the reason is a measurement rather
+    // than a preference: a run directory is a directory anyone with write access can create, so
+    // refusing the id at the door would not stop `digest` or `collect-reviews` from being handed
+    // one — it would only remove the route the SANITISED_SITES rows use to prove those commands
+    // escape what they are handed. Tried, and it turned six of those rows red while closing no
+    // hazard; see `tests/cli.test.mjs`, the `renderDigest` header row, for the same argument in
+    // the place it was first written.
     const runRefusal = idRefusal('--run', runId, { nested: true, maxBytes: MAX_RUN_ID_BYTES })
     if (runRefusal) { io.out(runRefusal); return 2 }
 
@@ -3101,6 +3114,10 @@ export async function runCli(argv, io = { out: console.log }) {
       baseBranch,
       constraints: parseConstraints(planMarkdown),
       caveman: resolved.caveman,
+      // A fix round's work is already ON the task branch, so the ordinary first step — a
+      // `checkout -B` back to the base — would destroy what the round exists to repair. The
+      // orchestrator knows which rounds are fix rounds; the brief cannot tell on its own.
+      fixRound: flags['fix-round'] === true,
     }))
     return 0
   }
@@ -3802,12 +3819,13 @@ export async function runCli(argv, io = { out: console.log }) {
       //     qualification rules disagree about. The round trip is kept for the honest
       //     two-subprocess race and is described as that and nothing more.
       //
-      //     STILL OPEN, and named because this list claims to be complete: gate-runner.mjs:1703
-      //     takes the NAME rather than `ctx.runBranchRef`. Nothing reaches it with a hostile value
-      //     now — every path goes through the classifier first — but the structural fix is to pass
-      //     the REF there, and that file is outside this task's declared set. Until then the
-      //     guarantee rests on the refusal above rather than on the consumer being unable to
-      //     misread what it is given.
+      //     CLOSED. That consumer took the NAME rather than `ctx.runBranchRef`; it now takes
+      //     `ctx.runBranchRef ?? ctx.runBranch`, so the guarantee no longer rests on the refusal
+      //     above alone — a consumer handed a ref cannot misread which ref is meant. Pinned by a
+      //     unit test on `runChecks` rather than end to end, because `classifyHeadRef` refuses
+      //     that HEAD state and no CLI path can reach the consumer with such a name any more; the
+      //     test builds the disagreement directly. The fallback keeps a caller that never
+      //     resolved HEAD — a `--run-branch` named on the command line — on its old behaviour.
       //
       //     WHAT IS NOT THIS CODE'S DOING: under the `refs/tags/x` plant the `git branch -D`
       //     below fails on its own, with `fatal: HEAD not found below refs/heads!`, exit 128

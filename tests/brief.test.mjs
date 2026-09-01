@@ -36,6 +36,39 @@ test('a fully supplied brief carries the checkout, baseline, plan, files and con
   for (const c of FULL.constraints) assert.ok(brief.includes('- ' + c), `missing constraint ${c}`)
 })
 
+// A FIX ROUND cannot be briefed with the ordinary first step. `git checkout -B <branch> <base>`
+// resets the task branch to the base, which on a fix round is the work being fixed — the brief
+// would destroy exactly what the round exists to repair. Compounding it, a fresh isolation
+// worktree cannot check out a branch a dead worktree still holds, so the naive retry is
+// blocked-THEN-destructive: the teammate is refused, frees the branch, and then runs the reset.
+//
+// Both halves are asserted, and the negative one is keyed on a RUNNABLE reset rather than on the
+// string: this variant's prose names `git checkout -B` in order to forbid it, so an assertion on
+// the substring would refuse the very sentence that closes the hazard. `runnableReset` is the
+// existing `runnableCheckout` convention — an indented line beginning with the executable —
+// narrowed to the reset spellings.
+const runnableReset = /^[ \t]*git[ \t]+(checkout[ \t]+-B|switch[ \t]+-C)\b/m
+
+test('a fix-round brief checks the task branch out without resetting it', () => {
+  const brief = composeBrief({ ...FULL, fixRound: true })
+  assert.ok(!runnableReset.test(brief), `a fix-round brief must never emit a runnable reset:\n${brief}`)
+  // The same pattern must match the variant that DOES reset, or the assertion above proves
+  // nothing.
+  assert.ok(runnableReset.test(composeBrief(FULL)), 'the runnable-reset pattern fails to match a real reset command')
+  assert.ok(brief.includes('git checkout teammates/substop/T4'), brief)
+  // The teammate must not free the branch itself: the worktree guard blocks a teammate from
+  // inspecting or removing another worktree, so that is the orchestrator's job.
+  assert.match(brief, /report status\s+"blocked"/, brief)
+})
+
+test('a fix-round brief still carries everything else the ordinary brief does', () => {
+  const brief = composeBrief({ ...FULL, fixRound: true })
+  assert.ok(brief.includes('docs/plans/2026-08-13-subagent-stop-enforcement.md'))
+  assert.ok(brief.includes('You may create or modify ONLY these files:'))
+  for (const f of TASK.files) assert.ok(brief.includes(f), `missing declared file ${f}`)
+  for (const c of FULL.constraints) assert.ok(brief.includes('- ' + c), `missing constraint ${c}`)
+})
+
 test('the plan section names the task section by its bare number', () => {
   const brief = composeBrief(FULL)
   assert.ok(brief.includes('the section titled "Task 4:"'))

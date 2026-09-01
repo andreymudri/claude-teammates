@@ -1700,7 +1700,16 @@ export async function runChecks(checks, ctx = {}) {
   try {
     return await withMergePreview({
       git: ctx.git,
-      base: ctx.runBranch,
+      // The REF HEAD points at, not the name derived from it, whenever the caller knows it.
+      // `qualifyBranch` returns any `refs/`-prefixed string unchanged and prefixes anything else,
+      // so a NAME that is itself a ref path qualifies to a different ref than the one HEAD holds
+      // — and this preview would then be built on the wrong tree while reporting merge=pass.
+      // `classifyHeadRef` refuses that HEAD state upstream, so nothing reaches here with such a
+      // name today; this makes the consumer unable to misread what it is given, rather than
+      // leaving the guarantee resting on the refusal alone. The fallback keeps every caller that
+      // has no ref to give — a `--run-branch` named on the command line, never resolved from HEAD
+      // — on exactly the behaviour it had.
+      base: ctx.runBranchRef ?? ctx.runBranch,
       branches,
       link: ctx.previewLink ?? [],
       repoRoot: ctx.cwd,
