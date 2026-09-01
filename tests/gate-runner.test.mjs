@@ -91,6 +91,45 @@ test('timeoutMs at the ceiling itself is accepted, not just one below it', async
 // `runChecks`, not `runCommandCheck` directly, so a sub-1000 value is proved to reach `exec`
 // intact through the manifest path `timeoutFault` guards, not merely accepted by the function in
 // isolation.
+// THE CONSUMER, pinned independently of the refusal that currently protects it. `derive` in
+// `scripts/cli.mjs` hands `deriveContext` the run branch's NAME, and this function passed that
+// name on as the merge preview's base — while `ctx.runBranchRef` carried the ref HEAD actually
+// pointed at. The two disagree exactly when the name is ITSELF a ref path: `qualifyBranch` returns
+// any `refs/`-prefixed string unchanged, so `refs/heads/run-branch` re-qualified to the REAL
+// branch while the ref stayed the planted one, and a gate reported merge=pass on a tree where
+// merging into the real run branch conflicts.
+//
+// `classifyHeadRef` refuses that HEAD state now, so nothing reaches this function with such a
+// name through the CLI — which is why this is a unit test and not an end-to-end one. The point is
+// that the guarantee should not rest on the refusal alone: a consumer handed a ref cannot misread
+// which ref is meant, and that property is this test's subject.
+test('the merge preview is built from the run branch ref, not from a name two rules can qualify differently', async () => {
+  const seen = []
+  const ctx = {
+    cwd: process.cwd(),
+    runId: 'r1',
+    runBranch: 'refs/heads/run-branch',
+    runBranchRef: 'refs/heads/refs/heads/run-branch',
+    tasks: [{ id: 'T1', phase: 1 }],
+    currentPhase: 1,
+    git: {
+      branchExists: async () => true,
+      addWorktreeDetached: async (_dir, base) => {
+        seen.push(base)
+        // Stops the preview here: what this test is about has already been observed, and nothing
+        // below it needs a real worktree.
+        throw new Error('recorded')
+      },
+    },
+  }
+  await runChecks([], ctx)
+  assert.deepEqual(
+    seen,
+    ['refs/heads/refs/heads/run-branch'],
+    'the preview was based on the run branch NAME, which qualifies to a different ref than the one HEAD points at',
+  )
+})
+
 test('a sub-second timeoutMs is not a floor violation and reaches exec unchanged', async () => {
   let seen = null
   const results = await runChecks(

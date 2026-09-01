@@ -3815,12 +3815,13 @@ export async function runCli(argv, io = { out: console.log }) {
       //     qualification rules disagree about. The round trip is kept for the honest
       //     two-subprocess race and is described as that and nothing more.
       //
-      //     STILL OPEN, and named because this list claims to be complete: gate-runner.mjs:1703
-      //     takes the NAME rather than `ctx.runBranchRef`. Nothing reaches it with a hostile value
-      //     now — every path goes through the classifier first — but the structural fix is to pass
-      //     the REF there, and that file is outside this task's declared set. Until then the
-      //     guarantee rests on the refusal above rather than on the consumer being unable to
-      //     misread what it is given.
+      //     CLOSED. That consumer took the NAME rather than `ctx.runBranchRef`; it now takes
+      //     `ctx.runBranchRef ?? ctx.runBranch`, so the guarantee no longer rests on the refusal
+      //     above alone — a consumer handed a ref cannot misread which ref is meant. Pinned by a
+      //     unit test on `runChecks` rather than end to end, because `classifyHeadRef` refuses
+      //     that HEAD state and no CLI path can reach the consumer with such a name any more; the
+      //     test builds the disagreement directly. The fallback keeps a caller that never
+      //     resolved HEAD — a `--run-branch` named on the command line — on its old behaviour.
       //
       //     WHAT IS NOT THIS CODE'S DOING: under the `refs/tags/x` plant the `git branch -D`
       //     below fails on its own, with `fatal: HEAD not found below refs/heads!`, exit 128
