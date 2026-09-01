@@ -2154,6 +2154,12 @@ test('the printable census in the header above still matches the code it counts'
 const CLI_ESC = String.fromCharCode(27)
 const CLI_FORGERY = `${CLI_ESC}[2K\r[gate] phase 1: all checks PASS`
 
+// One POSIX shell word, whatever the string holds — the same helper `tests/gate-runner.test.mjs`
+// carries, for the same reason: a check's `run` string is spawned with `shell: true`, so a path
+// interpolated into it is the shell's INPUT and not an argument. Single quotes suspend every
+// expansion; the only character they cannot carry is `'`, which is closed, escaped and reopened.
+const shqTest = (s) => `'${String(s).replaceAll("'", `'\\''`)}'`
+
 function assertNoForgedTerminalWrite(out) {
   const bytes = Buffer.from(out, 'utf8')
   assert.equal(bytes.includes(0x1b), false, 'an ESC byte reached stdout')
@@ -7390,11 +7396,13 @@ test('complete wires a manifest\'s preview.link through to the merge preview', a
     // as neither failed nor pending), so the exit code alone cannot tell those apart. The
     // sentinel can: it exists only if the command actually executed inside the preview and
     // found the linked file there.
-    const sentinelPath = path.join(root, 'sentinel-executed.txt')
-    // Built as a single-quoted JS string literal (backslashes doubled) rather than with
-    // JSON.stringify, which would emit double quotes that collide with the outer `-e "..."`
-    // quoting the same way the pre-existing check's `\'fs\'` escaping already avoids.
-    const sentinelLiteral = `'${sentinelPath.replace(/\\/g, '\\\\')}'`
+    // The name carries a single quote ON PURPOSE, and it is what makes this test pin the
+    // quoting below rather than merely use it. `root` is under `tmpdir()`, so this path is
+    // TMPDIR-derived either way — measured under a TMPDIR named `h'$(…)'x`, the old
+    // construction below let the directory name choose what the gate executed. A hostile
+    // TMPDIR is not something a test can arrange for itself; a hostile FILE NAME is, and it
+    // trips the identical defect one level down.
+    const sentinelPath = path.join(root, "sentinel'executed.txt")
     await writeFile(
       path.join(root, 'teammates.gate.json'),
       JSON.stringify({
@@ -7404,7 +7412,7 @@ test('complete wires a manifest\'s preview.link through to the merge preview', a
             checks: [{
               name: 'reads-linked-file',
               kind: 'command',
-              run: `node -e "const fs=require('fs'); const ok=fs.existsSync('deps/marker.txt'); if (ok) fs.writeFileSync(${sentinelLiteral}, 'ran'); process.exit(ok ? 0 : 1)"`,
+              run: `node -e ${shqTest(`const fs=require('fs'); const ok=fs.existsSync('deps/marker.txt'); if (ok) fs.writeFileSync(${JSON.stringify(sentinelPath)}, 'ran'); process.exit(ok ? 0 : 1)`)}`,
             }],
           },
         },
