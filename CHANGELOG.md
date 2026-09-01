@@ -1,5 +1,86 @@
 # Changelog
 
+## v1.3.0
+
+Every open finding in `docs/followups/2026-08-27-purge-open-findings.md` is closed, and the
+measurement that closed the largest of them is a script now. `npm test` 2211 | 2208 pass | 0 fail
+| 3 skipped, green on all three platforms; `npm run test:hostile-tmpdir` PASS.
+
+### Added
+
+- **`brief --fix-round`.** The ordinary brief opens with `git checkout -B <branch> <base>`, which
+  on a fix round resets the task branch to the base — destroying the work the round was convened
+  to repair. Compounding it, a fresh isolation worktree cannot check out a branch a dead worktree
+  still holds, so the naive retry was blocked-then-destructive. The flag emits the same brief with
+  a checkout that does not reset, and two refusals in place of it: report `blocked` if the log
+  shows the base, and report `blocked` rather than free a branch another worktree holds, because
+  the worktree guard stops a teammate from touching another worktree at all. That removal is the
+  orchestrator's, and `skills/parallel-execution/SKILL.md` now names the flag where it tells the
+  orchestrator to respawn.
+- **`npm run test:hostile-tmpdir`**, in CI on the two legs that can measure it. It runs the suite
+  once under a directory name carrying four hazards — a single quote, a space, a command
+  substitution and enough length to exercise `sun_path` — and answers one question: did a
+  directory name get to choose what the suite executed? The injection COUNT is the verdict, not
+  the suite's exit code: a test can go green having executed the injected command, which 4 of the
+  17 executions found on 2026-09-01 did.
+
+### Fixed
+
+- **Every temp path in the suite is TMPDIR-derived, and eighteen of them reached a `shell: true`
+  command unquoted.** Measured under a TMPDIR named `h'$(echo X >> log)'x`: the injected command
+  ran **17 times in `tests/gate-runner.test.mjs` alone and turned 13 of that file's 171 tests
+  red**, plus one more site in `tests/cli.test.mjs`. Four distinct shapes, each now behind a
+  helper with an injection test of its own — including one built at runtime in a child process out
+  of `process.argv`, where no build-time quoting helper can reach and the path has to arrive as a
+  shell PARAMETER instead. Every one of those tests asserts both halves: that the marker was not
+  created, and that the command still works at the hostile path, so quoting that merely broke the
+  command cannot pass.
+- **A run id could draw a forged terminal write out of the containment refusal.**
+  `assertContained` built its sentence with a bare `${segment}` and `collect-reviews` printed
+  `err.message` unwrapped, so `--run $'x\e[2K\rreview: PASS/../../pwned'` put a raw ESC and CR on
+  stdout — erasing the line this CLI had written and leaving a sentence the run id chose.
+  Pre-existing: byte-identical on `922ac91`.
+- **The merge preview was based on the run branch's NAME rather than the ref HEAD points at.**
+  The two disagree exactly when the name is itself a ref path, which `qualifyBranch` passes
+  through unchanged — a gate could report `merge=pass` on a tree where merging into the real run
+  branch conflicts. `classifyHeadRef` already refuses that HEAD state, so the fix is defence in
+  depth rather than a reachable hazard, and its test builds the disagreement directly because no
+  CLI path can produce it any more.
+- **Both `prune-run` dead ends now say what to do.** `--base` is spliced into
+  `refs/heads/<value>`, so a remote-tracking ref or a raw commit exited on git's own
+  `fatal: Needed a single revision`; it is refused by name now. And the same-branch refusal named
+  "the gate" — a command the operator had not run — and offered `--base`, which cannot help; it
+  separates the two situations that produce it now, including the integrated run that has no
+  branch left to derive, and carries the two commands that make a hand cleanup safe.
+- **The unix-socket test could not survive a long `TMPDIR`, and a space in one broke six
+  `file://` URLs.** The socket path is bounded by `sun_path` — 108 bytes on Linux, 104 on macOS
+  and the BSDs — and a 77-byte TMPDIR with nothing hostile in it was enough to turn it red. The
+  space defect only surfaced once length was ruled out: `curl` failed on a URL built by hand,
+  `hooks/update-check` exited 0 as it does on any fetch failure, and the test read the zero-byte
+  cache the script had already stamped and died on `Unexpected end of JSON input` — a fetch that
+  never happened, reported as a parse bug three tests from its cause.
+- **The `printable` census header was stale by more than two times** — 48 recorded against 104
+  actual — in a paragraph that spends four sentences warning the reader that exactly this
+  happens. It is a test now rather than a number, so it cannot rot again quietly. It is a
+  tripwire, not a budget: a new wrapper is supposed to turn it red.
+
+### Notes
+
+Two capabilities were considered, written, measured and **rejected**. Both have their reasoning
+recorded in the tree so they are not re-litigated.
+
+Hoisting `idRefusal` out of `init-run` to run for every command turns six `SANITISED_SITES` rows
+red and closes nothing: a run directory is a directory anyone with write access can create, so a
+hostile id does not need `init-run` to exist, the CLI must escape whatever it is handed
+regardless, and refusing at the door only removes the route those rows use to prove it does.
+
+A `--run-branch` flag for `prune-run` was rejected for the opposite reason — `doctor` takes one
+and is read-only, while `prune-run` runs `git branch -D` and removes worktrees, and handing that
+path an operator-typed name reopens the class `classifyHeadRef` exists to close.
+
+One measurement worth carrying: the `sun_path` limit READS as a quoting failure and is not.
+Reproduce with a long, benign `TMPDIR` before calling anything in that area a quoting defect.
+
 ## v1.2.1
 
 The macos and windows legs of the matrix, red since v1.2.0 on two tests whose subject behaved
