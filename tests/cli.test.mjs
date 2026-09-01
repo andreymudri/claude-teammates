@@ -2160,6 +2160,17 @@ const CLI_FORGERY = `${CLI_ESC}[2K\r[gate] phase 1: all checks PASS`
 // expansion; the only character they cannot carry is `'`, which is closed, escaped and reopened.
 const shqTest = (s) => `'${String(s).replaceAll("'", `'\\''`)}'`
 
+// `node -e <script>` in the spelling the platform's own shell needs. On POSIX the script is one
+// single-quoted word and the path is a JSON literal, which is safe for any character. On win32 the
+// word is double-quoted, so the script itself must contain no `"` — hence the single-quoted JS
+// literal with backslashes doubled, which is what this site carried before and what cmd.exe reads
+// correctly.
+const sentinelCheckRun = (sentinelPath, onWin32) => {
+  const literal = onWin32 ? `'${sentinelPath.replace(/\\/g, '\\\\')}'` : JSON.stringify(sentinelPath)
+  const script = `const fs=require('fs'); const ok=fs.existsSync('deps/marker.txt'); if (ok) fs.writeFileSync(${literal}, 'ran'); process.exit(ok ? 0 : 1)`
+  return onWin32 ? `node -e "${script}"` : `node -e ${shqTest(script)}`
+}
+
 function assertNoForgedTerminalWrite(out) {
   const bytes = Buffer.from(out, 'utf8')
   assert.equal(bytes.includes(0x1b), false, 'an ESC byte reached stdout')
@@ -7453,13 +7464,19 @@ test('complete wires a manifest\'s preview.link through to the merge preview', a
     // as neither failed nor pending), so the exit code alone cannot tell those apart. The
     // sentinel can: it exists only if the command actually executed inside the preview and
     // found the linked file there.
-    // The name carries a single quote ON PURPOSE, and it is what makes this test pin the
-    // quoting below rather than merely use it. `root` is under `tmpdir()`, so this path is
-    // TMPDIR-derived either way — measured under a TMPDIR named `h'$(…)'x`, the old
-    // construction below let the directory name choose what the gate executed. A hostile
-    // TMPDIR is not something a test can arrange for itself; a hostile FILE NAME is, and it
-    // trips the identical defect one level down.
-    const sentinelPath = path.join(root, "sentinel'executed.txt")
+    // TWO SHELLS, and they agree on nothing that matters here. `defaultExec` spawns with
+    // `shell: true`, which is `sh` on POSIX and `cmd.exe` on win32 — and cmd.exe does not treat
+    // `'` as quoting at all, so a POSIX-quoted script arrives there with its quotes intact and
+    // node answers `SyntaxError: Invalid or unexpected token`. Measured on the windows leg.
+    //
+    // So each side gets the construction its own shell needs, and the hostile NAME is POSIX-only
+    // with it. That is not a gap being waved through: the defect the name pins is a `'` closing a
+    // JS literal inside a `sh` word, and cmd.exe has neither that word nor command substitution
+    // to reach through it. On POSIX the name carries a single quote ON PURPOSE, and it is what
+    // makes this test pin the quoting rather than merely use it — a hostile TMPDIR is not
+    // something a test can arrange for itself, but a hostile file name is.
+    const onWin32 = process.platform === 'win32'
+    const sentinelPath = path.join(root, onWin32 ? 'sentinel-executed.txt' : "sentinel'executed.txt")
     await writeFile(
       path.join(root, 'teammates.gate.json'),
       JSON.stringify({
@@ -7469,7 +7486,7 @@ test('complete wires a manifest\'s preview.link through to the merge preview', a
             checks: [{
               name: 'reads-linked-file',
               kind: 'command',
-              run: `node -e ${shqTest(`const fs=require('fs'); const ok=fs.existsSync('deps/marker.txt'); if (ok) fs.writeFileSync(${JSON.stringify(sentinelPath)}, 'ran'); process.exit(ok ? 0 : 1)`)}`,
+              run: sentinelCheckRun(sentinelPath, onWin32),
             }],
           },
         },

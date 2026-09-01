@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
+import path from 'node:path'
 import { readFile } from 'node:fs/promises'
 import { HAZARDS, hostileTmpdirName, sweepSupported, sweepVerdict } from '../scripts/hostile-tmpdir-sweep.mjs'
 
@@ -14,13 +15,18 @@ const root = new URL('..', import.meta.url)
 // any one of them would have left one of those four classes unmeasured, which is why this asserts
 // the set rather than the count.
 test('the sweep folds every hazard it claims into one directory name', () => {
-  const name = hostileTmpdirName('/tmp/base', '/tmp/base/marker.log')
+  // Built with `path.join` rather than written as a literal: `hostileTmpdirName` joins, so on
+  // win32 the separators in the embedded log path come back as backslashes and a hard-coded
+  // `/tmp/base/marker.log` never appears in the result. Measured on the windows leg.
+  const base = path.join('/tmp', 'base')
+  const logPath = path.join(base, 'marker.log')
+  const name = hostileTmpdirName(base, logPath)
   assert.equal(name.includes("'"), true, 'no single quote: the JS-literal and sh -c shapes go unmeasured')
   assert.equal(name.includes(' '), true, 'no space: word-splitting and URL-encoding defects go unmeasured')
   assert.match(name, /\$\(/, 'no command substitution: nothing distinguishes a broken command from an executed one')
   assert.ok(name.length > 70, `no length hazard: sun_path is not exercised (${name.length} bytes)`)
   // The substitution must WRITE somewhere the caller named, or the sweep cannot count anything.
-  assert.ok(name.includes('/tmp/base/marker.log'), name)
+  assert.ok(name.includes(logPath), name)
   assert.deepEqual([...HAZARDS].sort(), ['command substitution', 'length', 'single quote', 'space'])
 })
 
