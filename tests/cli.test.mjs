@@ -4257,6 +4257,63 @@ test('finish does not recommend --enforcement-only on a manifest it would refuse
   })
 })
 
+// `--base` is spliced into `refs/heads/<value>`, so a value that is not a LOCAL branch name
+// reaches git as a ref that cannot exist. Measured on run `purgefix`:
+// `--base origin/fix/pass6-findings` exited 4 with git's own
+// `fatal: Needed a single revision`, which names neither the flag nor the shape it wanted — an
+// operator reaching for a remote-tracking ref or a sha gets a plumbing error and no way forward.
+// Both spellings are checked because they are the two an operator actually reaches for.
+for (const [label, base] of [['a remote-tracking ref', 'origin/main'], ['a raw sha', 'HEAD~0']]) {
+  test(`prune-run refuses ${label} as --base by naming the shape it takes`, async () => {
+    await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      // A manifest, or the missing-gate refusal fires first and this measures that instead.
+      await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+        phases: { default: { checks: [{ name: 'test', kind: 'command', run: 'node -e ""' }] } },
+      }), 'utf8')
+      g(['add', 'teammates.gate.json'])
+      g(['commit', '--quiet', '-m', 'manifest'])
+      lines.length = 0
+      const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', base, '--root', root], io)
+      const out = lines.join('\n')
+      assert.notEqual(code, 0, out)
+      assert.doesNotMatch(out, /Needed a single revision/, 'git’s plumbing error reached the operator unexplained')
+      assert.match(out, /--base/, out)
+      assert.match(out, /local branch/i, out)
+    })
+  })
+}
+
+// The refusal an operator meets after the run is INTEGRATED, which is exactly when they reach
+// for `prune-run`. The run branch is derived from HEAD, so once the run is merged and the
+// operator is back on `master` there is nothing left to derive and both names come out the same.
+// Measured on runs `purge` and `purgefix`.
+//
+// What the message used to do with that: say "before running the gate" — naming a command the
+// operator did not run — and offer `--base`, which cannot help, because the problem is the RUN
+// branch and not the base. Neither half told them the run was simply past the point where this
+// command can decide anything.
+test('the same-branch refusal names the integrated case and not the gate', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'test', kind: 'command', run: 'node -e ""' }] } },
+    }), 'utf8')
+    g(['add', 'teammates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    lines.length = 0
+    // `withRepo` leaves HEAD on `run-branch`, so naming that as the base is the shape an
+    // integrated run presents — the run branch and the base resolving to one name — without
+    // needing a merge to stage it.
+    const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'run-branch', '--root', root], io)
+    const out = lines.join('\n')
+    assert.notEqual(code, 0, out)
+    assert.doesNotMatch(out, /running the gate/, 'the refusal names a command the operator did not run')
+    assert.match(out, /integrated/i, 'the refusal does not name the state that most often produces it')
+    assert.match(out, /derived from HEAD/i, 'the refusal does not say where the run branch name came from')
+  })
+})
+
 test('prune-run does not recommend --enforcement-only on a manifest it would refuse', async () => {
   await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
@@ -11343,8 +11400,43 @@ const foreignOwnerOf = (dir) => async (p) => (
 // planting one socket. Node unlinks a unix socket path on `close`, so the server stays listening
 // across the call: closing it during setup would leave ENOENT and this test would pass while
 // measuring nothing.
+// The kernel copies a unix socket's path into `sun_path`, which is 108 bytes on Linux and 104 on
+// macOS and the BSDs. Over that, `listen` fails with EINVAL — and this suite's socket path is
+// built from `tmpdir()`, which is the ENVIRONMENT's: a 77-byte `TMPDIR` with nothing hostile in it
+// is enough to turn the test below red, and macOS's default `/var/folders/xx/<24>/T` already
+// spends most of the budget before this suite adds a name. Measured: with `/tmp` the claim path
+// is 60 bytes, so a default Linux run has room to spare and a long `TMPDIR` has none.
+//
+// 104 rather than 108, so the bound is the smallest of the three target platforms rather than
+// this one's.
+const SUN_PATH_MAX = 104
+
+// The first candidate base whose resulting claim path fits, or null when none does. Returning
+// null rather than the shortest candidate is deliberate: a socket path that does not fit cannot
+// be listened on at all, and a test that quietly used a too-long one would report EINVAL as
+// though the code under test had produced it.
+const socketScratchBase = (candidates, claimPathFor) => candidates.find((b) => claimPathFor(b).length < SUN_PATH_MAX) ?? null
+
+test('the socket scratch base is chosen to fit sun_path, not taken on faith', () => {
+  const claimPathFor = (base) => previewClaimPath(path.join(base, 'tm-preview-socket-AbCdEf', 'preview'), 4242)
+  const tooLong = '/tmp/' + 'a'.repeat(90)
+  assert.equal(claimPathFor(tooLong).length > SUN_PATH_MAX, true, 'the fixture base is not actually too long, so this test proves nothing')
+  assert.equal(socketScratchBase([tooLong, '/tmp'], claimPathFor), '/tmp')
+  // Order is preserved among bases that fit: the environment's own choice wins when it can.
+  assert.equal(socketScratchBase(['/tmp', '/var/tmp'], claimPathFor), '/tmp')
+  // Nothing fits: the caller must be told, not handed a path that cannot be bound.
+  assert.equal(socketScratchBase([tooLong], claimPathFor), null)
+})
+
 test('a unix socket planted at a claim name is ignored, not treated as unknown', NO_FIFO_ON_WIN32, async () => {
-  const scratch = await mkdtemp(path.join(tmpdir(), 'tm-preview-socket-'))
+  // `/tmp` as the fallback rather than a second `mkdtemp` under the same root: what has to shrink
+  // is the BASE, and on every POSIX target `/tmp` is the shortest one that certainly exists. The
+  // environment's own `tmpdir()` is tried first, so a sandbox that redirects it keeps its choice
+  // whenever the path still fits.
+  const claimPathFor = (base) => previewClaimPath(path.join(base, 'tm-preview-socket-AbCdEf', 'preview'), 4242)
+  const base = socketScratchBase([tmpdir(), '/tmp'], claimPathFor)
+  assert.notEqual(base, null, `no temp base short enough to bind a unix socket under: sun_path is ${SUN_PATH_MAX} bytes and tmpdir() is ${tmpdir()}`)
+  const scratch = await mkdtemp(path.join(base, 'tm-preview-socket-'))
   const preview = path.join(scratch, 'preview')
   await mkdir(preview)
   const server = net.createServer()

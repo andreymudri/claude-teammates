@@ -661,6 +661,11 @@ in-tree partial answer that the question should be read against.
 
 ## Found on 2026-09-01, while closing the section above
 
+> **All three closed the same day**, on branch `fix/three-new-findings`
+> (`4716059`, `cc28877`, `a171018`). The sweep that found them is a script now — see the third
+> item — and the two hazards it was missing, length and a space, are folded into it.
+
+
 - **The unix-socket owner marker cannot survive a long `TMPDIR`, and it has nothing to do with
   quoting.** Under a hostile TMPDIR long enough to matter, four tests fail on
   `listen EINVAL` — the merge-preview owner socket exceeds the ~108-byte `sun_path` limit. A
@@ -668,6 +673,17 @@ in-tree partial answer that the question should be read against.
   separates it from the injection class it was found inside. Not fixed, and recorded here so the
   next hostile-TMPDIR sweep does not chase it: at a 20-byte hostile TMPDIR the whole suite is
   green with zero injections.
+
+  **CLOSED by `4716059`, and it was two defects rather than one.** `socketScratchBase` picks the
+  first temp base whose resulting path fits `sun_path`, trying `tmpdir()` first so a sandbox that
+  redirects it keeps its choice, and returns null — a named skip, not a bind that cannot work —
+  when none fits. The second defect only appeared once length was ruled out: with a SPACE in
+  `TMPDIR`, six sites built a `file://` URL by hand, `curl` failed on the malformed URL,
+  `hooks/update-check` exited 0 as it does on any fetch failure, and the test read the zero-byte
+  cache the script had already stamped and died on `Unexpected end of JSON input` — a fetch that
+  never happened, reported as a parse bug three tests from its cause. `pathToFileURL` now, and
+  both are pinned by hostile NAMES rather than a hostile environment: the fixture is
+  `published version.json`.
 
 - **`prune-run` cannot clean a run whose branch has already been merged** — which is exactly when
   an operator wants to. With `HEAD` on `master` and the run integrated it exits on *"the run
@@ -679,12 +695,33 @@ in-tree partial answer that the question should be read against.
   redundancy per ref with `git cherry master <ref>`, bundle the doomed refs, then delete with
   `git update-ref -d <ref> <sha>` so a concurrent write is not deleted unproved.
 
+  **CLOSED by `a171018` — as two honest refusals, not as a new capability.** `--base` is checked
+  in `resolveBaseBranch`, where every consumer's `refs/heads/<name>` assumption actually lives,
+  and the refusal names the two spellings an operator reaches for. The same-branch refusal now
+  separates the two situations that produce it and carries the two commands that make a hand
+  cleanup safe. A `--run-branch` flag for `prune-run` was considered and REJECTED: `doctor` takes
+  one and is read-only, while `prune-run` runs `git branch -D` and removes worktrees, and
+  handing that path an operator-typed name reopens the class `classifyHeadRef` exists to close.
+
 - **The test suite has no injection-shape guard outside the two files that now carry one.** The
   four helpers in `tests/gate-runner.test.mjs` and the sentinel in `tests/cli.test.mjs` are each
   pinned, but nothing stops a NEW site elsewhere from interpolating a TMPDIR-derived path into a
   `shell: true` command. The measurement that found all five — run the suite under a TMPDIR named
   `h'$(echo X >> log)'x`, short enough to stay inside `sun_path`, and count the log lines — is
   cheap and is not automated.
+
+  **CLOSED by `cc28877`: `npm run test:hostile-tmpdir`, wired into CI on the two legs that can
+  measure it.** Four hazards in one directory name, and the SET is the contract rather than the
+  count, because each found something the others could not — the quote and the substitution found
+  the injections, LENGTH found the `sun_path` limit that no hostile character reaches, and a
+  SPACE found the hand-built `file://` URL. The injection COUNT is the verdict and not the
+  suite's exit code: a test can go green having executed the injected command, which 4 of the 17
+  measured executions did. Validated by reintroducing one injection — `FAIL — the injected
+  command executed 4 time(s)`, exit 1, while only 4 tests went red. It is deliberately not part
+  of `npm test` (it runs the whole suite a second time) and deliberately not a static guard (one
+  of the four shapes is built at runtime in a child process out of `process.argv`, where no
+  source-level rule reaches). It refuses win32 by name rather than reporting a clean run it
+  cannot measure.
 
 ## Review methodology — what nine rounds and five rounds bought
 
