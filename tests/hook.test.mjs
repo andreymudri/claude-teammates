@@ -10,7 +10,7 @@ import { execFileSync } from 'node:child_process'
 // `execFileSync` was rebound or shadowed to. The live-probe evidence test compares
 // against this, not against the local name.
 import * as childProcess from 'node:child_process'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 // LOADING THIS MODULE SPAWNS BASH. The accessibility probe below runs at module
 // evaluation, before any test body, so importing this file at all — a full `node --test`
@@ -1215,6 +1215,15 @@ hookTest('a notice never breaks the emitted JSON or adds a second context field'
 
 // --- update-check (the async, network-touching hook) ---------------------
 
+// A `file://` URL built by hand out of a path, which six call sites used to do, is only correct
+// while the path holds no character a URL reserves. `tmpdir()` is the ENVIRONMENT's, so it can
+// hold one: measured, a TMPDIR containing a SPACE made `curl` fail on the malformed URL, the
+// script exited 0 as it does on any fetch failure, and the test read the zero-byte cache it had
+// stamped and died on `Unexpected end of JSON input` — a fetch that never happened, reported as
+// a parse bug. `pathToFileURL` percent-encodes, and handles the drive-letter and separator
+// spellings the hand-rolled version was doing by `split`/`join`.
+const fixtureUrl = (filePath) => pathToFileURL(filePath).href
+
 function runUpdateCheck(configDir, { url, ...env } = {}) {
   // The URL is an ARGUMENT, never an environment variable: an env override would let
   // a repo's .envrc retarget the check at an attacker host on every session.
@@ -1238,10 +1247,14 @@ hookTest('update-check makes no request and writes nothing when opted out', () =
 
 hookTest('update-check writes the published version to its cache', () => {
   withConfigDir((dir) => {
-    const fixture = path.join(dir, 'published.json')
+    // The SPACE in the name is what makes this test pin `fixtureUrl` rather than merely use it.
+    // The character that broke this arrived from `tmpdir()`, which a test cannot make hostile for
+    // itself without changing the environment for every other test in the process — but a file
+    // name it can, and a space trips the identical defect one level down.
+    const fixture = path.join(dir, 'published version.json')
     writeFileSync(fixture, '{"name":"claude-teammates","version":"0.9.9"}')
     const out = runUpdateCheck(dir, {
-      url: `file:///${fixture.split(path.sep).join("/")}`,
+      url: fixtureUrl(fixture),
     })
     assert.equal(out, '')
     const cache = JSON.parse(readFileSync(path.join(stateDir(dir), 'update-check.json'), 'utf8'))
@@ -1255,7 +1268,7 @@ hookTest('update-check refuses a version that is not digits and dots', () => {
   withConfigDir((dir) => {
     const fixture = path.join(dir, 'published.json')
     writeFileSync(fixture, '<html>"version": "not-a-version"</html>')
-    runUpdateCheck(dir, { url: `file:///${fixture.split(path.sep).join("/")}` })
+    runUpdateCheck(dir, { url: fixtureUrl(fixture) })
     // The cache file DOES exist: it is stamped before the attempt so that a failing
     // check still counts against the 24h throttle. What must not exist is a
     // `published` value — the stamp is empty, so no notice can be built from it.
@@ -1269,7 +1282,7 @@ hookTest('update-check refuses a version that is not digits and dots', () => {
 hookTest('update-check throttles: a fresh cache is not overwritten', () => {
   withConfigDir((dir) => {
     const fixture = path.join(dir, 'published.json')
-    const url = `file:///${fixture.split(path.sep).join("/")}`
+    const url = fixtureUrl(fixture)
     writeFileSync(fixture, '{"version":"0.9.9"}')
     runUpdateCheck(dir, { url })
     writeFileSync(fixture, '{"version":"1.2.3"}')
@@ -2074,7 +2087,7 @@ hookTest('update-check survives HOME and CLAUDE_CONFIG_DIR both being unset', ()
   // silently make a live network request from the test suite.
   const fixture = path.join(tmpdir(), 'tm-never-fetched.json')
   writeFileSync(fixture, '{"version":"9.9.9"}')
-  const out = runUnset(updateCheckScript, [`file:///${fixture.split(path.sep).join('/')}`])
+  const out = runUnset(updateCheckScript, [fixtureUrl(fixture)])
   assert.equal(out, '')
   hookBodyRan()
 })
@@ -2100,7 +2113,7 @@ hookTest('both hooks tolerate a config dir containing a space', () => {
 hookTest('update-check throttles a FAILED check, not just a successful one', () => {
   withConfigDir((dir) => {
     const missing = path.join(dir, 'does-not-exist.json')
-    runUpdateCheck(dir, { url: `file:///${missing.split(path.sep).join("/")}` })
+    runUpdateCheck(dir, { url: fixtureUrl(missing) })
     const cachePath = path.join(stateDir(dir), 'update-check.json')
     assert.ok(existsSync(cachePath), 'a failed check must still stamp the throttle')
     assert.doesNotMatch(readFileSync(cachePath, 'utf8'), /published/)
@@ -2182,7 +2195,7 @@ hookTest('update-check leaves no temp file behind after writing its cache', () =
   withConfigDir((dir) => {
     const fixture = path.join(dir, 'published.json')
     writeFileSync(fixture, '{"version":"0.9.9"}')
-    runUpdateCheck(dir, { url: `file:///${fixture.split(path.sep).join('/')}` })
+    runUpdateCheck(dir, { url: fixtureUrl(fixture) })
     const entries = readdirSync(stateDir(dir))
     assert.deepEqual(entries.filter((e) => e.includes('update-check.json.')), [])
     assert.ok(entries.includes('update-check.json'))
