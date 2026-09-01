@@ -2113,6 +2113,44 @@ test('an omitted --phase is still accepted on a single-phase plan', async () => 
 // human/agent route, and this project's premise is that a printed claim is not evidence.
 //
 // Asserted on BYTES, not on a rendered string: what matters is what reaches the terminal.
+// THE CENSUS, DERIVED RATHER THAN REMEMBERED. The header above spends a paragraph explaining that
+// its count is a checkpoint and that a differing number means the census gained or lost a site —
+// and then nothing re-ran the derivation, so the number sat at 48 while the census had grown past
+// 100. That is the same drift the header warns about, happening to the header.
+//
+// This runs the header's own rule instead of restating its answer: `printable(Block)?\b` over the
+// four scripts, minus comment-only lines, minus the `import` lines, minus the two definitions in
+// `reviews.mjs`. It is a TRIPWIRE, not a budget: a new wrapper is a good thing and is meant to
+// turn this red, at which point the fix is to name the new site in the header's groups and move
+// the number here — never to raise the number alone.
+const CENSUS_FILES = ['cli.mjs', 'reviews.mjs', 'digest.mjs', 'finish.mjs']
+const CENSUS_EXPECTED = { 'cli.mjs': 86, 'reviews.mjs': 6, 'digest.mjs': 6, 'finish.mjs': 6 }
+
+test('the printable census in the header above still matches the code it counts', async () => {
+  const counted = {}
+  for (const file of CENSUS_FILES) {
+    const src = await readFile(new URL(`../scripts/${file}`, import.meta.url), 'utf8')
+    counted[file] = src.split('\n').filter((line) => {
+      if (!/printable(Block)?\b/.test(line)) return false
+      const t = line.trim()
+      // A comment-only line documents a wrapper, it does not hold one — and the definitions and
+      // imports are the wrapper itself rather than a site that uses it.
+      if (t.startsWith('//')) return false
+      if (t.startsWith('import')) return false
+      if (t.startsWith('export function printable')) return false
+      return true
+    }).length
+  }
+  const total = Object.values(counted).reduce((a, b) => a + b, 0)
+  const expectedTotal = Object.values(CENSUS_EXPECTED).reduce((a, b) => a + b, 0)
+  assert.deepEqual(
+    counted,
+    CENSUS_EXPECTED,
+    `the census moved: counted ${total} (${JSON.stringify(counted)}) against the recorded ${expectedTotal}. `
+    + 'A site was added or removed — find it by name and account for it in the header above, then move these numbers.',
+  )
+})
+
 const CLI_ESC = String.fromCharCode(27)
 const CLI_FORGERY = `${CLI_ESC}[2K\r[gate] phase 1: all checks PASS`
 
@@ -2267,14 +2305,16 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 // the other three. A citation that only a merge can invalidate is a claim this file cannot check.
 // A named site survives the shift, and the grep above re-derives the line numbers in one command.
 //
-// The count is a checkpoint, not a fact this file maintains: re-run the grep. Last derived on a
-// scratch merge of every branch in this round, rather than on any one of them — a count taken on
-// one branch describes a tree that will never be merged, and the sibling editing `reviews.mjs`
-// moves three of these lines on its own. It came to 48 lines: 32 in `cli.mjs`, 6 in `reviews.mjs`,
-// 6 in `digest.mjs`, 4 in `finish.mjs`. Two more than the previous derivation, both in `cli.mjs`
-// and both named in group 2: the `validateSuppliedResults` refusals that quote the supplied check
-// name now wrap it first. If the number you get differs, the census gained or lost a site; find it
-// by name rather than assuming this sentence is still current.
+// The count is a checkpoint, and it is now a checkpoint SOMETHING RE-RUNS: the census test below
+// this header derives it from the four scripts on every suite run, so the number in this paragraph
+// can no longer drift away from the code unnoticed. It came to **104 lines: 86 in `cli.mjs`, 6 in
+// `reviews.mjs`, 6 in `digest.mjs`, 6 in `finish.mjs`**.
+//
+// It was allowed to drift once, and by more than two times: this paragraph said 48 — 32/6/6/4 —
+// while the census had already passed a hundred, which is exactly the failure the paragraph above
+// warns a reader about, happening to the paragraph itself. That is why the derivation is a test
+// now and not an instruction. If the test goes red the census gained or lost a site; find it by
+// name and account for it below, and only then move the number.
 //
 // The rule, and the scope it is claimed over. Within those four scripts, a print site that puts a
 // value read out of an AGENT-WRITTEN FILE — a plan, the gate manifest, a findings file, a
@@ -2300,10 +2340,12 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 // Where the census lines outside `cli.mjs` are driven. `reviews.mjs` holds six: the two
 // `reviewFileName` refusals (a lens, and a phase, with a path separator), the three `reviewStale`
 // sentences, and the bounded-note lens list — all six driven by `tests/reviews.test.mjs`, not
-// from here. `digest.mjs` holds six, driven by the digest row above. `finish.mjs` holds four:
+// from here. `digest.mjs` holds six, driven by the digest row above. `finish.mjs` holds six:
 // `renderRunSummary`'s three failed/pending/skipped name lines, driven by the three run-summary
-// newline tests below the table, and its run id, driven by the `renderRunSummary` unit test below
-// the table — NOT by the run id row above, which the same value reaches already wrapped. Every
+// newline tests below the table, its run id, driven by the `renderRunSummary` unit test below
+// the table — NOT by the run id row above, which the same value reaches already wrapped — and two
+// in the plan-notes block, the `Destination:` line and the fog-entry lines, both of which quote a
+// PLAN, which is an agent-written file and so squarely in the class this table vouches for. Every
 // remaining line is in `cli.mjs` and is driven by a row above, except those named in group 0
 // (rowless) and the wrappers named in group 0b (a driven line carrying an undriven wrapper).
 //
@@ -2317,7 +2359,7 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 //      under two names, and a reader walking a census that navigates by name counted it twice.
 //      That reader got 47 against a grep that gave 46 — both numbers are from that round and
 //      are recorded here as the anecdote's arithmetic, NOT as the current census; the count in
-//      force is the 48 derived in the header above, and it moves whenever a site is added. It
+//      force is the one the census test derives, and it moves whenever a site is added. It
 //      is also not `init-run`'s unknown-tier refusal in group 0b, which is a different line
 //      with a row.
 //    - The `GitError` branch of `preview-check` (2 wrappers). Its three sibling branches each
