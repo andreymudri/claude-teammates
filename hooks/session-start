@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SessionStart hook for the claude-teammates plugin.
+# SessionStart hook for the fleetmates plugin.
 
 set -uo pipefail
 
@@ -40,9 +40,9 @@ fi
 # nowhere to keep state, so the notice is skipped rather than guessed at.
 STATE_DIR=""
 if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-    STATE_DIR="${CLAUDE_CONFIG_DIR}/claude-teammates"
+    STATE_DIR="${CLAUDE_CONFIG_DIR}/fleetmates"
 elif [ -n "${HOME:-}" ]; then
-    STATE_DIR="${HOME}/.claude/claude-teammates"
+    STATE_DIR="${HOME}/.claude/fleetmates"
 fi
 SEEN_FILE="${STATE_DIR}/last-seen-version"
 CACHE_FILE="${STATE_DIR}/update-check.json"
@@ -84,11 +84,11 @@ if [ -n "${installed}" ]; then
     [ -f "${SEEN_FILE}" ] && seen=$(head -n 1 "${SEEN_FILE}" 2>/dev/null)
     if [ "${seen}" != "${installed}" ]; then
         if [ -n "${seen}" ]; then
-            notice="claude-teammates updated: ${seen} -> ${installed}"
+            notice="fleetmates updated: ${seen} -> ${installed}"
         else
-            notice="claude-teammates ${installed} is active"
+            notice="fleetmates ${installed} is active"
         fi
-        notice="${notice}"$'\n'"Release notes: https://github.com/andreymudri/claude-teammates/releases/tag/v${installed}"
+        notice="${notice}"$'\n'"Release notes: https://github.com/andreymudri/fleetmates/releases/tag/v${installed}"
         # Written via a temp file and renamed, for two reasons. A plain redirect onto
         # a FIFO blocks forever with no reader, which would hang this blocking hook —
         # the `-f` guard above stops the READ, but the write needs its own defence.
@@ -114,7 +114,7 @@ if [ -n "${published}" ] && [ -n "${installed}" ] && [ "${published}" != "${inst
     newest=$(printf '%s\n%s\n' "${installed}" "${published}" | sort -V 2>/dev/null | tail -n 1)
     if [ "${newest}" = "${published}" ]; then
         [ -n "${notice}" ] && notice="${notice}"$'\n'
-        notice="${notice}claude-teammates ${published} is available (installed: ${installed}). Run /plugin update claude-teammates"
+        notice="${notice}fleetmates ${published} is available (installed: ${installed}). Run /plugin update fleetmates"
     fi
 fi
 
@@ -141,8 +141,8 @@ if [ -n "${missing}" ]; then
     # Repeated every session, not once: a broken install stays broken, and the
     # operator needs the message on the session where they hit the failure — not
     # only on the one where the version happened to change.
-    broken="WARNING: claude-teammates is installed but NOT fully working. Missing: ${missing}."
-    broken="${broken}"$'\n'"Fleet commands and phase gates will fail. Reinstall with /plugin install claude-teammates, or check the plugin directory at ${PLUGIN_ROOT}."
+    broken="WARNING: fleetmates is installed but NOT fully working. Missing: ${missing}."
+    broken="${broken}"$'\n'"Fleet commands and phase gates will fail. Reinstall with /plugin install fleetmates, or check the plugin directory at ${PLUGIN_ROOT}."
     session_context="${session_context}\n\n$(escape_for_json "${broken}")"
 elif [ -n "${notice}" ]; then
     # Only alongside a version notice: on a healthy install this is reassurance, and
@@ -153,6 +153,24 @@ fi
 if [ -n "${notice}" ]; then
     session_context="${session_context}\n\n$(escape_for_json "${notice}")"
 fi
+
+# A claude-teammates install left enabled beside this one runs its own SessionStart and
+# SubagentStop hooks too: two entrypoints injected, and an old stop hook looking for
+# .teammates/ after fleetmates has migrated it to .fleetmates/. Repeated every session,
+# like the broken-install warning, because it stays true until the operator acts.
+# `-f`, not `-r`: a FIFO planted at that path would block this synchronous hook forever.
+# legacy-name:begin
+PLUGINS_FILE=""
+if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+    PLUGINS_FILE="${CLAUDE_CONFIG_DIR}/plugins/installed_plugins.json"
+elif [ -n "${HOME:-}" ]; then
+    PLUGINS_FILE="${HOME}/.claude/plugins/installed_plugins.json"
+fi
+if [ -n "${PLUGINS_FILE}" ] && [ -f "${PLUGINS_FILE}" ] && grep -q '"claude-teammates@' "${PLUGINS_FILE}" 2>/dev/null; then
+    legacy_warning="WARNING: claude-teammates is still installed alongside fleetmates. Both plugins' hooks run every session and at every teammate stop, and the old ones look for .teammates/ after fleetmates has moved it. Run /plugin uninstall claude-teammates."
+    session_context="${session_context}\n\n$(escape_for_json "${legacy_warning}")"
+fi
+# legacy-name:end
 
 # Output context injection as JSON.
 # Cursor hooks expect additional_context (snake_case).

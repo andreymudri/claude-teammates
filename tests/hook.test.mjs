@@ -420,7 +420,7 @@ function contextWith(configDir, env = {}) {
 }
 
 function stateDir(configDir) {
-  return path.join(configDir, 'claude-teammates')
+  return path.join(configDir, 'fleetmates')
 }
 
 function withConfigDir(fn) {
@@ -1119,7 +1119,7 @@ hookTest('a missing entrypoint file produces a loud warning, valid JSON, and exi
 hookTest('reports the installed version once when no marker exists, and writes the marker', () => {
   withConfigDir((dir) => {
     const ctx = contextWith(dir)
-    assert.ok(ctx.includes(`claude-teammates ${installedVersion} is active`))
+    assert.ok(ctx.includes(`fleetmates ${installedVersion} is active`))
     assert.ok(ctx.includes(`releases/tag/v${installedVersion}`))
     const marker = readFileSync(path.join(stateDir(dir), 'last-seen-version'), 'utf8').trim()
     assert.equal(marker, installedVersion)
@@ -1154,7 +1154,7 @@ hookTest('reports a newer published version from the async check cache', () => {
     writeFileSync(path.join(stateDir(dir), 'update-check.json'), '{"published":"999.0.0","checkedAt":1}')
     const ctx = contextWith(dir)
     assert.match(ctx, /999\.0\.0 is available/)
-    assert.match(ctx, /\/plugin update claude-teammates/)
+    assert.match(ctx, /\/plugin update fleetmates/)
   })
   hookBodyRan()
 })
@@ -1245,6 +1245,17 @@ hookTest('update-check makes no request and writes nothing when opted out', () =
   hookBodyRan()
 })
 
+// The renamed variable, beside the legacy one above: an operator who opts out under the new
+// name must get the same silence as one who opted out under the old.
+hookTest('update-check makes no request and writes nothing when opted out under FLEETMATES_UPDATE_CHECK', () => {
+  withConfigDir((dir) => {
+    const out = runUpdateCheck(dir, { FLEETMATES_UPDATE_CHECK: 'off' })
+    assert.equal(out, '', 'the async hook must emit nothing')
+    assert.equal(existsSync(path.join(stateDir(dir), 'update-check.json')), false)
+  })
+  hookBodyRan()
+})
+
 hookTest('update-check writes the published version to its cache', () => {
   withConfigDir((dir) => {
     // The SPACE in the name is what makes this test pin `fixtureUrl` rather than merely use it.
@@ -1252,7 +1263,7 @@ hookTest('update-check writes the published version to its cache', () => {
     // itself without changing the environment for every other test in the process — but a file
     // name it can, and a space trips the identical defect one level down.
     const fixture = path.join(dir, 'published version.json')
-    writeFileSync(fixture, '{"name":"claude-teammates","version":"0.9.9"}')
+    writeFileSync(fixture, '{"name":"fleetmates","version":"0.9.9"}')
     const out = runUpdateCheck(dir, {
       url: fixtureUrl(fixture),
     })
@@ -2099,7 +2110,7 @@ hookTest('both hooks tolerate a config dir containing a space', () => {
   try {
     const ctx = contextWith(dir)
     assert.match(ctx, /is active/)
-    assert.ok(existsSync(path.join(dir, 'claude-teammates', 'last-seen-version')))
+    assert.ok(existsSync(path.join(dir, 'fleetmates', 'last-seen-version')))
   } finally {
     rmSync(base, { recursive: true, force: true })
   }
@@ -2125,7 +2136,7 @@ hookTest('update-check throttles a FAILED check, not just a successful one', () 
 // so a blocking read there hangs session start with no timeout.
 hookTest('session-start does not hang on a FIFO in place of a state file', () => {
   withConfigDir((dir) => {
-    const sd = path.join(dir, 'claude-teammates')
+    const sd = path.join(dir, 'fleetmates')
     mkdirSync(sd, { recursive: true })
     try {
       execFileSync('mkfifo', [path.join(sd, 'last-seen-version')], { encoding: 'utf8' })
@@ -2148,7 +2159,7 @@ hookTest('session-start does not hang on a FIFO in place of a state file', () =>
 // rather than trusted. Without that, a crafted value lands verbatim in context.
 hookTest('session-start refuses a non-version published value from the cache', () => {
   withConfigDir((dir) => {
-    const sd = path.join(dir, 'claude-teammates')
+    const sd = path.join(dir, 'fleetmates')
     mkdirSync(sd, { recursive: true })
     writeFileSync(path.join(sd, 'last-seen-version'), `${installedVersion}\n`)
     writeFileSync(
@@ -2339,6 +2350,40 @@ const hookBodyRunsAfterRegistration = hookBodyRuns
 function bodySourceMismatch(body, expectedSource) {
   return Function.prototype.toString.call(body) !== expectedSource
 }
+
+const legacyPluginsFile = (configDir) => path.join(configDir, 'plugins', 'installed_plugins.json')
+
+hookTest('a claude-teammates install left beside fleetmates is warned about', () => {
+  withConfigDir((dir) => {
+    mkdirSync(path.join(dir, 'plugins'), { recursive: true })
+    writeFileSync(legacyPluginsFile(dir), JSON.stringify({ version: 2, plugins: { 'claude-teammates@claude-teammates': [{}] } }))
+    const ctx = contextWith(dir)
+    assert.match(ctx, /claude-teammates is still installed alongside fleetmates/)
+    assert.match(ctx, /\/plugin uninstall claude-teammates/)
+  })
+  hookBodyRan()
+})
+
+hookTest('no installed-plugins file, or one without claude-teammates, means no warning', () => {
+  withConfigDir((dir) => {
+    assert.doesNotMatch(contextWith(dir), /still installed alongside/)
+    mkdirSync(path.join(dir, 'plugins'), { recursive: true })
+    writeFileSync(legacyPluginsFile(dir), JSON.stringify({ version: 2, plugins: { 'fleetmates@fleetmates': [{}] } }))
+    assert.doesNotMatch(contextWith(dir), /still installed alongside/)
+  })
+  hookBodyRan()
+})
+
+test('update-check asks the npm registry for fleetmates by default', () => {
+  const text = readFileSync(updateCheckScript, 'utf8')
+  assert.match(text, /RAW_URL="\$\{1:-https:\/\/registry\.npmjs\.org\/fleetmates\/latest\}"/)
+  assert.doesNotMatch(text, /raw\.githubusercontent\.com/)
+})
+
+test('both the new and the old opt-out variable switch the update check off', () => {
+  const text = readFileSync(updateCheckScript, 'utf8')
+  assert.match(text, /\$\{FLEETMATES_UPDATE_CHECK:-\$\{CLAUDE_TEAMMATES_UPDATE_CHECK:-1\}\}/)
+})
 
 // Registered LAST on purpose. node:test runs top-level cases in registration order, so by
 // the time this body executes every hookTest above has either run or been skipped, and

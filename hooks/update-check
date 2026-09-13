@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Async SessionStart hook: checks whether a newer claude-teammates is published.
+# Async SessionStart hook: checks whether a newer fleetmates is published.
 #
 # Emits NOTHING. It writes a cache file that hooks/session-start reads on a later
 # session. Keeping the network call out of the emitting hook is the whole point:
@@ -16,9 +16,9 @@ set -uo pipefail
 # is unset. With neither set there is nowhere to cache a result, so there is no
 # point making the request.
 if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-  STATE_DIR="${CLAUDE_CONFIG_DIR}/claude-teammates"
+  STATE_DIR="${CLAUDE_CONFIG_DIR}/fleetmates"
 elif [ -n "${HOME:-}" ]; then
-  STATE_DIR="${HOME}/.claude/claude-teammates"
+  STATE_DIR="${HOME}/.claude/fleetmates"
 else
   exit 0
 fi
@@ -29,13 +29,17 @@ THROTTLE_SECONDS=86400
 # could point every session at an attacker host, and the attacker would then
 # control the version string printed into session context. Nothing sets argv here
 # except the test suite, which passes a file:// fixture so it never hits the network.
-RAW_URL="${1:-https://raw.githubusercontent.com/andreymudri/claude-teammates/master/.claude-plugin/plugin.json}"
+RAW_URL="${1:-https://registry.npmjs.org/fleetmates/latest}"
 
 # Opt-out is checked first, before anything else: a disabled install makes no
-# request at all, rather than making one and discarding the result.
-case "${CLAUDE_TEAMMATES_UPDATE_CHECK:-1}" in
+# request at all, rather than making one and discarding the result. The old
+# variable is still read: a rename must never switch a network call back on for
+# someone who turned it off.
+# legacy-name:begin
+case "${FLEETMATES_UPDATE_CHECK:-${CLAUDE_TEAMMATES_UPDATE_CHECK:-1}}" in
   0|false|no|off) exit 0 ;;
 esac
+# legacy-name:end
 
 now=$(date +%s 2>/dev/null) || exit 0
 
