@@ -13,7 +13,8 @@ test('marketplace manifest names the same plugin as plugin.json', async () => {
   const plugin = await readJson('../.claude-plugin/plugin.json')
   const entry = marketplace.plugins.find((p) => p.name === plugin.name)
   assert.ok(entry, `marketplace.json does not list ${plugin.name}`)
-  assert.equal(entry.source, './')
+  assert.equal(marketplace.name, 'fleetmates')
+  assert.deepEqual(entry.source, { source: 'npm', package: 'fleetmates' })
 })
 
 test('third-party license text is present and names the upstream author', async () => {

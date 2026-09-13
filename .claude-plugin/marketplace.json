@@ -1,12 +1,15 @@
 {
-  "name": "claude-teammates",
+  "name": "fleetmates",
   "owner": {
     "name": "andreymudri"
   },
   "plugins": [
     {
-      "name": "claude-teammates",
-      "source": "./",
+      "name": "fleetmates",
+      "source": {
+        "source": "npm",
+        "package": "fleetmates"
+      },
       "description": "Runs a written plan across background teammates, each in its own git worktree, with an automated gate between phases: brainstorming, planning, TDD, debugging, parallel execution, and supervision."
     }
   ]

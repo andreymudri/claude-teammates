@@ -861,7 +861,7 @@ jobs:
 
 `hooks/session-start` lines 8, 26 and 28 name the `using-teammates` skill; they belong to Task 5, which renames that skill. Leave them. Every other product-name string in the two hooks changes here.
 
-- [ ] **Step 1:** In `tests/hook.test.mjs`, change the `stateDir` helper (currently `return path.join(configDir, 'claude-teammates')`) to `return path.join(configDir, 'fleetmates')`; change the notice assertions `claude-teammates ${installedVersion} is active` to `fleetmates ${installedVersion} is active` and `/\/plugin update claude-teammates/` to `/\/plugin update fleetmates/`. Then add these tests at the end of the file, and run `node --test tests/hook.test.mjs` to watch the changed and new ones fail on the old strings and the missing warning.
+- [ ] **Step 1:** In `tests/hook.test.mjs`, change the `stateDir` helper (currently `return path.join(configDir, 'claude-teammates')`) to `return path.join(configDir, 'fleetmates')`; change the notice assertions `claude-teammates ${installedVersion} is active` to `fleetmates ${installedVersion} is active` and `/\/plugin update claude-teammates/` to `/\/plugin update fleetmates/`. Then add these tests immediately above the `// Registered LAST on purpose.` comment — the `(mechanism)` test below it must stay the last registration, and every `hookTest` body must end with `hookBodyRan()` or that test fails. Also add, beside the existing `update-check makes no request and writes nothing when opted out` test, the same test run with `{ FLEETMATES_UPDATE_CHECK: 'off' }`. Run `node --test tests/hook.test.mjs` to watch the changed and new ones fail on the old strings and the missing warning.
 
 ```js
 const legacyPluginsFile = (configDir) => path.join(configDir, 'plugins', 'installed_plugins.json')
@@ -874,6 +874,7 @@ hookTest('a claude-teammates install left beside fleetmates is warned about', ()
     assert.match(ctx, /claude-teammates is still installed alongside fleetmates/)
     assert.match(ctx, /\/plugin uninstall claude-teammates/)
   })
+  hookBodyRan()
 })
 
 hookTest('no installed-plugins file, or one without claude-teammates, means no warning', () => {
@@ -883,6 +884,7 @@ hookTest('no installed-plugins file, or one without claude-teammates, means no w
     writeFileSync(legacyPluginsFile(dir), JSON.stringify({ version: 2, plugins: { 'fleetmates@fleetmates': [{}] } }))
     assert.doesNotMatch(contextWith(dir), /still installed alongside/)
   })
+  hookBodyRan()
 })
 
 test('update-check asks the npm registry for fleetmates by default', () => {

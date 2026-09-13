@@ -7,7 +7,7 @@ const root = fileURLToPath(new URL('..', import.meta.url))
 
 test('plugin manifest declares the plugin name', async () => {
   const manifest = JSON.parse(await readFile(new URL('../.claude-plugin/plugin.json', import.meta.url), 'utf8'))
-  assert.equal(manifest.name, 'claude-teammates')
+  assert.equal(manifest.name, 'fleetmates')
 })
 
 test('package is ESM and has no dependencies', async () => {
