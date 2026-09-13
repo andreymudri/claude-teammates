@@ -3864,10 +3864,14 @@ export async function runCli(argv, io = { out: console.log }) {
       //     repository, which is why the force-removal a few lines up WAS reached. Do not read
       //     the surviving branch as evidence that this path was safe.
       //   - Proof-to-delete. The sha is proved and then deleted BY NAME, so a write to
-      //     refs/heads/<branch> in between is deleted unproved. Closing it needs a
-      //     compare-and-swap (`git update-ref -d <ref> <proved sha>`), which needs a helper
-      //     scripts/git.mjs does not have. There is no tracking issue for that helper: this
-      //     comment is the record.
+      //     refs/heads/<branch> in between is deleted unproved. A compare-and-swap
+      //     (`git update-ref -d <ref> <proved sha>`) would close it, and was DECIDED AGAINST on
+      //     2026-09-13 after measuring what it gives up on git 2.55.0: `update-ref -d` deletes a
+      //     branch a worktree still has checked out (exit 0, the worktree left on an unborn
+      //     branch) where `branch -D` refuses with `used by worktree`, and it leaves
+      //     `branch.<name>.*` config behind. That refusal is the one guard this loop leans on if
+      //     the worktree removal above did not take; trading it for a two-command window is the
+      //     wrong way round. This comment is the record, and the decision is not to re-litigate.
       //   - The run branch can still move between this resolve and the `-D` on the same
       //     iteration, and between one iteration and the next. Per-iteration shrinks that window
       //     to two git commands; it does not remove it. What is left is the honest race alone:

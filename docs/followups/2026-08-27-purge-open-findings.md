@@ -598,6 +598,10 @@ in-tree partial answer that the question should be read against.
   measurable*, which is precisely why the comment forbids describing it as defence. The question of
   whether a detector
   that can only fire on an honest race earns a refusal path is unanswered.
+
+  **DECIDED 2026-09-13: keep it.** When it fires, the run branch moved between two resolves, and
+  every range `derive` hands on would be computed over a snapshot that no longer exists; refusing
+  is the fail-closed answer to that, and it costs one resolve. Removing it buys nothing measurable.
 - **Does the compare-and-swap deletion (`git update-ref -d <ref> <proved sha>`) belong in
   `scripts/git.mjs` now, or does the symbolic resolution shrink that residual far enough to leave it
   as a recorded carry-over?** Currently a recorded carry-over, at `scripts/cli.mjs:3815-3819`: *"The
@@ -606,6 +610,14 @@ in-tree partial answer that the question should be read against.
   neighbouring bullet notes what the resolution did buy — the redirected-name case this used to be
   paired with is closed, so a move inside the window is now something that moved the real run
   branch.
+
+  **DECIDED 2026-09-13: not built.** Measured on git 2.55.0 in a scratch repository:
+  `git update-ref -d refs/heads/t <sha>` on a branch a worktree has checked out exits 0 and leaves
+  that worktree on an unborn branch, where `git branch -D t` refuses with `cannot delete branch 't'
+  used by worktree`; it also leaves `branch.t.*` config behind. The wrong-sha arm does refuse
+  (`is at … but expected …`). So the swap closes a two-command window by removing the refusal the
+  prune loop relies on when a worktree removal did not take. Recorded at the comment in
+  `scripts/cli.mjs` where the residual lives.
 
 ## Tooling defects found while running, unrelated to the plan
 
