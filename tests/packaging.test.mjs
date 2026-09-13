@@ -39,7 +39,7 @@ test('NOTICE lists every adapted skill and no skill that does not exist', async 
 
 test('NOTICE marks the original skills as original', async () => {
   const notice = await readFile(new URL('../NOTICE.md', import.meta.url), 'utf8')
-  for (const name of ['writing-plans', 'finishing-a-development-branch', 'using-teammates']) {
+  for (const name of ['writing-plans', 'finishing-a-development-branch', 'using-fleetmates']) {
     assert.ok(notice.includes(name), `NOTICE.md omits original skill ${name}`)
   }
 })
@@ -91,11 +91,11 @@ async function snapshot(dir, prefix = '') {
 
 // The behavioural counterpart to the prose assertion above. That assertion is a regex over the
 // README's own text and stays green no matter what `prune-run` actually does to
-// `.teammates/<run-id>/` — a reviewer proved this by adding an `rm` of that directory to
+// `.fleetmates/<run-id>/` — a reviewer proved this by adding an `rm` of that directory to
 // `prune-run`'s handler and watching the full suite, this file included, stay green. This test
 // builds a real run, prunes it with `--yes`, and checks the directory and its files are still on
 // disk afterwards — the one thing the README's claim is actually about.
-test('prune-run --yes leaves .teammates/<run-id>/ and its files on disk', async () => {
+test('prune-run --yes leaves .fleetmates/<run-id>/ and its files on disk', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'tm-packaging-prune-'))
   try {
     git(root, ['init', '--quiet', '--initial-branch=main'])
@@ -104,7 +104,7 @@ test('prune-run --yes leaves .teammates/<run-id>/ and its files on disk', async 
     const planPath = path.join(root, 'plan.md')
     await writeFile(planPath, PLAN, 'utf8')
     await writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'x' }), 'utf8')
-    await writeFile(path.join(root, '.gitignore'), '.teammates/\n', 'utf8')
+    await writeFile(path.join(root, '.gitignore'), '.fleetmates/\n', 'utf8')
     git(root, ['add', '.'])
     git(root, ['commit', '--quiet', '-m', 'initial'])
     git(root, ['checkout', '--quiet', '-b', 'run-branch'])
@@ -112,21 +112,21 @@ test('prune-run --yes leaves .teammates/<run-id>/ and its files on disk', async 
     const io = { out: () => {}, err: () => {} }
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
 
-    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({
+    await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
       phases: { default: { checks: [{ name: 'fileset', kind: 'fileset' }] } },
     }), 'utf8')
-    git(root, ['add', 'teammates.gate.json'])
+    git(root, ['add', 'fleetmates.gate.json'])
     git(root, ['commit', '--quiet', '-m', 'manifest'])
-    git(root, ['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    git(root, ['checkout', '--quiet', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
     git(root, ['add', 'a.mjs'])
     git(root, ['commit', '--quiet', '-m', 'T1 work'])
     git(root, ['checkout', '--quiet', 'run-branch'])
-    git(root, ['merge', '--no-ff', '--quiet', '-m', 'integrate T1', 'teammates/r1/T1'])
+    git(root, ['merge', '--no-ff', '--quiet', '-m', 'integrate T1', 'fleetmates/r1/T1'])
     const wtPath = path.join(root, '.claude', 'worktrees', 'a1')
-    git(root, ['worktree', 'add', '--quiet', wtPath, 'teammates/r1/T1'])
+    git(root, ['worktree', 'add', '--quiet', wtPath, 'fleetmates/r1/T1'])
 
-    const runDir = path.join(root, '.teammates', 'r1')
+    const runDir = path.join(root, '.fleetmates', 'r1')
     assert.ok(
       (await readdir(runDir)).length > 0,
       'init-run must have written run state for this test to pin its survival',
@@ -134,7 +134,7 @@ test('prune-run --yes leaves .teammates/<run-id>/ and its files on disk', async 
 
     // The shape a run that has been through a review round actually has on disk: `collect-reviews`
     // resolves its drop directory as `runDir(root, runId)` joined with `reviews`, so any such run
-    // carries `.teammates/<run-id>/reviews/`. `init-run` alone writes files and no subdirectory, so
+    // carries `.fleetmates/<run-id>/reviews/`. `init-run` alone writes files and no subdirectory, so
     // pinning retention against its output would leave the realistic shape unpinned.
     await mkdir(path.join(runDir, 'reviews'), { recursive: true })
     await writeFile(path.join(runDir, 'reviews', 'phase-1-claims.json'), '{"findings":[]}\n', 'utf8')
@@ -150,7 +150,7 @@ test('prune-run --yes leaves .teammates/<run-id>/ and its files on disk', async 
     assert.deepEqual(
       await snapshot(runDir),
       before,
-      '.teammates/r1 must hold the same entries, nested entries and contents after prune-run --yes',
+      '.fleetmates/r1 must hold the same entries, nested entries and contents after prune-run --yes',
     )
   } finally {
     await rm(root, { recursive: true, force: true })

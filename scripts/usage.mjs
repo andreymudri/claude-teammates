@@ -96,7 +96,8 @@ export function renderUsage(report) {
 
   // Truncated, not just padded. A value wider than its column runs into the next one and the
   // table stops being readable in exactly the case that matters — a fully-qualified agent type
-  // like `claude-teammates:tm-integrator` is 30 characters. One trailing space keeps a truncated
+  // like `fleetmates:tm-integrator` is 24 characters, and a longer plugin or agent name overruns
+  // its column. One trailing space keeps a truncated
   // cell from touching its neighbour.
   const fit = (text, width, right) => {
     const value = String(text)

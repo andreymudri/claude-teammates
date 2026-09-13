@@ -1,3 +1,4 @@
+import { NAMES } from './names.mjs'
 import { spawn } from 'node:child_process'
 // `printable` only. scripts/reviews.mjs imports NOTHING — it is a leaf — so this cannot cycle back
 // through git.mjs and drags no other module in with it. Wrapping at this single point rather than
@@ -187,7 +188,7 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
 
   // --end-of-options blocks flag injection but not NAMESPACE PRECEDENCE: git resolves a bare
   // name through refs/tags/ BEFORE refs/heads/, warns on stderr only, and exits 0. One
-  // ordinary `git tag teammates/r1/T1 <fork-point>` inside a teammate's own worktree is
+  // ordinary `git tag fleetmates/r1/T1 <fork-point>` inside a teammate's own worktree is
   // therefore enough to make `worktree add` check out, and `merge` merge, a commit that
   // carries none of the teammate's work — the gate then runs the suite against a tree missing
   // the code it is meant to be testing and records a pass. It also fires by accident wherever
@@ -747,5 +748,5 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
 }
 
 export function teammateRef(runId, taskId) {
-  return `refs/teammates/${runId}/${taskId}`
+  return `${NAMES.refPrefix}/${runId}/${taskId}`
 }

@@ -1,3 +1,4 @@
+import { NAMES } from './names.mjs'
 import { resolveTaskBranch } from './enforce.mjs'
 import { GitError } from './git.mjs'
 import { mergedParentFiles, landedForFiles, creditRunTipTasks, resolveTaskShas, spentParents } from './gate-runner.mjs'
@@ -63,7 +64,7 @@ export async function collectDoctorReport({ git, runId, runBranch, baseBranch, t
   const worktrees = await git.worktrees()
   for (const wt of worktrees) {
     if (wt.branch && HARNESS_BRANCH.test(wt.branch)) {
-      problems.push(`worktree ${wt.path} holds ${wt.branch} — a commit landing there instead of on teammates/<runId>/<taskId> leaves the conventional ref empty, and the task merges as a no-op`)
+      problems.push(`worktree ${wt.path} holds ${wt.branch} — a commit landing there instead of on ${NAMES.branchPrefix}/<runId>/<taskId> leaves the conventional ref empty, and the task merges as a no-op`)
     }
     if (insideRepo(wt.path, repoRoot) && !HARNESS_DIR.test(`${wt.path}/`)) {
       problems.push(`worktree ${wt.path} is inside the repository — anything but the harness's own .claude/ directory shows up as untracked content in the main worktree and fails ownership for the whole run`)

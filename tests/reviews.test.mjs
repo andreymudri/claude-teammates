@@ -120,7 +120,7 @@ async function collectWith({ phase, lens }) {
       lens: [lens],
       phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', blockOn: ['high'] }] } },
     }
-    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(config), 'utf8')
+    await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify(config), 'utf8')
     const lines = []
     const code = await runCli(
       ['collect-reviews', '--run', 'r1', '--phase', phase, '--root', root],
@@ -232,14 +232,14 @@ test('the output names the lens each finding came from', () => {
   assert.deepEqual(out.results[0].findings.map((f) => f.lens), ['correctness', 'security'])
 })
 
-const STAMP = { phase: '1', branches: ['teammates/r1/T1@aaa', 'teammates/r1/T2@bbb'] }
+const STAMP = { phase: '1', branches: ['fleetmates/r1/T1@aaa', 'fleetmates/r1/T2@bbb'] }
 
 test('a stamp names the phase, the lens and every branch tip it judged', () => {
-  const s = reviewStamp({ phase: 1, lens: 'tests', branchShas: { 'teammates/r1/T2': 'bbb', 'teammates/r1/T1': 'aaa' } })
+  const s = reviewStamp({ phase: 1, lens: 'tests', branchShas: { 'fleetmates/r1/T2': 'bbb', 'fleetmates/r1/T1': 'aaa' } })
   assert.equal(s.phase, '1')
   assert.equal(s.lens, 'tests')
   // Sorted, so two runs over the same tips produce the same stamp.
-  assert.deepEqual(s.branches, ['teammates/r1/T1@aaa', 'teammates/r1/T2@bbb'])
+  assert.deepEqual(s.branches, ['fleetmates/r1/T1@aaa', 'fleetmates/r1/T2@bbb'])
 })
 
 test('a stamp matching the current tips is not stale', () => {
@@ -249,8 +249,8 @@ test('a stamp matching the current tips is not stale', () => {
 // The exact failure this closes: a fix round moves a branch, the old findings file stays on disk.
 test('findings describing an older branch tip are stale and say which', () => {
   const why = reviewStale(
-    { stamp: { phase: '1', lens: 'tests', branches: ['teammates/r1/T1@aaa'] } },
-    { phase: '1', lens: 'tests', branches: ['teammates/r1/T1@ccc'] },
+    { stamp: { phase: '1', lens: 'tests', branches: ['fleetmates/r1/T1@aaa'] } },
+    { phase: '1', lens: 'tests', branches: ['fleetmates/r1/T1@ccc'] },
   )
   assert.match(why, /aaa/)
   assert.match(why, /ccc/)
@@ -296,8 +296,8 @@ test('a stale lens is reported and never contributes a pass', () => {
   const out = collectReviewResults({
     checkName: 'review',
     lenses: ['correctness'],
-    files: [{ lens: 'correctness', findings: [], stamp: { phase: '1', lens: 'correctness', branches: ['teammates/r1/T1@old'] } }],
-    expected: { phase: '1', branches: ['teammates/r1/T1@new'] },
+    files: [{ lens: 'correctness', findings: [], stamp: { phase: '1', lens: 'correctness', branches: ['fleetmates/r1/T1@old'] } }],
+    expected: { phase: '1', branches: ['fleetmates/r1/T1@new'] },
     blockOn: ['high'],
   })
   assert.deepEqual(out.results, [])
@@ -696,8 +696,8 @@ test('a stale reason cannot carry an escape sequence out of the phase or the bra
   assertNoEscapeBytes(byPhase)
   assertNoForgedGateLine(byPhase)
   const byBranch = reviewStale(
-    { stamp: { phase: '1', lens: 'tests', branches: [`teammates/r1/T1@aaa${FORGERY}`] } },
-    { phase: '1', lens: 'tests', branches: ['teammates/r1/T1@ccc'] },
+    { stamp: { phase: '1', lens: 'tests', branches: [`fleetmates/r1/T1@aaa${FORGERY}`] } },
+    { phase: '1', lens: 'tests', branches: ['fleetmates/r1/T1@ccc'] },
   )
   assertNoEscapeBytes(byBranch)
   assertNoForgedGateLine(byBranch)
@@ -713,8 +713,8 @@ test('neutralising a printed value does not change what reviewStale compares', (
   )
   assert.match(
     reviewStale(
-      { stamp: { phase: '1', lens: 'tests', branches: [`teammates/r1/T1@aaa${String.fromCharCode(27)}`] } },
-      { phase: '1', lens: 'tests', branches: ['teammates/r1/T1@aaa'] },
+      { stamp: { phase: '1', lens: 'tests', branches: [`fleetmates/r1/T1@aaa${String.fromCharCode(27)}`] } },
+      { phase: '1', lens: 'tests', branches: ['fleetmates/r1/T1@aaa'] },
     ),
     /judged/,
   )

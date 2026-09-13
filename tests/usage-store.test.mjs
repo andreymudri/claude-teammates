@@ -40,7 +40,7 @@ test('reads per-agent totals and takes the role from the meta file', async () =>
   await withStore(async ({ projectsDir }) => {
     const report = await readSessionUsage({ projectsDir, root: FAKE_ROOT })
     assert.equal(report.sessionId, 'sess-1')
-    const reviewer = report.agents.find((a) => a.agentType === 'claude-teammates:tm-reviewer')
+    const reviewer = report.agents.find((a) => a.agentType === 'fleetmates:tm-reviewer')
     assert.ok(reviewer, 'the meta file must supply the agent role')
     assert.equal(reviewer.model, 'opus')
     assert.equal(reviewer.turns, 2)
@@ -48,7 +48,7 @@ test('reads per-agent totals and takes the role from the meta file', async () =>
   }, {
     files: {
       'agent-a.jsonl': [line({ cache_read_input_tokens: 100 }), line({ cache_read_input_tokens: 200 })].join('\n'),
-      'agent-a.meta.json': JSON.stringify({ agentType: 'claude-teammates:tm-reviewer', model: 'opus' }),
+      'agent-a.meta.json': JSON.stringify({ agentType: 'fleetmates:tm-reviewer', model: 'opus' }),
     },
   })
 })

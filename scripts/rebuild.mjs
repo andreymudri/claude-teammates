@@ -1,6 +1,6 @@
 // Reconstructing a run's `plan.json` and `status.json` from git and the plan.
 //
-// `.teammates/` is gitignored, so a clean checkout, a pruned worktree, or a corrupted write loses
+// `.fleetmates/` is gitignored, so a clean checkout, a pruned worktree, or a corrupted write loses
 // the run's bookkeeping — and until now that was unrecoverable by anything but hand-editing JSON.
 // Nothing in the design actually needs those files to be durable: the gate derives the anchor,
 // the phase and every verdict from git, `status.gates` has no reader, and `complete` recomputes

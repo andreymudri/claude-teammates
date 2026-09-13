@@ -41,7 +41,7 @@ const results = await parallel(TASKS.map((t) => () =>
       phase: 'Implement',
       schema: RESULT_SCHEMA,
       isolation: 'worktree',
-      agentType: 'claude-teammates:tm-implementer',
+      agentType: 'fleetmates:tm-implementer',
       ...(t.model ? { model: t.model } : {}),
       ...(EFFORT ? { effort: EFFORT } : {}),
     },

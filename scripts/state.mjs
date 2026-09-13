@@ -1,10 +1,13 @@
+// Aliased: this module already has a `NAMES` — the set of state file names it reads and writes.
+import { NAMES as ON_DISK } from './names.mjs'
 import { mkdir, open, readFile, writeFile, rename, unlink } from 'node:fs/promises'
 import { constants, realpathSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
-// The single definition of `teammates/<runId>/<taskId>`. Imported rather than restated so the
+// The single definition of `fleetmates/<runId>/<taskId>`. Imported rather than restated so the
 // branch a record is allowed to name cannot drift from the branch the run actually uses.
-// enforce.mjs imports nothing, so this costs the stop-time hook no extra module graph.
+// enforce.mjs imports only names.mjs, which imports nothing, so this costs the stop-time hook no
+// extra module graph.
 import { taskBranchName } from './enforce.mjs'
 
 const NAMES = new Set(['plan', 'status', 'findings'])
@@ -37,7 +40,7 @@ const { O_RDONLY } = constants
 const O_NONBLOCK = constants.O_NONBLOCK ?? 0
 
 export function runDir(root, runId) {
-  return path.join(root, '.teammates', runId)
+  return path.join(root, ON_DISK.stateDir, runId)
 }
 
 function statePath(root, runId, name) {
@@ -78,7 +81,7 @@ export async function claimTask(root, runId, taskId, teammate) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Worktree location records: `.teammates/index/<sha256 of the normalised worktree>.json`.
+// Worktree location records: `.fleetmates/index/<sha256 of the normalised worktree>.json`.
 //
 // Both callers ship. `cli.mjs` writes a record from `locate`, and `scripts/subagent-stop.mjs` reads
 // one through `findTaskByWorktree` to resolve a stopping teammate to its task — that lookup, not the
@@ -151,7 +154,7 @@ export function normaliseWorktree(p, { resolveLinks = true } = {}) {
 }
 
 // Whether a path is safe to hand to realpath. A record's worktree is attacker-supplied — anyone
-// with a shell can write a file under `.teammates/` — and a UNC path to an unreachable host is
+// with a shell can write a file under `.fleetmates/` — and a UNC path to an unreachable host is
 // the measured stall above. Ten such records would keep every stop inside this lookup for
 // minutes, past the hook's own timeout, which switches enforcement off for the whole run at no
 // cost to whoever wrote them. What this predicate buys is that the obvious network spellings —
@@ -193,7 +196,7 @@ function relativeInside(baseDir, value) {
 
 // Containment only — nesting allowed. This is `assertContained`'s semantics from
 // scripts/cli.mjs:633, and it has to be, because `init-run --run 2026/substop` is accepted
-// there and creates `.teammates/2026/substop/`. A stricter rule here would throw for a run the
+// there and creates `.fleetmates/2026/substop/`. A stricter rule here would throw for a run the
 // CLI legitimately made, `locate` would abort, and enforcement would be off for that whole run.
 function isContained(baseDir, value) {
   return relativeInside(baseDir, value) !== null
@@ -251,7 +254,7 @@ function isIdComponent(component) {
 // syntax wherever it appears: `a..b` inside one component matters as much as a `..` component.
 //
 // A non-NFC id is REFUSED, not folded. Folding was worse than the problem: nothing else in the
-// repository normalises — `init-run` creates `.teammates/<runId>/` byte-exactly and
+// repository normalises — `init-run` creates `.fleetmates/<runId>/` byte-exactly and
 // `taskBranchName` builds the ref byte-exactly — so a folded id names a directory that does not
 // exist and recomputes a branch that is not the one git holds. Refusing is a closed rule: it
 // changes nothing behind the caller's back, and it cannot drift from consumers that do not
@@ -269,9 +272,9 @@ function isIdPath(value, { maxBytes }) {
 
 // A run id may nest, because init-run creates nested ones. A task id is one component, which
 // `isSegment` below is what enforces.
-const isRunId = (root, runId) => isContained(path.join(root, '.teammates'), runId)
+const isRunId = (root, runId) => isContained(path.join(root, ON_DISK.stateDir), runId)
   && isIdPath(runId, { maxBytes: MAX_RUN_ID_BYTES })
-const isTaskId = (root, taskId) => isSegment(path.join(root, '.teammates'), taskId)
+const isTaskId = (root, taskId) => isSegment(path.join(root, ON_DISK.stateDir), taskId)
   && isIdPath(taskId, { maxBytes: MAX_TASK_ID_BYTES })
 
 // A worktree path is not an id — it comes from the filesystem, and both filesystems permit
@@ -298,10 +301,10 @@ const shown = (value) => JSON.stringify(String(value))
 // refuses: a record that could be written but never read would take a worktree's enforcement
 // away silently.
 function assertIds(root, runId, taskId) {
-  if (!isContained(path.join(root, '.teammates'), runId)) {
+  if (!isContained(path.join(root, ON_DISK.stateDir), runId)) {
     throw new Error(`--run ${shown(runId)} escapes the run directory`)
   }
-  if (!isSegment(path.join(root, '.teammates'), taskId)) {
+  if (!isSegment(path.join(root, ON_DISK.stateDir), taskId)) {
     throw new Error(`--task ${shown(taskId)} escapes the run directory`)
   }
   if (!isRunId(root, runId)) throw new Error(`--run ${shown(runId)} is not a usable run id`)
@@ -320,7 +323,7 @@ export function worktreeKey(worktree, options) {
 }
 
 export function indexDir(root) {
-  return path.join(root, '.teammates', 'index')
+  return path.join(root, ON_DISK.stateDir, 'index')
 }
 
 // Written by the teammate at start through `cli.mjs locate`, and read by the stop-time hook.
@@ -510,9 +513,9 @@ export async function releaseClaim(root, runId, taskId) {
 // tokens; it cannot produce a false PASS, because every verdict is recomputed from git.
 //
 // State the bound precisely, because the obvious phrasing is wrong: the gate does NOT read
-// nothing under .teammates/ — `gate` and `complete` both read status.json (scripts/cli.mjs:3463
+// nothing under .fleetmates/ — `gate` and `complete` both read status.json (scripts/cli.mjs:3463
 // and :3652). What holds is the half that matters: no forgery here manufactures a PASS. The
-// files under .teammates/ are read for bookkeeping, and a corrupt one fails the run CLOSED —
+// files under .fleetmates/ are read for bookkeeping, and a corrupt one fails the run CLOSED —
 // non-JSON in status.json makes readState rethrow, and gate then reports FAIL with `run-state`
 // among the failures and exits 1 even with every check passing. Denial, not escalation.
 //

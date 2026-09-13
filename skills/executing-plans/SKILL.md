@@ -9,13 +9,13 @@ _Adapted from the MIT-licensed superpowers plugin by Jesse Vincent. See NOTICE.m
 
 Execute a written plan inline, in this session, task by task, checkpointing with your human
 partner as you go. This is the counterpart to `parallel-execution`: same run state, different
-cadence. Use `using-teammates` to decide which one applies before reaching for this skill.
+cadence. Use `using-fleetmates` to decide which one applies before reaching for this skill.
 
 ## 1. Initialize the run
 
     node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" init-run <planPath> --run <runId> --root <project root>
 
-This writes `.teammates/<runId>/plan.json` and `status.json` — the same shared state a fleet
+This writes `.fleetmates/<runId>/plan.json` and `status.json` — the same shared state a fleet
 run would write. Because of that:
 
 - `node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" digest --run <runId> --root <project root>`
@@ -41,7 +41,7 @@ plan. Report what changed, what you verified, and any deviation from the plan be
 
 ### Gate manifest is optional here
 
-A fleet phase demands a `teammates.gate.json` manifest before it will pass. Inline work does
+A fleet phase demands a `fleetmates.gate.json` manifest before it will pass. Inline work does
 not need one. When no manifest exists, checkpoint against the plan's own verification steps
 instead of demanding one be written first.
 
@@ -63,7 +63,7 @@ repeatedly. Ask rather than guess.
 
 ## Remember
 
-- Shared state with the fleet path: `.teammates/<run-id>/`, `init-run`, `digest`, resumable via
+- Shared state with the fleet path: `.fleetmates/<run-id>/`, `init-run`, `digest`, resumable via
   `fleet-lifecycle`.
 - Checkpoint per task or per batch, with the user — not per phase, not automated.
 - No gate manifest required; the plan's own verification steps stand in for one.

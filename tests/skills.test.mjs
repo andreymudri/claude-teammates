@@ -5,7 +5,7 @@ import { assertClaim, assertStatement, parseDoc } from './md-contract.mjs'
 import { STALL_HINT, renderLiveness } from '../scripts/liveness.mjs'
 
 const dir = new URL('../skills/', import.meta.url)
-const REQUIRED = ['fleet-lifecycle', 'fleet-supervision', 'parallel-execution', 'phase-gate', 'using-teammates']
+const REQUIRED = ['fleet-lifecycle', 'fleet-supervision', 'parallel-execution', 'phase-gate', 'using-fleetmates']
 
 async function allSkills() {
   return (await readdir(dir, { withFileTypes: true }))
@@ -66,8 +66,8 @@ test('every agent referenced by a skill exists', async () => {
 })
 
 test('the entrypoint routes to all four working skills', async () => {
-  const { body } = await skill('using-teammates')
-  for (const name of REQUIRED.filter((n) => n !== 'using-teammates')) {
+  const { body } = await skill('using-fleetmates')
+  for (const name of REQUIRED.filter((n) => n !== 'using-fleetmates')) {
     assert.ok(body.includes(name), `entrypoint does not route to ${name}`)
   }
 })

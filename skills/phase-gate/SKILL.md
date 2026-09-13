@@ -15,9 +15,9 @@ Exit codes: `0` PASS, `1` FAIL, `2` the manifest is broken, `3` no manifest (an 
 was printed).
 
 On exit 3, show the user the inferred manifest, get confirmation, and save it as
-`teammates.gate.json`. Never invent checks silently.
+`fleetmates.gate.json`. Never invent checks silently.
 
-Exit 2 is not a verdict — nothing was judged. `teammates.gate.json` is present and malformed,
+Exit 2 is not a verdict — nothing was judged. `fleetmates.gate.json` is present and malformed,
 and the message names the file and what is wrong with it. Show that message and stop; do not
 re-run the gate, and never save an inferred manifest over the broken one, which would discard
 the checks the operator meant to fix. `complete` and `fix` read the same manifest and exit 2
@@ -55,7 +55,7 @@ those you execute:
       session's effort. Only effort falls back this way.
 
   Name a findings path per lens in the dispatch —
-  `.teammates/<runId>/reviews/<phase>-<lens>.json` — which the reviewer writes before it
+  `.fleetmates/<runId>/reviews/<phase>-<lens>.json` — which the reviewer writes before it
   returns. The response stays the interface: read it first, and read that file before
   respawning a reviewer that idled without returning one. A file present with no response is a
   recovered review, not a fresh one; record it as recovered. Neither an absent response nor an
@@ -80,7 +80,7 @@ those you execute:
   writes a non-integer phase; a plan is agent-written, which is why the case is stated here.
 
   It prints a `--results` file with `source: "file"`, applying the manifest's own `blockOn`. It
-  also writes that same document to `.teammates/<runId>/reviews/results-<phase>.json` and prints
+  also writes that same document to `.fleetmates/<runId>/reviews/results-<phase>.json` and prints
   that path last, so the `gate --results <path>` that follows names a file that exists — run
   without a redirect and without this, the review check stays `pending` forever while the gate
   reports FAIL with an empty `failed` list, naming nothing to fix. Pass the written path, not a
@@ -237,7 +237,7 @@ exit status.
 
 `--verdict` names a file holding that same JSON, and `--phase` must match its own `phase` field —
 a mismatch exits 2 rather than adjudicating the wrong phase's findings, and so does a malformed
-`teammates.gate.json`. Exit 1 means the run has no plan at all or the verdict file could not be
+`fleetmates.gate.json`. Exit 1 means the run has no plan at all or the verdict file could not be
 read: an argument error, not a decision. Exit 0 covers `none`, `retry`, and `escalate` alike, so
 the exit status never tells them apart — only the `decision` field does.
 
@@ -256,8 +256,8 @@ into `status.json` only when the caller passes `--run`, and a solo gate invoked 
 writes no verdict anywhere.
 
 **The verdict you hand it must be the JSON this gate printed in this same pass, and must never be
-read back from `.teammates/`.** The only verdict persisted on disk lives in
-`status.gates[<phase>]` inside `.teammates/<run>/status.json`, written by the very agents this
+read back from `.fleetmates/`.** The only verdict persisted on disk lives in
+`status.gates[<phase>]` inside `.fleetmates/<run>/status.json`, written by the very agents this
 gate exists to enforce — the same file `scripts/enforce.mjs` refuses to consult when picking a
 branch. Feeding that record in today degenerates harmlessly, because the persisted object carries
 no `results` key and the decision comes back `none`; that is incidental, not guaranteed. Treat it
@@ -296,7 +296,7 @@ carry that property.
 ## What the enforcement checks do and do not cover
 
 `fileset` and `ownership` are computed by the gate from git, at the moment it runs. They read
-no file from `.teammates/`: the run phase, the anchor, and the plan all come from git, because
+no file from `.fleetmates/`: the run phase, the anchor, and the plan all come from git, because
 `status.json` is written by the agents being enforced. `complete` recomputes rather than
 trusting a recorded verdict.
 

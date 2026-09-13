@@ -1,9 +1,9 @@
 ---
-name: using-teammates
+name: using-fleetmates
 description: Use when starting any conversation or task - establishes how to find and use skills, and routes to the right process or fleet skill before anything else happens.
 ---
 
-# Using Teammates
+# Using Fleetmates
 
 This is the entrypoint. Read it before doing anything else this session — including
 answering a question, exploring the codebase, or checking a file.
@@ -37,7 +37,7 @@ apply, the process skill goes first.
 | Implementation is complete and all tests pass — decide how to integrate | `finishing-a-development-branch` |
 | Creating or editing a skill, or verifying one works before deployment | `writing-skills` |
 | Spawn, list, message, scale, stop, or resume teammates in a running fleet | `fleet-lifecycle` |
-| Changing how the fleet runs — parallelism, model tier or effort per role, caveman output | `teammates-config` |
+| Changing how the fleet runs — parallelism, model tier or effort per role, caveman output | `fleetmates-config` |
 | A fleet phase finished and needs a verdict before the next phase starts | `phase-gate` |
 | Want to know what a running fleet is doing right now | `fleet-supervision` |
 
@@ -116,4 +116,4 @@ isn't the plugin's own — which, installed via `/plugin`, it never is.
 
 - No teammate ever touches the main worktree. Only `tm-integrator` writes to the run branch.
 - Nothing is reported done without a recorded gate PASS.
-- All run state lives in `.teammates/<run-id>/`, never only in an agent's head.
+- All run state lives in `.fleetmates/<run-id>/`, never only in an agent's head.

@@ -3,17 +3,17 @@ import assert from 'node:assert/strict'
 import { readFile, readdir } from 'node:fs/promises'
 
 const skillsDir = new URL('../skills/', import.meta.url)
-const body = async () => readFile(new URL('using-teammates/SKILL.md', skillsDir), 'utf8')
+const body = async () => readFile(new URL('using-fleetmates/SKILL.md', skillsDir), 'utf8')
 
 // The routing table is the pairing under test, so it is parsed as a table — every row's Skill
 // cell, taken whole. The previous version filtered candidate names through a hardcoded prefix
 // allowlist, which silently stopped covering any skill whose name did not start with one of
-// them: `teammates-config` matched none, so deleting `skills/teammates-config/` while keeping
+// them: `fleetmates-config` matched none, so deleting `skills/fleetmates-config/` while keeping
 // its routing row left the whole suite green. A shape the table itself defines cannot fall out
 // of step with the table the way a name list does.
 function routedSkills(b) {
   const section = b.split(/^## Routing$/m)[1]
-  assert.ok(section, 'using-teammates has no ## Routing section')
+  assert.ok(section, 'using-fleetmates has no ## Routing section')
   const rows = section.split(/^## /m)[0]
     .split('\n')
     .filter((line) => line.startsWith('|') && !/^\|[\s|:-]+\|$/.test(line))
@@ -35,7 +35,7 @@ function routedSkills(b) {
 
 async function skillDirs() {
   return (await readdir(skillsDir, { withFileTypes: true }))
-    .filter((e) => e.isDirectory() && e.name !== 'using-teammates')
+    .filter((e) => e.isDirectory() && e.name !== 'using-fleetmates')
     .map((e) => e.name)
 }
 

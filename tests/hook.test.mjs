@@ -1080,7 +1080,7 @@ hookTest('(canary) a hook case body runs and the hook really answers', () => {
 hookTest('emits valid JSON containing the entrypoint content', () => {
   const parsed = JSON.parse(runHook({}))
   const ctx = parsed.hookSpecificOutput.additionalContext
-  assert.match(ctx, /using-teammates/)
+  assert.match(ctx, /using-fleetmates/)
   assert.match(ctx, /Using \[skill\]|routing|Skill/i)
   hookBodyRan()
 })
@@ -1104,9 +1104,9 @@ hookTest('a missing entrypoint file produces a loud warning, valid JSON, and exi
   const out = runHook({ CLAUDE_PLUGIN_ROOT: '/nonexistent-plugin-root' })
   const parsed = JSON.parse(out)
   const ctx = parsed.hookSpecificOutput.additionalContext
-  assert.match(ctx, /claude-teammates/i)
+  assert.match(ctx, /fleetmates/i)
   assert.match(ctx, /not active|missing|WARNING/i)
-  assert.match(ctx, /using-teammates\/SKILL\.md/)
+  assert.match(ctx, /using-fleetmates\/SKILL\.md/)
   hookBodyRan()
 })
 
@@ -1185,8 +1185,8 @@ hookTest('orders versions numerically, not lexically: 0.10.0 is newer than 0.9.0
   try {
     mkdirSync(path.join(fakeRoot, '.claude-plugin'), { recursive: true })
     writeFileSync(path.join(fakeRoot, '.claude-plugin', 'plugin.json'), '{"version":"0.9.0"}')
-    mkdirSync(path.join(fakeRoot, 'skills', 'using-teammates'), { recursive: true })
-    writeFileSync(path.join(fakeRoot, 'skills', 'using-teammates', 'SKILL.md'), '# using-teammates\n')
+    mkdirSync(path.join(fakeRoot, 'skills', 'using-fleetmates'), { recursive: true })
+    writeFileSync(path.join(fakeRoot, 'skills', 'using-fleetmates', 'SKILL.md'), '# using-fleetmates\n')
     withConfigDir((dir) => {
       mkdirSync(stateDir(dir), { recursive: true })
       writeFileSync(path.join(stateDir(dir), 'last-seen-version'), '0.9.0\n')
@@ -1208,7 +1208,7 @@ hookTest('a notice never breaks the emitted JSON or adds a second context field'
     // contextWith asserts the single-field property itself; reaching here means it held.
     const ctx = contextWith(dir)
     assert.match(ctx, /999\.0\.0 is available/)
-    assert.match(ctx, /using-teammates/)
+    assert.match(ctx, /using-fleetmates/)
   })
   hookBodyRan()
 })
@@ -2086,7 +2086,7 @@ hookTest('session-start survives HOME and CLAUDE_CONFIG_DIR both being unset', (
   const parsed = JSON.parse(runUnset(hookScript))
   assert.equal(Object.keys(parsed).length, 1)
   const ctx = parsed.hookSpecificOutput.additionalContext
-  assert.match(ctx, /using-teammates/, 'the entrypoint must still be injected')
+  assert.match(ctx, /using-fleetmates/, 'the entrypoint must still be injected')
   // With no state directory the notice cannot be once-only, so it is suppressed
   // rather than repeated every session.
   assert.doesNotMatch(ctx, /is active|updated:|is available/)
@@ -2225,8 +2225,8 @@ function fakePluginRoot({ cli = true, agents = true, skills = true } = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), "tm-inst-"))
   mkdirSync(path.join(dir, ".claude-plugin"), { recursive: true })
   writeFileSync(path.join(dir, ".claude-plugin", "plugin.json"), JSON.stringify({ version: "0.9.0" }))
-  mkdirSync(path.join(dir, "skills", "using-teammates"), { recursive: true })
-  writeFileSync(path.join(dir, "skills", "using-teammates", "SKILL.md"), "# using-teammates" + "\n")
+  mkdirSync(path.join(dir, "skills", "using-fleetmates"), { recursive: true })
+  writeFileSync(path.join(dir, "skills", "using-fleetmates", "SKILL.md"), "# using-fleetmates" + "\n")
   if (skills) {
     mkdirSync(path.join(dir, "skills", "phase-gate"), { recursive: true })
     writeFileSync(path.join(dir, "skills", "phase-gate", "SKILL.md"), "# phase-gate" + "\n")

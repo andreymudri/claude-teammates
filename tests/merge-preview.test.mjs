@@ -55,7 +55,7 @@ function orderedGit(order, { conflictPaths = null } = {}) {
 
 test('a clean merge calls run with a non-null path and the merged branch list', async () => {
   const git = fakeGit()
-  const branches = ['teammates/r1/T1', 'teammates/r1/T2']
+  const branches = ['fleetmates/r1/T1', 'fleetmates/r1/T2']
   let received = null
   await withMergePreview({
     git, base: 'main', branches,
@@ -78,7 +78,7 @@ test('an empty branch list calls run with path: null, merged: [] and never creat
 
 test('a conflict calls run with path: null and the conflict report, never with a worktree path', async () => {
   const git = fakeGit({ conflictPaths: ['scripts/cli.mjs'] })
-  const branches = ['teammates/r1/T3', 'teammates/r1/T8']
+  const branches = ['fleetmates/r1/T3', 'fleetmates/r1/T8']
   let received = null
   await withMergePreview({
     git, base: 'main', branches,
@@ -332,7 +332,7 @@ test('conflictPairs returns [] for no paths', () => {
 })
 
 test('conflictPairs returns one pair naming every branch and path otherwise', () => {
-  const branches = ['teammates/r1/T3', 'teammates/r1/T8']
+  const branches = ['fleetmates/r1/T3', 'fleetmates/r1/T8']
   const paths = ['scripts/cli.mjs', 'scripts/gate-runner.mjs']
   assert.deepEqual(conflictPairs(branches, paths), [{ branches, paths }])
 })

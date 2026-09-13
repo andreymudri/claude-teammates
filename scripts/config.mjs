@@ -1,10 +1,11 @@
+import { NAMES } from './names.mjs'
 import { readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { defaultMaxParallel } from './gate-config.mjs'
 import { TIERS } from './routing.mjs'
 
-export const GATE_FILE = 'teammates.gate.json'
-export const LOCAL_FILE = 'teammates.local.json'
+export const GATE_FILE = NAMES.gateFile
+export const LOCAL_FILE = NAMES.localFile
 
 export const CAVEMAN_LEVELS = ['lite', 'full', 'ultra']
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']

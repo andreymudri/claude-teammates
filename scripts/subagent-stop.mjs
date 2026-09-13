@@ -8,6 +8,7 @@
 // below is arranged so those cases cost one `git rev-parse` and exit 0; the count is pinned
 // by a test that traces the git processes this handler starts, because a cost claim nothing
 // measures is prose, and every subagent on the machine pays whatever it actually costs.
+import { taskBranchName } from './enforce.mjs'
 import { readFileSync } from 'node:fs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import path from 'node:path'
@@ -58,7 +59,7 @@ async function main() {
   // success while this is set. Honouring it makes one stop cost one forced retry: the
   // teammate gets the failure text, works again, and is not blocked a second time for the
   // same stop. The count lives in the harness process, so unlike anything under
-  // .teammates/ the teammate cannot reset it.
+  // .fleetmates/ the teammate cannot reset it.
   if (input.stop_hook_active === true) return ALLOW
 
   const cwd = typeof input.cwd === 'string' ? input.cwd : ''
@@ -121,7 +122,7 @@ async function main() {
   // The pair being unequal is necessary and NOT sufficient, because a `.git` FILE makes any
   // directory report a foreign git dir, and the directory it names is the planter's to build.
   // Measured end to end: four hand-written text files — `<main>/packages/app/.git` naming
-  // `<main>/.teammates/fakewt`, and `commondir`, `gitdir` and `HEAD` inside that directory —
+  // `<main>/.fleetmates/fakewt`, and `commondir`, `gitdir` and `HEAD` inside that directory —
   // make a tracked subdirectory of the MAIN worktree answer `rev-parse` like a linked
   // worktree of this repository. None of it is inside `.git`, and
   // `git status --untracked-files=all` reports none of it, because git excludes a subtree
@@ -146,14 +147,14 @@ async function main() {
   //
   // OPEN RESIDUAL, measured and left open deliberately. A plant that supplies its own
   // repository satisfies this check honestly: `git init` a second repo anywhere the attacker
-  // can write — the victim's own gitignored `.teammates/` will do — hand-write
+  // can write — the victim's own gitignored `.fleetmates/` will do — hand-write
   // `<evil>/.git/worktrees/fake/commondir` naming `<evil>/.git`, and point
   // `<victim-dir>/.git` at that metadata directory. `rev-parse` then reports a common dir and
   // a git dir that are genuinely two levels apart, so the pair is contained, and
   // `root = dirname(commonDir)` makes the ATTACKER's directory the store this handler reads.
   // A subagent stopping there is blocked over a task from a store that has nothing to do with
   // this repository. `git status --porcelain --untracked-files=all` prints nothing, because
-  // `.teammates/` is gitignored and git excludes a subtree once it sees a `.git` file in it.
+  // `.fleetmates/` is gitignored and git excludes a subtree once it sees a `.git` file in it.
   //
   // Two discriminators were built and measured against it, and neither is worth taking:
   //
@@ -181,7 +182,7 @@ async function main() {
   // from git and reads nothing here; and every variable interpolated into either message is an
   // id constrained by the allowlist described at the rejection path below.
   //
-  // Missing-branch path: the branch named is the conventional `teammates/<runId>/<taskId>`,
+  // Missing-branch path: the branch named is the conventional `fleetmates/<runId>/<taskId>`,
   // because the record's own `branch` field is clamped to that or dropped by
   // `findTaskByWorktree`; the text names no command and sends the teammate to its brief.
   //
@@ -219,7 +220,7 @@ async function main() {
   // The cheap precheck: a missing task branch is the do-nothing case, and it is the reason
   // resolution goes through the location record rather than the checked-out branch. It is
   // decided before anything more expensive runs.
-  const branch = found.branch ?? `teammates/${found.runId}/${found.taskId}`
+  const branch = found.branch ?? taskBranchName(found.runId, found.taskId)
   if (!git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], root)) {
     // The text NAMES the missing ref and directs the teammate to its brief. It deliberately
     // carries no command and interpolates nothing into one: a ref derived from a record is
@@ -254,7 +255,7 @@ async function main() {
   // enforcement that looks installed and does nothing. The phase gate still runs it all.
   //
   // SECOND REASON, and stated as exactly what it is rather than as a barrier: the manifest this
-  // reads is the MAIN worktree's `teammates.gate.json`, which any teammate can write, and a
+  // reads is the MAIN worktree's `fleetmates.gate.json`, which any teammate can write, and a
   // `command` check in it is a shell command. `--enforcement-only` filters with
   // `c.kind !== 'command'`, so it excludes checks whose kind IS THE STRING `command`, and that
   // much is real — dropping the flag runs those, inside a hook that fires for every subagent on
@@ -327,7 +328,7 @@ async function main() {
   if (result.status === REJECTED) {
     // FIXED FORM. `complete`'s stdout is NOT forwarded, and the reason is not verbosity: under
     // `--enforcement-only` that output carries gate-manifest CHECK NAMES, which are arbitrary
-    // strings from `teammates.gate.json`. This handler spawns `complete` with `--root <main
+    // strings from `fleetmates.gate.json`. This handler spawns `complete` with `--root <main
     // worktree>`, so the manifest read is the main worktree's — a file any teammate can write —
     // and forwarding it would put chosen text into the context of every sibling blocked at stop
     // time, in a hook that runs for every subagent on this machine. Reproduced before this was

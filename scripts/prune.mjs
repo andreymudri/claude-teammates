@@ -14,7 +14,8 @@
 // Pure. The caller lists the worktrees, names the main one, and supplies the plan's task→phase
 // map and the phases that hold a passing gate.
 
-const TASK_BRANCH = /^teammates\/([^/]+)\/([^/]+)$/
+import { NAMES } from './names.mjs'
+const TASK_BRANCH = new RegExp(`^${NAMES.branchPrefix}/([^/]+)/([^/]+)$`)
 
 // A merge preview is a detached worktree under the system temp directory, named tm-preview-*.
 // Its own cleanup runs in a `finally`, which a SIGKILL skips — so these accumulate, and every

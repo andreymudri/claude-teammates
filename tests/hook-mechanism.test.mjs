@@ -48,7 +48,7 @@ const root = fileURLToPath(new URL('..', import.meta.url))
 
 // Directories that must not travel into the copy: git state, run state, agent worktrees, and
 // anything a package manager put there. Everything else is source this suite reads.
-const EXCLUDED = new Set(['.git', '.teammates', '.claude', 'node_modules'])
+const EXCLUDED = new Set(['.git', '.fleetmates', '.claude', 'node_modules'])
 
 // The mutation. This exact string is asserted by the broken-install cases in hook.test.mjs, and
 // is the one its own comments use when they report what an honest run and a forged run each

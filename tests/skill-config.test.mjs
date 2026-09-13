@@ -20,9 +20,9 @@ import { parseDoc, splitFrontmatter, assertStatement, assertNoStatement, assertC
 // place in this repository to commit one.
 
 const doc = async () => {
-  const text = await readFile(new URL('../skills/teammates-config/SKILL.md', import.meta.url), 'utf8')
-  const { body } = splitFrontmatter(text, 'teammates-config')
-  return parseDoc(body, 'teammates-config/SKILL.md')
+  const text = await readFile(new URL('../skills/fleetmates-config/SKILL.md', import.meta.url), 'utf8')
+  const { body } = splitFrontmatter(text, 'fleetmates-config')
+  return parseDoc(body, 'fleetmates-config/SKILL.md')
 }
 
 // The SECTION that holds the claim, not the whole document. `assertClaim` screens back-references
@@ -45,7 +45,7 @@ const task = {
   id: 'T1',
   title: 'a task',
   files: ['a.mjs'],
-  branch: 'teammates/r1/T1',
+  branch: 'fleetmates/r1/T1',
 }
 const brief = (caveman) => composeBrief({ task, runId: 'r1', planPath: 'p.md', baseBranch: 'main', caveman })
 
@@ -80,8 +80,8 @@ const brief = (caveman) => composeBrief({ task, runId: 'r1', planPath: 'p.md', b
 // that is genuinely PROVEN is the runtime one — no caveman path in any reviewer or integrator
 // dispatch artifact — because that is mechanically checkable. The prose layers are change
 // detectors. Six rounds of calling a change detector a proof is what produced this comment.
-const SKILL_URL = new URL('../skills/teammates-config/SKILL.md', import.meta.url)
-const SKILL_FIXTURE_URL = new URL('./fixtures/teammates-config.SKILL.md', import.meta.url)
+const SKILL_URL = new URL('../skills/fleetmates-config/SKILL.md', import.meta.url)
+const SKILL_FIXTURE_URL = new URL('./fixtures/fleetmates-config.SKILL.md', import.meta.url)
 
 // LAYER 0 — THE ANCHOR THAT DOES NOT LIVE IN A FILE THE SKILL CAN BE COPIED OVER.
 //
@@ -95,34 +95,34 @@ const SKILL_FIXTURE_URL = new URL('./fixtures/teammates-config.SKILL.md', import
 // the skill — added sentence, added section, reworded aside, trailing space — fails here first.
 // This is the layer that actually closes the prose surface. The rest survive because they turn
 // "the digest changed" into a message that says WHICH kind of change it was.
-const SKILL_SHA256 = 'd541e851e3d7b2cfcef2e50317394d96a857e9560213561aae1fdd673664ce29'
+const SKILL_SHA256 = '114ae3986e57bba21ef311d74298085af5ccdd0bca9dce8e508ee9720b898759'
 
 test('the skill matches the digest recorded in this test file', async () => {
   const text = await readFile(SKILL_URL)
   const actual = createHash('sha256').update(text).digest('hex')
   assert.equal(actual, SKILL_SHA256,
-    'skills/teammates-config/SKILL.md changed. Updating tests/fixtures/ is NOT enough — this ' +
+    'skills/fleetmates-config/SKILL.md changed. Updating tests/fixtures/ is NOT enough — this ' +
     'constant is deliberately outside any file a `cp` from the skill can reach. Update it here, ' +
     'in the same commit, and say in the message what the measurement now is and why it changed')
 })
 
 // LAYER 1 — the readable diff. Redundant for DETECTION now that layer 0 exists; kept because a
 // byte-equality failure prints what changed, and a digest mismatch prints two hex strings.
-test('the teammates-config skill is exactly the reviewed text, byte for byte', async () => {
+test('the fleetmates-config skill is exactly the reviewed text, byte for byte', async () => {
   const [text, fixture] = await Promise.all([
     readFile(SKILL_URL, 'utf8'),
     readFile(SKILL_FIXTURE_URL, 'utf8'),
   ])
   assert.equal(text, fixture,
-    'skills/teammates-config/SKILL.md changed; if the change is intended, update ' +
-    'tests/fixtures/teammates-config.SKILL.md in the SAME commit and say why in the message')
+    'skills/fleetmates-config/SKILL.md changed; if the change is intended, update ' +
+    'tests/fixtures/fleetmates-config.SKILL.md in the SAME commit and say why in the message')
 })
 
 // LAYER 2 — the section inventory, which is what closes the `cp` route. An added section is the
 // escape that carried an inversion past the byte snapshot; the allow-list lives here rather than
 // in the fixture, so copying the skill over the fixture does not authorise it.
 const HEADINGS = [
-  '# Teammates Config',
+  '# Fleetmates Config',
   '## What `config` covers, and what it does not',
   '## What `caveman` actually reaches',
   '## Read before you write',
@@ -225,12 +225,12 @@ test('the skill states that the terse brief is larger, not smaller', async () =>
   assertStatement(
     await doc(),
     /caveman brief[\s\S]*\blarger\b[\s\S]*than the default/i,
-    'teammates-config must say the caveman brief is larger than the default',
+    'fleetmates-config must say the caveman brief is larger than the default',
   )
   assertNoStatement(
     await doc(),
     /caveman[\s\S]*brief[\s\S]*\b(smaller|shorter|terser|briefer)\b/i,
-    'teammates-config must not claim the caveman brief is smaller',
+    'fleetmates-config must not claim the caveman brief is smaller',
   )
 })
 
@@ -263,7 +263,7 @@ test('the skill states that effort, not caveman, is the control for thinking', a
   assertStatement(
     await doc(),
     /effort[\s\S]*thinking/i,
-    'teammates-config must name effort as the control for thinking tokens',
+    'fleetmates-config must name effort as the control for thinking tokens',
   )
 })
 
@@ -275,12 +275,12 @@ test('the skill states the level count the code actually validates', async () =>
   assertStatement(
     await doc(),
     /three levels[\s\S]*validated/i,
-    'teammates-config must state the same level count CAVEMAN_LEVELS defines',
+    'fleetmates-config must state the same level count CAVEMAN_LEVELS defines',
   )
   assertNoStatement(
     await doc(),
     /\b(two|four|five)\s+levels\b/i,
-    'teammates-config must not name a level count the code does not validate',
+    'fleetmates-config must not name a level count the code does not validate',
   )
 })
 
@@ -318,10 +318,10 @@ test('the README and CHANGELOG state the level count the code validates', async 
 // that speaks for the caveman section. Without this, an editor adding an unrelated paragraph gets
 // a caveman-scope failure and learns to distrust the assertion.
 test('prose in an unrelated section does not fail the caveman claim', async () => {
-  const text = await readFile(new URL('../skills/teammates-config/SKILL.md', import.meta.url), 'utf8')
-  const { body } = splitFrontmatter(text, 'teammates-config')
+  const text = await readFile(new URL('../skills/fleetmates-config/SKILL.md', import.meta.url), 'utf8')
+  const { body } = splitFrontmatter(text, 'fleetmates-config')
   const edited = `${body}\n\n## Troubleshooting\n\nThe above requirement applies to every layer.\n`
-  const parsed = parseDoc(edited, 'teammates-config/SKILL.md (edited)')
+  const parsed = parseDoc(edited, 'fleetmates-config/SKILL.md (edited)')
   const section = findCavemanSection(parsed)
   assertClaim(section, {
     label: 'reviewers are unaffected by caveman',

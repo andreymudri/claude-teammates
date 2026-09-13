@@ -6,7 +6,7 @@ const body = async () => readFile(new URL('../skills/executing-plans/SKILL.md', 
 
 test('initialises shared run state so the run is resumable', async () => {
   assert.match(await body(), /init-run/)
-  assert.match(await body(), /\.teammates/)
+  assert.match(await body(), /\.fleetmates/)
 })
 
 test('states that a gate manifest is optional for inline work', async () => {

@@ -124,9 +124,9 @@ const locateStep = (task, runId) => (runId ? [
 //      non-optional `pending` on every invocation and the verdict is never PASS. The exit-4 row
 //      says so rather than leaving a teammate to conclude its compliant work was rejected.
 //   1  the gate passed but status.json is missing or does not list the task — bookkeeping
-//   2  TWO unrelated things: teammates.gate.json is present and MALFORMED (configuration), or
+//   2  TWO unrelated things: fleetmates.gate.json is present and MALFORMED (configuration), or
 //      the invocation itself was rejected — a missing required argument, an unknown flag, a
-//      refused flag spelling, an empty --root, a --run escaping .teammates/ (which prints
+//      refused flag spelling, an empty --root, a --run escaping .fleetmates/ (which prints
 //      `--run <value> escapes the run directory`). The argument errors are the teammate's own
 //      to fix, and on one it has verified nothing at all, so the brief discriminates all five
 //      by the printed line the same way it does for exit 4. The escape case is narrow — a
@@ -176,7 +176,7 @@ const locateStep = (task, runId) => (runId ? [
 // NOT closed by this in every topology: docs/plans/2026-08-09-gaps-followups.md's Task 2
 // ("diff each task branch from its own fork point, not from the run anchor") reproduction
 // stages a run where task branches fork straight off the RUN branch itself (`git checkout -B
-// teammates/r/T5 run/r`, no separate base ahead of it). There `baseBranch` and the run branch
+// fleetmates/r/T5 run/r`, no separate base ahead of it). There `baseBranch` and the run branch
 // are the same name, so this line's `--base` sets the gate's base equal to its own run branch,
 // and `complete` refuses with "the run branch and the base branch are both '<name>'" — one
 // exit-4 non-verdict traded for another. `composeBrief` is pure and receives only `baseBranch`,
@@ -255,7 +255,7 @@ const verifyStep = (task, runId, planPath, baseBranch) => (runId && planPath ? [
   '             "escapes the run directory"',
   '           None of those mention the manifest, and on any of them you have verified NOTHING',
   '           yet — the gate never ran. Fix the command you typed and run it again.',
-  '           Any other exit 2 means teammates.gate.json itself is malformed. That one is',
+  '           Any other exit 2 means fleetmates.gate.json itself is malformed. That one is',
   '           configuration, not your work: quote it and report it; do not loop.',
   '  exit 1 — the gate passed, but the run\'s status file is missing or does not list your task.',
   '           Your work is verified; quote the message and report it.',

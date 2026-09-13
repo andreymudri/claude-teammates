@@ -1,12 +1,13 @@
 // Plans are authored by hand on Windows and read by git, which always emits posix
 // separators. Both sides are normalized before comparison. Comparison stays
 // case-sensitive: git is case-sensitive, and a case-only mismatch is a real mistake.
+import { NAMES } from './names.mjs'
 export function normalizePath(p) {
   return String(p).replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '')
 }
 
 export function taskBranchName(runId, taskId) {
-  return `teammates/${runId}/${taskId}`
+  return `${NAMES.branchPrefix}/${runId}/${taskId}`
 }
 
 // Convention only, deliberately. An earlier version preferred a branch recorded in
@@ -36,7 +37,7 @@ export function filesetViolations(changed, declared) {
 // genuinely different branches to git, so the fold can over-trigger — reporting `Main`
 // as a violation of the `main` run branch even though git would allow both to exist.
 // That over-triggering is deliberate: this is an enforcement check, and only reachable
-// by a branch deliberately named against the `teammates/<runId>/<taskId>` convention,
+// by a branch deliberately named against the `fleetmates/<runId>/<taskId>` convention,
 // so failing closed toward "flag it" is the right default in both directions.
 //
 // This is still a string comparison, not a git query: this module stays pure and has
@@ -121,7 +122,7 @@ export function ownershipViolations({ runBranch, baseBranch, taskBranches = [], 
 // and no record anywhere.
 //
 // It deliberately does NOT compare against a base sha recorded at run start. That state would
-// have to live in `.teammates/`, which the ownership check must never read: those files are
+// have to live in `.fleetmates/`, which the ownership check must never read: those files are
 // written by the very agents this check enforces, so consulting them would let the enforced
 // party supply the evidence and destroy the property that makes ownership tamper-evident.
 // The check reports what it accepted; it does not claim the base did not move.

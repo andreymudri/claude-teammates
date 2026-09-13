@@ -13,7 +13,7 @@ const DEFAULT_FIX_ROUNDS = 2
 // same default `inferTier` falls through to.
 const DEFAULT_TIER = 'mid'
 
-// `??` guarded only null/undefined, but `fix` reads plan.json out of `.teammates/`, which is
+// `??` guarded only null/undefined, but `fix` reads plan.json out of `.fleetmates/`, which is
 // agent-writable and re-read AFTER `init-run` validated the declared tiers. Any other value —
 // `"fast"`, `""`, `3`, an object — reached `escalateTier` and threw `unknown tier`, killing the
 // decision step with nothing on stdout. An unrecognised tier is no more informative than a

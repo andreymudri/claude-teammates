@@ -14,11 +14,12 @@
 //
 // Advisory only. No check reads it, and nothing in it can fail a phase.
 
-const HEADER = /^<!--\s*teammates-map\s+run=(\S+)\s+sha=(\S+)\s*-->/
+import { NAMES } from './names.mjs'
+const HEADER = new RegExp(`^<!--\\s*${NAMES.mapHeader}\\s+run=(\\S+)\\s+sha=(\\S+)\\s*-->`)
 
 export function mapNotesHeader({ runId, sha }) {
   if (!runId || !sha) throw new Error(`map notes need a run id and a sha, got ${JSON.stringify({ runId, sha })}`)
-  return `<!-- teammates-map run=${runId} sha=${sha} -->`
+  return `<!-- ${NAMES.mapHeader} run=${runId} sha=${sha} -->`
 }
 
 export function readMapNotesHeader(text) {
@@ -32,7 +33,7 @@ export function readMapNotesHeader(text) {
 export function mapNotesStale(text, { runId, sha }) {
   if (!text || String(text).trim() === '') return 'no map notes have been written for this run'
   const header = readMapNotesHeader(text)
-  if (!header) return 'the map notes carry no teammates-map header, so nothing says which commit they describe'
+  if (!header) return `the map notes carry no ${NAMES.mapHeader} header, so nothing says which commit they describe`
   if (header.sha !== sha) return `the map notes describe commit ${header.sha}, but the repository is at ${sha}`
   if (header.runId !== runId) return `the map notes were written for run ${header.runId}, not ${runId}`
   return null
@@ -68,7 +69,7 @@ export function mapNotesWritable(text, { runId, sha }) {
   const body = String(text ?? '')
   if (body.trim() === '') return 'the agent returned nothing to write'
   const header = readMapNotesHeader(body)
-  if (!header) return 'the returned map does not begin with the teammates-map header it was given'
+  if (!header) return `the returned map does not begin with the ${NAMES.mapHeader} header it was given`
   if (header.sha !== sha) return `the returned map claims commit ${header.sha}, but the dispatch named ${sha}`
   if (header.runId !== runId) return `the returned map claims run ${header.runId}, but the dispatch named ${runId}`
   // The header alone is not a map: an agent that echoes back only the line it was handed has

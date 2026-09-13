@@ -12,7 +12,7 @@ Create and check out this run's branch **before** initializing, then run `init-r
     git checkout -b <run branch> <base branch>    # e.g. run/<runId> from master
     node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" init-run <planPath> --run <runId> --root <project root>
 
-This writes `.teammates/<runId>/plan.json` and `status.json` and prints the phase breakdown.
+This writes `.fleetmates/<runId>/plan.json` and `status.json` and prints the phase breakdown.
 Tasks land in the same phase only when their deps are satisfied and their file sets are
 disjoint.
 
@@ -41,9 +41,9 @@ has checked out, and when it is absent or different it reports that it cannot ve
 the stop is allowed. Checking the run branch out before the **first** `init-run` is therefore what
 puts the record in place at the start of the run, on a run id that has none yet. It does not repair a run whose
 recorded branch is already wrong: no command overwrites that field. To correct one, remove
-`runBranch` from `.teammates/<runId>/plan.json` and run `init-run` again — from an attached branch.
+`runBranch` from `.fleetmates/<runId>/plan.json` and run `init-run` again — from an attached branch.
 An absent record needs no hand-editing: some later commands fill it in and others only read it, so
-read `runBranch` in `.teammates/<runId>/plan.json` rather than predicting which.
+read `runBranch` in `.fleetmates/<runId>/plan.json` rather than predicting which.
 On a detached HEAD `init-run` records the literal string `HEAD`, which is not a run branch and
 which no command overwrites, so it disarms the second layer until the field is removed by hand.
 
@@ -88,7 +88,7 @@ teammate is shown none of that detail — the hook reads the exit status and nev
 check printed.
 
 Treat both as best effort. The hook resolves a stopping teammate through records under
-`.teammates/`, which is gitignored and writable by every teammate, and it allows the stop on
+`.fleetmates/`, which is gitignored and writable by every teammate, and it allows the stop on
 anything it cannot establish — a teammate it cannot resolve, a plan it cannot read, a recorded run
 branch that is not the branch checked out. That is deliberate. The hook can only ever add a block that would
 not otherwise happen, so declining to block on anything it cannot establish is what keeps an unreadable record from costing a teammate a turn. It is not a guarantee against
@@ -100,9 +100,9 @@ including a reviewer's scratch one. One plant costs one forced retry, since the 
 
 What this buys is a fast signal on the common honest mistake, not a barrier against a determined
 one. The enforcement is the phase gate: its `fileset` and `ownership` checks recompute from git and
-read nothing under `.teammates/`, whatever else the command around them reads. Which checks run is
-another matter: that list comes from `teammates.gate.json` in the working tree, which every teammate
-can write, and an `agent` check's result comes from files under `.teammates/` the enforced teammate
+read nothing under `.fleetmates/`, whatever else the command around them reads. Which checks run is
+another matter: that list comes from `fleetmates.gate.json` in the working tree, which every teammate
+can write, and an `agent` check's result comes from files under `.fleetmates/` the enforced teammate
 can write too. Do the §1 order because it is what lets
 `complete --enforcement-only` reach a verdict; the branch-existence check does not depend on it and
 blocks whether or not a run branch was ever recorded. Never read a stop that was allowed as a
@@ -130,7 +130,7 @@ A returned `done` is a claim, not evidence. Check it against git before believin
     node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" doctor --run <runId> --plan <planPath> --root <project root>
 
 A teammate that skipped its `checkout -B` commits on the harness's own branch and leaves
-`teammates/<runId>/<taskId>` pointing at the run tip with nothing on it: the returned `branch`
+`fleetmates/<runId>/<taskId>` pointing at the run tip with nothing on it: the returned `branch`
 names a real ref, the task merges as a no-op, and `fileset` sees no stray path because it sees no
 path at all. `doctor` reports that branch as contributing nothing, along with anything else that
 moved in the repository while the phase ran.
@@ -234,7 +234,7 @@ but here it is the normal case, not an error. Tier and effort fall back differen
 
 These two keys are ergonomics, not enforcement, unlike the reviewer's tier and effort: the
 integrator merges branches, it does not judge a check, so either layer may set them and the
-gitignored `teammates.local.json` is the normal place to.
+gitignored `fleetmates.local.json` is the normal place to.
 
 When generating a Workflow, pass the same map through so the generated dispatches carry
 concrete models:

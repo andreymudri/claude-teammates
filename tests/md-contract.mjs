@@ -82,7 +82,7 @@ export function normalize(text) {
 
 // Split normalized prose into statements (sentences). The split is deliberately conservative: a
 // terminator ends a statement only when it is followed by whitespace and then something that
-// looks like the start of a new sentence. That keeps `cli.mjs status`, `.teammates/`, `a ..
+// looks like the start of a new sentence. That keeps `cli.mjs status`, `.fleetmates/`, `a ..
 // escape` and `...design.md lists what` in one piece. Over-splitting would let an assertion pass
 // on half a sentence; under-splitting only makes a statement longer, which is the safe direction
 // — a claim that spans an under-split boundary simply has to be written as one longer pattern.

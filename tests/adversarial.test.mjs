@@ -44,7 +44,7 @@ function git(cwd, args) {
 }
 
 // Builds a real repository: `main` carries a committed plan.md, package.json, an
-// enforcement-only teammates.gate.json, and a .gitignore excluding .teammates/ — without
+// enforcement-only fleetmates.gate.json, and a .gitignore excluding .fleetmates/ — without
 // that last piece, `ownership`'s dirty-worktree check sees init-run's own state files as
 // untracked and fails every test for a reason unrelated to what each test means to pin.
 // The repo is left checked out on `run-branch`, off `main`.
@@ -55,8 +55,8 @@ async function withRepo(fn) {
   git(root, ['config', 'user.name', 'Test'])
   await writeFile(path.join(root, 'plan.md'), PLAN, 'utf8')
   await writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'x' }), 'utf8')
-  await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(MANIFEST), 'utf8')
-  await writeFile(path.join(root, '.gitignore'), '.teammates/\n', 'utf8')
+  await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify(MANIFEST), 'utf8')
+  await writeFile(path.join(root, '.gitignore'), '.fleetmates/\n', 'utf8')
   git(root, ['add', '.'])
   git(root, ['commit', '--quiet', '-m', 'initial'])
   git(root, ['checkout', '--quiet', '-b', 'run-branch'])
@@ -74,10 +74,10 @@ async function runCliOn(root, args) {
   return { code, out: lines.join('\n') }
 }
 
-// Creates teammates/<runId>/<taskId>, writes and commits the given files, and returns to
+// Creates fleetmates/<runId>/<taskId>, writes and commits the given files, and returns to
 // run-branch. `from` defaults to run-branch's current tip (the anchor, for a fresh repo).
 async function taskBranch(root, runId, taskId, { from = 'run-branch', files = {} } = {}) {
-  const branch = `teammates/${runId}/${taskId}`
+  const branch = `fleetmates/${runId}/${taskId}`
   git(root, ['checkout', '--quiet', '-b', branch, from])
   for (const [rel, content] of Object.entries(files)) {
     await writeFile(path.join(root, rel), content, 'utf8')
@@ -89,7 +89,7 @@ async function taskBranch(root, runId, taskId, { from = 'run-branch', files = {}
 }
 
 async function readStatus(root, runId) {
-  return JSON.parse(await readFile(path.join(root, '.teammates', runId, 'status.json'), 'utf8'))
+  return JSON.parse(await readFile(path.join(root, '.fleetmates', runId, 'status.json'), 'utf8'))
 }
 
 // ============================================================================================
@@ -109,10 +109,10 @@ test('gate fails and names the pre-image when a teammate renames away a file bel
   await withRepo(async (root) => {
     // T1 lands a.mjs and is integrated first — the real workflow order.
     await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
-    git(root, ['merge', '--quiet', '--no-ff', '-m', 'integrate T1', 'teammates/r1/T1'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'integrate T1', 'fleetmates/r1/T1'])
     // T2 forks after that merge, so a.mjs is present in its history, then renames it away
     // instead of adding its own declared b.mjs.
-    git(root, ['checkout', '--quiet', '-b', 'teammates/r1/T2', 'run-branch'])
+    git(root, ['checkout', '--quiet', '-b', 'fleetmates/r1/T2', 'run-branch'])
     git(root, ['mv', 'a.mjs', 'b.mjs'])
     git(root, ['commit', '--quiet', '-m', 'T2: rename instead of adding my own file'])
     git(root, ['checkout', '--quiet', 'run-branch'])
@@ -132,7 +132,7 @@ test('gate fails even when a tag shadows the task branch name', async () => {
     // Plant a tag with the exact branch name, pointing at a clean commit. Every ref this
     // codebase resolves is fully qualified through refs/heads/, so the tag cannot stand in
     // for the branch — the stray file must still be seen.
-    git(root, ['tag', 'teammates/r1/T1', 'main'])
+    git(root, ['tag', 'fleetmates/r1/T1', 'main'])
     const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
     assert.equal(code, 1)
     assert.match(out, /stray\.mjs/)
@@ -142,7 +142,7 @@ test('gate fails even when a tag shadows the task branch name', async () => {
 test('gate fails on a merge commit that introduces its own content: a new file, a tampered file, and a deletion', async () => {
   await withRepo(async (root) => {
     await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'A1\n' } })
-    git(root, ['checkout', '--quiet', '-b', 'teammates/r1/T2', 'main'])
+    git(root, ['checkout', '--quiet', '-b', 'fleetmates/r1/T2', 'main'])
     await writeFile(path.join(root, 'b.mjs'), 'B1\n', 'utf8')
     git(root, ['add', '.'])
     git(root, ['commit', '--quiet', '-m', 'T2: b.mjs'])
@@ -151,7 +151,7 @@ test('gate fails on a merge commit that introduces its own content: a new file, 
     // An octopus merge of both task branches, then hand-tampered before completing:
     // a.mjs gets different bytes than T1 committed, rogue.mjs has no source in any parent,
     // and b.mjs — which T2's own parent introduced — is deleted.
-    git(root, ['merge', '--quiet', '--no-ff', '--no-commit', 'teammates/r1/T1', 'teammates/r1/T2'])
+    git(root, ['merge', '--quiet', '--no-ff', '--no-commit', 'fleetmates/r1/T1', 'fleetmates/r1/T2'])
     await writeFile(path.join(root, 'a.mjs'), 'TAMPERED\n', 'utf8')
     await writeFile(path.join(root, 'rogue.mjs'), 'no legitimate source\n', 'utf8')
     git(root, ['rm', '--quiet', '-f', 'b.mjs'])
@@ -181,7 +181,7 @@ test('gate fails naming --no-ff when a teammate commits directly to the run bran
 test('a forged status.json PASS changes neither the gate verdict nor complete', async () => {
   await withRepo(async (root) => {
     await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
-    const statusPath = path.join(root, '.teammates', 'r1', 'status.json')
+    const statusPath = path.join(root, '.fleetmates', 'r1', 'status.json')
     const status = JSON.parse(await readFile(statusPath, 'utf8'))
     status.gates = { 1: { verdict: 'PASS', failed: [], skipped: [], pending: [], recordedAt: Date.now() } }
     await writeFile(statusPath, `${JSON.stringify(status, null, 2)}\n`, 'utf8')
@@ -202,22 +202,22 @@ test('a forged status.json PASS changes neither the gate verdict nor complete', 
   })
 })
 
-test('gate still fails correctly when .teammates/plan.json is deleted', async () => {
+test('gate still fails correctly when .fleetmates/plan.json is deleted', async () => {
   await withRepo(async (root) => {
     await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
-    await rm(path.join(root, '.teammates', 'r1', 'plan.json'))
+    await rm(path.join(root, '.fleetmates', 'r1', 'plan.json'))
     const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
-    // The gate never reads .teammates/plan.json — everything comes from git — so deleting
+    // The gate never reads .fleetmates/plan.json — everything comes from git — so deleting
     // it changes nothing about the verdict: it still fails on the missing T1 branch.
     assert.equal(code, 1)
     assert.match(out, /T1/)
   })
 })
 
-test('gate still fails correctly when .teammates/ is deleted entirely', async () => {
+test('gate still fails correctly when .fleetmates/ is deleted entirely', async () => {
   await withRepo(async (root) => {
     await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
-    await rm(path.join(root, '.teammates'), { recursive: true, force: true })
+    await rm(path.join(root, '.fleetmates'), { recursive: true, force: true })
     const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
     assert.equal(code, 1)
     assert.match(out, /T1/)
@@ -240,7 +240,7 @@ test('gate fails on a widened working-tree plan edit because the plan is read fr
 test('gate fails with the phase error, not a silent skip, when phases integrate out of order', async () => {
   await withRepo(async (root) => {
     await taskBranch(root, 'r1', 'T2', { files: { 'b.mjs': 'x\n' } })
-    git(root, ['merge', '--quiet', '--no-ff', '-m', 'integrate T2 out of order', 'teammates/r1/T2'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'integrate T2 out of order', 'fleetmates/r1/T2'])
     const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
     assert.equal(code, 1)
     assert.match(out, /not integrated but a later phase is/)
@@ -250,7 +250,7 @@ test('gate fails with the phase error, not a silent skip, when phases integrate 
 test('a manifest marking fileset/ownership optional: true still fails the gate', async () => {
   await withRepo(async (root) => {
     await writeFile(
-      path.join(root, 'teammates.gate.json'),
+      path.join(root, 'fleetmates.gate.json'),
       JSON.stringify({
         phases: {
           default: {
@@ -275,7 +275,7 @@ test('a manifest marking fileset/ownership optional: true still fails the gate',
 test('gate fails and marks the check pending for a manifest with kind "toString"', async () => {
   await withRepo(async (root) => {
     await writeFile(
-      path.join(root, 'teammates.gate.json'),
+      path.join(root, 'fleetmates.gate.json'),
       JSON.stringify({ phases: { default: { checks: [{ name: 'evil', kind: 'toString' }] } } }),
       'utf8',
     )
@@ -290,10 +290,10 @@ test('gate fails and marks the check pending for a manifest with kind "toString"
 
 test('fast-forwarding the run branch to an empty commit does not read its phase as integrated', async () => {
   await withRepo(async (root) => {
-    git(root, ['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    git(root, ['checkout', '--quiet', '-b', 'fleetmates/r1/T1'])
     git(root, ['commit', '--quiet', '--allow-empty', '-m', 'T1: no-op'])
     git(root, ['checkout', '--quiet', 'run-branch'])
-    git(root, ['merge', '--quiet', '--ff-only', 'teammates/r1/T1'])
+    git(root, ['merge', '--quiet', '--ff-only', 'fleetmates/r1/T1'])
 
     const { out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
     const parsed = JSON.parse(out)
@@ -328,11 +328,11 @@ test('gate reports the ambiguity, not a silent guess, when both main and master 
 test('gate fails when a task ref is parked at a run tip carrying another task\'s work', async () => {
   await withRepo(async (root) => {
     await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
-    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'fleetmates/r1/T1'])
     // T2's branch is created pointing at the run tip, which already carries T1's real work,
     // and never moves. Diffed against the run anchor it showed a.mjs and got credit for work
     // it never did; diffed against its own fork point it shows nothing.
-    git(root, ['branch', 'teammates/r1/T2', 'run-branch'])
+    git(root, ['branch', 'fleetmates/r1/T2', 'run-branch'])
 
     const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
     assert.equal(code, 1)
@@ -340,7 +340,7 @@ test('gate fails when a task ref is parked at a run tip carrying another task\'s
     assert.equal(parsed.verdict, 'FAIL')
     assert.equal(parsed.phase, 2)
     const fileset = parsed.results.find((r) => r.name === 'fileset')
-    assert.match(fileset.output, /T2: branch teammates\/r1\/T2 contributes no file changes/)
+    assert.match(fileset.output, /T2: branch fleetmates\/r1\/T2 contributes no file changes/)
   })
 })
 
@@ -406,7 +406,7 @@ test('gate fails when a task ref is parked at a merged SIBLING\'s tip', async ()
     await commitPlanAtAnchor(root, SIBLING_TIP_PLAN)
 
     await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
-    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'fleetmates/r1/T1'])
 
     const t3Branch = await taskBranch(root, 'r1', 'T3', { files: { 'c.mjs': 'x\n' } })
     const t3Tip = git(root, ['rev-parse', t3Branch]).trim()
@@ -414,7 +414,7 @@ test('gate fails when a task ref is parked at a merged SIBLING\'s tip', async ()
 
     // T2 never commits: its ref is pointed straight at T3's own tip commit, not at the merge
     // commit that carried it.
-    git(root, ['branch', 'teammates/r1/T2', t3Tip])
+    git(root, ['branch', 'fleetmates/r1/T2', t3Tip])
 
     const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
     assert.equal(code, 1)
@@ -425,7 +425,7 @@ test('gate fails when a task ref is parked at a merged SIBLING\'s tip', async ()
     // (`phase: null`) two earlier designs produced.
     assert.equal(parsed.phase, 2)
     const fileset = parsed.results.find((r) => r.name === 'fileset')
-    assert.match(fileset.output, /T2: branch teammates\/r1\/T2 contributes no file changes past its fork point/)
+    assert.match(fileset.output, /T2: branch fleetmates\/r1\/T2 contributes no file changes past its fork point/)
     assert.match(fileset.output, new RegExp(t3Tip))
     assert.doesNotMatch(fileset.output, /T3:/)
   })
@@ -444,14 +444,14 @@ test('gate still fails a parked ref after the sibling it parked on makes a furth
     await commitPlanAtAnchor(root, SIBLING_TIP_PLAN)
 
     await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
-    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'fleetmates/r1/T1'])
 
     const t3Branch = await taskBranch(root, 'r1', 'T3', { files: { 'c.mjs': 'x\n' } })
     const t3FirstTip = git(root, ['rev-parse', t3Branch]).trim()
     git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T3', t3Branch])
 
     // T2 parks on T3's FIRST-round tip — never moves again.
-    git(root, ['branch', 'teammates/r1/T2', t3FirstTip])
+    git(root, ['branch', 'fleetmates/r1/T2', t3FirstTip])
 
     // T3's fix round: a further commit on T3's OWN branch, moving T3's ref off the shared sha.
     // (Not re-merged — this pins the shape as it stands mid-round, before any further gate.)
@@ -466,7 +466,7 @@ test('gate still fails a parked ref after the sibling it parked on makes a furth
     const parsed = JSON.parse(out)
     assert.equal(parsed.verdict, 'FAIL')
     const fileset = parsed.results.find((r) => r.name === 'fileset')
-    assert.match(fileset.output, /T2: branch teammates\/r1\/T2 contributes no file changes/)
+    assert.match(fileset.output, /T2: branch fleetmates\/r1\/T2 contributes no file changes/)
   })
 })
 
@@ -481,14 +481,14 @@ test('gate catches a ref parked at an unmerged sibling\'s tip via the declared-s
     await commitPlanAtAnchor(root, SIBLING_TIP_PLAN)
 
     await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
-    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'fleetmates/r1/T1'])
 
     // T3 commits but is NOT yet merged.
     const t3Branch = await taskBranch(root, 'r1', 'T3', { files: { 'c.mjs': 'x\n' } })
     const t3Tip = git(root, ['rev-parse', t3Branch]).trim()
 
     // T2 never commits: its ref is pointed straight at T3's own (still unmerged) tip.
-    git(root, ['branch', 'teammates/r1/T2', t3Tip])
+    git(root, ['branch', 'fleetmates/r1/T2', t3Tip])
 
     const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
     assert.equal(code, 1)
@@ -512,9 +512,9 @@ test('gate does not treat freshly-dispatched siblings sharing the run tip as par
     await commitPlanAtAnchor(root, SIBLING_TIP_PLAN)
 
     const runTip = git(root, ['rev-parse', 'run-branch']).trim()
-    git(root, ['branch', 'teammates/r1/T1', runTip])
-    git(root, ['branch', 'teammates/r1/T2', runTip])
-    git(root, ['branch', 'teammates/r1/T3', runTip])
+    git(root, ['branch', 'fleetmates/r1/T1', runTip])
+    git(root, ['branch', 'fleetmates/r1/T2', runTip])
+    git(root, ['branch', 'fleetmates/r1/T3', runTip])
 
     const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
     assert.equal(code, 1)
@@ -522,7 +522,7 @@ test('gate does not treat freshly-dispatched siblings sharing the run tip as par
     assert.equal(parsed.verdict, 'FAIL')
     assert.equal(parsed.phase, 1)
     const fileset = parsed.results.find((r) => r.name === 'fileset')
-    assert.match(fileset.output, /T1: branch teammates\/r1\/T1 contributes no file changes/)
+    assert.match(fileset.output, /T1: branch fleetmates\/r1\/T1 contributes no file changes/)
     assert.doesNotMatch(fileset.output, /parked at another's tip/)
   })
 })
@@ -543,12 +543,12 @@ test('gate does not treat two idle siblings as parked when an unrelated commit m
     await commitPlanAtAnchor(root, SIBLING_TIP_PLAN)
 
     await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
-    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'fleetmates/r1/T1'])
 
     // T2 and T3 (phase 2) are created at the run tip, right after T1's merge, and never commit.
     const runTip = git(root, ['rev-parse', 'run-branch']).trim()
-    git(root, ['branch', 'teammates/r1/T2', runTip])
-    git(root, ['branch', 'teammates/r1/T3', runTip])
+    git(root, ['branch', 'fleetmates/r1/T2', runTip])
+    git(root, ['branch', 'fleetmates/r1/T3', runTip])
 
     // The plan-amendment procedure: the base advances and the run branch merges it in. This is
     // unrelated to T2 and T3 — neither teammate did anything — but it moves the run tip past
@@ -568,8 +568,8 @@ test('gate does not treat two idle siblings as parked when an unrelated commit m
     assert.equal(parsed.verdict, 'FAIL')
     assert.equal(parsed.phase, 2)
     const fileset = parsed.results.find((r) => r.name === 'fileset')
-    assert.match(fileset.output, /T2: branch teammates\/r1\/T2 contributes no file changes/)
-    assert.match(fileset.output, /T3: branch teammates\/r1\/T3 contributes no file changes/)
+    assert.match(fileset.output, /T2: branch fleetmates\/r1\/T2 contributes no file changes/)
+    assert.match(fileset.output, /T3: branch fleetmates\/r1\/T3 contributes no file changes/)
     assert.doesNotMatch(fileset.output, /parked at another's tip/)
     assert.doesNotMatch(fileset.output, /cannot be phase-gated until it is fixed/)
   })
@@ -617,31 +617,31 @@ test('gate does not credit an idle ref parked on a run tip that only a sibling\'
 
     // T3 forks BEFORE T1 lands, so its own sync merge with run-branch (after T1 merges) is a
     // genuine, non-fast-forward merge rather than a no-op.
-    git(root, ['checkout', '--quiet', '-b', 'teammates/r1/T3'])
+    git(root, ['checkout', '--quiet', '-b', 'fleetmates/r1/T3'])
     await writeFile(path.join(root, 'c.mjs'), 'x\n', 'utf8')
     git(root, ['add', '.'])
     git(root, ['commit', '--quiet', '-m', 'T3: work'])
     git(root, ['checkout', '--quiet', 'run-branch'])
 
     await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
-    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'fleetmates/r1/T1'])
 
     // T2 (phase 2, idle) is dispatched right after T1 merges, and never commits.
-    git(root, ['branch', 'teammates/r1/T2', 'run-branch'])
+    git(root, ['branch', 'fleetmates/r1/T2', 'run-branch'])
 
     // T3's own sync, picking up T1's interface: names the post-T1 tip as a secondary parent of
     // this commit, which is NOT a merge `tm-integrator` ever ran.
-    git(root, ['checkout', '--quiet', 'teammates/r1/T3'])
+    git(root, ['checkout', '--quiet', 'fleetmates/r1/T3'])
     git(root, ['merge', '--quiet', '--no-ff', '-m', 'T3: sync with run-branch', 'run-branch'])
     git(root, ['checkout', '--quiet', 'run-branch'])
-    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T3', 'teammates/r1/T3'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T3', 'fleetmates/r1/T3'])
 
     const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
     assert.equal(code, 1)
     const parsed = JSON.parse(out)
     assert.equal(parsed.verdict, 'FAIL')
     const fileset = parsed.results.find((r) => r.name === 'fileset')
-    assert.match(fileset.output, /T2: branch teammates\/r1\/T2 contributes no file changes/)
+    assert.match(fileset.output, /T2: branch fleetmates\/r1\/T2 contributes no file changes/)
     assert.doesNotMatch(fileset.output, /parked at another's tip/)
     assert.doesNotMatch(fileset.output, /cannot be phase-gated until it is fixed/)
   })
@@ -685,11 +685,11 @@ test('gate does not let a later phase\'s parked ref strip an earlier phase\'s ge
     const t1Tip = git(root, ['rev-parse', t1Branch]).trim()
     git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', t1Branch])
     await taskBranch(root, 'r1', 'T2', { files: { 'b.mjs': 'x\n' } })
-    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T2', 'teammates/r1/T2'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T2', 'fleetmates/r1/T2'])
 
     // T3 (phase 3) never commits: its ref is pointed at T1's own merged tip — a fixed
     // ancestor now that T2's merge has moved the run tip past it.
-    git(root, ['branch', 'teammates/r1/T3', t1Tip])
+    git(root, ['branch', 'fleetmates/r1/T3', t1Tip])
 
     const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
     assert.equal(code, 1)
@@ -701,7 +701,7 @@ test('gate does not let a later phase\'s parked ref strip an earlier phase\'s ge
     assert.equal(parsed.phase, 3)
     const fileset = parsed.results.find((r) => r.name === 'fileset')
     assert.doesNotMatch(fileset.output, /refusing to guess which phase to enforce/)
-    assert.match(fileset.output, /T3: branch teammates\/r1\/T3 contributes no file changes past its fork point/)
+    assert.match(fileset.output, /T3: branch fleetmates\/r1\/T3 contributes no file changes past its fork point/)
     assert.match(fileset.output, new RegExp(t1Tip))
     assert.doesNotMatch(fileset.output, /T1:/)
   })
@@ -746,7 +746,7 @@ test('gate fails a ref built one empty commit above a merged sibling\'s tip, eve
     await commitPlanAtAnchor(root, NEAR_SIBLING_PLAN)
 
     await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
-    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'fleetmates/r1/T1'])
 
     const t3Branch = await taskBranch(root, 'r1', 'T3', { files: { 'c.mjs': 'x\n' } })
     git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T3', t3Branch])
@@ -754,17 +754,17 @@ test('gate fails a ref built one empty commit above a merged sibling\'s tip, eve
     // T2 branches from T3's tip and adds one empty commit — a distinct sha, not T3's own —
     // then that branch is merged under T2's own name, exactly as a genuine contribution would
     // be.
-    git(root, ['checkout', '--quiet', '-b', 'teammates/r1/T2', t3Branch])
+    git(root, ['checkout', '--quiet', '-b', 'fleetmates/r1/T2', t3Branch])
     git(root, ['commit', '--quiet', '--allow-empty', '-m', 'T2: empty, contributes nothing'])
     git(root, ['checkout', '--quiet', 'run-branch'])
-    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T2', 'teammates/r1/T2'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T2', 'fleetmates/r1/T2'])
 
     const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
     assert.equal(code, 1)
     const parsed = JSON.parse(out)
     assert.equal(parsed.verdict, 'FAIL')
     const fileset = parsed.results.find((r) => r.name === 'fileset')
-    assert.match(fileset.output, /T2: branch teammates\/r1\/T2 contributes no file changes/)
+    assert.match(fileset.output, /T2: branch fleetmates\/r1\/T2 contributes no file changes/)
     assert.doesNotMatch(fileset.output, /T3:/)
   })
 })
@@ -788,9 +788,9 @@ test('LIMIT (self-integration): a teammate that does real work and merges its ow
     // The parked-branch variant this bullet used to be conflated with is now DEFENDED; see
     // 'gate fails when a task ref is parked at a run tip carrying another task's work' above.
     await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
-    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'fleetmates/r1/T1'])
     await taskBranch(root, 'r1', 'T2', { files: { 'b.mjs': 'y\n' } })
-    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T2', 'teammates/r1/T2'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T2', 'fleetmates/r1/T2'])
 
     const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
     assert.equal(code, 0)
@@ -837,7 +837,7 @@ test('LIMIT (sibling-tip, overlapping declared set): a parked ref whose declared
 
     // T2 never commits: its ref is pointed straight at T1's own merged tip. T2's declared set
     // (`a.mjs`, `b.mjs`) intersects `a.mjs` — what the merge that landed T1 actually carried.
-    git(root, ['branch', 'teammates/r1/T2', t1Tip])
+    git(root, ['branch', 'fleetmates/r1/T2', t1Tip])
 
     const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
     assert.equal(code, 0)
@@ -864,12 +864,12 @@ test('a merge that flips a file\'s executable bit beyond its task branch is caug
   await withRepo(async (root) => {
     git(root, ['config', 'core.fileMode', 'false'])
     await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
-    git(root, ['merge', '--quiet', '--no-ff', '--no-commit', 'teammates/r1/T1'])
+    git(root, ['merge', '--quiet', '--no-ff', '--no-commit', 'fleetmates/r1/T1'])
     git(root, ['update-index', '--chmod=+x', 'a.mjs'])
     git(root, ['commit', '--quiet', '-m', 'integrate T1 (tampered mode bit)'])
 
     await taskBranch(root, 'r1', 'T2', { from: 'main', files: { 'b.mjs': 'y\n' } })
-    git(root, ['merge', '--quiet', '--no-ff', '-m', 'integrate T2', 'teammates/r1/T2'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'integrate T2', 'fleetmates/r1/T2'])
 
     const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
     assert.equal(code, 1)
@@ -884,7 +884,7 @@ test('LIMIT (uncommitted work): an out-of-set file left uncommitted in a teammat
     // main checkout the gate runs from, so an uncommitted stray file there never reaches
     // either the fileset diff or the main worktree's dirty check.
     const wtPath = path.join(path.dirname(root), `${path.basename(root)}-t1`)
-    git(root, ['worktree', 'add', '--quiet', '-b', 'teammates/r1/T1', wtPath, 'main'])
+    git(root, ['worktree', 'add', '--quiet', '-b', 'fleetmates/r1/T1', wtPath, 'main'])
     try {
       await writeFile(path.join(wtPath, 'a.mjs'), 'x\n', 'utf8')
       git(wtPath, ['add', 'a.mjs'])
@@ -902,11 +902,11 @@ test('LIMIT (uncommitted work): an out-of-set file left uncommitted in a teammat
 
 test('LIMIT (forged digest): a forged status.tasks[].state is reported as-is because status.json is a report, not evidence', async () => {
   await withRepo(async (root) => {
-    // Spec: "A teammate that forges run state. .teammates/ is writable. Nothing reads it
+    // Spec: "A teammate that forges run state. .fleetmates/ is writable. Nothing reads it
     // for a verdict, so this buys little — but the digest and supervision output can be
     // made to lie."
     await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
-    const statusPath = path.join(root, '.teammates', 'r1', 'status.json')
+    const statusPath = path.join(root, '.fleetmates', 'r1', 'status.json')
     const status = JSON.parse(await readFile(statusPath, 'utf8'))
     status.tasks.find((t) => t.id === 'T1').state = 'done'
     await writeFile(statusPath, `${JSON.stringify(status, null, 2)}\n`, 'utf8')
@@ -944,21 +944,21 @@ test('a compliant run passes the gate and complete marks the task done', async (
 // Step 5 — the fix loop's trust boundary.
 //
 // What the two tests immediately below pin: the fix-round budget is bookkeeping that lives in
-// `.teammates/status.json`, and `.teammates/` is writable by exactly the agents the gate
+// `.fleetmates/status.json`, and `.fleetmates/` is writable by exactly the agents the gate
 // enforces. So the budget bounds the loop against DRIFT AND MISTAKES — a check that stays red
 // because the retry did not help, an operator who re-runs `fix` after a crash, a phase that
 // would otherwise ping-pong forever — and against nothing else. What they do NOT pin, because
 // it is not true: that the budget survives a teammate aiming at it. A teammate that rewrites
 // its own round counter downward gets more retries (pinned below), and that is the accepted
 // cost, because the thing a retry cannot buy is a verdict: `gate`'s ENFORCEMENT CHECKS read no
-// file out of `.teammates/` at all, so every verdict is recomputed from git on every round.
+// file out of `.fleetmates/` at all, so every verdict is recomputed from git on every round.
 //
 // Stated at that precision on purpose, matching skills/phase-gate/SKILL.md. The gate *command*
-// does touch `.teammates/`: after the verdict is computed, `cli.mjs` calls
+// does touch `.fleetmates/`: after the verdict is computed, `cli.mjs` calls
 // `readState(root, runId, 'status')` to write the record back, and `readState` rethrows
 // anything that is not ENOENT — a `status.json` containing `{ not json` makes `gate` throw a
 // SyntaxError rather than return an exit code. That is a fail-closed crash, not a hole, and it
-// happens strictly after the verdict exists; `.teammates/` is a report sink, never an input.
+// happens strictly after the verdict exists; `.fleetmates/` is a report sink, never an input.
 // The budget protects tokens; git protects correctness. See scripts/state.mjs
 // (`readFixRounds`) and the spec's "Not defended against" list.
 // ============================================================================================
@@ -966,7 +966,7 @@ test('a compliant run passes the gate and complete marks the task done', async (
 test('the round counter is not an input to the verdict: the gate output is identical with five rounds recorded and with the counter wiped', async () => {
   await withRepo(async (root) => {
     await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
-    const statusPath = path.join(root, '.teammates', 'r1', 'status.json')
+    const statusPath = path.join(root, '.fleetmates', 'r1', 'status.json')
 
     // Spend five rounds through the real writer. Asserting the counter actually reads 5 is
     // load-bearing, not decoration: a fresh init-run status carries no `fixRounds` at all, so
@@ -1007,7 +1007,7 @@ test('a fileset failure escalates as process-violation on round 0, with the whol
     // so the full budget is available and no round has been spent.
     const gateResult = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
     assert.equal(gateResult.code, 1)
-    const verdictPath = path.join(root, '.teammates', 'verdict.json')
+    const verdictPath = path.join(root, '.fleetmates', 'verdict.json')
     await writeFile(verdictPath, gateResult.out, 'utf8')
 
     const fixResult = await runCliOn(root, ['fix', '--run', 'r1', '--phase', '1', '--verdict', verdictPath])
@@ -1055,15 +1055,15 @@ const RETRYABLE_MANIFEST = {
 // a.mjs, so both enforcement checks pass and only `test` is red.
 //
 // The swapped manifest is amended into the base commit rather than left in the working tree.
-// withRepo commits its own teammates.gate.json, so overwriting it in place would leave the
+// withRepo commits its own fleetmates.gate.json, so overwriting it in place would leave the
 // worktree dirty and fail `ownership` — turning every decision below into a process violation
 // for a reason that has nothing to do with the fix loop. run-branch is still at main's tip
 // here, so moving both refs onto the amended commit leaves the repo exactly as withRepo left
 // it, only with a different committed manifest.
 async function retryableRun(root) {
-  await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(RETRYABLE_MANIFEST), 'utf8')
+  await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify(RETRYABLE_MANIFEST), 'utf8')
   git(root, ['checkout', '--quiet', 'main'])
-  git(root, ['add', 'teammates.gate.json'])
+  git(root, ['add', 'fleetmates.gate.json'])
   git(root, ['commit', '--quiet', '--amend', '--no-edit'])
   git(root, ['branch', '--quiet', '-f', 'run-branch', 'main'])
   git(root, ['checkout', '--quiet', 'run-branch'])
@@ -1072,12 +1072,12 @@ async function retryableRun(root) {
   await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
 }
 
-// Runs the gate, asserts it FAILed, parks the verdict under the gitignored .teammates/ (so it
+// Runs the gate, asserts it FAILed, parks the verdict under the gitignored .fleetmates/ (so it
 // never dirties the worktree the ownership check inspects) and returns its path.
 async function gateVerdict(root) {
   const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
   assert.equal(code, 1)
-  const verdictPath = path.join(root, '.teammates', 'verdict.json')
+  const verdictPath = path.join(root, '.fleetmates', 'verdict.json')
   await writeFile(verdictPath, out, 'utf8')
   return verdictPath
 }
@@ -1096,7 +1096,7 @@ test('LIMIT (self-served budget): a teammate that rewrites its own fixRounds dow
 
     // Now cheat: status.json is written by the agents the gate enforces, so the counter can
     // simply be zeroed. The loop reopens.
-    const statusPath = path.join(root, '.teammates', 'r1', 'status.json')
+    const statusPath = path.join(root, '.fleetmates', 'r1', 'status.json')
     const status = JSON.parse(await readFile(statusPath, 'utf8'))
     status.fixRounds = { 1: { T1: 0 } }
     await writeFile(statusPath, `${JSON.stringify(status, null, 2)}\n`, 'utf8')
@@ -1146,13 +1146,13 @@ test('the budget comes from the manifest, walked end to end through the real sub
   })
 })
 
-// `fix` reads plan.json out of `.teammates/`, which is exactly as agent-writable as
+// `fix` reads plan.json out of `.fleetmates/`, which is exactly as agent-writable as
 // status.json. The three tests below pin what that buys. None of them is a hole in the gate —
 // no verdict moves — but each changes which teammate the loop points at, and an untested
 // limitation drifts into an implied guarantee.
 
 async function rewritePlan(root, runId, mutate) {
-  const planPath = path.join(root, '.teammates', runId, 'plan.json')
+  const planPath = path.join(root, '.fleetmates', runId, 'plan.json')
   const plan = JSON.parse(await readFile(planPath, 'utf8'))
   mutate(plan)
   await writeFile(planPath, `${JSON.stringify(plan, null, 2)}\n`, 'utf8')
@@ -1209,18 +1209,18 @@ test('LIMIT (persisted verdict): feeding the gate record stored in status.json b
     const gateResult = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
     assert.equal(gateResult.code, 1)
 
-    // skills/phase-gate/SKILL.md forbids reading the verdict back from `.teammates/` and notes
+    // skills/phase-gate/SKILL.md forbids reading the verdict back from `.fleetmates/` and notes
     // that doing it today "degenerates harmlessly, because the persisted object carries no
     // `results` key and the decision comes back `none` … that is incidental, not guaranteed."
     // This pins the incidental behaviour so it breaks loudly the day `results` starts being
     // persisted and the on-disk record silently becomes a decision input.
-    const statusPath = path.join(root, '.teammates', 'r1', 'status.json')
+    const statusPath = path.join(root, '.fleetmates', 'r1', 'status.json')
     const status = JSON.parse(await readFile(statusPath, 'utf8'))
     const persisted = status.gates['1']
     assert.equal(persisted.verdict, 'FAIL')
     assert.equal(persisted.results, undefined)
 
-    const recordPath = path.join(root, '.teammates', 'persisted-verdict.json')
+    const recordPath = path.join(root, '.fleetmates', 'persisted-verdict.json')
     await writeFile(recordPath, JSON.stringify(persisted), 'utf8')
     const fromRecord = JSON.parse((await runCliOn(root, ['fix', '--run', 'r1', '--phase', '1', '--verdict', recordPath])).out)
     assert.equal(fromRecord.decision, 'none')
@@ -1259,23 +1259,23 @@ test('LIMIT (persisted verdict): feeding the gate record stored in status.json b
 // than into `withRepo`'s default, which stays enforcement-only on purpose (see MANIFEST).
 //
 // Amended INTO the initial commit, with main moved along, rather than left in the working
-// tree: teammates.gate.json is tracked, so a plain overwrite leaves the worktree dirty and
+// tree: fleetmates.gate.json is tracked, so a plain overwrite leaves the worktree dirty and
 // `ownership` fails the run on that instead of on what the test is about. Committing it on
 // run-branch alone would be worse — an unexplained commit, which `ownership` also fails.
 // Call before taskBranch, so task branches fork from the amended commit.
 async function commitManifest(root, checks) {
-  await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify({ phases: { default: { checks } } }), 'utf8')
+  await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({ phases: { default: { checks } } }), 'utf8')
   git(root, ['add', '.'])
   git(root, ['commit', '--quiet', '--amend', '--no-edit'])
   git(root, ['branch', '--force', 'main', 'run-branch'])
 }
 
-// Under `.teammates/` because that is the one path withRepo's .gitignore excludes. Dropped in
+// Under `.fleetmates/` because that is the one path withRepo's .gitignore excludes. Dropped in
 // the repo root instead, the results file is an untracked file in the worktree and `ownership`
 // fails the run on it — which would mask the very rejection each test below means to pin, and
 // did exactly that on the first draft of the last test here.
 async function writeResults(root, results) {
-  const file = path.join(root, '.teammates', 'supplied-results.json')
+  const file = path.join(root, '.fleetmates', 'supplied-results.json')
   await mkdir(path.dirname(file), { recursive: true })
   await writeFile(file, JSON.stringify({ results }), 'utf8')
   return file
@@ -1440,7 +1440,7 @@ test('a compliant two-phase run passes phase 1, is merged --no-ff, then derives 
     assert.equal(phase1.code, 0)
     assert.equal(JSON.parse(phase1.out).phase, 1)
 
-    git(root, ['merge', '--quiet', '--no-ff', '-m', 'integrate T1', 'teammates/r1/T1'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'integrate T1', 'fleetmates/r1/T1'])
 
     // T2 branches off the run branch AFTER the phase-1 merge — the real workflow, and a
     // regression test for a confirmed bug where every phase-2 task false-failed on files
@@ -1487,8 +1487,8 @@ test('a compliant two-phase run passes phase 1, is merged --no-ff, then derives 
 // directory (it runs `git add .`).
 async function commitPreviewManifest(root, { link, checks, ignore = [] }) {
   const config = { preview: { link }, phases: { default: { checks } } }
-  await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(config), 'utf8')
-  await writeFile(path.join(root, '.gitignore'), ['.teammates/', ...ignore, ''].join('\n'), 'utf8')
+  await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify(config), 'utf8')
+  await writeFile(path.join(root, '.gitignore'), ['.fleetmates/', ...ignore, ''].join('\n'), 'utf8')
   git(root, ['add', '.'])
   git(root, ['commit', '--quiet', '--amend', '--no-edit'])
   git(root, ['branch', '--force', 'main', 'run-branch'])
@@ -1613,7 +1613,7 @@ test('a legitimate preview.link provisions the preview and a command check reads
     // below can tell "read through the link, from inside the preview" apart from "read from
     // the repository working tree" — the two are indistinguishable by exit code alone, and a
     // check that was skipped still yields PASS and exit 0.
-    const sentinel = path.join(root, '.teammates', 'link-probe.json')
+    const sentinel = path.join(root, '.fleetmates', 'link-probe.json')
     // realpathSync.native, not realpathSync: on Windows the plain form can return an 8.3 short
     // path (`C:\Users\RUNNER~1\...`) while the test's own side resolves to the long one
     // (`C:\Users\runneradmin\...`), and the two compare unequal for the same file. The native
@@ -1692,7 +1692,7 @@ writeFileSync(${JSON.stringify(sentinel)}, JSON.stringify({
 // ============================================================================================
 // Step 8 — the config layer's trust boundary.
 //
-// `teammates.local.json` is gitignored on purpose: it holds machine-local ergonomics, so it must
+// `fleetmates.local.json` is gitignored on purpose: it holds machine-local ergonomics, so it must
 // not be committed. That same gitignore is what makes it interesting here. A teammate runs its
 // own code, so it can write the file during its own task, and neither `fileset` nor `ownership`
 // will ever see it — the worktree stays clean. The whole defence is therefore that the file
@@ -1740,7 +1740,7 @@ const HOSTILE_LOCAL = {
 async function ignoreLocalLayer(root) {
   const branches = git(root, ['branch', '--list', 'teammates/*', '--format=%(refname:short)']).trim()
   assert.equal(branches, '', 'ignoreLocalLayer must run before any task branch exists — call it before retryableRun')
-  await writeFile(path.join(root, '.gitignore'), '.teammates/\nteammates.local.json\n', 'utf8')
+  await writeFile(path.join(root, '.gitignore'), '.fleetmates/\nfleetmates.local.json\n', 'utf8')
   git(root, ['checkout', '--quiet', 'main'])
   git(root, ['add', '.gitignore'])
   git(root, ['commit', '--quiet', '--amend', '--no-edit'])
@@ -1748,7 +1748,7 @@ async function ignoreLocalLayer(root) {
   git(root, ['checkout', '--quiet', 'run-branch'])
 }
 
-test('a hostile teammates.local.json declaring an empty check list leaves the gate verdict untouched', async () => {
+test('a hostile fleetmates.local.json declaring an empty check list leaves the gate verdict untouched', async () => {
   await withRepo(async (root) => {
     await ignoreLocalLayer(root)
     await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
@@ -1763,7 +1763,7 @@ test('a hostile teammates.local.json declaring an empty check list leaves the ga
     assert.equal(before.code, 1)
     assert.equal(JSON.parse(before.out).verdict, 'FAIL')
 
-    await writeFile(path.join(root, 'teammates.local.json'), JSON.stringify(HOSTILE_LOCAL), 'utf8')
+    await writeFile(path.join(root, 'fleetmates.local.json'), JSON.stringify(HOSTILE_LOCAL), 'utf8')
     // Invisible to git, which is precisely why the file must not be trusted — and why this test
     // exists rather than relying on `ownership` to catch it.
     assert.equal(git(root, ['status', '--porcelain']).trim(), '')
@@ -1792,7 +1792,7 @@ test('the same hostile file cannot extend the fix-round budget the tracked manif
     // whole suite while handing a teammate 99 retries it was never granted.
     await ignoreLocalLayer(root)
     await retryableRun(root)
-    await writeFile(path.join(root, 'teammates.local.json'), JSON.stringify(HOSTILE_LOCAL), 'utf8')
+    await writeFile(path.join(root, 'fleetmates.local.json'), JSON.stringify(HOSTILE_LOCAL), 'utf8')
     // Still invisible to git, exactly as in the verdict test.
     assert.equal(git(root, ['status', '--porcelain']).trim(), '')
 
@@ -1827,10 +1827,10 @@ test('the same hostile file cannot extend the fix-round budget the tracked manif
   })
 })
 
-test('the same hostile teammates.local.json makes config list exit 2, naming phases as an enforcement key', async () => {
+test('the same hostile fleetmates.local.json makes config list exit 2, naming phases as an enforcement key', async () => {
   await withRepo(async (root) => {
     await ignoreLocalLayer(root)
-    await writeFile(path.join(root, 'teammates.local.json'), JSON.stringify(HOSTILE_LOCAL), 'utf8')
+    await writeFile(path.join(root, 'fleetmates.local.json'), JSON.stringify(HOSTILE_LOCAL), 'utf8')
 
     const { code, out } = await runCliOn(root, ['config', 'list'])
     assert.equal(code, 2)
@@ -1839,18 +1839,18 @@ test('the same hostile teammates.local.json makes config list exit 2, naming pha
     // a flag given a value it does not take — so an assertion on the exit code, or on the mere
     // appearance of the word `phases`, cannot tell which one fired and would certify a rejection
     // it never observed.
-    assert.equal(out, 'phases is an enforcement key; it may only be set in teammates.gate.json')
+    assert.equal(out, 'phases is an enforcement key; it may only be set in fleetmates.gate.json')
     // The nearest neighbour, ruled out explicitly: `fixRounds` in this same file IS an unknown
     // key, so a validator that walked the object in a different order would reject the file at
     // exit 2 with that wording instead — loud, but about the wrong key, and it would leave
     // `phases` unmentioned for an operator reading the message.
-    assert.doesNotMatch(out, /unknown key in teammates\.local\.json/)
+    assert.doesNotMatch(out, /unknown key in fleetmates\.local\.json/)
     // Not printed and then ignored: no resolved value may reach stdout alongside the rejection.
     assert.doesNotMatch(out, /maxParallel/)
   })
 })
 
-test('a teammates.local.json declaring agents.reviewer.tier is rejected by name', async () => {
+test('a fleetmates.local.json declaring agents.reviewer.tier is rejected by name', async () => {
   await withRepo(async (root) => {
     await ignoreLocalLayer(root)
     // `cheap` is a perfectly valid tier — the value is not the problem. The reviewer produces
@@ -1859,20 +1859,20 @@ test('a teammates.local.json declaring agents.reviewer.tier is rejected by name'
     // evidence. `agents.implementer.tier` in this same position is accepted; the role is what
     // makes this one enforcement.
     await writeFile(
-      path.join(root, 'teammates.local.json'),
+      path.join(root, 'fleetmates.local.json'),
       JSON.stringify({ agents: { reviewer: { tier: 'cheap' } } }),
       'utf8',
     )
 
     const { code, out } = await runCliOn(root, ['config', 'list'])
     assert.equal(code, 2)
-    assert.equal(out, 'agents.reviewer is an enforcement key; it may only be set in teammates.gate.json')
+    assert.equal(out, 'agents.reviewer is an enforcement key; it may only be set in fleetmates.gate.json')
     // Ruled out explicitly, because both are exit-2 rejections of the same file and only one of
     // them is the guarantee this test claims: `unknown agent role` would mean the role was
     // refused as a typo rather than as enforcement, and would equally refuse a legitimate
     // reviewer entry in the tracked manifest.
     assert.doesNotMatch(out, /unknown agent role/)
-    assert.doesNotMatch(out, /unknown key in teammates\.local\.json/)
+    assert.doesNotMatch(out, /unknown key in fleetmates\.local\.json/)
   })
 })
 
@@ -1882,10 +1882,10 @@ test('the same reviewer tier is accepted in the tracked manifest, so the rejecti
     // — a config that simply cannot express a reviewer tier at all — would satisfy every
     // assertion there while making the documented split meaningless.
     const manifest = { ...MANIFEST, agents: { reviewer: { tier: 'cheap' } } }
-    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(manifest), 'utf8')
+    await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify(manifest), 'utf8')
 
     const { code, out } = await runCliOn(root, ['config', 'list'])
     assert.equal(code, 0, out)
-    assert.match(out, /^agents\.reviewer\.tier {4}cheap {2}\(teammates\.gate\.json\)$/m)
+    assert.match(out, /^agents\.reviewer\.tier {4}cheap {2}\(fleetmates\.gate\.json\)$/m)
   })
 })

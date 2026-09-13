@@ -46,16 +46,16 @@ test('a task declaring no files makes every change a violation', () => {
   assert.deepEqual(filesetViolations(['a.mjs'], []), ['a.mjs'])
 })
 
-test('the branch convention is teammates/<runId>/<taskId>', () => {
-  assert.equal(taskBranchName('r1', 'T1'), 'teammates/r1/T1')
+test('the branch convention is fleetmates/<runId>/<taskId>', () => {
+  assert.equal(taskBranchName('r1', 'T1'), 'fleetmates/r1/T1')
 })
 
 test('a branch field on the task is ignored in favour of the convention', () => {
-  assert.equal(resolveTaskBranch({ id: 'T1', branch: 'custom' }, 'r1'), 'teammates/r1/T1')
+  assert.equal(resolveTaskBranch({ id: 'T1', branch: 'custom' }, 'r1'), 'fleetmates/r1/T1')
 })
 
 test('with no recorded branch the convention is used', () => {
-  assert.equal(resolveTaskBranch({ id: 'T1' }, 'r1'), 'teammates/r1/T1')
+  assert.equal(resolveTaskBranch({ id: 'T1' }, 'r1'), 'fleetmates/r1/T1')
 })
 
 test('a task with no id resolves to null', () => {
@@ -123,13 +123,13 @@ test('a task branch that reached the base branch without the run branch is a vio
   const v = ownershipViolations({
     runBranch: 'run',
     baseBranch: 'master',
-    taskBranches: ['teammates/r1/T1'],
-    sideDoorBranches: ['teammates/r1/T1'],
+    taskBranches: ['fleetmates/r1/T1'],
+    sideDoorBranches: ['fleetmates/r1/T1'],
     unexplainedCommits: [],
     dirty: false,
   })
   assert.equal(v.length, 1)
-  assert.match(v[0], /teammates\/r1\/T1/)
+  assert.match(v[0], /fleetmates\/r1\/T1/)
   assert.match(v[0], /master/)
   assert.match(v[0], /run/)
 })
@@ -138,7 +138,7 @@ test('a task branch on neither the base nor the run branch is not a side-door vi
   const v = ownershipViolations({
     runBranch: 'run',
     baseBranch: 'master',
-    taskBranches: ['teammates/r1/T1'],
+    taskBranches: ['fleetmates/r1/T1'],
     sideDoorBranches: [],
     unexplainedCommits: [],
     dirty: false,
@@ -148,7 +148,7 @@ test('a task branch on neither the base nor the run branch is not a side-door vi
 
 test('no unexplained commits and no alias collisions is clean', () => {
   const v = ownershipViolations({
-    runBranch: 'main', taskBranches: ['teammates/r1/T1'], unexplainedCommits: [], dirty: false,
+    runBranch: 'main', taskBranches: ['fleetmates/r1/T1'], unexplainedCommits: [], dirty: false,
   })
   assert.deepEqual(v, [])
 })
@@ -195,7 +195,7 @@ test('a doubly-prefixed heads/heads/ alias is a violation', () => {
 
 test('each unexplained commit is flagged and names --no-ff', () => {
   const v = ownershipViolations({
-    runBranch: 'main', taskBranches: ['teammates/r1/T1'], unexplainedCommits: ['abc123', 'def456'], dirty: false,
+    runBranch: 'main', taskBranches: ['fleetmates/r1/T1'], unexplainedCommits: ['abc123', 'def456'], dirty: false,
   })
   assert.equal(v.length, 2)
   assert.match(v[0], /abc123/)
@@ -209,7 +209,7 @@ test('each unexplained commit is flagged and names --no-ff', () => {
 // the commit is not on the base either — the message must name that possibility itself.
 test('an unexplained commit names the base branch as a ruled-out explanation', () => {
   const v = ownershipViolations({
-    runBranch: 'main', taskBranches: ['teammates/r1/T1'], unexplainedCommits: ['abc123'], dirty: false,
+    runBranch: 'main', taskBranches: ['fleetmates/r1/T1'], unexplainedCommits: ['abc123'], dirty: false,
   })
   assert.equal(v.length, 1)
   assert.match(v[0], /base branch/)
@@ -252,12 +252,12 @@ const baseVerdict = {
   verdict: 'PASS',
   anchorSha: 'anchor1',
   planHash: 'ph1',
-  branchShas: { 'teammates/r1/T1': 'sha1' },
+  branchShas: { 'fleetmates/r1/T1': 'sha1' },
 }
 const baseCurrent = {
   anchorSha: 'anchor1',
   planHash: 'ph1',
-  branchShas: { 'teammates/r1/T1': 'sha1' },
+  branchShas: { 'fleetmates/r1/T1': 'sha1' },
 }
 
 test('verdictCoversTree is null for a matching PASS', () => {
@@ -282,19 +282,19 @@ test('verdictCoversTree gives a reason for a changed plan hash', () => {
 
 test('verdictCoversTree gives a reason for a moved branch', () => {
   assert.match(
-    verdictCoversTree(baseVerdict, { ...baseCurrent, branchShas: { 'teammates/r1/T1': 'sha2' } }),
-    /branch teammates\/r1\/T1 moved/,
+    verdictCoversTree(baseVerdict, { ...baseCurrent, branchShas: { 'fleetmates/r1/T1': 'sha2' } }),
+    /branch fleetmates\/r1\/T1 moved/,
   )
 })
 
 test('verdictCoversTree flags a branch present in current but not in the recorded verdict', () => {
-  const current = { ...baseCurrent, branchShas: { ...baseCurrent.branchShas, 'teammates/r1/T2': 'sha3' } }
-  assert.match(verdictCoversTree(baseVerdict, current), /branch teammates\/r1\/T2 moved/)
+  const current = { ...baseCurrent, branchShas: { ...baseCurrent.branchShas, 'fleetmates/r1/T2': 'sha3' } }
+  assert.match(verdictCoversTree(baseVerdict, current), /branch fleetmates\/r1\/T2 moved/)
 })
 
 test('verdictCoversTree flags a branch present in the recorded verdict but not in current', () => {
-  const verdict = { ...baseVerdict, branchShas: { ...baseVerdict.branchShas, 'teammates/r1/T2': 'sha3' } }
-  assert.match(verdictCoversTree(verdict, baseCurrent), /branch teammates\/r1\/T2 moved/)
+  const verdict = { ...baseVerdict, branchShas: { ...baseVerdict.branchShas, 'fleetmates/r1/T2': 'sha3' } }
+  assert.match(verdictCoversTree(verdict, baseCurrent), /branch fleetmates\/r1\/T2 moved/)
 })
 
 // --- planHash -------------------------------------------------------------------------------

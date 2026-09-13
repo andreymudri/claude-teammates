@@ -7,7 +7,7 @@ description: Use when spawning, listing, messaging, scaling, stopping, or resumi
 
 ## When the run directory is gone
 
-`.teammates/` is gitignored, so a clean checkout or a stray delete takes a run's bookkeeping with
+`.fleetmates/` is gitignored, so a clean checkout or a stray delete takes a run's bookkeeping with
 it. Rebuild it from git rather than hand-writing JSON:
 
     node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" rebuild-state --run <runId> --plan <planPath> --root <project root>
@@ -76,7 +76,7 @@ claim so the task is claimable again:
 Without this the task stays permanently claimed by the stopped teammate and no respawned
 teammate can ever pick it up.
 
-**resume `<run-id>`** — read `.teammates/<run-id>/` and reconstruct state. For the Workflow
+**resume `<run-id>`** — read `.fleetmates/<run-id>/` and reconstruct state. For the Workflow
 path, relaunch with `resumeFromRunId` so completed agents return cached results.
 
 ## Scaling mid-run
@@ -91,10 +91,10 @@ Both paths support adding teammates at any moment:
 Two separate limits apply — do not conflate them:
 
 - **`maxParallel`** (default `min(8, cores-2)`) is this plugin's own fleet size. It is an
-  **ergonomics** key: settable in either layer, but `teammates.local.json` (gitignored,
+  **ergonomics** key: settable in either layer, but `fleetmates.local.json` (gitignored,
   machine-local) is the normal place for it — fleet size depends on the machine, so it does not
   belong committed. Change it through `config set maxParallel <n> --local`, never by hand; see
-  `teammates-config`. You may change it between phases.
+  `fleetmates-config`. You may change it between phases.
 - **`min(16, cores-2)`** is the Workflow tool's built-in per-workflow concurrency cap. It is
   not ours to set. Excess items queue rather than fail.
 

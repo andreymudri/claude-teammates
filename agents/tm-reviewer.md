@@ -46,7 +46,7 @@ Exactly one shape, for the file and the response both — a JSON object carrying
 
 ```json
 {
-  "stamp": { "phase": "1", "lens": "correctness", "branches": ["teammates/<run>/T1@<sha>"] },
+  "stamp": { "phase": "1", "lens": "correctness", "branches": ["fleetmates/<run>/T1@<sha>"] },
   "findings": [
     { "severity": "high|medium|low", "file": "...", "line": 0, "summary": "...", "failureScenario": "..." }
   ]

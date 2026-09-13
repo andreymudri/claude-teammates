@@ -1,3 +1,5 @@
+import { migrate } from './migrate.mjs'
+import { NAMES } from './names.mjs'
 import { readFile, writeFile, mkdir, rename, lstat, readdir, unlink, open as openFile } from 'node:fs/promises'
 import { constants as fsConstants } from 'node:fs'
 import { livenessRows, renderLiveness, hasStall, hasUnknown, DEFAULT_STALE_MINUTES } from './liveness.mjs'
@@ -284,7 +286,7 @@ function unknownFlags(command, flags) {
 
 // Commands whose `--phase` names a numeric plan phase, not a manifest phase key. `gate` is
 // deliberately absent: its `--phase` is a NAME (`default`, `integration`) that selects a
-// block of checks from teammates.gate.json.
+// block of checks from fleetmates.gate.json.
 // Not a missing argument in the sense the generic line means, so it does not get that line's
 // lead. A `--no-fleet` gate names its phase from the manifest and emits a verdict carrying
 // `phaseName` with no integer `phase` — reported as a typo, that told an operator following the
@@ -351,7 +353,7 @@ const ENFORCEMENT_ONLY_SKIPPED = Symbol('skipped by --enforcement-only')
 // `merge` has declared no enforcement, and counting it here would reopen the hole this closes.
 const MANIFEST_ENFORCED_KINDS = new Set(['fileset', 'ownership'])
 
-// A MANIFEST ENTRY IS NOT KNOWN TO BE AN OBJECT. `teammates.gate.json` is `JSON.parse`-only and
+// A MANIFEST ENTRY IS NOT KNOWN TO BE AN OBJECT. `fleetmates.gate.json` is `JSON.parse`-only and
 // `validateGate` in `scripts/config.mjs` checks only that `phases[*].checks` is an ARRAY, never
 // what is in it, so a hand-written `[null, …]` — or a bare string, or a number — arrives here
 // intact. `runChecks` diagnoses every one of those shapes and fails the phase on them, which is
@@ -380,7 +382,7 @@ function commandChecks(checks) {
 
 // THE ONLY WAY TO NARROW A MANIFEST CHECK LIST BEFORE `runChecks`. `gate-runner` reports a
 // malformed entry by its POSITION — that is all an entry with no `name` can be found by, and the
-// message sends the operator to that position in `teammates.gate.json` — and it counts the list it
+// message sends the operator to that position in `fleetmates.gate.json` — and it counts the list it
 // is handed. A plain `.filter` therefore renumbers the entries and the diagnosis names a different
 // one. Returning the positions alongside the narrowed list is what keeps the numbering true — but
 // that is a convention, not a guarantee: a caller that destructures only `checks` drops them
@@ -685,7 +687,7 @@ export function planSectionsRefusal(err) {
   return formatPlanSectionError(err)
 }
 
-// runId/taskId become path segments under root/.teammates. Without containment, a value
+// runId/taskId become path segments under root/.fleetmates. Without containment, a value
 // like `../../ESCAPED` writes state outside the run directory entirely — the same class
 // of ref/path-escape primitive the git layer already closes for branch and tag names.
 function assertContained(baseDir, segment, flagName) {
@@ -742,7 +744,7 @@ function offendingIdChar(component) {
 
 // null when the id is usable, otherwise a sentence naming the id and what is wrong with it.
 // `nested` is true for a runId, which may descend (`init-run --run 2026/substop` really does
-// create `.teammates/2026/substop/`), and false for a taskId, which names exactly one component.
+// create `.fleetmates/2026/substop/`), and false for a taskId, which names exactly one component.
 // Exported so the corpus can put BOTH nesting modes to it directly. `init-run` only ever reaches
 // the nested (runId) call with caller-supplied text — a plan's task ids are built as `T<digits>`
 // by `plan-parser.mjs` and cannot be anything else — so the single-component branch has no route
@@ -785,7 +787,7 @@ export function idRefusal(flagName, value, { nested, maxBytes }) {
   return null
 }
 
-// The MAIN worktree's root, which is where a run's `.teammates/` lives. `--git-common-dir` is
+// The MAIN worktree's root, which is where a run's `.fleetmates/` lives. `--git-common-dir` is
 // `<main>/.git` for a linked worktree and the repository's own `.git` otherwise, so its parent
 // is the main worktree in both cases. `locate` runs from inside a teammate's worktree, so its
 // `--root` is that worktree and cannot be the store's root.
@@ -813,12 +815,12 @@ async function worktreeTopLevel(root) {
 // inside `.git` — are enough to make `rev-parse` report a `--show-toplevel` and a `--git-common-dir`
 // that both look like this repository's:
 //
-//     <main>/packages/app/.git            "gitdir: <main>/.teammates/fakewt"
-//     <main>/.teammates/fakewt/commondir  "<main>/.git"
-//     <main>/.teammates/fakewt/gitdir     "<main>/packages/app/.git"
-//     <main>/.teammates/fakewt/HEAD       "ref: refs/heads/master"
+//     <main>/packages/app/.git            "gitdir: <main>/.fleetmates/fakewt"
+//     <main>/.fleetmates/fakewt/commondir  "<main>/.git"
+//     <main>/.fleetmates/fakewt/gitdir     "<main>/packages/app/.git"
+//     <main>/.fleetmates/fakewt/HEAD       "ref: refs/heads/master"
 //
-// `.teammates/` is gitignored, so `git status --untracked-files=all` shows nothing. A record filed
+// `.fleetmates/` is gitignored, so `git status --untracked-files=all` shows nothing. A record filed
 // for that path then blocks every unrelated agent whose cwd is inside it.
 //
 // The discriminator is CONTAINMENT of the git dir, measured on all four shapes in a real
@@ -1063,7 +1065,7 @@ const TASK_SCOPED_KINDS = new Set(['fileset', 'merge'])
 // REPAIRING A POISONED RECORD: nothing here does, deliberately. Every automatic writer fills only
 // an absent value precisely so that no automatic writer can be talked into replacing a good one —
 // which means a wrong value, once written, is the operator's to remove: delete
-// `.teammates/<runId>/plan.json` (or just its `runBranch`) and re-run `init-run`, or delete the run
+// `.fleetmates/<runId>/plan.json` (or just its `runBranch`) and re-run `init-run`, or delete the run
 // directory and `rebuild-state`. `init-run` prints the recorded branch whenever it differs from the
 // checkout, so a poisoned record announces itself rather than being found later by its effects.
 async function writePlan(root, runId, planFields, { candidateRunBranch = null, baseBranch = null } = {}) {
@@ -1651,7 +1653,7 @@ export function fusedHolderOpenFlags(c = fsConstants) {
 // there is none.
 //
 // THE THIRD DOOR of the class closed at the other two: `readState` opens by path,
-// so a FIFO at `.teammates/<run>/plan.json` parks the open forever. Measured — `master` hangs on it
+// so a FIFO at `.fleetmates/<run>/plan.json` parks the open forever. Measured — `master` hangs on it
 // too (SIGKILL at 15s, empty stdout), so the door is inherited rather than opened here; what IS
 // new is the reach. The ambiguity check above reads the plan BEFORE the manifest is resolved, so a
 // run with no manifest — which `master` answers in milliseconds without ever touching `plan.json`
@@ -1675,7 +1677,7 @@ async function readRunPlan(root, runId) {
 // O_RDONLY|O_NONBLOCK, and deliberately WITHOUT O_NOFOLLOW, or null where this platform cannot
 // spell it. The property this read needs is that it cannot park; refusing a link is a different
 // property that came along for the ride when the plan borrowed the findings reader, and it made
-// these two commands the only ones in the CLI that refuse a symlinked `.teammates/<run>/plan.json`.
+// these two commands the only ones in the CLI that refuse a symlinked `.fleetmates/<run>/plan.json`.
 // Measured across three trees: a symlinked plan read fine on `master` and at the fork point and
 // failed here with ELOOP — one cell of "used to proceed, now refuses" that nothing asked for.
 //
@@ -2114,20 +2116,20 @@ function tasksOfPhase(plan, phaseName) {
 // The component of the run's reviews path that is a symlink, or null when every one of them that
 // exists is a real entry. `lstat` reports only the FINAL component of a path, so asking it about
 // the reviews directory alone answers nothing about the directories above it: with
-// `.teammates/<run>` planted as a link to a directory the caller chose, `lstat(dir)` is a plain
+// `.fleetmates/<run>` planted as a link to a directory the caller chose, `lstat(dir)` is a plain
 // directory, `mkdir` recursive builds `reviews/` inside the link's target, and every path built
 // from `dir` resolves through it — measured on this branch, the command exited 0 printing an
 // in-repo path while the bytes landed at `<root>/outside-the-run/reviews/results-1.json`.
 //
 // EVERY component from `root` down, accumulated over `path.relative`, and NOT a fixed list. A
-// fixed list of three — `<root>/.teammates`, the run directory, `reviews` — is right only for a
+// fixed list of three — `<root>/.fleetmates`, the run directory, `reviews` — is right only for a
 // single-segment run id, because `path.dirname` climbs exactly one level. Run ids nest by design
 // (`scripts/state.mjs` names `--run 2026/substop`, and `idRefusal` caps bytes rather than depth),
-// and at depth two `<root>/.teammates` itself went unchecked. Measured on this branch, through a
-// real `init-run`: with `--run a/b` and `.teammates` symlinked out, the command exited 0 printing
-// `.teammates/a/b/reviews/results-default.json` while the bytes landed under the planted target;
+// and at depth two `<root>/.fleetmates` itself went unchecked. Measured on this branch, through a
+// real `init-run`: with `--run a/b` and `.fleetmates` symlinked out, the command exited 0 printing
+// `.fleetmates/a/b/reviews/results-default.json` while the bytes landed under the planted target;
 // with `--run 2026/substop` the same plant put the clear inside a victim tree; and at `--run
-// a/b/c` a plant at `.teammates/a` did the same. The control that settles it: the identical plant
+// a/b/c` a plant at `.fleetmates/a` did the same. The control that settles it: the identical plant
 // with a FLAT run id was refused by the fixed list. The rule was right and its reach was wrong.
 //
 // Top down, so the refusal names the OUTERMOST planted component — the one an operator has to go
@@ -2199,7 +2201,7 @@ export async function plantedReviewsLink(root, dir, deps = {}) {
       // ENOENT is a component that is not there yet; anything else is a component this process
       // cannot see, and refusing to guess about it is the whole job. Swallowing these instead
       // leaves the suite green, and a reviewer measured why: with a regular file at
-      // `.teammates/<run>`, the throw refuses with `cannot vet the run's reviews directory …
+      // `.fleetmates/<run>`, the throw refuses with `cannot vet the run's reviews directory …
       // ENOTDIR` and swallowing refuses with `could not clear the previous results file … unlink
       // failed (ENOTDIR)` — a different sentence, the same exit, nothing removed either way. No
       // wrong RESULT is reachable through this arm, because every operation that follows it acts
@@ -2436,7 +2438,7 @@ function configFailureMessage(err) {
 }
 
 // The single reader. `loadConfig` validates the LOCAL layer and, until T9 lands, keeps the
-// tracked one as `(readLayer ?? {})` — so `teammates.gate.json` holding `[]` resolved every key
+// tracked one as `(readLayer ?? {})` — so `fleetmates.gate.json` holding `[]` resolved every key
 // to its default at exit 0 while the same body on the local side exited 2. Both layers are
 // validated here, on the way out, so a reader and a writer cannot disagree about a file and the
 // two layers cannot disagree with each other. Every read path in this module goes through it.
@@ -2587,7 +2589,7 @@ const ABSENT = Symbol('absent layer')
 
 // Every READER validates both layers through `loadValidatedConfig`; the write path validated
 // only the layer it was writing. So `config set maxParallel 3 --local` exited 0 against a repo
-// whose `teammates.gate.json` was malformed, while `config list` on that same repo exited 2 —
+// whose `fleetmates.gate.json` was malformed, while `config list` on that same repo exited 2 —
 // one CLI, two answers about one repository. The same shape as the layer-and-spelling asymmetries
 // fixed in the read path and in `loadConfig`: a guard applied to one side and not its counterpart.
 //
@@ -2740,13 +2742,19 @@ export async function runCli(argv, io = { out: console.log }) {
     }
   }
 
-  // runId and taskId become path segments under root/.teammates before any command runs.
+  // Before any command reads a name: a repository claude-teammates left behind is moved to the
+  // fleetmates spellings once, or the command refuses and says why. `newestMtime` is the same walk
+  // `liveness` uses, so "a teammate is live" means the same thing in both places.
+  const migration = await migrate(root, { io, measureTouch: (dir) => newestMtime(dir) })
+  if (migration.code !== 0) return migration.code
+
+  // runId and taskId become path segments under root/.fleetmates before any command runs.
   // Checked once, here, rather than in each command — a value like `../../ESCAPED` must
   // never reach a filesystem call.
   try {
-    if (typeof runId === 'string') assertContained(path.join(root, '.teammates'), runId, '--run')
+    if (typeof runId === 'string') assertContained(path.join(root, NAMES.stateDir), runId, '--run')
     if ((command === 'claim' || command === 'unclaim') && typeof flags.task === 'string') {
-      assertContained(path.join(root, '.teammates', runId, 'claims'), flags.task, '--task')
+      assertContained(path.join(root, NAMES.stateDir, runId, 'claims'), flags.task, '--task')
     }
   } catch (err) {
     io.out(`${err.message}\n\n${USAGE}`)
@@ -2935,7 +2943,7 @@ export async function runCli(argv, io = { out: console.log }) {
       io.out(
         `note: run ${printable(runId)} keeps its recorded run branch ${printable(recorded.carried)}`
         + `, which is not the branch checked out here (${printable(runBranch ?? 'none')}).`
-        + ' If that recorded branch is wrong, remove `runBranch` from .teammates/'
+        + ` If that recorded branch is wrong, remove \`runBranch\` from ${NAMES.stateDir}/`
         + `${printable(runId)}/plan.json and run this command again — no command overwrites it,`
         + ' so that a wrong checkout can never re-point a run.',
       )
@@ -3135,7 +3143,7 @@ export async function runCli(argv, io = { out: console.log }) {
     if (planMarkdown === PLAN_READ_REJECTED) return 2
 
     io.out(composeBrief({
-      // `taskBranchName` is the single definition of `teammates/${runId}/${taskId}`, and the
+      // `taskBranchName` is the single definition of `fleetmates/${runId}/${taskId}`, and the
       // gate resolves the branch through it. A brief restating the shape could name a ref
       // nothing looks for.
       task: { ...task, branch: taskBranchName(runId, task.id) },
@@ -3159,7 +3167,7 @@ export async function runCli(argv, io = { out: console.log }) {
     const resolved = await resolveConfig(root, io)
     if (!resolved) return 2
 
-    // Concrete model names never enter this repository or teammates.gate.json — they live
+    // Concrete model names never enter this repository or fleetmates.gate.json — they live
     // in the dispatching skill, which passes its own tier map through here. Absent, the
     // generated agent() calls carry no model and inherit the session's, as before.
     const tierModels = parseTierModels(flags, io)
@@ -3381,7 +3389,7 @@ export async function runCli(argv, io = { out: console.log }) {
       return 2
     }
 
-    // Existence only, never the contents. The constraint that no CHECK may read `.teammates/`
+    // Existence only, never the contents. The constraint that no CHECK may read `.fleetmates/`
     // binds the checks whose verdict must not be influenced by the agents they enforce; this is a
     // report that records nothing and decides nothing, and the state it reads is a directory name
     // the orchestrator created, not a claim a teammate wrote. The exception is stated here rather
@@ -3394,7 +3402,7 @@ export async function runCli(argv, io = { out: console.log }) {
       await stat(runDir(root, runId))
     } catch {
       io.out(
-        `run ${runId} has no directory under .teammates — check --run, because a run id that`
+        `run ${runId} has no directory under ${NAMES.stateDir} — check --run, because a run id that`
         + ' matches nothing produces a report about no teammate at all',
       )
       return 2
@@ -3452,7 +3460,7 @@ export async function runCli(argv, io = { out: console.log }) {
       return 2
     }
 
-    // Worktree paths come from git rather than from `.teammates/`, which is written by the very
+    // Worktree paths come from git rather than from `.fleetmates/`, which is written by the very
     // teammates being reported on. This is NOT a claim that the path is trustworthy: `git worktree
     // list` reports whatever path was passed to `git worktree add`, so the directory is still the
     // teammate's choice, and `liveness.mjs`'s header concedes both signals are forgeable anyway.
@@ -3542,7 +3550,7 @@ export async function runCli(argv, io = { out: console.log }) {
     // that was never written into the object passed in.
     const rebuiltPlanPath = path.relative(root, path.resolve(root, flags.plan)).split(path.sep).join('/')
     // RECOVERY, NOT REFUSAL — decided 2026-08-22. This command exists to restore state after
-    // `.teammates/` is lost, and the plan it reads is the one COMMITTED AT THE ANCHOR, not the
+    // `.fleetmates/` is lost, and the plan it reads is the one COMMITTED AT THE ANCHOR, not the
     // one on disk. A section defect there is therefore unfixable by the operator: correcting
     // plan.md in the working tree does not change a historical commit, so refusing would leave
     // the run permanently unrecoverable for a reason nobody can act on. `init-run` still
@@ -3792,7 +3800,7 @@ export async function runCli(argv, io = { out: console.log }) {
       // a bare name through refs/tags/ BEFORE refs/heads/, warns on stderr only and exits 0
       // (`isAncestor` reads no stderr), while `git branch -D` resolves refs/heads only — so an
       // ancestry question asked on the bare name `w.branch` is answerable by a TAG while the
-      // thing deleted is the branch. One ordinary `git tag teammates/r1/T1 <any commit the run
+      // thing deleted is the branch. One ordinary `git tag fleetmates/r1/T1 <any commit the run
       // branch contains>`, which a teammate can create inside its own worktree, then turns this
       // guard into a rubber stamp: verified end to end, the unmerged branch was deleted and
       // `deleted …` printed. It also fires by accident wherever a release tag and a branch share
@@ -4012,7 +4020,7 @@ export async function runCli(argv, io = { out: console.log }) {
     if (!config) { io.out(`no ${GATE_FILE} — there is nothing to verify a phase against`); return 4 }
 
     // Read once, before any phase is computed, so a malformed file is refused before minutes of
-    // check-running rather than after. Never persisted and never read back from `.teammates/`:
+    // check-running rather than after. Never persisted and never read back from `.fleetmates/`:
     // it fills in this run's pending checks and nothing else.
     const supplied = await readSuppliedPhases(flags, io)
     if (supplied === SUPPLIED_REJECTED) return 2
@@ -4274,7 +4282,7 @@ export async function runCli(argv, io = { out: console.log }) {
 
     // The orchestrator's half of the inverted map-notes contract: the dispatched agent is
     // read-only and RETURNS the map, the caller saves that text somewhere, and this is the one
-    // path that turns it into `.teammates/<runId>/map.md`. Without it the orchestrator writes
+    // path that turns it into `.fleetmates/<runId>/map.md`. Without it the orchestrator writes
     // that file by hand and `mapNotesWritable` — the validator that exists precisely so the
     // stamped file can be vouched for — is never called by anything.
     //
@@ -4308,7 +4316,7 @@ export async function runCli(argv, io = { out: console.log }) {
       // returned map can carry an escape sequence into this sentence.
       if (refusal) { io.out(printable(refusal)); return 4 }
       // Written through a uniquely-named temp file and renamed, the same way `writeState` writes
-      // every other file under `.teammates/`: a reader must never find a half-written map under
+      // every other file under `.fleetmates/`: a reader must never find a half-written map under
       // a header that vouches for the whole of it.
       const tmp = `${notesPath}.${process.pid}.${Math.floor(performance.now() * 1000)}.tmp`
       try {
@@ -4485,7 +4493,7 @@ export async function runCli(argv, io = { out: console.log }) {
     // unpinned. The rule is: the check named `test` if there is exactly one; otherwise the sole
     // command check if there is exactly one; otherwise no choice is made here.
     //
-    // This comes from `teammates.gate.json` in the WORKING TREE — `resolveGateConfig` reads it
+    // This comes from `fleetmates.gate.json` in the WORKING TREE — `resolveGateConfig` reads it
     // through `readLayer`, not out of the index — so an enforced agent can edit it. Reading the
     // manifest rather than the resolved config keeps the gitignored local layer out of the
     // choice; it does not make the value trusted. Nothing screens the run string: containment is
@@ -4584,7 +4592,7 @@ export async function runCli(argv, io = { out: console.log }) {
         // so a tag named like a task branch redirects them exactly as one named like the run
         // branch did. `resolveBranchShas` already proved each exists under refs/heads/.
         branches: branches.map((b) => (b.startsWith('refs/') ? b : `refs/heads/${b}`)),
-        findingsDir: `.teammates/${runId}/reviews`,
+        findingsDir: `${NAMES.stateDir}/${runId}/reviews`,
         scratchRoot: tmpdir(),
         testCommand,
         testCommandName,
@@ -4663,7 +4671,7 @@ export async function runCli(argv, io = { out: console.log }) {
     // escaping the directory. Vetted HERE rather than beside the write, because this removal
     // builds a path from the same value: unvetted, it is a delete-anything primitive as readily as
     // the write was a write-anything one. Measured, with this block moved below the unlink and a
-    // real file planted at `.teammates/pwned.json`: the command still exited 4 with this same
+    // real file planted at `.fleetmates/pwned.json`: the command still exited 4 with this same
     // sentence, and the file was gone. The refusal is not what the ordering buys — the ordering is
     // what stops the deletion happening on the way to it. Refused with the 4 the `reviewFileName`
     // failure below returns, rather than a second code for the same flag on the same command.
@@ -4674,7 +4682,7 @@ export async function runCli(argv, io = { out: console.log }) {
     // two refusals also read differently on purpose — this one names the results file — because
     // they otherwise printed the same sentence, and a fixture could not tell which had fired.
     // Measured on this branch, with this guard forced to false and the manifest declaring a phase
-    // key of `a/../../../pwned`: the results file was written to `.teammates/pwned.json`, two
+    // key of `a/../../../pwned`: the results file was written to `.fleetmates/pwned.json`, two
     // directories above the run's own reviews directory, and the command printed that path and
     // exited 0; with the guard merely MOVED below the removal, a real file planted at that same
     // path was deleted while the command still exited 4 with this very sentence.
@@ -5002,7 +5010,7 @@ export async function runCli(argv, io = { out: console.log }) {
     // The JSON goes out FIRST, before anything is written, and the path after it. Two reasons,
     // and the ordering serves both. Nothing is prepended to what a caller already parses; and a
     // collection that succeeded is never lost to a filesystem that refused it — with the results
-    // file made unwritable (an earlier round under another uid, or a read-only `.teammates`) the
+    // file made unwritable (an earlier round under another uid, or a read-only `.fleetmates`) the
     // write-first version exited 1 with a raw Node stack and ZERO bytes on stdout, discarding a
     // review it had already computed, and 1 is not a code this command otherwise returns.
     //
@@ -5016,10 +5024,10 @@ export async function runCli(argv, io = { out: console.log }) {
     // TEMP-THEN-RENAME, matching `writeState` in `scripts/state.mjs`, because a plain `writeFile`
     // FOLLOWS A SYMLINK sitting at the target. `'w'` is `O_CREAT|O_WRONLY|O_TRUNC`, and the guard
     // above vets the phase STRING while nothing vets the ENTRY already at the safe path — which
-    // any teammate can plant, since `.teammates/<run>/reviews/` is where reviewers are told to
+    // any teammate can plant, since `.fleetmates/<run>/reviews/` is where reviewers are told to
     // write and the filename is derivable from the phase in their own dispatch prompt. Measured on
     // this branch before this change, each with the printed path still naming the innocuous
-    // in-repo location and the command exiting 0: a symlink to `teammates.gate.json` had the
+    // in-repo location and the command exiting 0: a symlink to `fleetmates.gate.json` had the
     // TRACKED MANIFEST overwritten with this document (`git status` reported it modified); a
     // symlink to a file outside the project root had that file overwritten; and a DANGLING symlink
     // to `hooks-new-file.mjs` CREATED that file. `rename` replaces a link rather than following
@@ -5079,7 +5087,7 @@ export async function runCli(argv, io = { out: console.log }) {
     if (!config) {
       const pkg = await readPackage(root)
       config = inferGateConfig(pkg)
-      io.out('inferred gate manifest — review, then save as teammates.gate.json:')
+      io.out(`inferred gate manifest — review, then save as ${NAMES.gateFile}:`)
       io.out(JSON.stringify(config, null, 2))
       // `preview.link` is inferred only for a Node project, because `node_modules` is the one
       // build input this CLI can name without guessing. Every other ecosystem gets a manifest
@@ -5107,7 +5115,7 @@ export async function runCli(argv, io = { out: console.log }) {
     //
     // Through `narrowChecks`, because this narrows the manifest's list exactly as
     // `--enforcement-only` does: a plain `.filter` here renumbered the entries and `gate --no-fleet`
-    // named the wrong entry of `teammates.gate.json` in the malformed-entry diagnosis.
+    // named the wrong entry of `fleetmates.gate.json` in the malformed-entry diagnosis.
     const { checks, checkPositions } = narrowChecks(
       all,
       (c) => !solo || (kindOf(c) !== 'fileset' && kindOf(c) !== 'ownership'),
@@ -5115,7 +5123,7 @@ export async function runCli(argv, io = { out: console.log }) {
     if (solo) io.out('--no-fleet: enforcement checks are not running')
 
     // Read once, at the moment of the run. The file is never persisted and never read back
-    // from `.teammates/`; it fills in this run's pending checks and nothing else.
+    // from `.fleetmates/`; it fills in this run's pending checks and nothing else.
     let supplied = []
     // A valueless `--results` never reaches here: missingArgs rejects it as the missing
     // argument it is, rather than letting this guard silently drop the flag.
@@ -5450,7 +5458,7 @@ export async function runCli(argv, io = { out: console.log }) {
     // this phase's to retry.
     const phaseTasks = (plan.tasks ?? []).filter((t) => Number(t.phase) === phase)
     // Two key spaces meet here. Task selection and the round counter are keyed by the
-    // NUMERIC phase; teammates.gate.json is keyed by phase NAME (`default`, `integration`),
+    // NUMERIC phase; fleetmates.gate.json is keyed by phase NAME (`default`, `integration`),
     // which is what `gate --phase` selects checks under. The manifest key space wins for
     // the budget, and the gate's own verdict carries the name it used forward as
     // `phaseName` — so the budget comes from the same manifest block that produced these

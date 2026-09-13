@@ -1,8 +1,9 @@
+import { NAMES } from './names.mjs'
 import { readFile } from 'node:fs/promises'
 import { availableParallelism } from 'node:os'
 import path from 'node:path'
 
-const MANIFEST = 'teammates.gate.json'
+const MANIFEST = NAMES.gateFile
 const INFERRED_ORDER = ['typecheck', 'lint', 'test', 'build']
 const DEFAULT_FIX_ROUNDS = 2
 const DEFAULT_LENS = ['correctness', 'security', 'tests']

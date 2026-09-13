@@ -30,15 +30,15 @@ though neither is a line-for-line adaptation.
 
 ## Original skills
 
-The following skills are original to `claude-teammates` and are not adaptations
+The following skills are original to `fleetmates` and are not adaptations
 of, nor share a name with, any superpowers skill:
 
-- `using-teammates`
+- `using-fleetmates`
 - `fleet-lifecycle`
 - `parallel-execution`
 - `phase-gate`
 - `fleet-supervision`
-- `teammates-config`
+- `fleetmates-config`
 
 Three of these original skills additionally absorb guidance from superpowers
 skills that have no direct counterpart in this plugin:

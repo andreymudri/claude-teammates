@@ -448,7 +448,7 @@ test('a task with no files key yields a serialisable decision, not a TypeError (
 // The caller treats decideFix's return value as the loop's decision and serialises it. A throw
 // is not a decision: the loop's decision step dies with no verdict recorded, which hangs the
 // loop exactly the way the `pending` -> `none` deadlock did, by a different door. `fix` reads
-// `plan.json` out of `.teammates/`, which is agent-writable, so none of these shapes are
+// `plan.json` out of `.fleetmates/`, which is agent-writable, so none of these shapes are
 // hypothetical — `init-run` validates declared tiers but `fix` re-reads the file afterwards.
 
 test('an out-of-vocabulary tier yields a decision instead of throwing', () => {

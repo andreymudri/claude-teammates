@@ -1,3 +1,4 @@
+import { NAMES } from './names.mjs'
 import { spawn } from 'node:child_process'
 import { writeFileSync, unlinkSync } from 'node:fs'
 import { filesetViolations, ownershipViolations, baseExplainedNote, resolveTaskBranch, derivePhase, planHash, normalizePath } from './enforce.mjs'
@@ -589,7 +590,7 @@ const ALWAYS_ENFORCED_KINDS = new Set(['fileset', 'ownership', 'merge'])
 // with cwd at the main worktree. `["fileset"] + optional: true` runs the REAL fileset check and
 // then declines to block it, producing `{"verdict":"PASS","failed":[],"optionalFailed":["fileset"]}`
 // — a forged manifest reaching a false gate PASS, which is a bound this design has claimed since
-// phase 1. `teammates.gate.json` is writable by any teammate, so neither needs a further foothold.
+// phase 1. `fleetmates.gate.json` is writable by any teammate, so neither needs a further foothold.
 //
 // The type test lives HERE, at the runner lookup and at the two places `optional` is computed,
 // rather than in the callers' filters: `cli.mjs`'s `--enforcement-only` filter is one call site of
@@ -598,7 +599,7 @@ const ALWAYS_ENFORCED_KINDS = new Set(['fileset', 'ownership', 'merge'])
 // always handled; an array is the spelling JSON can express and nothing covered it.
 const hasUsableKind = (check) => typeof check?.kind === 'string'
 
-// The position `malformedKindResult` reports must locate the entry in `teammates.gate.json`, and
+// The position `malformedKindResult` reports must locate the entry in `fleetmates.gate.json`, and
 // the list this module is handed is not always that file's list — `cli.mjs` narrows it in more
 // than one place, and counting the surviving entries then names a different entry than the message
 // tells the operator to fix.
@@ -657,7 +658,7 @@ function malformedKindResult(check, index) {
     'fail',
     `check kind must be a string, got ${shown} (${position})`
     + ' — a manifest entry this gate cannot understand is a configuration fault, not a check.'
-    + ' Fix the `kind` in teammates.gate.json.',
+    + ` Fix the \`kind\` in ${NAMES.gateFile}.`,
   )
 }
 
@@ -1129,7 +1130,7 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
       // CLOSED, kept as history because two attempts at it failed in instructive ways:
       //   - `ownWorkBase`: a fix round that re-points an ALREADY-INTEGRATED task's branch onto
       //     the run branch's own current tip — exactly what the brief's own recommended
-      //     `git checkout -B teammates/<runId>/<taskId> <run branch>` step does — USED TO read as
+      //     `git checkout -B fleetmates/<runId>/<taskId> <run branch>` step does — USED TO read as
       //     having done no work, even though the task's files are genuinely already on the run
       //     branch. `sha` then equals `runSha`, `forkPoint` above also equals `sha` (the
       //     "already on the run branch" branch is taken), and `landedForFiles` looks the sha up
@@ -1137,7 +1138,7 @@ export async function deriveContext({ git, runId, runBranch, baseBranch, planPat
       //     visits while walking the chain — the run tip itself is never a value indexed there
       //     unless some LATER merge happens to name it as a secondary parent. Executed: T1's
       //     branch is merged `--no-ff` into `run`, then re-pointed with `git branch -f
-      //     teammates/r1/T1 run` (the same tip `checkout -B` would produce); `deriveContext`
+      //     fleetmates/r1/T1 run` (the same tip `checkout -B` would produce); `deriveContext`
       //     then reads T1 as not integrated, `currentPhase` reopens phase 1, and
       //     `runFilesetCheck` fails it with "contributes no file changes past its fork point"
       //     for a task that is genuinely, fully landed. The declared-files predicate does not
@@ -1308,7 +1309,7 @@ export async function runFilesetCheck(check, ctx = {}) {
       const forkPoint = await git.mergeBase(runSha, sha)
       const changed = await git.changedFiles({ base: forkPoint, branch: sha })
       // An existing branch that changes nothing is not a vacuous pass. A teammate that skips
-      // its `git checkout -B teammates/<runId>/<taskId>` commits on whatever branch it was
+      // its `git checkout -B fleetmates/<runId>/<taskId>` commits on whatever branch it was
       // handed — the harness's own worktree branch — and leaves the conventional ref sitting
       // at the run tip with no work on it. The ref exists, filesetViolations of an empty list
       // is empty, and the task then merges as a no-op while its result says `done`. The
@@ -1617,7 +1618,7 @@ async function runCheckList(checks, ctx, commandCwd, mergeConflicted, previewDir
     // skip and could be reported as a benign skip; it cannot, because the skip compares
     // `kind === 'command'` strictly and no non-string value satisfies a strict comparison. What
     // the skip actually does is dereference `check.kind` UNGUARDED. Of the entry shapes
-    // `teammates.gate.json` can express, exactly one throws there: `null`. A string, number, array
+    // `fleetmates.gate.json` can express, exactly one throws there: `null`. A string, number, array
     // or boolean entry evaluates `check.kind` to `undefined` harmlessly and is caught below for the
     // ordinary reason, and `undefined` itself throws but JSON has no literal for it, so it can only
     // arrive from a programmatic caller. That one shape is enough — a `null` entry throws a

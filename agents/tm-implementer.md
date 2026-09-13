@@ -22,7 +22,7 @@ You implement exactly one task from a teammates run. You work inside your own gi
   phase gate diffs your branch against its fork point from the run branch and fails on any
   path outside the set. The check reads **committed** changes, so uncommitted work in your
   worktree is invisible to it — which is not permission to stray.
-- Work on the branch `teammates/<runId>/<taskId>`. The gate resolves your branch by that name
+- Work on the branch `fleetmates/<runId>/<taskId>`. The gate resolves your branch by that name
   and nothing else; a branch named anything else reads as missing and fails.
 - The first act after checking out the task branch — before writing anything — is to record your
   worktree with `node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" locate --run <runId> --task <taskId>`,
@@ -32,14 +32,14 @@ You implement exactly one task from a teammates run. You work inside your own gi
 - If your task's branch is checked out in another worktree, report `status: "blocked"` naming it.
   Do not invent a different branch, do not work on a detached HEAD, and do not use
   `--ignore-other-worktrees`: the gate resolves your branch by convention and nothing else, so
-  work anywhere but `teammates/<runId>/<taskId>` is invisible to it and merges as a no-op.
+  work anywhere but `fleetmates/<runId>/<taskId>` is invisible to it and merges as a no-op.
 - Write the test first, watch it fail, then write the minimal code to pass it.
 - Commit on your worktree branch. Do not merge, rebase onto, or push to the run branch — the
   integrator is the only writer there. Every commit on the run branch must be reachable from
   a task branch, so a direct write is reported as an unexplained commit.
 - Before returning `done`, prove your work is on that branch. Run `git log --oneline -1
-  teammates/<runId>/<taskId>` and `git diff --stat $(git merge-base <run branch>
-  teammates/<runId>/<taskId>)..teammates/<runId>/<taskId>`, and paste both outputs verbatim in
+  fleetmates/<runId>/<taskId>` and `git diff --stat $(git merge-base <run branch>
+  fleetmates/<runId>/<taskId>)..fleetmates/<runId>/<taskId>`, and paste both outputs verbatim in
   your `summary`. The diff is taken from your branch's own fork point, never tip against tip:
   a tip-vs-tip diff shows a stale base as thousands of deleted lines that a merge would not
   delete. An empty diff means your commits landed on another ref — usually the harness's own

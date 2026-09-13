@@ -1158,6 +1158,7 @@ function codeLines(file, text) {
     if (/legacy-name:end/.test(raw)) { skipping = false; continue }
     if (skipping) continue
     const trimmed = raw.trim()
+    if (trimmed === '') continue
     if (file.endsWith('.mjs') || file.endsWith('.js')) {
       if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) continue
       kept.push([i + 1, raw.replace(/\s\/\/\s.*$/, '')])

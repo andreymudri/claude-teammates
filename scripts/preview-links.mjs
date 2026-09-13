@@ -1,3 +1,4 @@
+import { NAMES } from './names.mjs'
 import { mkdir, realpath, stat, symlink, unlink } from 'node:fs/promises'
 import path from 'node:path'
 
@@ -198,7 +199,7 @@ function rootItselfMessage(entry) {
 function linkFailureMessage(entry, err, gateMade = false) {
   if (err.code === 'ENOENT') {
     return `preview link '${entry}' failed: ENOENT — no such directory in the repository. `
-      + 'Run your install step, or remove it from preview.link in teammates.gate.json'
+      + `Run your install step, or remove it from preview.link in ${NAMES.gateFile}`
   }
   if (err.code === 'EEXIST') {
     // Two very different paths reach EEXIST. Only one of them is about the merged tree: the

@@ -7,7 +7,7 @@ const root = fileURLToPath(new URL('..', import.meta.url))
 
 test('the plugin ships its own gate manifest', async () => {
   const config = await loadGateConfig(root)
-  assert.ok(config, 'teammates.gate.json is missing')
+  assert.ok(config, 'fleetmates.gate.json is missing')
   assert.equal(typeof config.maxParallel, 'number')
 })
 

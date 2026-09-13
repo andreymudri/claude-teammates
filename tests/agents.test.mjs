@@ -105,7 +105,7 @@ test('the implementer reports blocked rather than improvising a branch', async (
   )
   assertStatement(
     doc,
-    /work anywhere but teammates\/<runId>\/<taskId> is invisible to it and merges as a no-op/,
+    /work anywhere but fleetmates\/<runId>\/<taskId> is invisible to it and merges as a no-op/,
     'the consequence of working on the wrong ref must be stated',
   )
 })
@@ -311,7 +311,7 @@ test('the integrator is declared the sole writer to the run branch', async () =>
 
 test('the implementer states the branch convention and that the check reads committed changes', async () => {
   const { doc } = await agent('tm-implementer.md')
-  assert.match(doc.text, /teammates\/<runId>\/<taskId>/)
+  assert.match(doc.text, /fleetmates\/<runId>\/<taskId>/)
   assert.match(doc.text, /\bcommitted\b/)
 })
 

@@ -13,7 +13,7 @@ const BASE_BRANCH = 'master'
 const T1 = { id: 'T1', phase: 1, files: ['a.mjs'] }
 const T2 = { id: 'T2', phase: 1, files: ['b.mjs'] }
 
-// Everything the report says comes from git, never from `.teammates/` — the same rule the
+// Everything the report says comes from git, never from `.fleetmates/` — the same rule the
 // enforcement checks follow, and the reason this is worth running at all: `digest` renders
 // status.json, which the agents being diagnosed write.
 function fakeGit(overrides = {}) {
@@ -56,14 +56,14 @@ function fakeGit(overrides = {}) {
 
 // The tip the default resolveRef gives T1's branch, which is what a merge of T1 would name as
 // its secondary parent.
-const T1_TIP = 'refs/heads/teammates/r1/T1-sha'
+const T1_TIP = 'refs/heads/fleetmates/r1/T1-sha'
 
 test('a healthy run reports every task as contributing and finds no problems', async () => {
   const report = await collectDoctorReport({
     git: fakeGit(), runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, tasks: [T1],
   })
   assert.equal(report.problems.length, 0)
-  assert.equal(report.tasks[0].branch, 'teammates/r1/T1')
+  assert.equal(report.tasks[0].branch, 'fleetmates/r1/T1')
   assert.equal(report.tasks[0].exists, true)
   assert.deepEqual(report.tasks[0].changed, ['a.mjs'])
 })
@@ -83,7 +83,7 @@ test('a task branch with no contribution is reported as a problem naming the tas
 
 test('a missing task branch is reported without failing the whole report', async () => {
   const report = await collectDoctorReport({
-    git: fakeGit({ branchExists: async (name) => name !== 'teammates/r1/T2' }),
+    git: fakeGit({ branchExists: async (name) => name !== 'fleetmates/r1/T2' }),
     runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, tasks: [T1, T2],
   })
   assert.equal(report.tasks[1].exists, false)
@@ -160,10 +160,10 @@ test('renderDoctor prints every task line and ends with the problem count', () =
     dirty: [],
     worktrees: [{ path: '/repo', branch: RUN_BRANCH, detached: false }],
     tasks: [
-      { id: 'T1', branch: 'teammates/r1/T1', exists: true, tip: 'abc1234 work', changed: ['a.mjs'], sideDoor: false },
-      { id: 'T2', branch: 'teammates/r1/T2', exists: false, tip: null, changed: [], sideDoor: false },
+      { id: 'T1', branch: 'fleetmates/r1/T1', exists: true, tip: 'abc1234 work', changed: ['a.mjs'], sideDoor: false },
+      { id: 'T2', branch: 'fleetmates/r1/T2', exists: false, tip: null, changed: [], sideDoor: false },
     ],
-    problems: ['T2: branch teammates/r1/T2 does not exist'],
+    problems: ['T2: branch fleetmates/r1/T2 does not exist'],
   })
   assert.match(out, /T1/)
   assert.match(out, /abc1234/)
@@ -341,7 +341,7 @@ test('a branch parked at the anchor is reported as a problem after a plan amendm
 
     const anchorSha = (await sh(['merge-base', 'main', 'run'])).stdout.trim()
     const runSha = (await sh(['rev-parse', 'run'])).stdout.trim()
-    await sh(['branch', 'teammates/r1/T14', anchorSha])
+    await sh(['branch', 'fleetmates/r1/T14', anchorSha])
 
     const report = await collectDoctorReport({
       git: createGit({ cwd: root }),
@@ -352,7 +352,7 @@ test('a branch parked at the anchor is reported as a problem after a plan amendm
 
     assert.equal(report.tasks[0].landed, false)
     assert.equal(report.problems.length, 1)
-    assert.match(report.problems[0], /T14: branch teammates\/r1\/T14 has no file changes/)
+    assert.match(report.problems[0], /T14: branch fleetmates\/r1\/T14 has no file changes/)
     assert.doesNotMatch(report.problems[0], /could not determine which branches/i)
   } finally {
     await rm(root, { recursive: true, force: true })
@@ -363,7 +363,7 @@ test('renderDoctor prints integrated rather than NO CHANGES for a landed task', 
   const out = renderDoctor({
     runId: RUN_ID, runBranch: RUN_BRANCH, baseBranch: BASE_BRANCH, mainBranch: RUN_BRANCH,
     dirty: [], worktrees: [],
-    tasks: [{ id: 'T1', branch: 'teammates/r1/T1', exists: true, tip: 'abc work', changed: [], sideDoor: false, landed: true }],
+    tasks: [{ id: 'T1', branch: 'fleetmates/r1/T1', exists: true, tip: 'abc work', changed: [], sideDoor: false, landed: true }],
     problems: [],
   })
   assert.match(out, /integrated/)
@@ -397,25 +397,25 @@ test('doctor agrees with the gate on a task ref parked at a merged sibling tip (
     git(root, ['checkout', '--quiet', '-b', 'run-branch'])
 
     // T1 (phase 1), merged cleanly.
-    git(root, ['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    git(root, ['checkout', '--quiet', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'x\n', 'utf8')
     git(root, ['add', '.'])
     git(root, ['commit', '--quiet', '-m', 'T1 work'])
     git(root, ['checkout', '--quiet', 'run-branch'])
-    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'fleetmates/r1/T1'])
 
     // T3 (phase 2 sibling of T2), merged cleanly, carrying c.mjs only.
-    git(root, ['checkout', '--quiet', '-b', 'teammates/r1/T3'])
+    git(root, ['checkout', '--quiet', '-b', 'fleetmates/r1/T3'])
     await writeFile(path.join(root, 'c.mjs'), 'x\n', 'utf8')
     git(root, ['add', '.'])
     git(root, ['commit', '--quiet', '-m', 'T3 work'])
-    const t3Tip = git(root, ['rev-parse', 'teammates/r1/T3']).trim()
+    const t3Tip = git(root, ['rev-parse', 'fleetmates/r1/T3']).trim()
     git(root, ['checkout', '--quiet', 'run-branch'])
-    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T3', 'teammates/r1/T3'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T3', 'fleetmates/r1/T3'])
 
     // T2 never commits its own work: its ref is pointed straight at T3's own tip commit,
     // never at the merge commit that carried T3's file.
-    git(root, ['branch', 'teammates/r1/T2', t3Tip])
+    git(root, ['branch', 'fleetmates/r1/T2', t3Tip])
 
     const anchorSha = git(root, ['rev-parse', 'HEAD~2']).trim()
     const runSha = git(root, ['rev-parse', 'run-branch']).trim()
@@ -443,7 +443,7 @@ test('doctor agrees with the gate on a task ref parked at a merged sibling tip (
     // T2 is the parked ref: same shape the gate fails on. `doctor` must call it not-landed and
     // name it as a problem, agreeing with the gate rather than contradicting it.
     assert.equal(t2.landed, false)
-    assert.match(report.problems.join('\n'), /T2: branch teammates\/r1\/T2 has no file changes/)
+    assert.match(report.problems.join('\n'), /T2: branch fleetmates\/r1\/T2 has no file changes/)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -465,18 +465,18 @@ test('doctor agrees with the gate on refs at the run tip (real repo)', async () 
     git(root, ['checkout', '--quiet', '-b', 'run-branch'])
 
     // T1 lands both files under its own name.
-    git(root, ['checkout', '--quiet', '-b', 'teammates/r1/T1'])
+    git(root, ['checkout', '--quiet', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'x\n', 'utf8')
     await writeFile(path.join(root, 'b.mjs'), 'x\n', 'utf8')
     git(root, ['add', '.'])
     git(root, ['commit', '--quiet', '-m', 'T1 work'])
     git(root, ['checkout', '--quiet', 'run-branch'])
-    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'fleetmates/r1/T1'])
 
     // T1's ref re-pointed by a fix round; T2 declares a subset of what T1's merge carried and
     // parks at the same tip having written nothing.
-    git(root, ['branch', '-f', 'teammates/r1/T1', 'run-branch'])
-    git(root, ['branch', 'teammates/r1/T2', 'run-branch'])
+    git(root, ['branch', '-f', 'fleetmates/r1/T1', 'run-branch'])
+    git(root, ['branch', 'fleetmates/r1/T2', 'run-branch'])
 
     const anchorSha = git(root, ['rev-parse', 'HEAD~1']).trim()
     const runSha = git(root, ['rev-parse', 'run-branch']).trim()
@@ -497,7 +497,7 @@ test('doctor agrees with the gate on refs at the run tip (real repo)', async () 
     // also be credited with it.
     assert.equal(t1.landed, true)
     assert.equal(t2.landed, false)
-    assert.match(report.problems.join('\n'), /T2: branch teammates\/r1\/T2 has no file changes/)
+    assert.match(report.problems.join('\n'), /T2: branch fleetmates\/r1\/T2 has no file changes/)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -580,7 +580,7 @@ test('renderDoctor neutralises control bytes in a present task id and branch', (
 // teammate being diagnosed wrote itself.
 test('renderDoctor neutralises control bytes in a commit subject the teammate wrote', () => {
   const out = renderDoctor(doctorReport({
-    tasks: [{ id: 'T1', branch: 'teammates/r1/T1', exists: true, tip: PAYLOAD, changed: ['a.mjs'], sideDoor: false, landed: false }],
+    tasks: [{ id: 'T1', branch: 'fleetmates/r1/T1', exists: true, tip: PAYLOAD, changed: ['a.mjs'], sideDoor: false, landed: false }],
   }))
   assert.match(out, /T1/)
   assertNeutralised(out)

@@ -1,3 +1,4 @@
+import { NAMES } from './names.mjs'
 import { reviewFileName, reviewStamp } from './reviews.mjs'
 // A pure string check — no filesystem, no resolution — so importing it does not cost this module
 // its own purity. It is the same screen `withMergePreview` runs before it links anything, which
@@ -242,7 +243,7 @@ export function generateReviewDispatch({
     const stamp = reviewStamp({ phase: phaseName, lens, branchShas })
 
     const basePrompt = [
-      `Review the phase ${phaseName} diff of teammates run ${runId} through exactly one lens: ${lens}.`,
+      `Review the phase ${phaseName} diff of ${NAMES.product} run ${runId} through exactly one lens: ${lens}.`,
       '',
       `The diff under review is these task branches against the run branch ${runBranch}:`,
       ...branches.map((b) => `  ${b}`),
@@ -267,7 +268,7 @@ export function generateReviewDispatch({
       // Explicitly null rather than omitted: "dispatch this without a name" is the instruction,
       // and an absent key reads as an oversight the next caller helpfully fills in.
       name: null,
-      agentType: 'claude-teammates:tm-reviewer',
+      agentType: `${NAMES.product}:tm-reviewer`,
       findingsPath,
       scratchWorktree,
       prompt,

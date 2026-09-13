@@ -37,8 +37,8 @@ const writeJson = (root, file, obj) =>
   writeFile(path.join(root, file), JSON.stringify(obj), 'utf8')
 
 test('vocabulary constants name the two layers and their domains', () => {
-  assert.equal(GATE_FILE, 'teammates.gate.json')
-  assert.equal(LOCAL_FILE, 'teammates.local.json')
+  assert.equal(GATE_FILE, 'fleetmates.gate.json')
+  assert.equal(LOCAL_FILE, 'fleetmates.local.json')
   assert.deepEqual(CAVEMAN_LEVELS, ['lite', 'full', 'ultra'])
   assert.deepEqual(EFFORTS, ['low', 'medium', 'high', 'xhigh', 'max'])
   assert.deepEqual(ROLES, ['implementer', 'reviewer', 'integrator'])
@@ -901,7 +901,7 @@ test('validateGate accepts the shapes the repository and its fixtures actually u
   }
 })
 
-test("this repository's own teammates.gate.json validates", async () => {
+test("this repository's own fleetmates.gate.json validates", async () => {
   const own = JSON.parse(
     await readFile(path.join(import.meta.dirname, '..', GATE_FILE), 'utf8'),
   )

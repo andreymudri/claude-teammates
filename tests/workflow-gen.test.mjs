@@ -14,7 +14,7 @@ const tasks = [
 test('generated source declares a meta literal with the run and phase', async () => {
   const src = await generatePhaseWorkflow({ runId: '3f2a', phase: 1, tasks, maxParallel: 4 })
   assert.match(src, /export const meta = \{/)
-  assert.match(src, /name: 'teammates-3f2a-phase-1'/)
+  assert.match(src, /name: 'fleetmates-3f2a-phase-1'/)
 })
 
 test('every task appears with its id, title and files', async () => {
@@ -183,7 +183,7 @@ test('the brief opens with a verifiable checkout of the task branch off the base
   })
   const [prompt] = await captureAgentPrompts(src)
   assert.ok(
-    prompt.includes('git checkout -B teammates/r1/T1 main'),
+    prompt.includes('git checkout -B fleetmates/r1/T1 main'),
     'brief must spell out the exact checkout command',
   )
   assert.ok(prompt.includes('git log --oneline -1'), 'brief must ask the teammate to verify the checkout')
@@ -192,7 +192,7 @@ test('the brief opens with a verifiable checkout of the task branch off the base
   // been told which files to edit cannot stop it reading stale content first. Substring
   // presence alone would stay green if the block were moved to the end, so pin position.
   assert.ok(
-    prompt.indexOf('git checkout -B teammates/r1/T1 main') < prompt.indexOf('FILES.'),
+    prompt.indexOf('git checkout -B fleetmates/r1/T1 main') < prompt.indexOf('FILES.'),
     'the checkout must come before the file set',
   )
   assert.ok(
@@ -331,7 +331,7 @@ test('with no base branch the brief emits no checkout command and says the start
       !/git checkout -B\s+(?:"[^"]+"|'[^']+'|[^\s"']+)\s+[A-Za-z0-9._/-]+/.test(prompt),
       'no checkout may supply a start point the template invented',
     )
-    assert.ok(!prompt.includes('git checkout -B teammates/r1/T1 HEAD'), 'must not substitute HEAD for a base')
+    assert.ok(!prompt.includes('git checkout -B fleetmates/r1/T1 HEAD'), 'must not substitute HEAD for a base')
     assert.ok(prompt.includes('MANDATORY FIRST STEP.'), 'the first step must still be present')
     assert.ok(prompt.includes('No base branch was supplied'), 'the brief must say no base was supplied')
     assert.ok(prompt.includes('UNVERIFIED'), 'the brief must flag the starting commit as unverified')
@@ -380,7 +380,7 @@ test('a plan path and a base branch containing $& survive the function replacer 
   const [prompt] = await captureAgentPrompts(src)
   assert.ok(prompt.includes('PLAN. Read docs/plans/$&-thing.md'), '$& must reach the brief from the plan path')
   assert.ok(
-    prompt.includes('git checkout -B teammates/r1/T1 release/$&-base'),
+    prompt.includes('git checkout -B fleetmates/r1/T1 release/$&-base'),
     '$& must reach the brief from the base branch',
   )
 })
@@ -404,7 +404,7 @@ test('a task title containing a marker string is not rescanned as a substitution
   )
   const [prompt] = await captureAgentPrompts(src)
   assert.ok(prompt.includes('T1: ok__BASE_BRANCH__ and __CONSTRAINTS__ too.'), 'title must reach the brief verbatim')
-  assert.ok(prompt.includes('git checkout -B teammates/r1/T1 main'), 'the real marker must still be substituted')
+  assert.ok(prompt.includes('git checkout -B fleetmates/r1/T1 main'), 'the real marker must still be substituted')
 })
 
 test('an emitted literal never carries a raw double quote', async () => {
@@ -429,7 +429,7 @@ test('an emitted literal never carries a raw double quote', async () => {
   assert.ok(src.includes(String.raw`say \"no\"`), 'constraint quote must be escaped in the embedded brief')
   // Escaping is transparent: the teammate still reads the value it was given.
   const [prompt] = await captureAgentPrompts(src)
-  assert.ok(prompt.includes('git checkout -B teammates/r1/T1 feat/"q"'), 'escape must round-trip')
+  assert.ok(prompt.includes('git checkout -B fleetmates/r1/T1 feat/"q"'), 'escape must round-trip')
   assert.ok(prompt.includes('PLAN. Read docs/"p".md'), 'escape must round-trip in the plan path')
   assert.ok(prompt.includes('- say "no"'), 'escape must round-trip in a constraint')
 })
@@ -461,7 +461,7 @@ test('a base branch containing a double quote cannot inject code into the genera
     })
     assert.equal(globalThis.PWNED, undefined, 'running the generated workflow must not execute injected code')
     assert.ok(
-      captured[0].includes('git checkout -B teammates/r1/T1 "+(globalThis.PWNED=1)+"'),
+      captured[0].includes('git checkout -B fleetmates/r1/T1 "+(globalThis.PWNED=1)+"'),
       'the branch name must reach the brief as inert text',
     )
   } finally {
@@ -472,11 +472,11 @@ test('a base branch containing a double quote cannot inject code into the genera
 
 test('the dispatch names a real agent type and keeps worktree isolation', async () => {
   const src = await generatePhaseWorkflow({ runId: 'r1', phase: 1, tasks, maxParallel: 2 })
-  assert.ok(src.includes("agentType: 'claude-teammates:tm-implementer'"), 'missing agentType')
+  assert.ok(src.includes("agentType: 'fleetmates:tm-implementer'"), 'missing agentType')
   assert.ok(src.includes("isolation: 'worktree'"), 'missing worktree isolation')
   const captured = await captureAgentOptions(src)
   for (const options of captured) {
-    assert.equal(options.agentType, 'claude-teammates:tm-implementer')
+    assert.equal(options.agentType, 'fleetmates:tm-implementer')
     assert.equal(options.isolation, 'worktree')
   }
 })
@@ -539,7 +539,7 @@ test('a caveman brief keeps every load-bearing instruction verbatim', async () =
   const [prompt] = await captureAgentPrompts(src)
   for (const required of [
     'MANDATORY FIRST STEP',
-    'git checkout -B teammates/r1/T1 main',
+    'git checkout -B fleetmates/r1/T1 main',
     'git log --oneline -1',
     'Report status "blocked"',
     'FILES. You may create or modify ONLY these files:',
@@ -741,7 +741,7 @@ test('the generated source parses as a real module', async () => {
     const file = join(dir, 'phase.mjs')
     await writeFile(file, wrapped, 'utf8')
     const mod = await import(pathToFileURL(file).href)
-    assert.equal(mod.meta.name, 'teammates-r1-phase-1')
+    assert.equal(mod.meta.name, 'fleetmates-r1-phase-1')
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
@@ -791,7 +791,7 @@ test('the embedded brief and composeBrief called directly are byte-identical', a
   })
   const [prompt] = await captureAgentPrompts(src)
   const expected = composeBrief({
-    task: { id: task.id, title: task.title, files: task.files, branch: `teammates/${runId}/${task.id}` },
+    task: { id: task.id, title: task.title, files: task.files, branch: `fleetmates/${runId}/${task.id}` },
     runId,
     planPath,
     baseBranch,

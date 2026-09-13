@@ -7,7 +7,7 @@ const TASK = {
   id: 'T4',
   title: 'the SubagentStop handler',
   files: ['hooks/subagent-stop.mjs', 'tests/hook.test.mjs'],
-  branch: 'teammates/substop/T4',
+  branch: 'fleetmates/substop/T4',
 }
 
 const FULL = {
@@ -28,7 +28,7 @@ const at = (brief, needle) => {
 
 test('a fully supplied brief carries the checkout, baseline, plan, files and constraints', () => {
   const brief = composeBrief(FULL)
-  assert.ok(brief.includes('git checkout -B teammates/substop/T4 master'))
+  assert.ok(brief.includes('git checkout -B fleetmates/substop/T4 master'))
   assert.ok(brief.includes('IN THE FOREGROUND'))
   assert.ok(brief.includes('docs/plans/2026-08-13-subagent-stop-enforcement.md'))
   assert.ok(brief.includes('You may create or modify ONLY these files:'))
@@ -55,7 +55,7 @@ test('a fix-round brief checks the task branch out without resetting it', () => 
   // The same pattern must match the variant that DOES reset, or the assertion above proves
   // nothing.
   assert.ok(runnableReset.test(composeBrief(FULL)), 'the runnable-reset pattern fails to match a real reset command')
-  assert.ok(brief.includes('git checkout teammates/substop/T4'), brief)
+  assert.ok(brief.includes('git checkout fleetmates/substop/T4'), brief)
   // The teammate must not free the branch itself: the worktree guard blocks a teammate from
   // inspecting or removing another worktree, so that is the orchestrator's job.
   assert.match(brief, /report status\s+"blocked"/, brief)
@@ -209,7 +209,7 @@ test('the verify step attaches the right guidance to the rejection and the canno
       'the brief does not say an argument error means the gate never ran')
     assert.ok(/exit 2[^]{0,600}malformed/.test(brief),
       'exit 2 no longer describes a malformed manifest')
-    assert.ok(!/exit 2 — teammates\.gate\.json is malformed\. Configuration, not your work\./.test(brief),
+    assert.ok(!/exit 2 — fleetmates\.gate\.json is malformed\. Configuration, not your work\./.test(brief),
       'exit 2 still maps every case to configuration')
     // `complete` accepts `--enforcement-only` now, and the brief still must not emit it: the
     // teammate's own verification is the full one. The flag exists for the stop-time hook, which
@@ -451,7 +451,7 @@ test('the brief names the script-file fallback for a shell that refuses the comp
 
 test('the caveman variant keeps every load-bearing instruction', () => {
   const brief = composeBrief({ ...FULL, caveman: 'full' })
-  assert.ok(brief.includes('git checkout -B teammates/substop/T4 master'))
+  assert.ok(brief.includes('git checkout -B fleetmates/substop/T4 master'))
   assert.ok(brief.includes('locate --run substop --task T4'))
   assert.ok(brief.includes('cli.mjs" complete'))
   assert.ok(brief.includes('--run substop --task T4 --plan ' + FULL.planPath))
@@ -475,7 +475,7 @@ test('the caveman variant keeps every load-bearing instruction', () => {
 // stays green with the whole PLAN clause deleted.
 const SPEC_CLAUSES = [
   'MANDATORY FIRST STEP.',
-  'git checkout -B teammates/substop/T4 master',
+  'git checkout -B fleetmates/substop/T4 master',
   'RECORD YOUR WORKTREE.',
   'locate --run substop --task T4',
   // The plan pointer, by its instruction rather than by the path.

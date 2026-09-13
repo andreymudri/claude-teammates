@@ -25,7 +25,7 @@ test('loadGateConfig returns null when the manifest is absent', async () => {
 test('loadGateConfig reads the manifest', async () => {
   await withTempRoot(async (root) => {
     const config = { maxParallel: 4, phases: { default: { checks: [] } } }
-    await writeFile(path.join(root, 'teammates.gate.json'), JSON.stringify(config), 'utf8')
+    await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify(config), 'utf8')
     assert.deepEqual(await loadGateConfig(root), config)
   })
 })

@@ -195,14 +195,14 @@ test('names the phase gate and ancestry proof, not junction-following, as the re
   assertBlockStatementCount(hit, 1, 'the hand-sweep paragraph must hold exactly its one warning, nothing appended after it')
 })
 
-test('says .teammates is kept deliberately, and the very next statement distinguishes what resume and rebuild-state each do with it rather than listing or delisting either', async () => {
+test('says .fleetmates is kept deliberately, and the very next statement distinguishes what resume and rebuild-state each do with it rather than listing or delisting either', async () => {
   const scope = await cleanup()
   const hit = assertClaim(scope, {
-    claim: /^What this does not clean up: \.teammates\/<run-id>\/ stays on disk on purpose\.$/,
+    claim: /^What this does not clean up: \.fleetmates\/<run-id>\/ stays on disk on purpose\.$/,
     // `resume` reads it to continue a run. `rebuild-state` reads it TWICE, for two different
     // reasons: `readState` refuses when the run's status file exists — that refusal is what the
     // directory-already-gone case exists to bypass — and then, inside `writePlan`, it reads
-    // `.teammates/<runId>/plan.json` again and carries forward whatever `runBranch` was already
+    // `.fleetmates/<runId>/plan.json` again and carries forward whatever `runBranch` was already
     // recorded there. Verified in this worktree: mutating `writePlan`'s `carried` to always be
     // `null` turns `tests/cli.test.mjs`'s "rebuild-state keeps the recorded run branch rather
     // than adopting the checkout" red — named, not numbered, for the reason given above —
@@ -223,7 +223,7 @@ test('says .teammates is kept deliberately, and the very next statement distingu
   // pins the whole paragraph, so a fourth statement appended after "It is gitignored." (which
   // `then:`'s adjacency check cannot see, since it only binds the claim's immediate next
   // statement) fails too.
-  assertBlockStatementCount(hit, 3, 'the .teammates paragraph must hold exactly its three statements, nothing appended after "It is gitignored."')
+  assertBlockStatementCount(hit, 3, 'the .fleetmates paragraph must hold exactly its three statements, nothing appended after "It is gitignored."')
 })
 
 test('is original and carries no upstream attribution', async () => {

@@ -1,3 +1,5 @@
+import { taskBranchName } from './enforce.mjs'
+import { NAMES } from './names.mjs'
 import { readFile } from 'node:fs/promises'
 import { composeBrief } from './brief.mjs'
 
@@ -49,8 +51,8 @@ export async function generatePhaseWorkflow({
   if (!tasks || tasks.length === 0) throw new Error(`no tasks for phase ${phase}`)
 
   const meta = {
-    name: `teammates-${runId}-phase-${phase}`,
-    description: `Run phase ${phase} of teammates run ${runId} (${tasks.length} tasks, max ${maxParallel} parallel)`,
+    name: `${NAMES.branchPrefix}-${runId}-phase-${phase}`,
+    description: `Run phase ${phase} of ${NAMES.product} run ${runId} (${tasks.length} tasks, max ${maxParallel} parallel)`,
     phases: [{ title: 'Implement', detail: `${tasks.length} worktree-isolated implementers` }],
   }
 
@@ -58,7 +60,7 @@ export async function generatePhaseWorkflow({
   // so the brief's `checkout -B` and the dispatch cannot disagree about the string.
   const slim = tasks.map(({ id, title, files, tier }) => {
     const model = tierModels?.[tier]
-    const base = { id, title, files, branch: `teammates/${runId}/${id}` }
+    const base = { id, title, files, branch: taskBranchName(runId, id) }
     const near = neighbours?.[id]
     const withNear = Array.isArray(near) && near.length > 0 ? { ...base, neighbours: near } : base
     return model ? { ...withNear, model } : withNear

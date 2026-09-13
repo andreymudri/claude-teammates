@@ -19,18 +19,18 @@ function rowFor({ tip, touch, staleMinutes }) {
 
 test('a fresh tip with a stale worktree reads working', () => {
   const row = rowFor({
-    tip: { branch: 'teammates/r1/T1', at: NOW - 2 * MIN },
-    touch: { branch: 'teammates/r1/T1', at: NOW - 90 * MIN, floored: false },
+    tip: { branch: 'fleetmates/r1/T1', at: NOW - 2 * MIN },
+    touch: { branch: 'fleetmates/r1/T1', at: NOW - 90 * MIN, floored: false },
   })
   assert.equal(row.state, 'working')
-  assert.equal(row.branch, 'teammates/r1/T1')
+  assert.equal(row.branch, 'fleetmates/r1/T1')
 })
 
 test('a stale tip with a fresh worktree reads working', () => {
   // The commonest true shape: a teammate mid-edit has written nothing to git yet.
   const row = rowFor({
-    tip: { branch: 'teammates/r1/T1', at: NOW - 90 * MIN },
-    touch: { branch: 'teammates/r1/T1', at: NOW - 1 * MIN, floored: false },
+    tip: { branch: 'fleetmates/r1/T1', at: NOW - 90 * MIN },
+    touch: { branch: 'fleetmates/r1/T1', at: NOW - 1 * MIN, floored: false },
   })
   assert.equal(row.state, 'working')
 })
@@ -40,7 +40,7 @@ test('a stale tip with a fresh worktree reads working', () => {
 // measured stall it fired exit 1 on the first heartbeat of any phase dispatched without worktree
 // isolation, with both teammates actively working and simply not having committed yet.
 test('a stale tip with no worktree record reads unknown rather than a measured stall', () => {
-  const row = rowFor({ tip: { branch: 'teammates/r1/T1', at: NOW - 90 * MIN } })
+  const row = rowFor({ tip: { branch: 'fleetmates/r1/T1', at: NOW - 90 * MIN } })
   assert.equal(row.state, 'unknown')
   assert.equal(row.unknownReason, 'no-worktree-measurement')
 })
@@ -49,15 +49,15 @@ test('a stale tip with no worktree record reads unknown rather than a measured s
 // the shape that produces it. Nothing was measured, so it is the same answer as no record at all.
 test('a touch record carrying no measurement reads unknown', () => {
   const row = rowFor({
-    tip: { branch: 'teammates/r1/T1', at: NOW - 90 * MIN },
-    touch: { branch: 'teammates/r1/T1', at: null, floored: false },
+    tip: { branch: 'fleetmates/r1/T1', at: NOW - 90 * MIN },
+    touch: { branch: 'fleetmates/r1/T1', at: null, floored: false },
   })
   assert.equal(row.state, 'unknown')
   assert.equal(row.unknownReason, 'no-worktree-measurement')
 })
 
 test('a fresh tip with no worktree record still reads working', () => {
-  const row = rowFor({ tip: { branch: 'teammates/r1/T1', at: NOW - 1 * MIN } })
+  const row = rowFor({ tip: { branch: 'fleetmates/r1/T1', at: NOW - 1 * MIN } })
   assert.equal(row.state, 'working')
   assert.equal(row.unknownReason, null)
 })
@@ -78,8 +78,8 @@ test('the two unmeasured shapes are told apart by unknownReason', () => {
 
 test('a stale tip and a stale worktree read stalled', () => {
   const row = rowFor({
-    tip: { branch: 'teammates/r1/T1', at: NOW - 90 * MIN },
-    touch: { branch: 'teammates/r1/T1', at: NOW - 90 * MIN, floored: false },
+    tip: { branch: 'fleetmates/r1/T1', at: NOW - 90 * MIN },
+    touch: { branch: 'fleetmates/r1/T1', at: NOW - 90 * MIN, floored: false },
   })
   assert.equal(row.state, 'stalled')
   assert.equal(row.tipAgeMs, 90 * MIN)
@@ -95,10 +95,10 @@ test('no branch and no worktree reads not started rather than stalled', () => {
 })
 
 test('a worktree with no commits and a stale mtime reads stalled', () => {
-  const row = rowFor({ touch: { branch: 'teammates/r1/T1', at: NOW - 45 * MIN, floored: false } })
+  const row = rowFor({ touch: { branch: 'fleetmates/r1/T1', at: NOW - 45 * MIN, floored: false } })
   assert.equal(row.state, 'stalled')
   assert.equal(row.tipAgeMs, null)
-  assert.equal(row.branch, 'teammates/r1/T1')
+  assert.equal(row.branch, 'fleetmates/r1/T1')
 })
 
 // A floored walk stopped early, so the newest file may be one it never reached: "stalled" is
@@ -106,15 +106,15 @@ test('a worktree with no commits and a stale mtime reads stalled', () => {
 // worktree always floors, every row read working and the stall signal could never fire at all.
 test('a floored touch with nothing fresh reads unknown, not working and not stalled', () => {
   const row = rowFor({
-    tip: { branch: 'teammates/r1/T1', at: NOW - 5000 * MIN },
-    touch: { branch: 'teammates/r1/T1', at: NOW - 5000 * MIN, floored: true },
+    tip: { branch: 'fleetmates/r1/T1', at: NOW - 5000 * MIN },
+    touch: { branch: 'fleetmates/r1/T1', at: NOW - 5000 * MIN, floored: true },
   })
   assert.equal(row.state, 'unknown')
   assert.equal(row.floored, true)
 })
 
 test('a floored touch with no touch measurement at all still reads unknown', () => {
-  const row = rowFor({ touch: { branch: 'teammates/r1/T1', at: null, floored: true } })
+  const row = rowFor({ touch: { branch: 'fleetmates/r1/T1', at: null, floored: true } })
   assert.equal(row.state, 'unknown')
 })
 
@@ -122,8 +122,8 @@ test('a floored touch with no touch measurement at all still reads unknown', () 
 // whatever the walk did — so a floored row is not automatically unknown.
 test('a fresh tip settles a row as working even when the worktree walk floored', () => {
   const row = rowFor({
-    tip: { branch: 'teammates/r1/T1', at: NOW - 1 * MIN },
-    touch: { branch: 'teammates/r1/T1', at: NOW - 5000 * MIN, floored: true },
+    tip: { branch: 'fleetmates/r1/T1', at: NOW - 1 * MIN },
+    touch: { branch: 'fleetmates/r1/T1', at: NOW - 5000 * MIN, floored: true },
   })
   assert.equal(row.state, 'working')
 })

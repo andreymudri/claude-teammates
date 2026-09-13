@@ -10,11 +10,11 @@ const BASE = {
   blockOn: ['high'],
   tier: 'capable',
   runBranch: 'run/r1',
-  branches: ['teammates/r1/T1', 'teammates/r1/T2'],
-  findingsDir: '.teammates/r1/reviews',
+  branches: ['fleetmates/r1/T1', 'fleetmates/r1/T2'],
+  findingsDir: '.fleetmates/r1/reviews',
   scratchRoot: '/tmp',
   // The generator emits the stamp requirement itself now, so it needs the tips to name.
-  branchShas: { 'teammates/r1/T1': 'aaa', 'teammates/r1/T2': 'bbb' },
+  branchShas: { 'fleetmates/r1/T1': 'aaa', 'fleetmates/r1/T2': 'bbb' },
 }
 
 test('one dispatch per lens, each naming only its own lens', () => {
@@ -30,13 +30,13 @@ test('one dispatch per lens, each naming only its own lens', () => {
 test('every dispatch is explicitly unnamed', () => {
   for (const r of generateReviewDispatch(BASE).reviewers) {
     assert.equal(r.name, null)
-    assert.equal(r.agentType, 'claude-teammates:tm-reviewer')
+    assert.equal(r.agentType, 'fleetmates:tm-reviewer')
   }
 })
 
 test('each dispatch carries its own findings path, derived from phase and lens', () => {
   const out = generateReviewDispatch(BASE)
-  assert.equal(out.reviewers[0].findingsPath, '.teammates/r1/reviews/1-correctness.json')
+  assert.equal(out.reviewers[0].findingsPath, '.fleetmates/r1/reviews/1-correctness.json')
   assert.match(out.reviewers[0].prompt, /1-correctness\.json/)
 })
 
@@ -52,8 +52,8 @@ test('each dispatch names a scratch worktree outside the repository', () => {
 test('the prompt states the diff under review as the phase branches against the run branch', () => {
   const prompt = generateReviewDispatch(BASE).reviewers[0].prompt
   assert.match(prompt, /run\/r1/)
-  assert.match(prompt, /teammates\/r1\/T1/)
-  assert.match(prompt, /teammates\/r1\/T2/)
+  assert.match(prompt, /fleetmates\/r1\/T1/)
+  assert.match(prompt, /fleetmates\/r1\/T2/)
 })
 
 test('the blocking severity comes from the manifest and is stated in the prompt', () => {
@@ -96,9 +96,9 @@ test('a lens that cannot be a filename is refused before it reaches a path', () 
 // A substring check would still pass if the method text leaked into every lens; these are the
 // whole string, so any addition to the shared prompt shows up here and has to be intended.
 const GENERIC_PROMPTS = {
-  correctness: "Review the phase 1 diff of teammates run r1 through exactly one lens: correctness.\n\nThe diff under review is these task branches against the run branch run/r1:\n  teammates/r1/T1\n  teammates/r1/T2\nDiff each against its own fork point (git merge-base run/r1 <branch>), never tip against tip.\n\nReport only correctness defects you can tie to a concrete failure: specific input or state producing a specific wrong result. Rate each finding high, medium or low. Findings rated high block this phase, so reserve those. Cite file:line for every finding. No findings is a valid and common result.\n\nYou are read-only. Never write to any ref — no commit, merge, rebase, reset, push or update-ref — on the base branch, the run branch, or any task branch, and never run git checkout in the main worktree. If you need to execute code across branches, create your scratch worktree at /tmp/tm-review-r1-1-correctness, which is outside the repository, and remove it when you are done. If you cannot verify a finding without writing to a shared ref, report it unverified and say what you would have run.\n\nWrite your findings JSON to .teammates/r1/reviews/1-correctness.json before you return, then return the same JSON as your final output. The response is the interface; the file is what makes your review recoverable if you go idle before emitting it.\n\nInclude this exact object under a \"stamp\" key in the JSON you write and return:\n    {\"phase\":\"1\",\"lens\":\"correctness\",\"branches\":[\"teammates/r1/T1@aaa\",\"teammates/r1/T2@bbb\"]}\nIt names the branch tips these findings judged. collect-reviews refuses a findings file whose stamp names different tips: a fix round moves a branch, and findings about the old tree are not findings about this one.",
-  security: "Review the phase 1 diff of teammates run r1 through exactly one lens: security.\n\nThe diff under review is these task branches against the run branch run/r1:\n  teammates/r1/T1\n  teammates/r1/T2\nDiff each against its own fork point (git merge-base run/r1 <branch>), never tip against tip.\n\nReport only security defects you can tie to a concrete failure: specific input or state producing a specific wrong result. Rate each finding high, medium or low. Findings rated high block this phase, so reserve those. Cite file:line for every finding. No findings is a valid and common result.\n\nYou are read-only. Never write to any ref — no commit, merge, rebase, reset, push or update-ref — on the base branch, the run branch, or any task branch, and never run git checkout in the main worktree. If you need to execute code across branches, create your scratch worktree at /tmp/tm-review-r1-1-security, which is outside the repository, and remove it when you are done. If you cannot verify a finding without writing to a shared ref, report it unverified and say what you would have run.\n\nWrite your findings JSON to .teammates/r1/reviews/1-security.json before you return, then return the same JSON as your final output. The response is the interface; the file is what makes your review recoverable if you go idle before emitting it.\n\nInclude this exact object under a \"stamp\" key in the JSON you write and return:\n    {\"phase\":\"1\",\"lens\":\"security\",\"branches\":[\"teammates/r1/T1@aaa\",\"teammates/r1/T2@bbb\"]}\nIt names the branch tips these findings judged. collect-reviews refuses a findings file whose stamp names different tips: a fix round moves a branch, and findings about the old tree are not findings about this one.",
-  tests: "Review the phase 1 diff of teammates run r1 through exactly one lens: tests.\n\nThe diff under review is these task branches against the run branch run/r1:\n  teammates/r1/T1\n  teammates/r1/T2\nDiff each against its own fork point (git merge-base run/r1 <branch>), never tip against tip.\n\nReport only tests defects you can tie to a concrete failure: specific input or state producing a specific wrong result. Rate each finding high, medium or low. Findings rated high block this phase, so reserve those. Cite file:line for every finding. No findings is a valid and common result.\n\nYou are read-only. Never write to any ref — no commit, merge, rebase, reset, push or update-ref — on the base branch, the run branch, or any task branch, and never run git checkout in the main worktree. If you need to execute code across branches, create your scratch worktree at /tmp/tm-review-r1-1-tests, which is outside the repository, and remove it when you are done. If you cannot verify a finding without writing to a shared ref, report it unverified and say what you would have run.\n\nWrite your findings JSON to .teammates/r1/reviews/1-tests.json before you return, then return the same JSON as your final output. The response is the interface; the file is what makes your review recoverable if you go idle before emitting it.\n\nInclude this exact object under a \"stamp\" key in the JSON you write and return:\n    {\"phase\":\"1\",\"lens\":\"tests\",\"branches\":[\"teammates/r1/T1@aaa\",\"teammates/r1/T2@bbb\"]}\nIt names the branch tips these findings judged. collect-reviews refuses a findings file whose stamp names different tips: a fix round moves a branch, and findings about the old tree are not findings about this one.",
+  correctness: "Review the phase 1 diff of fleetmates run r1 through exactly one lens: correctness.\n\nThe diff under review is these task branches against the run branch run/r1:\n  fleetmates/r1/T1\n  fleetmates/r1/T2\nDiff each against its own fork point (git merge-base run/r1 <branch>), never tip against tip.\n\nReport only correctness defects you can tie to a concrete failure: specific input or state producing a specific wrong result. Rate each finding high, medium or low. Findings rated high block this phase, so reserve those. Cite file:line for every finding. No findings is a valid and common result.\n\nYou are read-only. Never write to any ref — no commit, merge, rebase, reset, push or update-ref — on the base branch, the run branch, or any task branch, and never run git checkout in the main worktree. If you need to execute code across branches, create your scratch worktree at /tmp/tm-review-r1-1-correctness, which is outside the repository, and remove it when you are done. If you cannot verify a finding without writing to a shared ref, report it unverified and say what you would have run.\n\nWrite your findings JSON to .fleetmates/r1/reviews/1-correctness.json before you return, then return the same JSON as your final output. The response is the interface; the file is what makes your review recoverable if you go idle before emitting it.\n\nInclude this exact object under a \"stamp\" key in the JSON you write and return:\n    {\"phase\":\"1\",\"lens\":\"correctness\",\"branches\":[\"fleetmates/r1/T1@aaa\",\"fleetmates/r1/T2@bbb\"]}\nIt names the branch tips these findings judged. collect-reviews refuses a findings file whose stamp names different tips: a fix round moves a branch, and findings about the old tree are not findings about this one.",
+  security: "Review the phase 1 diff of fleetmates run r1 through exactly one lens: security.\n\nThe diff under review is these task branches against the run branch run/r1:\n  fleetmates/r1/T1\n  fleetmates/r1/T2\nDiff each against its own fork point (git merge-base run/r1 <branch>), never tip against tip.\n\nReport only security defects you can tie to a concrete failure: specific input or state producing a specific wrong result. Rate each finding high, medium or low. Findings rated high block this phase, so reserve those. Cite file:line for every finding. No findings is a valid and common result.\n\nYou are read-only. Never write to any ref — no commit, merge, rebase, reset, push or update-ref — on the base branch, the run branch, or any task branch, and never run git checkout in the main worktree. If you need to execute code across branches, create your scratch worktree at /tmp/tm-review-r1-1-security, which is outside the repository, and remove it when you are done. If you cannot verify a finding without writing to a shared ref, report it unverified and say what you would have run.\n\nWrite your findings JSON to .fleetmates/r1/reviews/1-security.json before you return, then return the same JSON as your final output. The response is the interface; the file is what makes your review recoverable if you go idle before emitting it.\n\nInclude this exact object under a \"stamp\" key in the JSON you write and return:\n    {\"phase\":\"1\",\"lens\":\"security\",\"branches\":[\"fleetmates/r1/T1@aaa\",\"fleetmates/r1/T2@bbb\"]}\nIt names the branch tips these findings judged. collect-reviews refuses a findings file whose stamp names different tips: a fix round moves a branch, and findings about the old tree are not findings about this one.",
+  tests: "Review the phase 1 diff of fleetmates run r1 through exactly one lens: tests.\n\nThe diff under review is these task branches against the run branch run/r1:\n  fleetmates/r1/T1\n  fleetmates/r1/T2\nDiff each against its own fork point (git merge-base run/r1 <branch>), never tip against tip.\n\nReport only tests defects you can tie to a concrete failure: specific input or state producing a specific wrong result. Rate each finding high, medium or low. Findings rated high block this phase, so reserve those. Cite file:line for every finding. No findings is a valid and common result.\n\nYou are read-only. Never write to any ref — no commit, merge, rebase, reset, push or update-ref — on the base branch, the run branch, or any task branch, and never run git checkout in the main worktree. If you need to execute code across branches, create your scratch worktree at /tmp/tm-review-r1-1-tests, which is outside the repository, and remove it when you are done. If you cannot verify a finding without writing to a shared ref, report it unverified and say what you would have run.\n\nWrite your findings JSON to .fleetmates/r1/reviews/1-tests.json before you return, then return the same JSON as your final output. The response is the interface; the file is what makes your review recoverable if you go idle before emitting it.\n\nInclude this exact object under a \"stamp\" key in the JSON you write and return:\n    {\"phase\":\"1\",\"lens\":\"tests\",\"branches\":[\"fleetmates/r1/T1@aaa\",\"fleetmates/r1/T2@bbb\"]}\nIt names the branch tips these findings judged. collect-reviews refuses a findings file whose stamp names different tips: a fix round moves a branch, and findings about the old tree are not findings about this one.",
 }
 
 // Every generic lens under every input the method reads. A snapshot taken at one input
@@ -410,7 +410,7 @@ test('every lens is told to carry the stamp, and the dispatch reports it', () =>
     assert.match(r.prompt, /Include this exact object under a "stamp" key/)
     assert.equal(r.stamp.lens, r.lens)
     assert.equal(r.stamp.phase, '1')
-    assert.deepEqual(r.stamp.branches, ['teammates/r1/T1@aaa', 'teammates/r1/T2@bbb'])
+    assert.deepEqual(r.stamp.branches, ['fleetmates/r1/T1@aaa', 'fleetmates/r1/T2@bbb'])
     // The object in the prompt has to be the object the dispatch reports, or the reviewer writes
     // one stamp and collect-reviews compares another.
     assert.ok(r.prompt.includes(JSON.stringify(r.stamp)))
@@ -613,7 +613,7 @@ test('the method states the basis of the scratch worktree and what to do when it
   // The basis is now stated by the command itself rather than by the word "from" — the run
   // branch must still be the start point the worktree is built from.
   assert.match(prompt, new RegExp(`git worktree add --detach \\S+ ${'run/r1'.replace(/\//g, '\\/')}`))
-  assert.match(prompt, /merge teammates\/r1\/T1, teammates\/r1\/T2 into it/)
+  assert.match(prompt, /merge fleetmates\/r1\/T1, fleetmates\/r1\/T2 into it/)
   assert.match(prompt, /If that merge conflicts/)
   assert.match(prompt, /"unableToVerify"/)
 })

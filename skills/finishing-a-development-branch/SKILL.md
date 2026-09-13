@@ -16,7 +16,7 @@ what state the run is in — check in this order.
 
 ### 1. Fleet run: `status.gates` is recorded
 
-If `.teammates/<run-id>/status.json` exists and has a non-empty `status.gates`, this is a fleet
+If `.fleetmates/<run-id>/status.json` exists and has a non-empty `status.gates`, this is a fleet
 run — but a record in `status.gates` is a report written by the agents being enforced, and
 `status.json` is agent-writable, so it is never trusted as evidence. A recorded `verdict` of
 `PASS` proves nothing by itself:
@@ -53,14 +53,14 @@ There is no fleet history to derive `fileset` or `ownership` from, so run the ga
     node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" gate --no-fleet --root <project root>
 
 `--no-fleet` is the only way the enforcement checks are skipped, and it runs the project's
-full test suite (and any other command checks `teammates.gate.json` declares) fresh — a
+full test suite (and any other command checks `fleetmates.gate.json` declares) fresh — a
 remembered result, or a run from earlier in this session, is not evidence. Once it exits
 `0`, proceed.
 
 ### 3. No run directory at all
 
 Someone may have finished work on a branch without ever calling `init-run` — there's no
-`.teammates/<run-id>/` to read. Run the gate solo the same way as case 2, confirm it exits `0`
+`.fleetmates/<run-id>/` to read. Run the gate solo the same way as case 2, confirm it exits `0`
 from fresh output, and proceed the same way.
 
 ## Branch taxonomy
@@ -118,7 +118,7 @@ Do not sweep by hand: a hand-run `git worktree remove --force` or `git branch -D
 neither the recomputed phase gate nor the ancestry proof above — it only does what the flag
 itself says, on whatever you point it at.
 
-What this does not clean up: `.teammates/<run-id>/` stays on disk on purpose. Delete it
+What this does not clean up: `.fleetmates/<run-id>/` stays on disk on purpose. Delete it
 yourself when you no longer want the record: `resume` reads it to continue a run, while
 `rebuild-state` reads it twice: once to refuse when it exists, since it exists for the
 case where the directory is already gone, and once to keep the run branch it recorded —

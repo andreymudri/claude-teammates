@@ -209,7 +209,7 @@ test('phase-gate documents the two claims results that are not findings', async 
 // Anchoring is NOT what stops a sentence being CONTRADICTED by a new one beside it. Three such
 // insertions were measured green here, and the inventory below is what closes them; see its own
 // comment for the scope decision and what remains open.
-const PG_WRITES_FILE = /^It also writes that same document to \.teammates\/<runId>\/reviews\/results-<phase>\.json and prints that path last, so the gate --results <path> that follows names a file that exists — run without a redirect and without this, the review check stays pending forever while the gate reports FAIL with an empty failed list, naming nothing to fix\.$/i
+const PG_WRITES_FILE = /^It also writes that same document to \.fleetmates\/<runId>\/reviews\/results-<phase>\.json and prints that path last, so the gate --results <path> that follows names a file that exists — run without a redirect and without this, the review check stays pending forever while the gate reports FAIL with an empty failed list, naming nothing to fix\.$/i
 const PG_DEAD_REDIRECT = /^Pass the written path, not a capture of stdout: a > results\.json redirect no longer round-trips, because the trailing path line is inside the captured bytes and gate --results on that capture exits 2 on --results must be a readable JSON file shaped \{ "results": \[\.\.\.\] \}, while the file the same command wrote exits 0 with verdict PASS — both measured on this tree\.$/i
 const PG_RESIDUAL_CLASSES = /^Two classes of refusal sit above it and leave the earlier round's file where it was\.$/i
 const PG_RESULTS_PATH_RULE = /^After any refusal, hand gate --results nothing at all: only a path printed on a results written to … line is this command's answer, and no refusal prints one — least of all the clear failure above, which names that very path while refusing to stand behind what is at it\.$/i
@@ -390,7 +390,7 @@ const PG_RESULTS_PATH_LEXICON =
 const PG_RESULTS_PATH_CORPUS = [
   "phase-gate :: To rebuild the results file from those drops rather than by hand:",
   "phase-gate :: It prints a --results file with source: \"file\", applying the manifest's own blockOn.",
-  "phase-gate :: It also writes that same document to .teammates/<runId>/reviews/results-<phase>.json and prints that path last, so the gate --results <path> that follows names a file that exists — run without a redirect and without this, the review check stays pending forever while the gate reports FAIL with an empty failed list, naming nothing to fix.",
+  "phase-gate :: It also writes that same document to .fleetmates/<runId>/reviews/results-<phase>.json and prints that path last, so the gate --results <path> that follows names a file that exists — run without a redirect and without this, the review check stays pending forever while the gate reports FAIL with an empty failed list, naming nothing to fix.",
   "phase-gate :: Pass the written path, not a capture of stdout: a > results.json redirect no longer round-trips, because the trailing path line is inside the captured bytes and gate --results on that capture exits 2 on --results must be a readable JSON file shaped { \"results\": [...] }, while the file the same command wrote exits 0 with verdict PASS — both measured on this tree.",
   "phase-gate :: The file's existence is itself the claim: the previous results-<phase>.json is removed at the start of the command body, before the manifest is read and before any findings file is opened, so every refusal that judges this round's work is downstream of the clear and leaves no results file behind — measured, by making a second round refuse on a stale stamp and watching the first round's file go with it.",
   "phase-gate :: And the clear itself can fail: a previous file that can be neither unlinked nor emptied exits 4 with could not clear the previous results file at …, and a reviews directory that is a symlink exits 4 with … must be a real directory before the clear is even attempted; either way the earlier round's file is still on disk saying what that round said.",
@@ -421,10 +421,10 @@ test('collect-reviews really does refuse an unableToVerify claims review rather 
   // and the test would pass whatever the code did with that key — which is this project's
   // signature defect committed one level up, inside the test written to close an instance of it.
   // `expected` matches, so the file is current and reaches the point where the key decides.
-  const stamp = { phase: '1', lens: 'claims', branches: ['teammates/r1/T1@abc123'] }
+  const stamp = { phase: '1', lens: 'claims', branches: ['fleetmates/r1/T1@abc123'] }
   const out = collectReviewResults({
     lenses: ['claims'],
-    expected: { phase: '1', branches: ['teammates/r1/T1@abc123'] },
+    expected: { phase: '1', branches: ['fleetmates/r1/T1@abc123'] },
     files: [{ lens: 'claims', stamp, findings: [], unableToVerify: 'the baseline suite was red', unprobed: ['a.mjs:1'] }],
   })
   assert.deepEqual(out.stale, [], 'the fixture must not be rejected as stale, or it proves nothing')
@@ -439,10 +439,10 @@ test('collect-reviews really does refuse an unableToVerify claims review rather 
 // `unableToVerify`" would be indistinguishable from "refused for some unrelated reason", and the
 // three key-absence assertions below would have nowhere left to live once the result went away.
 test('the same claims file without unableToVerify collects, and keeps none of the three read keys', async () => {
-  const stamp = { phase: '1', lens: 'claims', branches: ['teammates/r1/T1@abc123'] }
+  const stamp = { phase: '1', lens: 'claims', branches: ['fleetmates/r1/T1@abc123'] }
   const out = collectReviewResults({
     lenses: ['claims'],
-    expected: { phase: '1', branches: ['teammates/r1/T1@abc123'] },
+    expected: { phase: '1', branches: ['fleetmates/r1/T1@abc123'] },
     files: [{ lens: 'claims', stamp, findings: [], unprobed: ['a.mjs:1'] }],
   })
   assert.deepEqual(out.stale, [], 'the fixture must not be rejected as stale, or it proves nothing')
@@ -543,7 +543,7 @@ test('phase-gate requires the fix decision to use this pass’s verdict, never t
   // between them said the opposite.
   assertClaim(doc.section('On FAIL'), {
     label: 'verdict provenance',
-    claim: /The verdict you hand it must be the JSON this gate printed in this same pass, and must never be read back from \.teammates\//i,
+    claim: /The verdict you hand it must be the JSON this gate printed in this same pass, and must never be read back from \.fleetmates\//i,
     then: /The only verdict persisted on disk lives in status\.gates\[<phase>\]/i,
     subject: /status\.gates/i,
   })
@@ -559,7 +559,7 @@ test('phase-gate documents the real fix invocation and its exit-code contract', 
     // `then` consequence from the inventory check, so leaving either open at the end lets a
     // clause appended to that exact sentence pass unscreened, the same hole the `allow` entry
     // below was fixed for.
-    claim: /^--verdict names a file holding that same JSON, and --phase must match its own phase field — a mismatch exits 2 rather than adjudicating the wrong phase's findings, and so does a malformed teammates\.gate\.json\.$/i,
+    claim: /^--verdict names a file holding that same JSON, and --phase must match its own phase field — a mismatch exits 2 rather than adjudicating the wrong phase's findings, and so does a malformed fleetmates\.gate\.json\.$/i,
     then: /^Exit 1 means the run has no plan at all or the verdict file could not be read: an argument error, not a decision\.$/i,
     subject: /\bexit 0\b|\bexit 1\b|\bexit 2\b/i,
     allow: [
@@ -1495,7 +1495,7 @@ test('parallel-execution names the brief command its direct dispatches are built
 // a teammate that never stops for either reason, and the test name asserts exactly that coverage.
 // The hook writes a FIXED-FORM refusal naming the branch to create and forwards nothing from
 // `complete`'s stdout. The reason is security, not economy: that output carries check names read
-// from `teammates.gate.json` in the main worktree, which any teammate can write, and forwarding it
+// from `fleetmates.gate.json` in the main worktree, which any teammate can write, and forwarding it
 // was reproduced delivering a check named to look like an orchestrator instruction carrying a shell
 // command. Two documents promised the opposite — the agent contract and fleet-supervision — and
 // nothing pinned either, so the contradiction survived a correction to the sibling skill. Any
@@ -1588,7 +1588,7 @@ const SUBAGENT_STOP_CORPUS = [
   "parallel-execution :: The SubagentStop hook does two cheap things at that moment: it blocks a teammate whose task branch does not exist, and it runs complete --enforcement-only.",
   "parallel-execution :: Only a task-scoped failure refuses the stop, meaning fileset or merge, so a refused stop is not always about a file set; an ownership failure with no task-scoped failure beside it is reported and the stop is allowed.",
   "parallel-execution :: The teammate is shown none of that detail — the hook reads the exit status and never forwards what the check printed.",
-  "parallel-execution :: The hook resolves a stopping teammate through records under .teammates/, which is gitignored and writable by every teammate, and it allows the stop on anything it cannot establish — a teammate it cannot resolve, a plan it cannot read, a recorded run branch that is not the branch checked out.",
+  "parallel-execution :: The hook resolves a stopping teammate through records under .fleetmates/, which is gitignored and writable by every teammate, and it allows the stop on anything it cannot establish — a teammate it cannot resolve, a plan it cannot read, a recorded run branch that is not the branch checked out.",
   "parallel-execution :: The hook can only ever add a block that would not otherwise happen, so declining to block on anything it cannot establish is what keeps an unreadable record from costing a teammate a turn.",
   "parallel-execution :: It is not a guarantee against being blocked over foreign state: the records are teammate-writable, so a planted location record makes the hook establish something false and block whoever stops in the worktree that record keys on — resolution is by worktree path, not by teammate identity, and any linked worktree of this repository qualifies, including a reviewer's scratch one.",
   "tm-implementer.md :: Stopping without running that gate is caught, not waved through: a SubagentStop hook runs the enforcement checks at stop time and can refuse the stop.",
@@ -1646,7 +1646,7 @@ test('every sentence about the SubagentStop mechanism, in any document, is one a
 // The corpus is also two documents, not every document. Measured: `skills/` holds fourteen
 // SKILL.md files; the byte-identical bullet+block plant appended to `fleet-lifecycle` leaves the
 // suite green, and a `claimSites` scan finds lexicon sites already outside the lock in
-// `fleet-lifecycle`, `phase-gate` and `teammates-config`. Widening the corpus would pin prose in
+// `fleet-lifecycle`, `phase-gate` and `fleetmates-config`. Widening the corpus would pin prose in
 // documents nobody has reviewed for this purpose, so the bound is stated instead of closed.
 //
 // So this buys nothing about MEANING, exactly as the lexicon above buys nothing, and nothing about
@@ -1836,7 +1836,7 @@ const GUARD_CODE = [
 
 const RECORD_BLOCK = [
   "Create and check out this run's branch before initializing, then run init-run from it:",
-  'This writes .teammates/<runId>/plan.json and status.json and prints the phase breakdown.',
+  'This writes .fleetmates/<runId>/plan.json and status.json and prints the phase breakdown.',
   'Tasks land in the same phase only when their deps are satisfied and their file sets are disjoint.',
   'The order matters for enforcement, not just tidiness. init-run records a run branch by fill-if-absent: it records HEAD when the run has no runBranch recorded yet and HEAD is not the base branch, and it records nothing when HEAD is the base.',
   'A value already recorded always wins — writePlan resolves the field as carried ?? usable — so a re-init from a different branch keeps the old record and prints a note naming the branch it kept.',
@@ -1847,8 +1847,8 @@ const RECORD_BLOCK = [
   'What it decides is whether the stop-time checks are allowed to be a verdict: complete --enforcement-only compares the recorded run branch against the branch the main worktree has checked out, and when it is absent or different it reports that it cannot verify completion and the stop is allowed.',
   'Checking the run branch out before the first init-run is therefore what puts the record in place at the start of the run, on a run id that has none yet.',
   'It does not repair a run whose recorded branch is already wrong: no command overwrites that field.',
-  'To correct one, remove runBranch from .teammates/<runId>/plan.json and run init-run again — from an attached branch.',
-  'An absent record needs no hand-editing: some later commands fill it in and others only read it, so read runBranch in .teammates/<runId>/plan.json rather than predicting which.',
+  'To correct one, remove runBranch from .fleetmates/<runId>/plan.json and run init-run again — from an attached branch.',
+  'An absent record needs no hand-editing: some later commands fill it in and others only read it, so read runBranch in .fleetmates/<runId>/plan.json rather than predicting which.',
   'On a detached HEAD init-run records the literal string HEAD, which is not a run branch and which no command overwrites, so it disarms the second layer until the field is removed by hand.',
   'When init-run records nothing it prints a note directing you to check the run branch out before gating; the note concerns gate refusing to run from the base branch, and a checkout on its own records no run branch.',
 ]
@@ -1872,14 +1872,14 @@ const GUARD_BLOCK = [
   'Only a task-scoped failure refuses the stop, meaning fileset or merge, so a refused stop is not always about a file set; an ownership failure with no task-scoped failure beside it is reported and the stop is allowed.',
   'The teammate is shown none of that detail — the hook reads the exit status and never forwards what the check printed.',
   'Treat both as best effort.',
-  'The hook resolves a stopping teammate through records under .teammates/, which is gitignored and writable by every teammate, and it allows the stop on anything it cannot establish — a teammate it cannot resolve, a plan it cannot read, a recorded run branch that is not the branch checked out.',
+  'The hook resolves a stopping teammate through records under .fleetmates/, which is gitignored and writable by every teammate, and it allows the stop on anything it cannot establish — a teammate it cannot resolve, a plan it cannot read, a recorded run branch that is not the branch checked out.',
   'That is deliberate.',
   'The hook can only ever add a block that would not otherwise happen, so declining to block on anything it cannot establish is what keeps an unreadable record from costing a teammate a turn.',
   "It is not a guarantee against being blocked over foreign state: the records are teammate-writable, so a planted location record makes the hook establish something false and block whoever stops in the worktree that record keys on — resolution is by worktree path, not by teammate identity, and any linked worktree of this repository qualifies, including a reviewer's scratch one.",
   'One plant costs one forced retry, since the next stop carries stop_hook_active.',
   'What this buys is a fast signal on the common honest mistake, not a barrier against a determined one.',
-  'The enforcement is the phase gate: its fileset and ownership checks recompute from git and read nothing under .teammates/, whatever else the command around them reads.',
-  "Which checks run is another matter: that list comes from teammates.gate.json in the working tree, which every teammate can write, and an agent check's result comes from files under .teammates/ the enforced teammate can write too.",
+  'The enforcement is the phase gate: its fileset and ownership checks recompute from git and read nothing under .fleetmates/, whatever else the command around them reads.',
+  "Which checks run is another matter: that list comes from fleetmates.gate.json in the working tree, which every teammate can write, and an agent check's result comes from files under .fleetmates/ the enforced teammate can write too.",
   'Do the §1 order because it is what lets complete --enforcement-only reach a verdict; the branch-existence check does not depend on it and blocks whether or not a run branch was ever recorded.',
   'Never read a stop that was allowed as a verdict.',
   'Wait on completion notifications.',

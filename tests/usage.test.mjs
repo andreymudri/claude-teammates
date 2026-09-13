@@ -91,13 +91,15 @@ test('renderUsage names every unreadable transcript and counts them', () => {
 // satisfied every assertion and deleting the truncation entirely left the suite green. Found by
 // mutation; the comment claimed the opposite of what the fixture did.
 test('renderUsage truncates an agentType wider than its column', () => {
-  const long = 'claude-teammates:tm-implementer-with-a-very-long-suffix'
+  // Kept at the 55 characters the claude-teammates fixture had: the rename shortened the plugin
+  // prefix by six, and the row-length bound below is measured against this string's length.
+  const long = 'fleetmates:tm-implementer-with-a-very-very-long-suffixx'
   const out = renderUsage({
     sessionId: 's',
     agents: [{ agentType: long, model: 'sonnet', turns: 1, prefix: 1, cacheRead: 1, output: 1 }],
     unreadable: [],
   })
-  const row = out.split('\n').find((l) => l.includes('claude-teammates:tm-impl'))
+  const row = out.split('\n').find((l) => l.includes('fleetmates:tm-impl'))
   assert.ok(row, 'the row must be present')
   assert.ok(row.length < long.length + 40, 'the oversized cell must be truncated, not printed whole')
   assert.match(row, /…/, 'a truncated cell is marked, so the reader can see it was cut')

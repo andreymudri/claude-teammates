@@ -59,9 +59,9 @@ async function withCli(fn, { files, other }) {
 
 const FIXTURE = {
   'agent-a.jsonl': [line({ cache_read_input_tokens: 100 }), line({ cache_read_input_tokens: 300 })].join('\n'),
-  'agent-a.meta.json': JSON.stringify({ agentType: 'claude-teammates:tm-reviewer', model: 'opus' }),
+  'agent-a.meta.json': JSON.stringify({ agentType: 'fleetmates:tm-reviewer', model: 'opus' }),
   'agent-b.jsonl': line({ cache_read_input_tokens: 50 }),
-  'agent-b.meta.json': JSON.stringify({ agentType: 'claude-teammates:tm-integrator', model: 'sonnet' }),
+  'agent-b.meta.json': JSON.stringify({ agentType: 'fleetmates:tm-integrator', model: 'sonnet' }),
 }
 
 test('usage renders a table naming every agent', async () => {
@@ -99,7 +99,7 @@ test('usage --json emits the same numbers as the table', async () => {
   )
   assert.equal(code, 0)
   const report = JSON.parse(out)
-  const reviewer = report.agents.find((a) => a.agentType === 'claude-teammates:tm-reviewer')
+  const reviewer = report.agents.find((a) => a.agentType === 'fleetmates:tm-reviewer')
   assert.equal(reviewer.turns, 2)
   assert.equal(reviewer.cacheRead, 400)
   assert.equal(report.sessionId, 'sess-9')

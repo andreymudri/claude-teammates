@@ -47,7 +47,7 @@ The gate can answer "is this run landable" without an operator reading any prose
 
 ## Out of Scope
 
-- Replacing `.teammates/` with a real datastore — swapping it invalidates every check that
+- Replacing `.fleetmates/` with a real datastore — swapping it invalidates every check that
   reads it, and the coordination store is not what this destination is about.
 ```
 

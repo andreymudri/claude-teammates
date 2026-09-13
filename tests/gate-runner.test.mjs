@@ -334,8 +334,8 @@ test('a result with an unrecognised status aggregates to FAIL', () => {
 const RUN_ID = 'r1'
 const RUN_BRANCH = 'run'
 const BASE_BRANCH = 'main'
-const T1_BRANCH = 'teammates/r1/T1'
-const T2_BRANCH = 'teammates/r1/T2'
+const T1_BRANCH = 'fleetmates/r1/T1'
+const T2_BRANCH = 'fleetmates/r1/T2'
 
 function planMarkdown() {
   return [
@@ -550,7 +550,7 @@ test('runFilesetCheck does not read a ref parked at the anchor as landed even wh
   }
   const res = await runFilesetCheck(check, ctx)
   assert.equal(res.status, 'fail')
-  assert.match(res.output, /T2: branch teammates\/r1\/T2 contributes no file changes/)
+  assert.match(res.output, /T2: branch fleetmates\/r1\/T2 contributes no file changes/)
 })
 
 // T2 (phase 2, under check) sits at T1's tip (phase 1, merged). T2's own diff is empty and
@@ -584,7 +584,7 @@ test('runFilesetCheck fails a branch parked on a merged sibling\'s tip, naming o
   }
   const res = await runFilesetCheck(check, ctx)
   assert.equal(res.status, 'fail')
-  assert.match(res.output, /T2: branch teammates\/r1\/T2 contributes no file changes past its fork point/)
+  assert.match(res.output, /T2: branch fleetmates\/r1\/T2 contributes no file changes past its fork point/)
   assert.doesNotMatch(res.output, /T1/)
 })
 
@@ -595,8 +595,8 @@ test('runFilesetCheck does not fail the current phase for two refs of a later ph
   const T2_TASK = { id: 'T2', phase: 2, files: ['b.mjs'] }
   const T8_TASK = { id: 'T8', phase: 3, files: ['h.mjs'] }
   const T9_TASK = { id: 'T9', phase: 3, files: ['i.mjs'] }
-  const T8_BRANCH = 'teammates/r1/T8'
-  const T9_BRANCH = 'teammates/r1/T9'
+  const T8_BRANCH = 'fleetmates/r1/T8'
+  const T9_BRANCH = 'fleetmates/r1/T9'
   const FUTURE_SHA = 'futureSha1'
   const git = fakeGit({
     branchExists: async () => true,
@@ -637,7 +637,7 @@ test('runFilesetCheck fails with the git error when the merge-history walk fails
   assert.match(res.output, /bad revision/)
 })
 
-// A teammate that skips its `git checkout -B teammates/<run>/<task>` and commits on the
+// A teammate that skips its `git checkout -B fleetmates/<run>/<task>` and commits on the
 // harness's own worktree branch leaves the conventional ref existing but empty: it points at
 // the run tip with no work on it. `filesetViolations` of an empty change list is empty, so the
 // check used to pass, the task merged as a no-op, and the returned `status: done` was believed.
@@ -1313,7 +1313,7 @@ test('runChecks yields pending for prototype-shadowing kinds', async () => {
 // `Object.hasOwn(RUNNERS, kind)`, resolves `RUNNERS[kind]` to a real runner, and is absent from
 // `ALWAYS_ENFORCED_KINDS`, so `optional: true` is honoured.
 //
-// `teammates.gate.json` lives in the main worktree and is writable by any teammate, so this needs
+// `fleetmates.gate.json` lives in the main worktree and is writable by any teammate, so this needs
 // no other foothold.
 
 // Every kind the manifest accepts, in the array spelling. `command` is the execution path;
@@ -1333,7 +1333,7 @@ test('an array-spelled kind never reaches a runner, for any kind the manifest ac
     assert.equal(result.optional, false, `an array-spelled ${kind} was optional`)
     assert.match(result.output, /kind must be a string/)
     // Named in the diagnosis, so an operator can find the entry in the manifest.
-    assert.match(result.output, /teammates\.gate\.json/)
+    assert.match(result.output, /fleetmates\.gate\.json/)
   }
 })
 
@@ -1429,7 +1429,7 @@ test('a nameless malformed timeoutMs entry is reported by its position, not as n
   assert.match(results[0].output, /entry #0 in this phase's check list/)
 })
 
-// The number in that message tells the operator which entry of `teammates.gate.json` to go and
+// The number in that message tells the operator which entry of `fleetmates.gate.json` to go and
 // fix, so it has to survive a caller that hands `runChecks` a SUBSET of the manifest's list.
 // `cli.mjs` does exactly that for `--enforcement-only`, which `complete`, `finish` and `prune-run`
 // all accept, by filtering the command checks out first — after which a recounted index names a different
@@ -1472,7 +1472,7 @@ test('a filtered check list still reports the manifest position of a malformed t
   assert.equal(results[0].name, "entry #2 in this phase's check list")
 })
 
-// The `JSON.stringify` fallback in `malformedKindResult`. Unreachable from `teammates.gate.json`,
+// The `JSON.stringify` fallback in `malformedKindResult`. Unreachable from `fleetmates.gate.json`,
 // which is `JSON.parse`-only — every shape that file can express serialises. It guards the
 // EXPORTED api, which `cli.mjs` and these tests call with real JavaScript values, so it is pinned
 // through that door: without the `catch`, this throws out of `runChecks` and no verdict is
@@ -1693,12 +1693,12 @@ test('an evil --no-ff merge that carries extra content is unexplained (real repo
     await sh(['add', '.'])
     await sh(['commit', '-m', 'base'])
     await sh(['checkout', '-b', 'run'])
-    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await sh(['checkout', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
     await sh(['add', '.'])
     await sh(['commit', '-m', 'T1 work'])
     await sh(['checkout', 'run'])
-    await sh(['merge', '--no-ff', '--no-commit', 'teammates/r1/T1'])
+    await sh(['merge', '--no-ff', '--no-commit', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'BACKDOOR.mjs'), 'export const backdoor = true\n', 'utf8')
     await sh(['add', '-A'])
     await sh(['commit', '-m', 'Merge T1'])
@@ -1723,12 +1723,12 @@ test('a merge that tampers with content under an unchanged filename is unexplain
     await sh(['add', '.'])
     await sh(['commit', '-m', 'base'])
     await sh(['checkout', '-b', 'run'])
-    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await sh(['checkout', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'from-branch\n', 'utf8')
     await sh(['add', '.'])
     await sh(['commit', '-m', 'T1 work'])
     await sh(['checkout', 'run'])
-    await sh(['merge', '--no-ff', '--no-commit', 'teammates/r1/T1'])
+    await sh(['merge', '--no-ff', '--no-commit', 'fleetmates/r1/T1'])
     // Same filename the merge legitimately brings in, different bytes.
     await writeFile(path.join(root, 'a.mjs'), 'TAMPERED-IN-MERGE\n', 'utf8')
     await sh(['add', '-A'])
@@ -1758,22 +1758,22 @@ test('a genuine hand-resolved merge conflict is explained, not flagged as tamper
     await sh(['checkout', '-b', 'run'])
 
     // Phase 1: T2 changes shared.txt, merges cleanly onto run.
-    await sh(['checkout', '-b', 'teammates/r1/T2'])
+    await sh(['checkout', '-b', 'fleetmates/r1/T2'])
     await writeFile(path.join(root, 'shared.txt'), 'line1\nline2-T2\nline3\n', 'utf8')
     await sh(['add', '.'])
     await sh(['commit', '-m', 'T2 work'])
     await sh(['checkout', 'run'])
-    await sh(['merge', '--no-ff', '-m', 'Merge T2', 'teammates/r1/T2'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T2', 'fleetmates/r1/T2'])
 
     // Phase 2: T1, branched from the original anchor (unaware of T2's change), changes the
     // same line differently — a genuine conflict when merged onto run.
     await sh(['checkout', 'main'])
-    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await sh(['checkout', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'shared.txt'), 'line1\nline2-T1\nline3\n', 'utf8')
     await sh(['add', '.'])
     await sh(['commit', '-m', 'T1 work'])
     await sh(['checkout', 'run'])
-    const merge = await sh(['merge', '--no-ff', '--no-commit', 'teammates/r1/T1'])
+    const merge = await sh(['merge', '--no-ff', '--no-commit', 'fleetmates/r1/T1'])
     assert.match(merge.stdout + merge.stderr, /[Cc]onflict/, 'expected a real git conflict to set up this test')
     // Hand-resolve, combining both intents — content matching neither parent verbatim.
     await writeFile(path.join(root, 'shared.txt'), 'line1\nline2-merged\nline3\n', 'utf8')
@@ -1798,7 +1798,7 @@ test('an empty task branch at the run tip does not read as integrated (real repo
     await sh(['commit', '-m', 'base'])
     await sh(['checkout', '-b', 'run'])
     // Created at the run tip; no commits of its own.
-    await sh(['branch', 'teammates/r1/T1'])
+    await sh(['branch', 'fleetmates/r1/T1'])
 
     const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
 
@@ -1821,16 +1821,16 @@ test('a phase-1 branch parked at an intermediate post-anchor commit fails the fi
     await sh(['commit', '-m', 'base'])
     await sh(['checkout', '-b', 'run'])
 
-    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await sh(['checkout', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
     await sh(['add', '.'])
     await sh(['commit', '-m', 'T1 work'])
     await sh(['checkout', 'run'])
-    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'fleetmates/r1/T1'])
     const afterT1 = (await sh(['rev-parse', 'run'])).stdout.trim()
 
     // T2's ref is created here and never moves — the stale-base shape.
-    await sh(['branch', 'teammates/r1/T2', afterT1])
+    await sh(['branch', 'fleetmates/r1/T2', afterT1])
 
     // The run tip then moves past it: a sibling branch, outside the plan, is merged in. T2 is
     // now parked at an INTERMEDIATE post-anchor commit — afterT1 is the FIRST parent of this
@@ -1862,7 +1862,7 @@ test('a phase-1 branch parked at an intermediate post-anchor commit fails the fi
     const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
 
     assert.equal(res.status, 'fail')
-    assert.match(res.output, /T2: branch teammates\/r1\/T2 contributes no file changes/)
+    assert.match(res.output, /T2: branch fleetmates\/r1\/T2 contributes no file changes/)
     // T1 was genuinely merged in, so its empty diff is still excused.
     assert.doesNotMatch(res.output, /T1:/)
   })
@@ -1899,7 +1899,7 @@ test('a task branch parked at the anchor still fails after a plan amendment merg
     assert.equal(anchorSha, (await sh(['rev-parse', 'main'])).stdout.trim(), 'fixture: the anchor is the base tip')
 
     // The stale ref: created off the base, never moved, carrying nothing.
-    await sh(['branch', 'teammates/r1/T14', anchorSha])
+    await sh(['branch', 'fleetmates/r1/T14', anchorSha])
 
     const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, {
       git, runId: 'r1', runSha, anchorSha,
@@ -1907,7 +1907,7 @@ test('a task branch parked at the anchor still fails after a plan amendment merg
     })
 
     assert.equal(res.status, 'fail')
-    assert.match(res.output, /T14: branch teammates\/r1\/T14 contributes no file changes/)
+    assert.match(res.output, /T14: branch fleetmates\/r1\/T14 contributes no file changes/)
   })
 })
 
@@ -1922,12 +1922,12 @@ test('a fast-forward-integrated branch is failed, not excused — the stated lim
     await sh(['add', '.'])
     await sh(['commit', '-m', 'base'])
     await sh(['checkout', '-b', 'run'])
-    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await sh(['checkout', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
     await sh(['add', '.'])
     await sh(['commit', '-m', 'T1 work'])
     await sh(['checkout', 'run'])
-    await sh(['merge', '--ff-only', 'teammates/r1/T1'])
+    await sh(['merge', '--ff-only', 'fleetmates/r1/T1'])
 
     const anchorSha = (await sh(['merge-base', 'main', 'run'])).stdout.trim()
     const runSha = (await sh(['rev-parse', 'run'])).stdout.trim()
@@ -1953,12 +1953,12 @@ test('deriveContext does not read a fast-forward-integrated branch as integrated
     await sh(['add', '.'])
     await sh(['commit', '-m', 'base'])
     await sh(['checkout', '-b', 'run'])
-    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await sh(['checkout', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
     await sh(['add', '.'])
     await sh(['commit', '-m', 'T1 work'])
     await sh(['checkout', 'run'])
-    await sh(['merge', '--ff-only', 'teammates/r1/T1'])
+    await sh(['merge', '--ff-only', 'fleetmates/r1/T1'])
 
     const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
     assert.deepEqual(ctx.integratedPhases, [])
@@ -1976,10 +1976,10 @@ test('a branch consisting only of an empty commit does not read as integrated (r
     await sh(['add', '.'])
     await sh(['commit', '-m', 'base'])
     await sh(['checkout', '-b', 'run'])
-    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await sh(['checkout', '-b', 'fleetmates/r1/T1'])
     await sh(['commit', '--allow-empty', '-m', 'empty T1 commit'])
     await sh(['checkout', 'run'])
-    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'fleetmates/r1/T1'])
 
     const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
 
@@ -1999,12 +1999,12 @@ test('a merge that deletes the task branch\'s entire contribution is unexplained
     await sh(['add', '.'])
     await sh(['commit', '-m', 'base'])
     await sh(['checkout', '-b', 'run'])
-    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await sh(['checkout', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'content\n', 'utf8')
     await sh(['add', '.'])
     await sh(['commit', '-m', 'T1 work'])
     await sh(['checkout', 'run'])
-    await sh(['merge', '--no-ff', '--no-commit', 'teammates/r1/T1'])
+    await sh(['merge', '--no-ff', '--no-commit', 'fleetmates/r1/T1'])
     await sh(['rm', '-f', 'a.mjs'])
     await sh(['commit', '-m', 'Merge T1 (dropped)'])
 
@@ -2085,25 +2085,25 @@ test('a phase-2 branch parked at the run tip does not read as integrated (real r
     await sh(['checkout', '-b', 'run'])
 
     // Phase 1: real work, merged --no-ff, so the run tip is now past the anchor.
-    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await sh(['checkout', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
     await sh(['add', '.'])
     await sh(['commit', '-m', 'T1 work'])
     await sh(['checkout', 'run'])
-    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'fleetmates/r1/T1'])
     const afterT1 = (await sh(['rev-parse', 'run'])).stdout.trim()
 
     // Phase 2, T2: the ref is created at the run tip as it stands right now and never moves —
     // the teammate committed on some other branch, or never committed at all.
-    await sh(['branch', 'teammates/r1/T2', afterT1])
+    await sh(['branch', 'fleetmates/r1/T2', afterT1])
 
     // Phase 2, T3: real work, merged --no-ff, so the run tip moves past where T2 is parked.
-    await sh(['checkout', '-b', 'teammates/r1/T3', afterT1])
+    await sh(['checkout', '-b', 'fleetmates/r1/T3', afterT1])
     await writeFile(path.join(root, 'c.mjs'), 'export const c = 1\n', 'utf8')
     await sh(['add', '.'])
     await sh(['commit', '-m', 'T3 work'])
     await sh(['checkout', 'run'])
-    await sh(['merge', '--no-ff', '-m', 'Merge T3', 'teammates/r1/T3'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T3', 'fleetmates/r1/T3'])
     assert.notEqual((await sh(['rev-parse', 'run'])).stdout.trim(), afterT1)
 
     const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
@@ -2118,7 +2118,7 @@ test('a phase-2 branch parked at the run tip does not read as integrated (real r
     // still excused.
     const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
     assert.equal(res.status, 'fail')
-    assert.match(res.output, /T2: branch teammates\/r1\/T2 contributes no file changes/)
+    assert.match(res.output, /T2: branch fleetmates\/r1\/T2 contributes no file changes/)
     assert.doesNotMatch(res.output, /T3:/)
   })
 })
@@ -2144,23 +2144,23 @@ test('deriveContext does not credit a ref parked on a merged sibling\'s tip, and
     await sh(['commit', '-m', 'base'])
     await sh(['checkout', '-b', 'run'])
 
-    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await sh(['checkout', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
     await sh(['add', '.'])
     await sh(['commit', '-m', 'T1 work'])
     await sh(['checkout', 'run'])
-    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'fleetmates/r1/T1'])
 
-    await sh(['checkout', '-b', 'teammates/r1/T3'])
+    await sh(['checkout', '-b', 'fleetmates/r1/T3'])
     await writeFile(path.join(root, 'c.mjs'), 'export const c = 1\n', 'utf8')
     await sh(['add', '.'])
     await sh(['commit', '-m', 'T3 work'])
-    const t3Tip = (await sh(['rev-parse', 'teammates/r1/T3'])).stdout.trim()
+    const t3Tip = (await sh(['rev-parse', 'fleetmates/r1/T3'])).stdout.trim()
     await sh(['checkout', 'run'])
-    await sh(['merge', '--no-ff', '-m', 'Merge T3', 'teammates/r1/T3'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T3', 'fleetmates/r1/T3'])
 
     // T2 never commits: its ref is pointed straight at T3's own tip commit.
-    await sh(['branch', 'teammates/r1/T2', t3Tip])
+    await sh(['branch', 'fleetmates/r1/T2', t3Tip])
 
     const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
 
@@ -2173,7 +2173,7 @@ test('deriveContext does not credit a ref parked on a merged sibling\'s tip, and
 
     const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
     assert.equal(res.status, 'fail')
-    assert.match(res.output, /T2: branch teammates\/r1\/T2 contributes no file changes/)
+    assert.match(res.output, /T2: branch fleetmates\/r1\/T2 contributes no file changes/)
     assert.doesNotMatch(res.output, /T3:/)
   })
 })
@@ -2194,16 +2194,16 @@ test('deriveContext does not treat siblings sharing the run tip as a violation (
     // T1 is the only phase-1 task in this plan; give it its own real, unmerged commit so the
     // run tip advances past main, then park T2 and T3 (both phase 2, still un-started) exactly
     // where `git checkout -B <task> <run branch>` would put them.
-    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await sh(['checkout', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
     await sh(['add', '.'])
     await sh(['commit', '-m', 'T1 work'])
     await sh(['checkout', 'run'])
-    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'fleetmates/r1/T1'])
 
     const runTip = (await sh(['rev-parse', 'run'])).stdout.trim()
-    await sh(['branch', 'teammates/r1/T2', runTip])
-    await sh(['branch', 'teammates/r1/T3', runTip])
+    await sh(['branch', 'fleetmates/r1/T2', runTip])
+    await sh(['branch', 'fleetmates/r1/T3', runTip])
 
     const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
 
@@ -2213,8 +2213,8 @@ test('deriveContext does not treat siblings sharing the run tip as a violation (
 
     const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
     assert.equal(res.status, 'fail')
-    assert.match(res.output, /T2: branch teammates\/r1\/T2 contributes no file changes/)
-    assert.match(res.output, /T3: branch teammates\/r1\/T3 contributes no file changes/)
+    assert.match(res.output, /T2: branch fleetmates\/r1\/T2 contributes no file changes/)
+    assert.match(res.output, /T3: branch fleetmates\/r1\/T3 contributes no file changes/)
     assert.doesNotMatch(res.output, /parked at the other's tip/)
   })
 })
@@ -2270,7 +2270,7 @@ test('a task branch parked at the anchor does not read as integrated after a pla
 
     const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
     assert.equal(res.status, 'fail')
-    assert.match(res.output, /T2: branch teammates\/r1\/T2 contributes no file changes/)
+    assert.match(res.output, /T2: branch fleetmates\/r1\/T2 contributes no file changes/)
   })
 })
 
@@ -2303,17 +2303,17 @@ test('a hand-resolved conflict over the coordinator\'s exact V5 scenario is expl
     await sh(['add', '.'])
     await sh(['commit', '-m', 'base'])
     await sh(['checkout', '-b', 'run'])
-    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await sh(['checkout', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'line1 edited by T1\n', 'utf8')
     await sh(['add', '.'])
     await sh(['commit', '-m', 'T1 work'])
-    await sh(['checkout', '-b', 'teammates/r1/T2', 'main'])
+    await sh(['checkout', '-b', 'fleetmates/r1/T2', 'main'])
     await writeFile(path.join(root, 'a.mjs'), 'line1 edited by T2\n', 'utf8')
     await sh(['add', '.'])
     await sh(['commit', '-m', 'T2 work'])
     await sh(['checkout', 'run'])
-    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
-    const conflict = await sh(['merge', '--no-ff', '--no-commit', 'teammates/r1/T2'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'fleetmates/r1/T1'])
+    const conflict = await sh(['merge', '--no-ff', '--no-commit', 'fleetmates/r1/T2'])
     assert.match(conflict.stdout + conflict.stderr, /[Cc]onflict/, 'expected a real git conflict to set up this test')
     await writeFile(path.join(root, 'a.mjs'), 'line1 edited by T1 and T2\n', 'utf8')
     await sh(['add', 'a.mjs'])
@@ -2663,7 +2663,7 @@ test('only the current phase\'s branches are merged into the preview', async () 
   })
   await runChecks([{ name: 'test', kind: 'command', run: 'npm test' }], ctx)
   assert.deepEqual(merged, [T1_BRANCH, T2_BRANCH])
-  assert.ok(!merged.includes('teammates/r1/T3'), 'a phase-2 branch must not reach a phase-1 preview')
+  assert.ok(!merged.includes('fleetmates/r1/T3'), 'a phase-2 branch must not reach a phase-1 preview')
 })
 
 // The `previewed` guard exists so a throw raised *after* the callback resolved can never re-run
@@ -2716,7 +2716,7 @@ test('a branch lookup that throws while assembling the preview fails the merge c
 // this file's half of the contract whether or not the `cli.mjs` half has landed yet.
 
 const T3_PHASE2_TASK = { id: 'T3', phase: 2, files: ['c.mjs'] }
-const T3_BRANCH = 'teammates/r1/T3'
+const T3_BRANCH = 'fleetmates/r1/T3'
 
 // The finding this closes: with the phase-wide branch set, the first teammate of a 3-task phase
 // to run `complete` gets every sibling's branch merged into its preview. A sibling's stray
@@ -2942,18 +2942,18 @@ test('ownWorkBase: a fix round re-pointing an already-integrated branch at the r
     await sh(['commit', '-m', 'base'])
     await sh(['checkout', '-b', 'run'])
 
-    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await sh(['checkout', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
     await sh(['add', '.'])
     await sh(['commit', '-m', 'T1 work'])
     await sh(['checkout', 'run'])
-    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'fleetmates/r1/T1'])
 
-    // The brief's own recommended fix-round step: `git checkout -B teammates/r1/T1 run`. T1's
+    // The brief's own recommended fix-round step: `git checkout -B fleetmates/r1/T1 run`. T1's
     // work is already, genuinely, on the run branch — this only moves where the CONVENTIONAL
     // REF points, at a commit that is already the run tip. Nothing else claims T1's merge, so
     // the parent is free and T1 matches it.
-    await sh(['branch', '-f', 'teammates/r1/T1', 'run'])
+    await sh(['branch', '-f', 'fleetmates/r1/T1', 'run'])
 
     const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
     assert.deepEqual(ctx.integratedPhases, [1])
@@ -2978,21 +2978,21 @@ test('a run-tip ref is NOT credited with a merge another task ref still points a
     await sh(['checkout', '-b', 'run'])
 
     // T1 declares and lands BOTH files; T2 declares only `a.mjs` and never writes anything.
-    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await sh(['checkout', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
     await writeFile(path.join(root, 'b.mjs'), 'export const b = 1\n', 'utf8')
     await sh(['add', '.'])
     await sh(['commit', '-m', 'T1 work'])
     await sh(['checkout', 'run'])
-    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'fleetmates/r1/T1'])
 
-    await sh(['branch', '-f', 'teammates/r1/T2', 'run'])
+    await sh(['branch', '-f', 'fleetmates/r1/T2', 'run'])
 
     const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
     assert.equal(ctx.currentPhase, 2)
     const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
     assert.equal(res.status, 'fail')
-    assert.match(res.output, /T2: branch teammates\/r1\/T2 contributes no file changes past its fork point/)
+    assert.match(res.output, /T2: branch fleetmates\/r1\/T2 contributes no file changes past its fork point/)
   })
 })
 
@@ -3007,16 +3007,16 @@ test('two refs at the run tip cannot both be credited with a single merged paren
     await sh(['commit', '-m', 'base'])
     await sh(['checkout', '-b', 'run'])
 
-    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await sh(['checkout', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
     await writeFile(path.join(root, 'b.mjs'), 'export const b = 1\n', 'utf8')
     await sh(['add', '.'])
     await sh(['commit', '-m', 'T1 work'])
     await sh(['checkout', 'run'])
-    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'fleetmates/r1/T1'])
 
-    await sh(['branch', '-f', 'teammates/r1/T1', 'run'])
-    await sh(['branch', '-f', 'teammates/r1/T2', 'run'])
+    await sh(['branch', '-f', 'fleetmates/r1/T1', 'run'])
+    await sh(['branch', '-f', 'fleetmates/r1/T2', 'run'])
 
     const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
     const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
@@ -3042,27 +3042,27 @@ test('the spare parent of a task merged twice is spent, not matchable by a run-t
 
     // T1 lands `a.mjs`, then a fix round lands a second merge also touching `a.mjs`. Two parents
     // now carry T1's file; T1's ref can only point at one of them.
-    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await sh(['checkout', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
     await sh(['add', '.'])
     await sh(['commit', '-m', 'T1 work'])
     await sh(['checkout', 'run'])
-    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
-    await sh(['checkout', 'teammates/r1/T1'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'fleetmates/r1/T1'])
+    await sh(['checkout', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'export const a = 2\n', 'utf8')
     await sh(['add', '.'])
     await sh(['commit', '-m', 'T1 fix round'])
     await sh(['checkout', 'run'])
-    await sh(['merge', '--no-ff', '-m', 'Merge T1 again', 'teammates/r1/T1'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1 again', 'fleetmates/r1/T1'])
 
     // T2 declares `a.mjs`, writes nothing, parks at the run tip. Both parents carry `a.mjs` and
     // both are ancestors of T1's ref, so neither is free.
-    await sh(['branch', '-f', 'teammates/r1/T2', 'run'])
+    await sh(['branch', '-f', 'fleetmates/r1/T2', 'run'])
 
     const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
     const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
     assert.equal(res.status, 'fail')
-    assert.match(res.output, /T2: branch teammates\/r1\/T2 contributes no file changes past its fork point/)
+    assert.match(res.output, /T2: branch fleetmates\/r1\/T2 contributes no file changes past its fork point/)
   })
 })
 
@@ -3081,23 +3081,23 @@ test('a later sibling does not spend the merged parent of an earlier task it nev
     await sh(['commit', '-m', 'base'])
     await sh(['checkout', '-b', 'run'])
 
-    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await sh(['checkout', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
     await sh(['add', '.'])
     await sh(['commit', '-m', 'T1 work'])
     await sh(['checkout', 'run'])
-    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'fleetmates/r1/T1'])
 
     // T2 forks AFTER T1's merge, so T1's merged parent is an ancestor of T2's tip.
-    await sh(['checkout', '-b', 'teammates/r1/T2', 'run'])
+    await sh(['checkout', '-b', 'fleetmates/r1/T2', 'run'])
     await writeFile(path.join(root, 'b.mjs'), 'export const b = 1\n', 'utf8')
     await sh(['add', '.'])
     await sh(['commit', '-m', 'T2 work'])
     await sh(['checkout', 'run'])
-    await sh(['merge', '--no-ff', '-m', 'Merge T2', 'teammates/r1/T2'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T2', 'fleetmates/r1/T2'])
 
     // T1's fix round finds nothing to change and leaves its ref at the run tip.
-    await sh(['branch', '-f', 'teammates/r1/T1', 'run'])
+    await sh(['branch', '-f', 'fleetmates/r1/T1', 'run'])
 
     const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
     const res = await runFilesetCheck({ name: 'fileset', kind: 'fileset' }, ctx)
@@ -3189,12 +3189,12 @@ test('a base merge whose only contribution is a mode change is explained, not fl
     await sh(['checkout', '-b', 'run'])
 
     // One honest task branch, merged --no-ff, so the run branch is a normal mid-run branch.
-    await sh(['checkout', '-b', 'teammates/r1/T1'])
+    await sh(['checkout', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'work\n', 'utf8')
     await sh(['add', '.'])
     await sh(['commit', '-m', 'T1 work'])
     await sh(['checkout', 'run'])
-    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'teammates/r1/T1'])
+    await sh(['merge', '--no-ff', '-m', 'Merge T1', 'fleetmates/r1/T1'])
 
     // The base advances by a commit whose ENTIRE payload is the executable bit: same blob
     // before and after. This is the documented, legitimate route for a mid-run amendment.

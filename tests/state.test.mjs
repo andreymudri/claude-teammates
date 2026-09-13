@@ -30,8 +30,8 @@ async function withTempRoot(fn) {
   try { await fn(root) } finally { await rm(root, { recursive: true, force: true }) }
 }
 
-test('runDir places state under .teammates/<runId>', () => {
-  assert.equal(runDir('/repo', 'abc'), path.join('/repo', '.teammates', 'abc'))
+test('runDir places state under .fleetmates/<runId>', () => {
+  assert.equal(runDir('/repo', 'abc'), path.join('/repo', '.fleetmates', 'abc'))
 })
 
 test('readState returns null when the file does not exist', async () => {
@@ -99,11 +99,11 @@ test('concurrent claims on one task produce exactly one winner', async () => {
 // what a shell reports — all hashing to one key, and about a record being unable to answer for
 // any directory but the one it is filed under.
 
-const recordPath = (root, worktree) => path.join(root, '.teammates', 'index', `${worktreeKey(worktree)}.json`)
+const recordPath = (root, worktree) => path.join(root, '.fleetmates', 'index', `${worktreeKey(worktree)}.json`)
 
 // Writes a record byte-for-byte, bypassing writeLocation, the way a teammate with a shell can.
 async function plant(root, keyFor, contents) {
-  const dir = path.join(root, '.teammates', 'index')
+  const dir = path.join(root, '.fleetmates', 'index')
   await mkdir(dir, { recursive: true })
   const target = path.join(dir, `${worktreeKey(keyFor)}.json`)
   await writeFile(target, typeof contents === 'string' ? contents : JSON.stringify(contents), 'utf8')
@@ -113,19 +113,19 @@ async function plant(root, keyFor, contents) {
 test('writeLocation files a record under the hash of its worktree', async () => {
   await withTempRoot(async (root) => {
     const worktree = path.join(root, 'wt', 'agent-1')
-    const written = await writeLocation(root, 'r1', 'T1', { worktree, branch: 'teammates/r1/T1' })
+    const written = await writeLocation(root, 'r1', 'T1', { worktree, branch: 'fleetmates/r1/T1' })
     assert.equal(written, recordPath(root, worktree))
     assert.match(path.basename(written), /^[0-9a-f]{64}\.json$/)
     assert.deepEqual(JSON.parse(await readFile(written, 'utf8')), {
       runId: 'r1',
       taskId: 'T1',
-      branch: 'teammates/r1/T1',
+      branch: 'fleetmates/r1/T1',
       worktree: normaliseWorktree(worktree),
     })
     assert.deepEqual(await findTaskByWorktree(root, worktree), {
       runId: 'r1',
       taskId: 'T1',
-      branch: 'teammates/r1/T1',
+      branch: 'fleetmates/r1/T1',
     })
   })
 })
@@ -134,18 +134,18 @@ test('rewriting one worktree overwrites in place, and a second worktree gets its
   await withTempRoot(async (root) => {
     const first = path.join(root, 'wt', 'agent-1')
     const second = path.join(root, 'wt', 'agent-2')
-    await writeLocation(root, 'r1', 'T1', { worktree: first, branch: 'teammates/r1/T1' })
+    await writeLocation(root, 'r1', 'T1', { worktree: first, branch: 'fleetmates/r1/T1' })
     // Same worktree, re-recorded: one file, updated.
-    await assert.doesNotReject(writeLocation(root, 'r1', 'T2', { worktree: first, branch: 'teammates/r1/T2' }))
+    await assert.doesNotReject(writeLocation(root, 'r1', 'T2', { worktree: first, branch: 'fleetmates/r1/T2' }))
     assert.deepEqual(await findTaskByWorktree(root, first), {
       runId: 'r1',
       taskId: 'T2',
-      branch: 'teammates/r1/T2',
+      branch: 'fleetmates/r1/T2',
     })
     // A respawn into a different worktree writes a different key. The old record survives and
     // still answers for the old directory — nothing deletes records, and nothing needs to,
     // because a stale record is only reachable by asking about the exact path it names.
-    await writeLocation(root, 'r1', 'T2', { worktree: second, branch: 'teammates/r1/T2' })
+    await writeLocation(root, 'r1', 'T2', { worktree: second, branch: 'fleetmates/r1/T2' })
     assert.equal((await findTaskByWorktree(root, second)).taskId, 'T2')
     assert.equal((await findTaskByWorktree(root, first)).taskId, 'T2')
     assert.notEqual(recordPath(root, first), recordPath(root, second))
@@ -155,11 +155,11 @@ test('rewriting one worktree overwrites in place, and a second worktree gets its
 test('findTaskByWorktree matches a trailing separator against a record written without one', async () => {
   await withTempRoot(async (root) => {
     const worktree = path.join(root, 'wt', 'agent-1')
-    await writeLocation(root, 'r1', 'T7', { worktree, branch: 'teammates/r1/T7' })
+    await writeLocation(root, 'r1', 'T7', { worktree, branch: 'fleetmates/r1/T7' })
     assert.deepEqual(await findTaskByWorktree(root, `${worktree}${path.sep}`), {
       runId: 'r1',
       taskId: 'T7',
-      branch: 'teammates/r1/T7',
+      branch: 'fleetmates/r1/T7',
     })
   })
 })
@@ -170,8 +170,8 @@ test('findTaskByWorktree on win32 matches across drive-letter case and separator
   await withTempRoot(async (root) => {
     const worktree = path.resolve(path.join(root, 'wt', 'agent-1'))
     const upper = worktree[0].toUpperCase() + worktree.slice(1)
-    await writeLocation(root, 'r1', 'T4', { worktree: upper, branch: 'teammates/r1/T4' })
-    const expected = { runId: 'r1', taskId: 'T4', branch: 'teammates/r1/T4' }
+    await writeLocation(root, 'r1', 'T4', { worktree: upper, branch: 'fleetmates/r1/T4' })
+    const expected = { runId: 'r1', taskId: 'T4', branch: 'fleetmates/r1/T4' }
     assert.deepEqual(await findTaskByWorktree(root, upper.replace(/\\/g, '/')), expected)
     assert.deepEqual(await findTaskByWorktree(root, upper[0].toLowerCase() + upper.slice(1)), expected)
     assert.deepEqual(
@@ -229,7 +229,7 @@ test('findTaskByWorktree returns null for an unknown worktree and for an empty q
   await withTempRoot(async (root) => {
     await writeLocation(root, 'r1', 'T1', {
       worktree: path.join(root, 'wt', 'agent-1'),
-      branch: 'teammates/r1/T1',
+      branch: 'fleetmates/r1/T1',
     })
     assert.equal(await findTaskByWorktree(root, path.join(root, 'wt', 'nobody')), null)
     assert.equal(await findTaskByWorktree(root, ''), null)
@@ -251,11 +251,11 @@ test('findTaskByWorktree returns null for a malformed record and does not throw'
     await assert.doesNotReject(findTaskByWorktree(root, worktree))
     assert.equal(await findTaskByWorktree(root, worktree), null)
     // Rewriting it honestly makes it findable, so the skip was the content and nothing else.
-    await writeLocation(root, 'r1', 'T3', { worktree, branch: 'teammates/r1/T3' })
+    await writeLocation(root, 'r1', 'T3', { worktree, branch: 'fleetmates/r1/T3' })
     assert.deepEqual(await findTaskByWorktree(root, worktree), {
       runId: 'r1',
       taskId: 'T3',
-      branch: 'teammates/r1/T3',
+      branch: 'fleetmates/r1/T3',
     })
   })
 })
@@ -303,7 +303,7 @@ test('writeLocation refuses a taskId that is not a single path segment', async (
   })
 })
 
-test('writeLocation refuses a runId that climbs out of .teammates', async () => {
+test('writeLocation refuses a runId that climbs out of .fleetmates', async () => {
   await withTempRoot(async (root) => {
     const args = { worktree: path.join(root, 'wt', 'agent-1'), branch: 'b' }
     for (const runId of ['../..', '../escaped', '..', '.']) {
@@ -312,17 +312,17 @@ test('writeLocation refuses a runId that climbs out of .teammates', async () => 
   })
 })
 
-// `init-run --run 2026/substop` is accepted by the CLI and creates .teammates/2026/substop, so
+// `init-run --run 2026/substop` is accepted by the CLI and creates .fleetmates/2026/substop, so
 // refusing a nested run id here would abort `locate` for a run the CLI legitimately made and
 // leave that whole run unenforced. Containment, not single-segment, is the rule for a run id.
 test('writeLocation accepts a nested runId, as init-run does', async () => {
   await withTempRoot(async (root) => {
     const worktree = path.join(root, 'wt', 'agent-1')
-    await writeLocation(root, '2026/substop', 'T1', { worktree, branch: 'teammates/2026/substop/T1' })
+    await writeLocation(root, '2026/substop', 'T1', { worktree, branch: 'fleetmates/2026/substop/T1' })
     assert.deepEqual(await findTaskByWorktree(root, worktree), {
       runId: '2026/substop',
       taskId: 'T1',
-      branch: 'teammates/2026/substop/T1',
+      branch: 'fleetmates/2026/substop/T1',
     })
   })
 })
@@ -364,7 +364,7 @@ test('writeLocation refuses ids that are contained but illegal as ref components
 
 // The shape a single-segment path check cannot see: `T1/` joins to the same directory as `T1`,
 // so containment accepts it, and only the one-component rule rejects it. Under a widened
-// pattern it reaches `complete --task T1/` and `refs/heads/teammates/r1/T1/`.
+// pattern it reaches `complete --task T1/` and `refs/heads/fleetmates/r1/T1/`.
 test('a trailing slash is refused in a task id, at both ends', async () => {
   await withTempRoot(async (root) => {
     const worktree = path.join(root, 'wt', 'agent-1')
@@ -386,7 +386,7 @@ test('findTaskByWorktree skips a runId that aliases its run directory', async ()
       runId: 'sub/../substop',
       taskId: 'T1',
       worktree,
-      branch: 'teammates/sub/../substop/T1',
+      branch: 'fleetmates/sub/../substop/T1',
     })
     assert.equal(await findTaskByWorktree(root, worktree), null)
   })
@@ -406,10 +406,10 @@ test('ids that git and init-run accept are accepted here', async () => {
     ]
     for (const [runId, taskId] of cases) {
       const worktree = path.join(root, 'wt', `agent-${encodeURIComponent(runId).slice(0, 20)}-${taskId.slice(0, 8)}`)
-      await writeLocation(root, runId, taskId, { worktree, branch: `teammates/${runId}/${taskId}` })
+      await writeLocation(root, runId, taskId, { worktree, branch: `fleetmates/${runId}/${taskId}` })
       assert.deepEqual(
         await findTaskByWorktree(root, worktree),
-        { runId, taskId, branch: `teammates/${runId}/${taskId}` },
+        { runId, taskId, branch: `fleetmates/${runId}/${taskId}` },
         `${JSON.stringify(runId)} / ${JSON.stringify(taskId)} was refused`,
       )
     }
@@ -503,7 +503,7 @@ test('an id containing .. anywhere is refused at both ends', async () => {
         /is not a usable task id/,
         `taskId ${JSON.stringify(bad)} was accepted`,
       )
-      await plant(root, worktree, { runId: bad, taskId: 'T1', worktree, branch: `teammates/${bad}/T1` })
+      await plant(root, worktree, { runId: bad, taskId: 'T1', worktree, branch: `fleetmates/${bad}/T1` })
       assert.equal(await findTaskByWorktree(root, worktree), null, `runId ${JSON.stringify(bad)} was returned`)
     }
     // The multi-component spellings git also refuses.
@@ -543,7 +543,7 @@ test('writeLocation refuses a worktree whose resolved form the reader would reje
       return
     }
     await assert.rejects(
-      writeLocation(root, 'r1', 'T1', { worktree: link, branch: 'teammates/r1/T1' }),
+      writeLocation(root, 'r1', 'T1', { worktree: link, branch: 'fleetmates/r1/T1' }),
       /which no record can name/,
     )
     // And nothing was left behind for that key, so a failed write cannot displace a good record.
@@ -564,7 +564,7 @@ test('a leading or trailing separator in an id is refused, at both ends', async 
         /is not a usable run id|escapes the run directory|do not name a valid branch/,
         `runId ${JSON.stringify(runId)} was accepted`,
       )
-      await plant(root, worktree, { runId, taskId: 'T1', worktree, branch: `teammates/${runId}/T1` })
+      await plant(root, worktree, { runId, taskId: 'T1', worktree, branch: `fleetmates/${runId}/T1` })
       assert.equal(await findTaskByWorktree(root, worktree), null, `runId ${JSON.stringify(runId)} was returned`)
     }
   })
@@ -664,7 +664,7 @@ test('code points that render as nothing are refused as ids', async () => {
     }
     // And the property does not reject ordinary ids, including non-ASCII ones.
     for (const taskId of ['T1', 'café', '日本語', 'run-1_x', 'a.b']) {
-      await writeLocation(root, 'r1', taskId, { worktree, branch: `teammates/r1/${taskId}` })
+      await writeLocation(root, 'r1', taskId, { worktree, branch: `fleetmates/r1/${taskId}` })
       assert.equal((await findTaskByWorktree(root, worktree)).taskId, taskId)
     }
   })
@@ -688,10 +688,10 @@ test('ids that are legal for this store but were refused by the deleted ref rule
     ]
     for (const [runId, taskId] of cases) {
       const worktree = path.join(root, 'wt', `agent-${cases.findIndex((c) => c[0] === runId)}`)
-      await writeLocation(root, runId, taskId, { worktree, branch: `teammates/${runId}/${taskId}` })
+      await writeLocation(root, runId, taskId, { worktree, branch: `fleetmates/${runId}/${taskId}` })
       assert.deepEqual(
         await findTaskByWorktree(root, worktree),
-        { runId, taskId, branch: `teammates/${runId}/${taskId}` },
+        { runId, taskId, branch: `fleetmates/${runId}/${taskId}` },
         `${JSON.stringify(runId)} / ${JSON.stringify(taskId)} was refused`,
       )
     }
@@ -728,13 +728,13 @@ test('writeLocation refuses a worktree longer than any real path', async () => {
       : `${path.sep}${'a'.repeat(70_000)}`
     assert.equal(isLocalAbsolute(enormous), true, 'the fixture must be absolute on this platform')
     await assert.rejects(
-      writeLocation(root, 'r1', 'T1', { worktree: enormous, branch: 'teammates/r1/T1' }),
+      writeLocation(root, 'r1', 'T1', { worktree: enormous, branch: 'fleetmates/r1/T1' }),
       /over the 32767 allowed/,
     )
     assert.equal(await findTaskByWorktree(root, enormous), null)
     // An ordinary deep path is still fine, so this is a limit rather than a ban.
     const deep = path.join(root, ...Array.from({ length: 20 }, (_, i) => `level-${i}`))
-    await writeLocation(root, 'r1', 'T1', { worktree: deep, branch: 'teammates/r1/T1' })
+    await writeLocation(root, 'r1', 'T1', { worktree: deep, branch: 'fleetmates/r1/T1' })
     assert.equal((await findTaskByWorktree(root, deep)).taskId, 'T1')
   })
 })
@@ -784,33 +784,33 @@ test('a marked or non-ASCII id that git accepts is accepted here', async () => {
     const cases = ['T1', 'café', '日本語', 'run-1_x', 'run.1', '.hidden', 'T1.', 'हिन्दी', `1${String.fromCodePoint(0x20e3)}`]
     for (const taskId of cases) {
       const worktree = path.join(root, 'wt', `agent-${cases.indexOf(taskId)}`)
-      await writeLocation(root, 'r1', taskId, { worktree, branch: `teammates/r1/${taskId}` })
+      await writeLocation(root, 'r1', taskId, { worktree, branch: `fleetmates/r1/${taskId}` })
       assert.deepEqual(
         await findTaskByWorktree(root, worktree),
-        { runId: 'r1', taskId, branch: `teammates/r1/${taskId}` },
+        { runId: 'r1', taskId, branch: `fleetmates/r1/${taskId}` },
         `${JSON.stringify(taskId)} was refused`,
       )
     }
     // Nesting still works for a run id, and `2026/substop` is what init-run creates.
     const nested = path.join(root, 'wt', 'agent-nested')
-    await writeLocation(root, '2026/substop', 'T10', { worktree: nested, branch: 'teammates/2026/substop/T10' })
+    await writeLocation(root, '2026/substop', 'T10', { worktree: nested, branch: 'fleetmates/2026/substop/T10' })
     assert.equal((await findTaskByWorktree(root, nested)).runId, '2026/substop')
   })
 })
 
 // A `.` component is as much an alias as `..`: `sub/./substop` names the same directory, and the
-// branch it composes — `teammates/sub/./substop/T1` — is one git cannot resolve. Only `..` was
+// branch it composes — `fleetmates/sub/./substop/T1` — is one git cannot resolve. Only `..` was
 // refused before, so the same class was half closed.
 test('a dot component is refused wherever a dot-dot component would be', async () => {
   await withTempRoot(async (root) => {
     const worktree = path.join(root, 'wt', 'agent-1')
     for (const runId of ['sub/./substop', './sub', 'a/.', '.', 'sub/../substop', '..']) {
       await assert.rejects(
-        writeLocation(root, runId, 'T1', { worktree, branch: `teammates/${runId}/T1` }),
+        writeLocation(root, runId, 'T1', { worktree, branch: `fleetmates/${runId}/T1` }),
         /is not a usable run id|escapes the run directory/,
         `runId ${JSON.stringify(runId)} was accepted`,
       )
-      await plant(root, worktree, { runId, taskId: 'T1', worktree, branch: `teammates/${runId}/T1` })
+      await plant(root, worktree, { runId, taskId: 'T1', worktree, branch: `fleetmates/${runId}/T1` })
       assert.equal(await findTaskByWorktree(root, worktree), null, `runId ${JSON.stringify(runId)} was returned`)
     }
     // `./b` is the shape `isSegment` does NOT catch — path.relative resolves the dot away — so
@@ -835,7 +835,7 @@ test('a multibyte worktree is bounded by its byte length, not its character coun
     assert.equal(worktree.length < 33_000, true, 'the fixture must be inside any code-unit bound')
     assert.equal(Buffer.byteLength(worktree, 'utf8') > 90_000, true, 'and past the byte bound')
     await assert.rejects(
-      writeLocation(root, 'r1', 'T1', { worktree, branch: 'teammates/r1/T1' }),
+      writeLocation(root, 'r1', 'T1', { worktree, branch: 'fleetmates/r1/T1' }),
       /bytes, over the 32767 allowed/,
     )
     assert.equal(await findTaskByWorktree(root, worktree), null)
@@ -866,7 +866,7 @@ test('a zero-width or variation selector on a letter is refused', async () => {
     }
     // The honest twin is unaffected, which is the point: one of these two is an id and the
     // other cannot be told apart from it by looking.
-    await writeLocation(root, 'r1', 'T1', { worktree, branch: 'teammates/r1/T1' })
+    await writeLocation(root, 'r1', 'T1', { worktree, branch: 'fleetmates/r1/T1' })
     assert.equal((await findTaskByWorktree(root, worktree)).taskId, 'T1')
   })
 })
@@ -884,7 +884,7 @@ test('a non-NFC id is refused rather than folded', async () => {
     assert.notEqual(decomposed, precomposed)
     assert.equal(decomposed.normalize('NFC'), precomposed)
     await assert.rejects(
-      writeLocation(root, 'r1', decomposed, { worktree, branch: `teammates/r1/${decomposed}` }),
+      writeLocation(root, 'r1', decomposed, { worktree, branch: `fleetmates/r1/${decomposed}` }),
       /is not a usable task id/,
     )
     await assert.rejects(
@@ -898,13 +898,13 @@ test('a non-NFC id is refused rather than folded', async () => {
     // which is what keeps it equal to the directory init-run made and the ref git holds.
     const written = await writeLocation(root, 'r1', precomposed, {
       worktree,
-      branch: `teammates/r1/${precomposed}`,
+      branch: `fleetmates/r1/${precomposed}`,
     })
     assert.equal(JSON.parse(await readFile(written, 'utf8')).taskId, precomposed)
     assert.deepEqual(await findTaskByWorktree(root, worktree), {
       runId: 'r1',
       taskId: precomposed,
-      branch: `teammates/r1/${precomposed}`,
+      branch: `fleetmates/r1/${precomposed}`,
     })
   })
 })
@@ -940,7 +940,7 @@ test('a worktree containing C0 controls is refused, and one with DEL or C1 is no
     const prefix = process.platform === 'win32' ? 'C:/' : '/'
     for (const cp of [0x007f, 0x009b]) {
       const worktree = `${prefix}wt${String.fromCodePoint(cp)}agent`
-      await writeLocation(root, 'r1', 'T1', { worktree, branch: 'teammates/r1/T1' })
+      await writeLocation(root, 'r1', 'T1', { worktree, branch: 'fleetmates/r1/T1' })
       assert.equal(
         (await findTaskByWorktree(root, worktree)).taskId,
         'T1',
@@ -950,7 +950,7 @@ test('a worktree containing C0 controls is refused, and one with DEL or C1 is no
     for (const cp of [0x0001, 0x001f]) {
       const worktree = `${prefix}wt${String.fromCodePoint(cp)}agent`
       await assert.rejects(
-        writeLocation(root, 'r1', 'T1', { worktree, branch: 'teammates/r1/T1' }),
+        writeLocation(root, 'r1', 'T1', { worktree, branch: 'fleetmates/r1/T1' }),
         /contains control characters/,
         `U+${cp.toString(16)} was accepted in a worktree`,
       )
@@ -961,7 +961,7 @@ test('a worktree containing C0 controls is refused, and one with DEL or C1 is no
     assert.equal(Buffer.byteLength(enormous, 'utf8') < 32_767, true, 'must be inside the field bound')
     assert.equal(JSON.stringify(enormous).length > 150_000, true, 'and past the record bound once escaped')
     await assert.rejects(
-      writeLocation(root, 'r1', 'T1', { worktree: enormous, branch: 'teammates/r1/T1' }),
+      writeLocation(root, 'r1', 'T1', { worktree: enormous, branch: 'fleetmates/r1/T1' }),
       /contains control characters|could never be read back/,
     )
     assert.equal(await findTaskByWorktree(root, enormous), null)
@@ -979,9 +979,9 @@ test('a record that would exceed the size bound once serialised is refused', asy
     // The record the writer builds carries three more fields, so the escaped worktree alone
     // sits just under the bound and the whole record just over it — which is the point: only a
     // measurement of the real serialised bytes can see that.
-    assert.equal(JSON.stringify({ runId: 'r1', taskId: 'T1', branch: 'teammates/r1/T1', worktree }).length > 65_536, true, 'and fail once escaped')
+    assert.equal(JSON.stringify({ runId: 'r1', taskId: 'T1', branch: 'fleetmates/r1/T1', worktree }).length > 65_536, true, 'and fail once escaped')
     await assert.rejects(
-      writeLocation(root, 'r1', 'T1', { worktree, branch: 'teammates/r1/T1' }),
+      writeLocation(root, 'r1', 'T1', { worktree, branch: 'fleetmates/r1/T1' }),
       /could never be read back/,
     )
   })
@@ -1006,7 +1006,7 @@ test('id and branch bounds are measured in bytes', async () => {
     )
     // 413 characters — comfortably inside 512 counted as code units — and 1,213 bytes, which is
     // what the record is written in. A bound counting characters would accept this.
-    const multibyteBranch = `teammates/r1/${'日'.repeat(400)}`
+    const multibyteBranch = `fleetmates/r1/${'日'.repeat(400)}`
     assert.equal(multibyteBranch.length < MAX_BRANCH_CODE_UNITS, true, 'must pass a code-unit bound')
     assert.equal(Buffer.byteLength(multibyteBranch, 'utf8') > MAX_BRANCH_CODE_UNITS, true, 'and fail a byte bound')
     await assert.rejects(
@@ -1050,13 +1050,13 @@ test('the record bound is measured in bytes, not code units', async () => {
     const tail = '日'.repeat(17)
     const quotes = '"'.repeat(MAX_WORKTREE_TEST_BYTES - prefix.length - Buffer.byteLength(tail, 'utf8'))
     const worktree = `${prefix}${quotes}${tail}`
-    const record = { runId: 'r1', taskId: 'T1', branch: 'teammates/r1/T1', worktree }
+    const record = { runId: 'r1', taskId: 'T1', branch: 'fleetmates/r1/T1', worktree }
     const serialised = `${JSON.stringify(record)}\n`
     assert.equal(Buffer.byteLength(worktree, 'utf8') <= MAX_WORKTREE_TEST_BYTES, true, 'passes the field bound')
     assert.equal(serialised.length < 65_536, true, 'passes a code-unit bound')
     assert.equal(Buffer.byteLength(serialised, 'utf8') > 65_536, true, 'fails the byte bound')
     await assert.rejects(
-      writeLocation(root, 'r1', 'T1', { worktree, branch: 'teammates/r1/T1' }),
+      writeLocation(root, 'r1', 'T1', { worktree, branch: 'fleetmates/r1/T1' }),
       /could never be read back/,
     )
     assert.equal(await findTaskByWorktree(root, worktree), null)
@@ -1132,7 +1132,7 @@ test('a worktree resolving to a path with control characters is refused', {
     assert.doesNotMatch(link, /[\u0000-\u001f]/)
     assert.match(normaliseWorktree(link), /[\u0000-\u001f]/)
     await assert.rejects(
-      writeLocation(root, 'r1', 'T1', { worktree: link, branch: 'teammates/r1/T1' }),
+      writeLocation(root, 'r1', 'T1', { worktree: link, branch: 'fleetmates/r1/T1' }),
       /contains control characters/,
     )
   })
@@ -1158,7 +1158,7 @@ test('writeLocation stores the normalised worktree, not the caller spelling', as
     const worktree = path.join(root, 'wt', 'agent-1')
     const written = await writeLocation(root, 'r1', 'T1', {
       worktree: `${worktree}${path.sep}`,
-      branch: 'teammates/r1/T1',
+      branch: 'fleetmates/r1/T1',
     })
     const record = JSON.parse(await readFile(written, 'utf8'))
     assert.equal(record.worktree, normaliseWorktree(worktree))
@@ -1190,16 +1190,16 @@ test('findTaskByWorktree matches a worktree reached through a symlinked parent',
     }
     // Recorded as git prints it (the real path); queried as the harness reports it (through
     // the link). Both hash the resolved path, so both name one record.
-    await writeLocation(root, 'r1', 'T1', { worktree: real, branch: 'teammates/r1/T1' })
+    await writeLocation(root, 'r1', 'T1', { worktree: real, branch: 'fleetmates/r1/T1' })
     assert.deepEqual(await findTaskByWorktree(root, path.join(link, 'agent-1')), {
       runId: 'r1',
       taskId: 'T1',
-      branch: 'teammates/r1/T1',
+      branch: 'fleetmates/r1/T1',
     })
     // And the other way round: recorded through the link, queried by the real path.
     await writeLocation(root, 'r1', 'T2', {
       worktree: path.join(link, 'agent-1'),
-      branch: 'teammates/r1/T2',
+      branch: 'fleetmates/r1/T2',
     })
     assert.equal((await findTaskByWorktree(root, real)).taskId, 'T2')
   })
@@ -1224,11 +1224,11 @@ test('findTaskByWorktree matches across two different links to one worktree', as
     const spellingA = path.join(linkA, 'agent-1')
     const spellingB = path.join(linkB, 'agent-1')
     assert.notEqual(normaliseWorktree(spellingA, { resolveLinks: false }), normaliseWorktree(spellingB, { resolveLinks: false }))
-    await writeLocation(root, 'r1', 'T1', { worktree: spellingA, branch: 'teammates/r1/T1' })
+    await writeLocation(root, 'r1', 'T1', { worktree: spellingA, branch: 'fleetmates/r1/T1' })
     assert.deepEqual(await findTaskByWorktree(root, spellingB), {
       runId: 'r1',
       taskId: 'T1',
-      branch: 'teammates/r1/T1',
+      branch: 'fleetmates/r1/T1',
     })
   })
 })
@@ -1251,11 +1251,11 @@ test('normaliseWorktree maps a Windows 8.3 short name onto its long spelling', {
     }
     assert.notEqual(short.toLowerCase(), long.toLowerCase())
     assert.equal(normaliseWorktree(short), normaliseWorktree(long))
-    await writeLocation(root, 'r1', 'T1', { worktree: long, branch: 'teammates/r1/T1' })
+    await writeLocation(root, 'r1', 'T1', { worktree: long, branch: 'fleetmates/r1/T1' })
     assert.deepEqual(await findTaskByWorktree(root, short), {
       runId: 'r1',
       taskId: 'T1',
-      branch: 'teammates/r1/T1',
+      branch: 'fleetmates/r1/T1',
     })
   })
 })
@@ -1270,14 +1270,14 @@ test('findTaskByWorktree ignores a record filed under a key it does not name', a
     const other = path.join(root, 'wt', 'somewhere-else')
     // Filed under the victim's key, but naming a different directory: the forgery a planted
     // record would need, and the one the key binding refuses.
-    await plant(root, victim, { runId: 'r1', taskId: 'T1', branch: 'teammates/r1/T1', worktree: other })
+    await plant(root, victim, { runId: 'r1', taskId: 'T1', branch: 'fleetmates/r1/T1', worktree: other })
     assert.equal(await findTaskByWorktree(root, victim), null)
     // Naming its own directory, it answers normally.
-    await plant(root, victim, { runId: 'r1', taskId: 'T1', branch: 'teammates/r1/T1', worktree: victim })
+    await plant(root, victim, { runId: 'r1', taskId: 'T1', branch: 'fleetmates/r1/T1', worktree: victim })
     assert.deepEqual(await findTaskByWorktree(root, victim), {
       runId: 'r1',
       taskId: 'T1',
-      branch: 'teammates/r1/T1',
+      branch: 'fleetmates/r1/T1',
     })
   })
 })
@@ -1363,11 +1363,11 @@ test('findTaskByWorktree drops a branch the record could not legitimately name',
   await withTempRoot(async (root) => {
     const worktree = path.join(root, 'wt', 'agent-2')
     for (const branch of [
-      'teammates/r1/T5', // a rival task's ref: the hook would tell T2 to force-move it
+      'fleetmates/r1/T5', // a rival task's ref: the hook would tell T2 to force-move it
       'master', // any existing ref: waves past a teammate that created no branch at all
-      'refs/heads/teammates/r1/T2', // fully-qualified: not the name the run uses
-      'teammates/r2/T2', // right task, wrong run
-      'teammates/r1/T2 --force', // the right name with an argument stapled on
+      'refs/heads/fleetmates/r1/T2', // fully-qualified: not the name the run uses
+      'fleetmates/r2/T2', // right task, wrong run
+      'fleetmates/r1/T2 --force', // the right name with an argument stapled on
       42,
       null,
     ]) {
@@ -1380,11 +1380,11 @@ test('findTaskByWorktree drops a branch the record could not legitimately name',
     }
     // The one branch it may name survives untouched, so this narrows the field rather than
     // blanking it: a caller can still tell a recorded task branch from an absent one.
-    await plant(root, worktree, { runId: 'r1', taskId: 'T2', worktree, branch: 'teammates/r1/T2' })
+    await plant(root, worktree, { runId: 'r1', taskId: 'T2', worktree, branch: 'fleetmates/r1/T2' })
     assert.deepEqual(await findTaskByWorktree(root, worktree), {
       runId: 'r1',
       taskId: 'T2',
-      branch: 'teammates/r1/T2',
+      branch: 'fleetmates/r1/T2',
     })
   })
 })
@@ -1423,7 +1423,7 @@ test('isLocalAbsolute accepts only plain local absolute paths', () => {
 test('findTaskByWorktree does not match a record whose worktree is UNC', async () => {
   await withTempRoot(async (root) => {
     const unc = '\\\\nonexistent-host-for-tests\\share\\wt\\agent-1'
-    await plant(root, unc, { runId: 'r1', taskId: 'T1', worktree: unc, branch: 'teammates/r1/T1' })
+    await plant(root, unc, { runId: 'r1', taskId: 'T1', worktree: unc, branch: 'fleetmates/r1/T1' })
     assert.equal(await findTaskByWorktree(root, unc), null)
   })
 })
@@ -1478,12 +1478,12 @@ test('normaliseWorktree keeps a filesystem root distinct from the current direct
     assert.notEqual(worktreeKey(driveRoot), worktreeKey(process.cwd()))
     // And through the lookup: a record claiming the drive root must not answer a query for the
     // directory the reader happens to be standing in.
-    await plant(root, driveRoot, { runId: 'r1', taskId: 'T1', worktree: driveRoot, branch: 'teammates/r1/T1' })
+    await plant(root, driveRoot, { runId: 'r1', taskId: 'T1', worktree: driveRoot, branch: 'fleetmates/r1/T1' })
     assert.equal(await findTaskByWorktree(root, process.cwd()), null)
     assert.deepEqual(await findTaskByWorktree(root, driveRoot), {
       runId: 'r1',
       taskId: 'T1',
-      branch: 'teammates/r1/T1',
+      branch: 'fleetmates/r1/T1',
     })
   })
 })
@@ -1493,24 +1493,24 @@ test('findTaskByWorktree skips a record larger than the size cap', async () => {
     const worktree = path.join(root, 'wt', 'agent-1')
     // Valid JSON and a perfectly honest record — only its size disqualifies it.
     await plant(root, worktree, {
-      runId: 'r1', taskId: 'T1', branch: 'teammates/r1/T1', worktree, pad: 'x'.repeat(200_000),
+      runId: 'r1', taskId: 'T1', branch: 'fleetmates/r1/T1', worktree, pad: 'x'.repeat(200_000),
     })
     assert.equal(await findTaskByWorktree(root, worktree), null)
     // The shape that proves the cap is load-bearing rather than redundant with the bounded
     // read: a short, entirely valid record followed by whitespace past the cap. Truncating it
     // yields JSON that parses cleanly, so only the fstat'd size can reject this file.
-    const padded = `${JSON.stringify({ runId: 'r1', taskId: 'T1', branch: 'teammates/r1/T1', worktree })}${' '.repeat(200_000)}`
+    const padded = `${JSON.stringify({ runId: 'r1', taskId: 'T1', branch: 'fleetmates/r1/T1', worktree })}${' '.repeat(200_000)}`
     await plant(root, worktree, padded)
     assert.equal(JSON.parse(padded.slice(0, 64 * 1024)).taskId, 'T1', 'the truncated prefix must parse, or this pins nothing')
     assert.equal(await findTaskByWorktree(root, worktree), null)
     await plant(root, worktree, {
-      runId: 'r1', taskId: 'T1', branch: 'teammates/r1/T1', worktree, pad: 'x'.repeat(200_000),
+      runId: 'r1', taskId: 'T1', branch: 'fleetmates/r1/T1', worktree, pad: 'x'.repeat(200_000),
     })
     // Raising the cap for this call finds it, so the skip is the cap and not a parse failure.
     assert.deepEqual(await findTaskByWorktree(root, worktree, { maxRecordBytes: 1_000_000 }), {
       runId: 'r1',
       taskId: 'T1',
-      branch: 'teammates/r1/T1',
+      branch: 'fleetmates/r1/T1',
     })
   })
 })
@@ -1613,7 +1613,7 @@ test('claimTask still refuses a second claim and still writes exactly { taskId, 
   await withTempRoot(async (root) => {
     assert.equal(await claimTask(root, 'r1', 'T1', 'impl-a'), true)
     assert.equal(await claimTask(root, 'r1', 'T1', 'impl-b'), false)
-    const raw = await readFile(path.join(root, '.teammates', 'r1', 'claims', 'T1.json'), 'utf8')
+    const raw = await readFile(path.join(root, '.fleetmates', 'r1', 'claims', 'T1.json'), 'utf8')
     assert.equal(raw, JSON.stringify({ taskId: 'T1', teammate: 'impl-a' }))
     assert.deepEqual(Object.keys(JSON.parse(raw)), ['taskId', 'teammate'])
   })

@@ -9,7 +9,7 @@ const wt = (path, branch) => ({ path, branch, head: 'aaa', detached: false })
 test('a worktree holding this run’s task branch is selected', () => {
   const plan = selectPrunableWorktrees({
     runId: RUN_ID,
-    worktrees: [wt('/repo', 'run/r1'), wt('/repo/.claude/worktrees/a1', 'teammates/r1/T1')],
+    worktrees: [wt('/repo', 'run/r1'), wt('/repo/.claude/worktrees/a1', 'fleetmates/r1/T1')],
     mainWorktree: '/repo',
   })
   assert.deepEqual(plan.prunable.map((w) => w.path), ['/repo/.claude/worktrees/a1'])
@@ -20,7 +20,7 @@ test('a worktree holding this run’s task branch is selected', () => {
 test('a worktree belonging to another run is left alone and reported', () => {
   const plan = selectPrunableWorktrees({
     runId: RUN_ID,
-    worktrees: [wt('/repo', 'run/r1'), wt('/repo/.claude/worktrees/b1', 'teammates/r2/T1')],
+    worktrees: [wt('/repo', 'run/r1'), wt('/repo/.claude/worktrees/b1', 'fleetmates/r2/T1')],
     mainWorktree: '/repo',
   })
   assert.deepEqual(plan.prunable, [])
@@ -33,7 +33,7 @@ test('a worktree belonging to another run is left alone and reported', () => {
 test('the main worktree is never prunable, whatever branch it holds', () => {
   const plan = selectPrunableWorktrees({
     runId: RUN_ID,
-    worktrees: [wt('/repo', 'teammates/r1/T1')],
+    worktrees: [wt('/repo', 'fleetmates/r1/T1')],
     mainWorktree: '/repo',
   })
   assert.deepEqual(plan.prunable, [])
@@ -57,7 +57,7 @@ test('a detached worktree with no branch is left alone', () => {
 test('a task whose phase has not passed its gate is refused, and named', () => {
   const plan = selectPrunableWorktrees({
     runId: RUN_ID,
-    worktrees: [wt('/repo/.claude/worktrees/a1', 'teammates/r1/T1')],
+    worktrees: [wt('/repo/.claude/worktrees/a1', 'fleetmates/r1/T1')],
     mainWorktree: '/repo',
     taskPhases: { T1: 1 },
     passedPhases: [],
@@ -69,7 +69,7 @@ test('a task whose phase has not passed its gate is refused, and named', () => {
 test('a task whose phase passed its gate is prunable', () => {
   const plan = selectPrunableWorktrees({
     runId: RUN_ID,
-    worktrees: [wt('/repo/.claude/worktrees/a1', 'teammates/r1/T1')],
+    worktrees: [wt('/repo/.claude/worktrees/a1', 'fleetmates/r1/T1')],
     mainWorktree: '/repo',
     taskPhases: { T1: 1 },
     passedPhases: [1],
@@ -82,7 +82,7 @@ test('a task whose phase passed its gate is prunable', () => {
 test('a task with no known phase is refused rather than assumed safe', () => {
   const plan = selectPrunableWorktrees({
     runId: RUN_ID,
-    worktrees: [wt('/repo/.claude/worktrees/a1', 'teammates/r1/T9')],
+    worktrees: [wt('/repo/.claude/worktrees/a1', 'fleetmates/r1/T9')],
     mainWorktree: '/repo',
     taskPhases: { T1: 1 },
     passedPhases: [1],
@@ -96,8 +96,8 @@ test('renderPrunePlan lists what it would remove and what it refused, with reaso
     runId: RUN_ID,
     worktrees: [
       wt('/repo', 'run/r1'),
-      wt('/repo/.claude/worktrees/a1', 'teammates/r1/T1'),
-      wt('/repo/.claude/worktrees/b1', 'teammates/r2/T1'),
+      wt('/repo/.claude/worktrees/a1', 'fleetmates/r1/T1'),
+      wt('/repo/.claude/worktrees/b1', 'fleetmates/r2/T1'),
     ],
     mainWorktree: '/repo',
     taskPhases: { T1: 1 },
@@ -131,14 +131,14 @@ test('a detached tm-preview worktree under temp is identified as leaked', () => 
 // because a test that flips both together goes green with either one deleted.
 test('a worktree with a branch checked out is never treated as a leaked preview', () => {
   assert.deepEqual(
-    leakedPreviews([{ path: '/tmp/tm-preview-x', branch: 'teammates/r1/T1', head: 'a', detached: false }], { tempRoot: TEMP }),
+    leakedPreviews([{ path: '/tmp/tm-preview-x', branch: 'fleetmates/r1/T1', head: 'a', detached: false }], { tempRoot: TEMP }),
     [],
   )
 })
 
 test('a detached worktree that still names a branch is never treated as a leaked preview', () => {
   assert.deepEqual(
-    leakedPreviews([{ path: '/tmp/tm-preview-y', branch: 'teammates/r1/T1', head: 'a', detached: true }], { tempRoot: TEMP }),
+    leakedPreviews([{ path: '/tmp/tm-preview-y', branch: 'fleetmates/r1/T1', head: 'a', detached: true }], { tempRoot: TEMP }),
     [],
   )
 })
@@ -380,7 +380,7 @@ test('a live path is matched under the same normalisation the rest of the module
 test('a live path that names no identified preview is inert', () => {
   const plan = selectPrunableWorktrees({
     runId: RUN_ID,
-    worktrees: [wt('/repo', 'run/r1'), wt('/repo/wt/a1', 'teammates/r1/T1')],
+    worktrees: [wt('/repo', 'run/r1'), wt('/repo/wt/a1', 'fleetmates/r1/T1')],
     mainWorktree: '/repo',
     taskPhases: { T1: 1 },
     passedPhases: [1],

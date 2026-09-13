@@ -5,7 +5,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
-ENTRYPOINT="${PLUGIN_ROOT}/skills/using-teammates/SKILL.md"
+ENTRYPOINT="${PLUGIN_ROOT}/skills/using-fleetmates/SKILL.md"
 
 escape_for_json() {
     local s="$1"
@@ -23,9 +23,9 @@ escape_for_json() {
 # session start, which is a worse cure than the disease.
 if [ -r "${ENTRYPOINT}" ]; then
     content=$(cat "${ENTRYPOINT}")
-    session_context="<EXTREMELY_IMPORTANT>\nYou have claude-teammates.\n\n**Below is the full content of your 'claude-teammates:using-teammates' skill - your introduction to using skills. For all other skills, use the 'Skill' tool:**\n\n$(escape_for_json "$content")\n</EXTREMELY_IMPORTANT>"
+    session_context="<EXTREMELY_IMPORTANT>\nYou have fleetmates.\n\n**Below is the full content of your 'fleetmates:using-fleetmates' skill - your introduction to using skills. For all other skills, use the 'Skill' tool:**\n\n$(escape_for_json "$content")\n</EXTREMELY_IMPORTANT>"
 else
-    warning="WARNING: the claude-teammates plugin is installed but NOT active. Its entrypoint could not be read at ${ENTRYPOINT} (skills/using-teammates/SKILL.md). Process skills will not self-activate this session. Check the plugin installation."
+    warning="WARNING: the fleetmates plugin is installed but NOT active. Its entrypoint could not be read at ${ENTRYPOINT} (skills/using-fleetmates/SKILL.md). Process skills will not self-activate this session. Check the plugin installation."
     session_context=$(escape_for_json "$warning")
 fi
 
