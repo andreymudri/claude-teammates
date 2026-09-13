@@ -16,14 +16,14 @@ scope, and `tests/adversarial.test.mjs` pins each of those limits with a test.
 So the following are **known and documented**, not vulnerabilities:
 
 - A teammate executing arbitrary code during its own task or its own test run.
-- A teammate editing `teammates.gate.json` in the working tree — command checks are shell strings
+- A teammate editing `fleetmates.gate.json` in the working tree — command checks are shell strings
   read from that file.
-- A teammate writing `.teammates/` state. The checks that recompute — `fileset`, `ownership` and
+- A teammate writing `.fleetmates/` state. The checks that recompute — `fileset`, `ownership` and
   `merge` — read git and never that directory, so no write there moves them.
 
   **One check does read it, and it decides a verdict.** An `agent`-kind check such as `review` has
   no result of its own until `collect-reviews` builds one from
-  `.teammates/<runId>/reviews/<phase>-<lens>.json`. Those files are gitignored, are written during a
+  `.fleetmates/<runId>/reviews/<phase>-<lens>.json`. Those files are gitignored, are written during a
   teammate's own task, and are never compared against anything the teammate did not also write. A
   teammate that drops one empty-findings file per declared lens, each stamped with the tips it can
   read for itself, reaches `PASS` with no reviewer having run. The stamp check in `reviews.mjs`
@@ -32,7 +32,7 @@ So the following are **known and documented**, not vulnerabilities:
   Treat a recorded `agent` verdict as evidence only about a reviewer you know ran. It is the reason
   `--results` and `--enforcement-only` exist as separate, narrower doors, and the reason the
   recompute-from-git checks are the ones described as tamper-evident here.
-- A teammate writing `teammates.local.json`. That file is gitignored, so a teammate can write it
+- A teammate writing `fleetmates.local.json`. That file is gitignored, so a teammate can write it
   during its own task and `git status` stays clean: neither `fileset` nor `ownership` will ever
   see it. Read the next two paragraphs as the actual boundary rather than as a reassurance.
 
@@ -43,7 +43,7 @@ So the following are **known and documented**, not vulnerabilities:
   **`agents.reviewer.tier` and `agents.reviewer.effort`**. The reviewer produces the verdict for
   every `agent`-kind check, so its tier and effort decide how good the judge is; allowing them in
   the gitignored layer would let a teammate weaken the reviewer grading its own diff. Those live
-  only in the tracked `teammates.gate.json`.
+  only in the tracked `fleetmates.gate.json`.
 
   **It can still influence how later work is dispatched, and that influence leaves no evidence.**
   A teammate that writes `{"agents":{"implementer":{"tier":"cheap","effort":"low"}},"caveman":"ultra"}`
@@ -66,12 +66,13 @@ rather than in the list above because it is not a teammate capability — it run
 session start, whether or not a fleet is running.
 
 `hooks/update-check` issues a single `GET` to
-`https://raw.githubusercontent.com/andreymudri/claude-teammates/master/.claude-plugin/plugin.json`,
+`https://registry.npmjs.org/fleetmates/latest`,
 with `curl -fsS --max-time 5`, at most once every 24 hours. It sends nothing beyond the request:
 no identifiers, no project path, no telemetry. On any failure — offline, proxied, no `curl`, a
 non-200, a malformed body — it exits 0 silently and writes nothing.
 
-Set `CLAUDE_TEAMMATES_UPDATE_CHECK=0` to disable it. The opt-out is checked before the throttle and
+Set `FLEETMATES_UPDATE_CHECK=0` to disable it; `CLAUDE_TEAMMATES_UPDATE_CHECK=0`, the name from
+before the rename, is still honoured, so an existing opt-out stays in force. The opt-out is checked before the throttle and
 before the request, so a disabled install makes no request at all rather than making one and
 discarding the result. The 24-hour limit is stamped *before* each attempt rather than after a
 successful one, so a check that fails — offline, proxied — is rate-limited exactly like one that
@@ -82,7 +83,7 @@ passes one except the test suite. An environment override would let a cloned rep
 or devcontainer configuration retarget the check at a host of its choosing on every session.
 
 The hook is declared `"async": true` in `hooks/hooks.json` and emits no output. It writes only
-`${CLAUDE_CONFIG_DIR:-~/.claude}/claude-teammates/update-check.json`, which `hooks/session-start`
+`${CLAUDE_CONFIG_DIR:-~/.claude}/fleetmates/update-check.json`, which `hooks/session-start`
 reads on a later session. That file's only effect is a string printed into session context:
 
 - It is not read by `gate`, `complete` or `fix`, so nothing in it can reach a verdict.
@@ -97,7 +98,7 @@ reads on a later session. That file's only effect is a string printed into sessi
 
 - A way to get a **PASS on a phase whose content is not explained by a task branch or the base** —
   that is the property the whole design rests on.
-- A check OTHER THAN an `agent` check reading `.teammates/` when deciding a verdict, or any route
+- A check OTHER THAN an `agent` check reading `.fleetmates/` when deciding a verdict, or any route
   that makes a recompute-from-git check read it. The `agent` case is documented above as known: its
   status has no source but those files, which is why a recorded `agent` verdict is only ever
   evidence about a reviewer you know ran.
@@ -110,7 +111,7 @@ reads on a later session. That file's only effect is a string printed into sessi
 
 ## Reporting
 
-Open a [security advisory](https://github.com/andreymudri/claude-teammates/security/advisories/new)
+Open a [security advisory](https://github.com/andreymudri/fleetmates/security/advisories/new)
 rather than a public issue, and include the concrete path: what an attacker controls, what they
 do, and what they get. A finding without a reproduction is hard to act on.
 

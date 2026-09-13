@@ -1,4 +1,4 @@
-# claude-teammates
+# fleetmates
 
 A Claude Code plugin that runs a written plan across background teammates, each in its own git
 worktree, with an automated gate between phases.
@@ -27,20 +27,20 @@ Zero runtime and zero dev dependencies. Tests use the built-in `node:test` runne
 
 ## Install
 
-    /plugin marketplace add andreymudri/claude-teammates
-    /plugin install claude-teammates
+    /plugin marketplace add andreymudri/fleetmates
+    /plugin install fleetmates
 
-To develop against a local checkout instead, point the marketplace at the directory — skill
-edits then take effect on the next session without a push:
+The marketplace installs the package published on npm as `fleetmates`, not a checkout. To develop
+against a local checkout instead, load the directory directly — skill edits then take effect on
+the next session without a publish:
 
-    /plugin marketplace add /path/to/claude-teammates
-    /plugin install claude-teammates
+    claude --plugin-dir /path/to/fleetmates
 
 ### What installing registers
 
 Beyond the skills and commands, the plugin declares a `SubagentStop` hook with no matcher and
 `async: false`. That means **every** subagent stop on this machine — in any project, including one
-with no teammates run — synchronously spawns `node scripts/subagent-stop.mjs` before the stop is
+with no fleetmates run — synchronously spawns `node scripts/subagent-stop.mjs` before the stop is
 allowed to complete.
 
 The handler is written to be cheap and to fail open: it resolves the stopping agent through a
@@ -60,8 +60,8 @@ what it found — `ready: 14 skills, 3 agents, cli ok`. Once per version, then s
 If parts are missing it says so instead, naming them, and repeats that **every** session until
 fixed:
 
-    WARNING: claude-teammates is installed but NOT fully working. Missing: scripts/cli.mjs.
-    Fleet commands and phase gates will fail. Reinstall with /plugin install claude-teammates.
+    WARNING: fleetmates is installed but NOT fully working. Missing: scripts/cli.mjs.
+    Fleet commands and phase gates will fail. Reinstall with /plugin install fleetmates.
 
 Note what this cannot tell you: whether the plugin is *enabled*. Claude Code only runs a plugin's
 hooks when `enabledPlugins` has it turned on, so if it were off, nothing here would run to report
@@ -71,27 +71,46 @@ update, a missing `node`.
 **Whether a newer one is published.** A background check compares the installed version against the
 published one and reports a newer one on a later session. It runs at most once every 24 hours.
 
-The check is a single `GET` to `raw.githubusercontent.com` for this repository's published
-`.claude-plugin/plugin.json`, with a five-second timeout. It sends nothing about you, your machine,
+The check is a single `GET` to `https://registry.npmjs.org/fleetmates/latest`, the npm registry's
+record of the newest published version, with a five-second timeout. It sends nothing about you, your machine,
 or your project beyond the request itself, and it runs in a hook declared `"async": true`, so it
 never delays a session. If it fails — offline, proxied, no `curl` — it exits silently, and the
 24-hour limit still applies: the attempt is stamped before it is made, so a machine that can never
-reach GitHub does not retry on every session.
+reach the registry does not retry on every session.
 
 Turn it off with:
 
-    CLAUDE_TEAMMATES_UPDATE_CHECK=0
+    FLEETMATES_UPDATE_CHECK=0
 
-Both notices keep their state in `${CLAUDE_CONFIG_DIR:-~/.claude}/claude-teammates/`: the version
+`CLAUDE_TEAMMATES_UPDATE_CHECK=0`, the name from before the rename, still works, so an opt-out set
+under the old name is not switched back on.
+
+Both notices keep their state in `${CLAUDE_CONFIG_DIR:-~/.claude}/fleetmates/`: the version
 you last saw, and the cached result of the last check. Deleting that directory re-shows the current
 version's notice once.
 
 Because the check writes a cache the *next* session reads, a newly published version is reported
 one session after the check that found it. That is the cost of never blocking session start.
 
+## Coming from claude-teammates
+
+fleetmates is claude-teammates, renamed. To move over:
+
+1. `/plugin uninstall claude-teammates` — left installed, its hooks keep running beside the new
+   ones, and fleetmates warns about it at every session start until it is gone.
+2. `/plugin marketplace add andreymudri/fleetmates`, then `/plugin install fleetmates`.
+3. Run any fleetmates command once in each repository. The first run moves `.teammates/`,
+   `teammates.gate.json`, `teammates.local.json`, the `teammates/<run>/<task>` branches and the
+   `refs/teammates/` claim refs to their `fleetmates` names, and adds the new ignore lines next
+   to the old ones. It refuses, and changes nothing, while a teammate from an old run is still
+   working, or when both spellings of something already exist.
+
+A migration that fails part-way stops, and prints every step it completed with the command that
+reverses it.
+
 ## Getting started
 
-Say what you want built. The `using-teammates` skill routes you: an unclear idea goes to
+Say what you want built. The `using-fleetmates` skill routes you: an unclear idea goes to
 `brainstorming`, settled requirements go to `writing-plans`, and a written plan with three or
 more disjoint tasks offers you a fleet.
 
@@ -105,7 +124,7 @@ The gate merges the phase's task branches into a scratch worktree and runs its c
 `test` measures what integration will actually produce. It also checks that each teammate's
 **committed** changes stayed inside the files its task declared, and that every commit on the run
 branch is explained by a task branch or by the base. It computes all of this from git each time
-it runs, and trusts nothing an agent wrote — `.teammates/` state is written by the very agents
+it runs, and trusts nothing an agent wrote — `.fleetmates/` state is written by the very agents
 the gate exists to enforce, so no check reads it.
 
 **It is tamper-evident, not tamper-proof.** A teammate runs its own tests, and running a
@@ -121,7 +140,7 @@ these for you; they are listed here because an operator often wants the same ans
 
 Driving a run:
 
-- `init-run <planPath> --run <id>` — parse the plan, assign phases, write `.teammates/<id>/`
+- `init-run <planPath> --run <id>` — parse the plan, assign phases, write `.fleetmates/<id>/`
 - `workflow --run <id> --phase <n>` — generate the phase's implementer dispatches
 - `complete --run <id> --task <id>` — a teammate verifying its own task before returning
 - `gate --run <id> --plan <path>` — compute the current phase's verdict
@@ -163,16 +182,16 @@ Housekeeping:
 - `prune-run --run <id> --plan <path>` — remove this run's worktrees, but only where the phase's gate
   recomputes to PASS, and delete each removed worktree's branch where the run branch already
   contains it. Dry run unless `--yes`
-- `rebuild-state --run <id> --plan <path>` — reconstruct `.teammates/` bookkeeping from git. It
+- `rebuild-state --run <id> --plan <path>` — reconstruct `.fleetmates/` bookkeeping from git. It
   rebuilds no gate history: a verdict is evidence that checks ran, and git carries branches, not
   evidence
-- `.teammates/<run-id>/` is never removed by any command. `resume` and `rebuild-state` read it,
+- `.fleetmates/<run-id>/` is never removed by any command. `resume` and `rebuild-state` read it,
   it is gitignored, and deleting it is the operator's call — an age-based sweep would take the
   only record of a run someone is in the middle of resuming
 
 ## Skills
 
-- `using-teammates` — entrypoint; routes to the right process or fleet skill before anything else happens
+- `using-fleetmates` — entrypoint; routes to the right process or fleet skill before anything else happens
 - `brainstorming` — explores intent and design before implementation
 - `writing-plans` — turns a spec into a plan this plugin can parse, phase, and dispatch to a fleet
 - `executing-plans` — executes a written plan inline in this session, with checkpoints
@@ -188,7 +207,7 @@ Housekeeping:
 
 ## Gate manifest
 
-Copy `teammates.gate.json` into any project the fleet runs in, or let
+Copy `fleetmates.gate.json` into any project the fleet runs in, or let
 `node scripts/cli.mjs gate --run <id>` infer one from `package.json` and print it for you to
 confirm. A project whose test runner is itself a dependency should declare what to link into the
 preview:
@@ -204,12 +223,12 @@ with no dependencies installed and fails for a reason that has nothing to do wit
 
 Two files, split by trust rather than by topic.
 
-**`teammates.gate.json`** is tracked. Alongside the manifest above it holds every key that can
+**`fleetmates.gate.json`** is tracked. Alongside the manifest above it holds every key that can
 change a verdict: `phases` (the checks and their fix-round budgets), `lens`, `preview`, and
 `agents.reviewer.tier` / `agents.reviewer.effort`. Those go here and nowhere else — see
 `SECURITY.md` for why the reviewer's tier counts as enforcement.
 
-**`teammates.local.json`** is gitignored and holds machine-local ergonomics. Allowlisted keys,
+**`fleetmates.local.json`** is gitignored and holds machine-local ergonomics. Allowlisted keys,
 and nothing else:
 
 | Key | Domain | Default |
@@ -264,7 +283,7 @@ accept `phases`, `lens` or `preview` in either file — including without `--loc
     $ node scripts/cli.mjs config set lens correctness
     unknown config key: lens        # exit 2
 
-That is deliberate, not a gap. Enforcement policy is edited **by hand** in `teammates.gate.json`
+That is deliberate, not a gap. Enforcement policy is edited **by hand** in `fleetmates.gate.json`
 so it lands as a reviewable diff rather than as a CLI mutation that leaves nothing to read.
 
 **Check a hand edit with `config list`.** It *validates* more than it *prints*, and the two sets
@@ -273,10 +292,10 @@ below, and nothing else — `phases`, `lens` and `preview` never appear in its o
 validates is the whole of both layers, so it exits 2 with a message on a file that is no longer
 valid JSON, a malformed ergonomics key, or a badly *shaped* enforcement key:
 
-    $ node scripts/cli.mjs config list          # teammates.gate.json holds "lens": "performance"
+    $ node scripts/cli.mjs config list          # fleetmates.gate.json holds "lens": "performance"
     lens must be a non-empty array of strings   # exit 2
 
-To read back an enforcement key's value, open `teammates.gate.json`. No subcommand will show it.
+To read back an enforcement key's value, open `fleetmates.gate.json`. No subcommand will show it.
 
 **`config list` checks shape, not content, and the difference bites.** A `lens` of `["nonsense"]`
 is a well-shaped array of strings, so it is accepted, and `config list` exits 0 without printing
@@ -297,10 +316,10 @@ and that rejection says nothing about the manifest:
 Worked example — raise the fan-out on a large machine without committing that choice:
 
     $ node scripts/cli.mjs config set maxParallel 12 --local
-    wrote teammates.local.json
+    wrote fleetmates.local.json
 
     $ node scripts/cli.mjs config list
-    maxParallel  12  (teammates.local.json)
+    maxParallel  12  (fleetmates.local.json)
     caveman      false  (default)
     agents.implementer.tier    -  (default)
     agents.implementer.effort  -  (default)
@@ -310,7 +329,7 @@ Worked example — raise the fan-out on a large machine without committing that 
     agents.integrator.effort  -  (default)
 
 In a project whose `.gitignore` does not yet exclude the file, `config set --local` adds the
-entry and reports `added teammates.local.json to .gitignore` on a second line. This repository
+entry and reports `added fleetmates.local.json to .gitignore` on a second line. This repository
 already carries that entry, so the transcript above is what you get here.
 
 `config list` prints the layer each *ergonomics* value came from, so a value you did not expect
@@ -318,17 +337,17 @@ can be traced to the file that set it.
 
 **Model names never appear in either file.** Configuration stores a *tier* — `cheap`, `mid` or
 `capable`. The map from tier to a concrete model lives in the dispatching skill and reaches the
-CLI through `workflow --models`, so this repository and `teammates.gate.json` stay free of model
+CLI through `workflow --models`, so this repository and `fleetmates.gate.json` stay free of model
 names that would otherwise go stale. Setting a model name as a tier is rejected.
 
 ## Layout
 
-- `skills/` — process and human interaction (entrypoint: `using-teammates`)
+- `skills/` — process and human interaction (entrypoint: `using-fleetmates`)
 - `agents/` — `tm-implementer`, `tm-reviewer`, `tm-integrator`
 - `scripts/` — deterministic logic, driven via `scripts/cli.mjs`
 - `templates/` — generated Workflow source
 - `hooks/` — SessionStart context injection
-- `teammates.gate.json` — this plugin's own phase gate
+- `fleetmates.gate.json` — this plugin's own phase gate
 
 ## Development
 

@@ -1,5 +1,31 @@
 # Changelog
 
+## v2.0.0
+
+**claude-teammates is now fleetmates**, published on npm as `fleetmates`.
+
+### Breaking
+
+- Plugin, marketplace and npm package are `fleetmates`; skills are namespaced `fleetmates:`, and
+  `using-teammates` / `teammates-config` are `using-fleetmates` / `fleetmates-config`.
+- On disk: `.fleetmates/`, `fleetmates.gate.json`, `fleetmates.local.json`, task branches
+  `fleetmates/<run>/<task>`, claim refs `refs/fleetmates/…`, and the `fleetmates-map` header in map
+  notes.
+- The update-check opt-out is `FLEETMATES_UPDATE_CHECK`; `CLAUDE_TEAMMATES_UPDATE_CHECK` still works.
+
+### Migration
+
+- The first CLI command in a repository migrates every legacy name, or refuses with exit 2 while a
+  teammate is live or when both spellings exist. A failure part-way exits 4 and prints how to
+  reverse each completed step.
+- SessionStart warns while `claude-teammates` is still installed beside `fleetmates`.
+
+### Distribution
+
+- The marketplace installs the plugin from npm, and the package ships without tests or docs.
+- The update check reads the npm registry instead of `plugin.json` on GitHub.
+- `release.yml` publishes a `v*` tag through npm trusted publishing, after the three-OS matrix.
+
 ## v1.3.0
 
 Every open finding in `docs/followups/2026-08-27-purge-open-findings.md` is closed, and the

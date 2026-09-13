@@ -3,6 +3,16 @@
 Thanks for taking a look. This is a small plugin with strong opinions about verification, so a
 few of the rules below are stricter than you might expect.
 
+## Testing a local checkout
+
+The marketplace installs the package published on npm, so `/plugin marketplace add` on a checkout
+no longer runs your working copy. Load the checkout directly instead:
+
+    claude --plugin-dir .
+
+Start a new session after an edit to agents, skills, hooks or scripts; a running session keeps
+the copy it loaded.
+
 ## Ground rules
 
 - **Zero dependencies.** Runtime and dev, both. Tests use the built-in `node:test` runner. A
@@ -54,7 +64,7 @@ documentation. Two consequences:
 `scripts/gate-runner.mjs`, `scripts/enforce.mjs` and `scripts/preview-links.mjs` decide whether a
 phase passes. Two invariants hold there:
 
-- **Nothing in a check may read `.teammates/`.** That state is written by the agents the gate
+- **Nothing in a check may read `.fleetmates/`.** That state is written by the agents the gate
   exists to enforce. Every check computes from git instead. If a change needs run state to decide
   a verdict, the design is wrong, not the constraint.
 - `aggregateVerdict` stays the only producer of a verdict.

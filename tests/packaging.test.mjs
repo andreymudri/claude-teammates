@@ -53,8 +53,21 @@ test('NOTICE marks the original skills as original', async () => {
 // the README makes a promise the code has yet to keep, not as evidence that it keeps it.
 test('the README states the retention rule and the branch clause', async () => {
   const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8')
-  assert.match(readme, /`\.teammates\/<run-id>\/` is never removed by any command/)
+  assert.match(readme, /`\.fleetmates\/<run-id>\/` is never removed by any command/)
   assert.match(readme, /delete each removed worktree's branch where the run branch already/)
+})
+
+test('the README tells a claude-teammates user how to move over', async () => {
+  const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8')
+  assert.match(readme, /^## Coming from claude-teammates$/m)
+  assert.match(readme, /\/plugin uninstall claude-teammates/)
+  assert.match(readme, /\/plugin marketplace add andreymudri\/fleetmates/)
+})
+
+test('SECURITY.md names the host the update check contacts', async () => {
+  const security = await readFile(new URL('../SECURITY.md', import.meta.url), 'utf8')
+  assert.match(security, /registry\.npmjs\.org/)
+  assert.doesNotMatch(security, /raw\.githubusercontent\.com/)
 })
 
 const PLAN = `### Task 1: A
