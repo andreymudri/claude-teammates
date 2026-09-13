@@ -171,7 +171,9 @@ test('every legacy name is migrated, and the legacy spelling is gone afterwards'
     assert.deepEqual(await migrate(root, { io, now: LATER, measureTouch: staleTouch }), { code: 0, migrated: true })
     assert.deepEqual(out, [])
 
-    const branches = git(root, ['branch', '--list', '--format=%(refname:short)']).split('\n').filter(Boolean).sort()
+    // Full refnames: a claim ref `refs/fleetmates/r1/T1` shares its short name with the branch, so
+    // `%(refname:short)` prints `heads/fleetmates/r1/T1` to disambiguate.
+    const branches = git(root, ['branch', '--list', '--format=%(refname)']).split('\n').filter(Boolean).map((r) => r.replace(/^refs\/heads\//, '')).sort()
     assert.deepEqual(branches, ['fleetmates/r1/T1', 'fleetmates/r1/T2', 'main'])
     assert.equal(git(root, ['for-each-ref', '--format=%(objectname)', 'refs/fleetmates/r1/T1']).trim(), sha)
     assert.equal(git(root, ['for-each-ref', 'refs/teammates/']).trim(), '')
