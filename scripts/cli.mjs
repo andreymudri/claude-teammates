@@ -1707,10 +1707,10 @@ function nonBlockingReadFlags(c = fsConstants) {
 // and it is scoped to FINDINGS: nothing this project writes creates one, and the class this
 // command distrusts is exactly the entries it did not create itself — files a reviewer was told to
 // drop in a directory anyone can write. The run's own `plan.json` is not in that class, is read
-// through `nonBlockingReadFlags` below, and still follows a link as the rest of the CLI does.
+// through `nonBlockingReadFlags`, and still follows a link as the rest of the CLI does.
 //
 // DOCUMENTATION DOES NOT FOLLOW CODE THAT MOVES OUT FROM UNDER IT. This block stayed where it was
-// when the two readers were split, so for one commit it sat on `readRunPlan` and described that
+// when the two readers were split, so for three commits it sat on `readRunPlan` and described that
 // function as refusing symlinked findings files — false of the function it named, and leaving this
 // one undocumented, while every claim in it stayed true of the code it was written for. Editing a
 // comment gets scrutiny; relocating the code beneath one does not, and the second is the easier
@@ -2228,9 +2228,10 @@ export async function plantedReviewsLink(root, dir, deps = {}) {
 // when nothing says otherwise, and both commands already have their own say about a missing plan.
 //
 // The phases come from `plan.tasks[].phase`, the same field `tasksOfPhase` filters on, so the set
-// named is the set the flag chooses between. Non-integers are dropped: `tasksOfPhase` compares
-// `t.phase === phaseNumber` against an integer, so a phase that is not one is not selectable — and
-// dropping them is also what keeps this sentence free of any byte a hand-edited `plan.json` chose.
+// named is the set the flag chooses between. Non-integers are COUNTED but not named: `tasksOfPhase`
+// compares `t.phase === phaseNumber` against an integer, so a phase that is not one is not
+// selectable, yet the omitted flag still reviews its branch — and naming only integers is what keeps
+// this sentence free of any byte a hand-edited `plan.json` chose.
 async function ambiguousPhaseRefusal(root, runId, flags, command) {
   if (flags.phase !== undefined && flags.phase !== true) return null
   // CANNOT BE READ means exactly that, and `readState` answers null only for ENOENT — it rethrows
@@ -2261,11 +2262,17 @@ async function ambiguousPhaseRefusal(root, runId, flags, command) {
   // `{"tasks":{…}}` and `{"tasks":7}` still crash further downstream, in `tasksOfPhase`, and that
   // is fixed there rather than worked around here.
   const tasks = Array.isArray(plan.tasks) ? plan.tasks : []
-  const phases = [...new Set(tasks.map((t) => t?.phase))]
-    .filter((p) => Number.isInteger(p))
-    .sort((a, b) => a - b)
-  if (phases.length < 2) return null
-  return `${command} needs --phase: the plan for this run has ${phases.length} phases (${phases.join(', ')}), `
+  // EVERY DISTINCT VALUE COUNTS, integer or not. Counting integers only left `1` beside `"2"` one
+  // countable phase, so nothing was refused and the omitted flag reviewed both branches under one
+  // `default` stamp. Only the integers are NAMED: a phase `--phase` cannot select is reported as a
+  // count, which keeps every byte of this sentence one the CLI wrote.
+  const distinct = [...new Set(tasks.map((t) => t?.phase))]
+  if (distinct.length < 2) return null
+  const integers = distinct.filter((p) => Number.isInteger(p)).sort((a, b) => a - b)
+  const others = distinct.length - integers.length
+  const unselectable = others === 0 ? '' : `${others} non-integer phase${others === 1 ? '' : 's'} no --phase can select`
+  const named = [integers.join(', '), unselectable].filter(Boolean).join(', plus ')
+  return `${command} needs --phase: the plan for this run has ${distinct.length} phases (${named}), `
     + 'and an omitted --phase reviews every task branch of the run — including branches integrated in earlier phases'
 }
 

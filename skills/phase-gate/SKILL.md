@@ -73,13 +73,11 @@ those you execute:
   `--phase` is not optional on a plan with more than one phase, on either command above:
   omitted, it names the manifest key `default`, which scopes the review to every task branch in
   the run — including ones integrated rounds ago. The CLI refuses that with exit 2 rather than
-  reviewing it. The guard counts INTEGER phases only, so a `plan.json` mixing phase `1` with
-  phase `"2"` leaves it one countable phase, nothing is refused, and the omitted flag reviews
-  both branches under one `default` stamp — measured on this tree, where `review-dispatch`
-  without `--phase` exited 0 and dispatched both task branches while `--phase 1` dispatched one,
-  and the same plan with both phases written as integers exited 2. Nothing in this repository
-  writes a non-integer phase; a plan is agent-written, which is why that bound is stated beside
-  the guard rather than left to be discovered.
+  reviewing it. The guard counts every distinct phase value, integer or not, so a `plan.json`
+  mixing phase `1` with phase `"2"` is refused too. Only integer phases are listed in the refusal;
+  a non-integer one is reported as a count, because `--phase` cannot select it — no `--phase`
+  reviews that task's branch, and the fix is the plan, not the flag. Nothing in this repository
+  writes a non-integer phase; a plan is agent-written, which is why the case is stated here.
 
   It prints a `--results` file with `source: "file"`, applying the manifest's own `blockOn`. It
   also writes that same document to `.teammates/<runId>/reviews/results-<phase>.json` and prints

@@ -281,13 +281,13 @@ test('phase-gate documents the results file collect-reviews writes and the redir
     /the CLI refuses that with exit 2 rather than reviewing it/i,
     'phase-gate must name the exit code, since an orchestrator branches on it',
   )
-  // A guard's bound belongs beside the guard. Without this the section teaches a refusal that
-  // reads as total, and a plan mixing an integer phase with a string one silently reviews every
-  // branch in the run under one `default` stamp.
+  // The guard used to count INTEGER phases only, and this pinned that bound beside it. The bound
+  // is gone, so what is pinned now is that the section says so: a reader who remembers the old
+  // paragraph otherwise has nothing telling them a `"2"` beside a `1` is refused too.
   assertStatement(
     section,
-    /the guard counts INTEGER phases only/i,
-    'phase-gate must state the bound of the ambiguity refusal beside the refusal itself',
+    /the guard counts every distinct phase value, integer or not/i,
+    'phase-gate must say a non-integer phase counts toward the ambiguity refusal',
   )
 
   assertStatement(

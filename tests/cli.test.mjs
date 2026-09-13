@@ -885,7 +885,7 @@ test('collect-reviews refuses to write its results file outside the run director
 //     -> 'a fifo planted at plan.json is refused, and collect-reviews terminates'
 //        'an unparseable plan.json is refused rather than thrown, on both reads'
 //   `collect-reviews`' own plan read stops catching
-//     -> the two above, plus 'cli.mjs collect-reviews — the run id AND THE PLAN BYTES in the
+//     -> the two above, plus 'cli.mjs collect-reviews — the run id and the plan bytes in the
 //        unreadable-plan refusal cannot be made to draw a forged terminal write' — that row was
 //        renamed when its fixture grew the second forgery, and this line kept the old name while
 //        two others were updated. A name is only self-checking if something re-runs it.
@@ -1886,10 +1886,12 @@ test('collect-reviews refuses a valueless --phase the same way it refuses an omi
 })
 
 // The refusal names phase numbers read out of `plan.json`, which is an agent-written file, and it
-// does not wrap them. What makes that safe is the `Number.isInteger` filter: a phase that is not
-// an integer is not selectable by `--phase` either, since `tasksOfPhase` compares against one. So
-// the filter is a sanitiser as well as a correctness rule, and it is pinned here — without it the
-// forged string below is printed straight into the sentence.
+// does not wrap them. What makes that safe is the `Number.isInteger` filter on what is NAMED: a
+// phase that is not an integer is not selectable by `--phase` either, since `tasksOfPhase` compares
+// against one, so it is COUNTED and reported as a count. The filter is a sanitiser as well as a
+// correctness rule, and it is pinned here — without it the forged string below is printed straight
+// into the sentence. Counting it is the other half: before, the forged task went uncounted and a
+// plan of `1` beside `"2"` was not refused at all.
 test('the ambiguous-phase refusal names integers only, whatever plan.json carries', async () => {
   await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await withStampedPhase(root, planPath, io, g)
@@ -1904,7 +1906,7 @@ test('the ambiguous-phase refusal names integers only, whatever plan.json carrie
     const code = await runCli(['collect-reviews', '--run', 'r1', '--root', root], io)
     assert.equal(code, 2, lines.join('\n'))
     const out = lines.join('\n')
-    assert.match(out, /2 phases \(1, 2\)/)
+    assert.match(out, /3 phases \(1, 2, plus 1 non-integer phase no --phase can select\)/)
     assert.ok(!out.includes(CLI_ESC), 'no escape byte may reach stdout')
   })
 })
@@ -1963,6 +1965,35 @@ test('review-dispatch is refused by the same plan, not thrown', async () => {
       assert.equal(code, 4, lines.join('\n'))
       assert.notEqual(lines.join('\n').trim(), '')
     })
+  }
+})
+
+// A PHASE THAT IS NOT AN INTEGER IS STILL A PHASE to the omitted flag. The guard used to count
+// integers only, so `1` beside `"2"` left one countable phase, nothing was refused, and the
+// omitted flag reviewed both branches under one `default` stamp — measured on `1435417`, where
+// `review-dispatch` exited 0 and dispatched both. What the flag scopes is every task, so what the
+// guard counts is every distinct phase value. The ESC-bearing phase is here so that counting a
+// value the plan chose cannot also mean printing it.
+const MIXED_PHASE_PLANS = [
+  '{"tasks":[{"id":"T1","phase":1},{"id":"T2","phase":"2"}]}',
+  '{"tasks":[{"id":"T1","phase":1},{"id":"T2","phase":2.5}]}',
+  '{"tasks":[{"id":"T1","phase":1},{"id":"T2","phase":"\\u001b[2K"}]}',
+]
+
+test('an omitted --phase is refused on a plan mixing an integer phase with a non-integer one', async () => {
+  for (const body of MIXED_PHASE_PLANS) {
+    for (const command of ['collect-reviews', 'review-dispatch']) {
+      await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+        await stagedPhaseOneReviews(root, planPath, io, g)
+        await writeFile(path.join(root, '.teammates', 'r1', 'plan.json'), body, 'utf8')
+        lines.length = 0
+        const code = await runCli([command, '--run', 'r1', '--root', root], io)
+        const out = lines.join('\n')
+        assert.equal(code, 2, `${command} over ${body}: ${out}`)
+        assert.match(out, /needs --phase/)
+        assert.doesNotMatch(out, /\u001b/, `${command} over ${body} printed a byte the plan chose`)
+      })
+    }
   }
 })
 

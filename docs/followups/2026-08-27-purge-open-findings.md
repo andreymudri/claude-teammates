@@ -545,8 +545,21 @@ phase passed and everything below was recorded and carried by decision. All four
   `default` stamp."* It is pinned by an `assertStatement` at `tests/skill-contracts.test.mjs:274`.
   So the **documentation is closed and the code limitation is not** — and the pin on that sentence
   is one of the four unanchored ones the phase-4 medium above is about.
+
+  **CLOSED 2026-09-13, code and documentation both.** Found still open on `1435417`, whose release
+  message said every open finding was closed: that was true of the `## Still open` section only,
+  and this item lives in a different one. The guard now counts every distinct `t?.phase` value and
+  names only the integers, reporting the rest as a count (`3 phases (1, 2, plus 1 non-integer phase
+  no --phase can select)`), so the sanitising property the old filter carried is kept. RED first:
+  `an omitted --phase is refused on a plan mixing an integer phase with a non-integer one` ran
+  `1`/`"2"`, `1`/`2.5` and `1`/an ESC-bearing string through both commands and failed on the first
+  with exit 4 where 2 was expected. `skills/phase-gate/SKILL.md` drops the bound and says the case
+  is refused; its pin in `tests/skill-contracts.test.mjs` was flipped first and watched fail.
 - **Three claims lows, all record hygiene, none behavioural** — all three re-verified as still
-  present at `f99483e`:
+  present at `f99483e`, and again at `1435417`. **All three CLOSED 2026-09-13:** `below` dropped
+  rather than flipped (a direction word is what went stale), `one commit` corrected to `three`, and
+  the caps citation restored to the real test name. No test binds a comment, so these were
+  checked by grep, not by a RED run:
   - `scripts/cli.mjs:1688` says the plan "is read through `nonBlockingReadFlags` **below**", but
     after `692617d` relocated the block that function is **above** it (`nonBlockingReadFlags` at
     `:1665`, the comment at `:1688`). The directional word is exactly the staleness the paragraph
@@ -620,7 +633,7 @@ in-tree partial answer that the question should be read against.
   (…), and an omitted --phase reviews every task branch of the run — including branches integrated
   in earlier phases`. Applied at both call sites (`:4379` for `review-dispatch`, `:4754` for
   `collect-reviews`). A single-phase plan is unaffected, and an unreadable plan falls through rather
-  than refusing on a missing file. **Its bound is still open** — see the integer-phase item above.
+  than refusing on a missing file. **Its bound was open until 2026-09-13** — see the integer-phase item above.
 - **The sandbox git-safety hook — STILL OPEN, and it will stay open.** It is the operator's local
   configuration, not this repository's, so nothing in this repo can change its verdict. It refused
   a `node -e` one-liner during the writing of this document with *"this command is too complex to
