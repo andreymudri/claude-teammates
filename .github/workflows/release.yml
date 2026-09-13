@@ -1,0 +1,60 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  test:
+    # The same matrix as test.yml: a tag is a release, and a release is the one push whose
+    # platform bugs reach users before anyone reads a PR.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Configure git identity
+        run: |
+          git config --global user.email "test@example.com"
+          git config --global user.name "CI"
+      - run: npm test
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # npm trusted publishing: the registry exchanges this job's OIDC token for a short-lived
+      # publish credential. No npm token exists anywhere to leak or rotate.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Tag must match package.json version
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match package.json version ${version}"
+            exit 1
+          fi
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+      - name: npm must support trusted publishing (11.5.1 or later)
+        run: |
+          npm_version=$(npm --version)
+          echo "npm ${npm_version}"
+          node -e 'const [a, b, c] = process.argv[1].split(".").map(Number); process.exit(a > 11 || (a === 11 && (b > 5 || (b === 5 && c >= 1))) ? 0 : 1)' "${npm_version}"
+      - name: Publish unless this version is already on npm
+        run: |
+          if [ "$(npm view "fleetmates@${VERSION}" version 2>/dev/null)" = "${VERSION}" ]; then
+            echo "fleetmates@${VERSION} is already on npm — nothing to publish"
+            exit 0
+          fi
+          npm publish --provenance --access public
