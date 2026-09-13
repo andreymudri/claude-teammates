@@ -24,6 +24,9 @@ it from being a hard break).
 | task branches `teammates/<run>/<task>` | `fleetmates/<run>/<task>` |
 | claim refs `refs/teammates/<run>/<task>` | `refs/fleetmates/<run>/<task>` |
 | hook state `${CLAUDE_CONFIG_DIR:-~/.claude}/claude-teammates/` | `…/fleetmates/` — starts fresh, not migrated (it holds a last-seen version and an update cache) |
+| update-check opt-out `CLAUDE_TEAMMATES_UPDATE_CHECK` | `FLEETMATES_UPDATE_CHECK`; the old variable is still honoured (see below) |
+| map-notes header `<!-- teammates-map run=… sha=… -->` | `<!-- fleetmates-map run=… sha=… -->` |
+| generated workflow name `teammates-<run>-phase-<n>` | `fleetmates-<run>-phase-<n>` |
 | agents `tm-implementer`, `tm-integrator`, `tm-reviewer` | unchanged |
 
 **One module owns every spelling.** `scripts/names.mjs` exports `NAMES` (the new spellings) and
@@ -47,11 +50,15 @@ exists (one `lstat` per legacy path, plus one `for-each-ref` for branches and re
 acts it prints one line per rename, in this order:
 
 1. **Refuse, exit 2, nothing changed** if:
-   - any legacy run has a task that `livenessRows` reports as live (touched within
-     `DEFAULT_STALE_MINUTES`), computed for each run directory under `.teammates/` exactly as the
-     `liveness` command computes it. A teammate on the old plugin version keeps writing to
-     `.teammates/` after the move and splits the run. The message names each live run and task and
-     says to wait until they go stale or stop the fleet, then re-run.
+   - any legacy run has a live task. For each run directory under `.teammates/`, every task in its
+     `plan.json` (not only the current phase — `migrate` cannot derive a phase, and a wider net
+     only refuses more) gets the same two signals the `liveness` command gathers: the commit time
+     of its legacy task branch, and the newest mtime under the worktree git has checked out on that
+     branch. `livenessRows` decides; a row is live when its state is `working`, or `unknown` with
+     reason `walk-capped` (the walk stopped early, so the teammate may be working). A teammate on
+     the old plugin version keeps writing to `.teammates/` after the move and splits the run. The
+     message names each live run and task and says to wait until they go stale or stop the fleet,
+     then re-run.
    - both a legacy and a new spelling of the same thing exist (`.teammates/` and `.fleetmates/`,
      or both gate manifests). The message names both paths; the operator resolves it by hand.
 
@@ -69,8 +76,12 @@ acts it prints one line per rename, in this order:
    `fleetmates/`, `refs/teammates/` becomes `refs/fleetmates/`, and a `.teammates/` path segment
    becomes `.fleetmates/`. Free text (`brief`, `prompt`, `failureScenario`, `summary`, …) is
    history and is left alone. Without this, `scripts/state.mjs:486` discards every recorded branch
-   because it no longer equals `taskBranchName(runId, taskId)`. Each file is written temp-then-
-   rename, as `state.mjs` already does.
+   because it no longer equals `taskBranchName(runId, taskId)`. Every `map.md` whose first line is
+   a `<!-- teammates-map ` header gets `fleetmates-map` there, or `mapnotes.mjs` reports the notes
+   as carrying no header. Before a file is rewritten its original bytes are copied to
+   `<file>.pre-fleetmates` (never overwriting an existing copy), and the rewrite is temp-then-
+   rename, as `state.mjs` already does. The copies are deleted only after step 7 succeeds, so the
+   reverse command for this step is `mv <file>.pre-fleetmates <file>` per file.
 5. **State directory.** `rename('.teammates', '.fleetmates')`, then `git worktree repair <path>`
    for every registered worktree whose path was under `.teammates/`. Measured: after the move
    `git worktree list` marks such a worktree `prunable`; `repair` on the new path restores it.
@@ -80,6 +91,10 @@ acts it prints one line per rename, in this order:
    the new spelling with `ensureGitignored` (`scripts/config.mjs:318`). No code adds `.teammates/`
    today, so a user-written ignore line is the only thing keeping run state and the local config
    out of commits; dropping it would expose both.
+
+**Output channels.** Progress lines go to `io.err`, the CLI's commentary channel, because
+`workflow` prints a JavaScript module on `io.out` that callers redirect into a file. Refusals and
+failures go to `io.out`, like every other refusal in `scripts/cli.mjs`.
 
 **Failure mid-way.** Steps run in the order above. On the first failure `migrate` stops, prints
 every step already performed with the command that reverses it, and the command exits 4. It
@@ -114,7 +129,10 @@ confirmed present in this Claude Code build). `CONTRIBUTING.md` says so.
 ### Update check
 
 `hooks/update-check` reads `https://registry.npmjs.org/fleetmates/latest` and takes `.version`,
-replacing the `raw.githubusercontent.com/…/plugin.json` fetch at `hooks/update-check:32`. npm is
+replacing the `raw.githubusercontent.com/…/plugin.json` fetch at `hooks/update-check:32`. The
+opt-out is `FLEETMATES_UPDATE_CHECK`, and `CLAUDE_TEAMMATES_UPDATE_CHECK` is still read: someone who
+opted out of the network call must not have it silently switched back on by a rename. This is the
+one legacy name read outside `migrate.mjs`, and `tests/names.test.mjs` exempts exactly that line. npm is
 now where releases come from, so it is the source of truth. The release-notes link in
 `hooks/session-start` points at `github.com/andreymudri/fleetmates/releases`.
 
@@ -190,4 +208,5 @@ The `README.md` gets a "Coming from claude-teammates" section: uninstall the old
 - Renaming the `tm-*` agents.
 - Renaming the local checkout directory. The auto-memory path for this project is keyed on it,
   so a move is its own decision.
-- Dual-read of legacy names anywhere other than `migrate.mjs`.
+- Dual-read of legacy names anywhere other than `migrate.mjs`, the update-check opt-out variable,
+  and the old-plugin warning in `hooks/session-start`.
