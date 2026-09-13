@@ -545,8 +545,21 @@ phase passed and everything below was recorded and carried by decision. All four
   `default` stamp."* It is pinned by an `assertStatement` at `tests/skill-contracts.test.mjs:274`.
   So the **documentation is closed and the code limitation is not** — and the pin on that sentence
   is one of the four unanchored ones the phase-4 medium above is about.
+
+  **CLOSED 2026-09-13, code and documentation both.** Found still open on `1435417`, whose release
+  message said every open finding was closed: that was true of the `## Still open` section only,
+  and this item lives in a different one. The guard now counts every distinct `t?.phase` value and
+  names only the integers, reporting the rest as a count (`3 phases (1, 2, plus 1 non-integer phase
+  no --phase can select)`), so the sanitising property the old filter carried is kept. RED first:
+  `an omitted --phase is refused on a plan mixing an integer phase with a non-integer one` ran
+  `1`/`"2"`, `1`/`2.5` and `1`/an ESC-bearing string through both commands and failed on the first
+  with exit 4 where 2 was expected. `skills/phase-gate/SKILL.md` drops the bound and says the case
+  is refused; its pin in `tests/skill-contracts.test.mjs` was flipped first and watched fail.
 - **Three claims lows, all record hygiene, none behavioural** — all three re-verified as still
-  present at `f99483e`:
+  present at `f99483e`, and again at `1435417`. **All three CLOSED 2026-09-13:** `below` dropped
+  rather than flipped (a direction word is what went stale), `one commit` corrected to `three`, and
+  the caps citation restored to the real test name. No test binds a comment, so these were
+  checked by grep, not by a RED run:
   - `scripts/cli.mjs:1688` says the plan "is read through `nonBlockingReadFlags` **below**", but
     after `692617d` relocated the block that function is **above** it (`nonBlockingReadFlags` at
     `:1665`, the comment at `:1688`). The directional word is exactly the staleness the paragraph
@@ -585,6 +598,10 @@ in-tree partial answer that the question should be read against.
   measurable*, which is precisely why the comment forbids describing it as defence. The question of
   whether a detector
   that can only fire on an honest race earns a refusal path is unanswered.
+
+  **DECIDED 2026-09-13: keep it.** When it fires, the run branch moved between two resolves, and
+  every range `derive` hands on would be computed over a snapshot that no longer exists; refusing
+  is the fail-closed answer to that, and it costs one resolve. Removing it buys nothing measurable.
 - **Does the compare-and-swap deletion (`git update-ref -d <ref> <proved sha>`) belong in
   `scripts/git.mjs` now, or does the symbolic resolution shrink that residual far enough to leave it
   as a recorded carry-over?** Currently a recorded carry-over, at `scripts/cli.mjs:3815-3819`: *"The
@@ -593,6 +610,14 @@ in-tree partial answer that the question should be read against.
   neighbouring bullet notes what the resolution did buy — the redirected-name case this used to be
   paired with is closed, so a move inside the window is now something that moved the real run
   branch.
+
+  **DECIDED 2026-09-13: not built.** Measured on git 2.55.0 in a scratch repository:
+  `git update-ref -d refs/heads/t <sha>` on a branch a worktree has checked out exits 0 and leaves
+  that worktree on an unborn branch, where `git branch -D t` refuses with `cannot delete branch 't'
+  used by worktree`; it also leaves `branch.t.*` config behind. The wrong-sha arm does refuse
+  (`is at … but expected …`). So the swap closes a two-command window by removing the refusal the
+  prune loop relies on when a worktree removal did not take. Recorded at the comment in
+  `scripts/cli.mjs` where the residual lives.
 
 ## Tooling defects found while running, unrelated to the plan
 
@@ -620,7 +645,7 @@ in-tree partial answer that the question should be read against.
   (…), and an omitted --phase reviews every task branch of the run — including branches integrated
   in earlier phases`. Applied at both call sites (`:4379` for `review-dispatch`, `:4754` for
   `collect-reviews`). A single-phase plan is unaffected, and an unreadable plan falls through rather
-  than refusing on a missing file. **Its bound is still open** — see the integer-phase item above.
+  than refusing on a missing file. **Its bound was open until 2026-09-13** — see the integer-phase item above.
 - **The sandbox git-safety hook — STILL OPEN, and it will stay open.** It is the operator's local
   configuration, not this repository's, so nothing in this repo can change its verdict. It refused
   a `node -e` one-liner during the writing of this document with *"this command is too complex to
