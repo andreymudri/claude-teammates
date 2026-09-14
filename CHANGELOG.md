@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.0.1
+
+No change to the plugin itself — the published files are identical to 2.0.0.
+
+- The first release published by `release.yml` through npm trusted publishing, so it is the first
+  `fleetmates` version on npm with a provenance attestation. 2.0.0 was published by hand.
+
 ## v2.0.0
 
 **claude-teammates is now fleetmates**, published on npm as `fleetmates`.
